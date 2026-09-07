@@ -186,6 +186,7 @@ run --rm --user 0:0 --mount "type=volume,src=$volume,dst=/nix" --mount "type=vol
 run --rm --user "$uid:$gid" --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
     --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
+    --env 'NIX_CONFIG=build-users-group =' \
     --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
     "$image" sh -eu -c 'mkdir -p "$HOME"; exec nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1"' \
@@ -335,6 +336,7 @@ set -- --rm --init --interactive --user "$uid:$gid" --security-opt no-new-privil
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
+    --env 'NIX_CONFIG=build-users-group =' \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
     --env "TOOLCHAIN_GIT_POLICY_UNAVAILABLE=$policy_unavailable" --env CI --env TERM \
     --env GIT_AUTHOR_NAME --env GIT_AUTHOR_EMAIL --env GIT_COMMITTER_NAME --env GIT_COMMITTER_EMAIL "$@"

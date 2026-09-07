@@ -18,7 +18,9 @@ ordinary local POSIX directories, atomic same-filesystem rename and cooperating
 process locks. Hard power-loss durability of every downloaded byte is not claimed;
 a later launch rechecks identity and fails on corrupt state.
 
-The container runs project commands as the calling UID/GID. A short preparatory
+The container runs project commands as the calling UID/GID. Nix runs without a
+build-users group inside the container, including when the caller is namespace
+root; this does not require adding container capabilities. A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.

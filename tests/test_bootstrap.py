@@ -30,6 +30,8 @@ class BootstrapTests(unittest.TestCase):
             "root=os.environ['CHAINMAN_ROOT'], cwd=os.getcwd(), "
             "forward=os.environ.get('CHAINMAN_TEST_VALUE'), "
             "demo=os.environ.get('DEMO_TEST_VALUE'), container=os.environ.get('TOOLCHAIN_CONTAINER'))\n"
+            "record.update(uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'))\n"
+            "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
             "if (root / '.git').exists(): record['git_root'] = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()\n"
             "if os.environ.get('DEMO_TEST_FD'): os.fstat(int(os.environ['DEMO_TEST_FD']))\n"
             "if os.environ.get('DEMO_TEST_CACHE'):\n"
@@ -109,6 +111,26 @@ class BootstrapTests(unittest.TestCase):
         return [
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") and os.getuid() == 0,
+        "requires a real container engine inside the isolated root user namespace",
+    )
+    def test_real_root_container_uses_single_user_nix_without_extra_capabilities(self):
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        self.run_bootstrap("status", env=env)
+        record = self.records()[0]
+        self.assertEqual(record["uid"], 0)
+        self.assertEqual(record["nix_config"], "build-users-group =")
+        self.assertEqual(record["container"], "1")
+        self.assertEqual(int(record["cap_eff"], 16), 0)
+        self.assertEqual(
+            next(self.root.glob("record-*.json")).stat().st_uid, os.getuid()
+        )
 
     def test_verified_bundle_dispatch_and_repeated_generation(self):
         self.run_bootstrap("status", "argument with spaces", "", "$(not-a-command)")
