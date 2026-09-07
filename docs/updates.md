@@ -106,6 +106,15 @@ The optional `retained_sources` list supports dependency-free GitHub source pack
 with exact `manifest`, `package`, `repository`, full `commit`, archive `sha256` and
 `reason` fields. Actual dated archive bytes and native lock integrity must agree;
 mutable references and undeclared source graphs are rejected.
+For an existing transitive source, add its exact registry `parent="package@version"`
+and original `parent_specifier`. The owning manifest must reference that parent,
+which remains held at the declared version. An exact parent-scoped pnpm override
+must pin the configured GitHub commit before any resolution; an upstream mutable
+declaration is compared as evidence and is never resolved. This form permits bounded
+registry dependency and peer graphs from the hashed archive. Normal identity, age,
+compatibility and peer audits cover every child, including nested registry children;
+source retention does not exempt new child artifacts. Bundled dependencies and
+nested remote or local sources remain unsupported.
 
 Native integrations use `scripts/chainman.sh deps-query`: one JSON request on stdin,
 one schema-versioned JSON response on stdout. Schema 1 supports `select`, `metadata`

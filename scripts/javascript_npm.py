@@ -50,10 +50,30 @@ def identities(workspace):
                 raise ValueError(
                     "A local npm workspace cannot carry a registry resolution"
                 )
+            manifest = workspace.documents[
+                (location + "/" if location else "") + "package.json"
+            ][0]
+            if any(
+                key in item and item[key] != manifest.get(key)
+                for key in ("name", "version")
+            ):
+                raise ValueError(
+                    "npm local package identity disagrees with its declared manifest"
+                )
             continue
         if item.get("link") is True:
             if item.get("resolved") not in locals or set(item) - {"resolved", "link"}:
                 raise ValueError("npm link must name one declared local workspace")
+            target = item["resolved"]
+            manifest = workspace.documents[
+                (target + "/" if target else "") + "package.json"
+            ][0]
+            if not re.search(r"(?:^|/)node_modules/", location) or name_at(
+                location, {}
+            ) != manifest.get("name"):
+                raise ValueError(
+                    "npm local link alias disagrees with its declared workspace name"
+                )
             continue
         if not re.search(r"(?:^|/)node_modules/", location):
             raise ValueError("npm lock contains an undeclared local package")
@@ -115,7 +135,7 @@ def audit(workspace, before, policy, now):
         )
         if importer not in packages:
             raise ValueError("npm lock is missing a declared workspace")
-        queue = []
+        queue = [importer]
         for alias, index in refs.items():
             pin = workspace.pins[index]
             location = locate(packages, importer, alias)
@@ -181,7 +201,14 @@ def audit(workspace, before, policy, now):
                     info.get("peerDependencies", {}),
                     info.get("peerDependenciesMeta", {}),
                 )
+                for section in js.SECTIONS:
+                    if item.get(section, {}) != info.get(section, {}):
+                        raise ValueError(
+                            "npm local dependency declarations disagree with their manifest"
+                        )
+                dependencies = info
             else:
+                dependencies = item
                 actual = name_at(location, item)
                 peers, metadata = evidence.peers(actual, item["version"])
                 for rule in options.get("prefix_constraints", []):
@@ -208,17 +235,34 @@ def audit(workspace, before, policy, now):
                 scopes.setdefault(
                     (name_at(target, packages[target]), packages[target]["version"]), []
                 ).append(bound)
-            for name in {
-                **item.get("dependencies", {}),
-                **item.get("optionalDependencies", {}),
-            }:
+            for name, requirement in {
+                **dependencies.get("dependencies", {}),
+                **dependencies.get("optionalDependencies", {}),
+                **(
+                    dependencies.get("devDependencies", {})
+                    if location in locals
+                    else {}
+                ),
+            }.items():
                 child = locate(packages, location, name)
                 if child is None:
-                    if name not in item.get("optionalDependencies", {}):
+                    if name not in dependencies.get("optionalDependencies", {}):
                         raise ValueError(
                             "npm lock is missing a required transitive dependency"
                         )
                 else:
+                    if location in locals and requirement.startswith(
+                        ("workspace:", "file:", "link:")
+                    ):
+                        expected_manifest = workspace.local_manifest(
+                            name, requirement, location or "."
+                        )
+                        expected = str(Path(expected_manifest).parent)
+                        expected = "" if expected == "." else expected
+                        if child != expected:
+                            raise ValueError(
+                                "npm local dependency resolved to a different declared workspace"
+                            )
                     queue.append(child)
     return js.audit_artifacts(workspace, before, policy, now, scopes)
 

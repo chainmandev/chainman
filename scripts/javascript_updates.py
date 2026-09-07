@@ -227,6 +227,10 @@ class Workspace:
             self.keep(self.lock)
         self.discover()
         self.apply_held()
+        if spec.get("retained_sources"):
+            import javascript_sources
+
+            javascript_sources.configured(self)
 
     def apply_held(self):
         for rule in self.spec.get("held_dependencies", []):
@@ -386,6 +390,11 @@ class Workspace:
             )
 
     def override(self, file, pointer, selector, requirement):
+        if self.spec.get("retained_sources"):
+            import javascript_sources
+
+            if javascript_sources.override(self.spec, selector, requirement):
+                return
         # Keep parent/version selectors intact while updating their replacement.
         target = re.split(r">(?=@?[A-Za-z_~])", selector)[-1].strip()
         match = re.fullmatch(rf"({NAME})(?:@(.+))?", target)
@@ -637,6 +646,16 @@ def plan(workspace, policy, now):
     evidence.baseline = baseline
     for pin in workspace.pins:
         pin.ranges = compatibility(pin, options)
+        if workspace.spec.get("retained_sources"):
+            import javascript_sources
+
+            for item in javascript_sources.declarations(workspace.spec):
+                if (
+                    "parent" in item
+                    and item["manifest"] in pin.users
+                    and pin.name == item["parent"].rpartition("@")[0]
+                ):
+                    pin.ranges.append(item["parent"].rpartition("@")[2])
         if pin.operator is None or "overrides" in pin.pointer:
             pin.ranges.append(pin.requirement)
         if pin.held:
@@ -998,6 +1017,14 @@ def lock_target(alias, raw, workspace=None):
         raise ValueError("pnpm lock dependency resolution must be a string")
     if raw.startswith(("link:", "workspace:")):
         return None
+    if raw.startswith("https://codeload.github.com/") and workspace is not None:
+        context = alias + "@" + raw
+        source = getattr(workspace, "source_contents", {}).get(context)
+        if source is None:
+            raise ValueError(
+                "Undeclared or unaudited retained source dependency context"
+            )
+        return alias, source["version"], context
     if raw.startswith("file:"):
         if workspace is None:
             raise ValueError(
@@ -1018,7 +1045,7 @@ def lock_target(alias, raw, workspace=None):
     raise ValueError("Unrecognized pnpm dependency context")
 
 
-def effective_requirements(workspace, pin):
+def effective_requirements(workspace, pin, *, parent=None, versions=None):
     """A declared override can supersede a direct range, including an npm alias."""
     allowed = [(pin.name, pin.requirement)]
     overrides = {
@@ -1027,9 +1054,32 @@ def effective_requirements(workspace, pin):
     }
     for selector, replacement in overrides.items():
         if re.search(r">(?=@?[A-Za-z_~])", selector):
-            continue  # Parent-scoped rules apply inside that parent's graph.
+            scope, selector = re.split(r">(?=@?[A-Za-z_~])", selector, maxsplit=1)
+            if parent is None:
+                continue
+            parent_match = re.fullmatch(rf"({NAME})(?:@(.+))?", scope)
+            if (
+                not parent_match
+                or parent_match[1] != parent[0]
+                or (
+                    parent_match[2]
+                    and Version(parent[1]) not in NpmSpec(parent_match[2])
+                )
+            ):
+                continue
         match = re.fullmatch(rf"({NAME})(?:@(.+))?", selector)
         if not match or match[1] not in (pin.alias, pin.name):
+            continue
+        if (
+            parent is not None
+            and match[2]
+            and not any(
+                registry.lock_version("npm", value) is not None
+                and Version(value) in NpmSpec(pin.requirement)
+                and Version(value) in NpmSpec(match[2])
+                for value in (versions or [])
+            )
+        ):
             continue
         if replacement.startswith("$"):
             name = replacement[1:]
@@ -1037,10 +1087,14 @@ def effective_requirements(workspace, pin):
             if index is None:
                 raise ValueError("Override references a missing root dependency")
             reference = workspace.pins[index]
+            if parent is not None:
+                allowed = []
             allowed.append((reference.name, reference.requirement))
         elif replacement != "-":
             parsed = parse_requirement(pin.alias, replacement)
             if parsed:
+                if parent is not None:
+                    allowed = []
                 allowed.append((parsed[0], parsed[2]))
     return allowed
 
@@ -1091,8 +1145,11 @@ def audit_peers(workspace, evidence, options):
                         "Resolved transitive dependency violates JavaScript prefix compatibility"
                     )
             local = "@file:" in context
+            source_content = getattr(workspace, "source_contents", {}).get(context)
             if (
-                not local and f"{actual}@{version}" not in packages
+                not local
+                and source_content is None
+                and f"{actual}@{version}" not in packages
             ) or context not in snapshots:
                 raise ValueError("pnpm lock lacks the resolved package context")
             node = snapshots[context]
@@ -1104,7 +1161,52 @@ def audit_peers(workspace, evidence, options):
                 alias: lock_target(alias, raw, workspace)
                 for alias, raw in dependencies.items()
             }
-            if local:
+            if source_content is not None:
+                peers, metadata = (
+                    source_content.get("peerDependencies", {}),
+                    source_content.get("peerDependenciesMeta", {}),
+                )
+                declared = {
+                    **source_content.get("dependencies", {}),
+                    **source_content.get("optionalDependencies", {}),
+                    **peers,
+                }
+                if set(dependencies) - set(declared) or set(
+                    source_content.get("dependencies", {})
+                ) - set(dependencies):
+                    raise ValueError(
+                        "Retained source dependency graph differs from its archive manifest"
+                    )
+                for alias, target in children.items():
+                    parsed = parse_requirement(alias, declared[alias])
+                    if parsed is None or target is None:
+                        raise ValueError(
+                            "Retained source children require audited registry identities"
+                        )
+                    name, prefix, requirement, operator = parsed
+                    pin = Pin(
+                        "",
+                        (),
+                        alias,
+                        name,
+                        declared[alias],
+                        prefix,
+                        requirement,
+                        operator,
+                    )
+                    if not any(
+                        target[0] == name and Version(target[1]) in NpmSpec(bound)
+                        for name, bound in effective_requirements(
+                            workspace,
+                            pin,
+                            parent=(actual, version),
+                            versions=evidence.get(pin.name)[1],
+                        )
+                    ):
+                        raise ValueError(
+                            "Retained source child violates its archive range or declared override"
+                        )
+            elif local:
                 source = workspace.locals[actual]
                 content = workspace.documents[source][0]
                 peers, metadata = (
@@ -1243,7 +1345,7 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
         return javascript_npm.audit(workspace, before, policy, now)
     import javascript_sources
 
-    javascript_sources.audit(workspace, before, policy, now)
+    workspace.source_contents = javascript_sources.audit(workspace, before, policy, now)
     evidence = Evidence(policy, now)
     options = policy.get("javascript", {})
     scopes = audit_peers(workspace, evidence, options)

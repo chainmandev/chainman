@@ -857,6 +857,57 @@ class JavaScriptTests(unittest.TestCase):
             self.resolve(self.fake_npm)
         self.assertFalse((self.root / "package-lock.json").exists())
 
+    def test_npm_local_alias_and_graph_bind_to_declared_manifests(self):
+        self.spec["manager"] = "npm"
+        self.manifest(
+            "package.json", {"local-a": "file:packages/a"}, workspaces=["packages/*"]
+        )
+        self.manifest(
+            "packages/a/package.json",
+            {"local-b": "file:../b"},
+            name="local-a",
+            version="1.0.0",
+        )
+        self.manifest("packages/b/package.json", {}, name="local-b", version="1.0.0")
+        lock = {
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"dependencies": {"local-a": "file:packages/a"}},
+                "packages/a": {
+                    "name": "local-a",
+                    "version": "1.0.0",
+                    "dependencies": {"local-b": "file:../b"},
+                },
+                "packages/b": {"name": "local-b", "version": "1.0.0"},
+                "node_modules/local-a": {"link": True, "resolved": "packages/a"},
+                "node_modules/local-b": {"link": True, "resolved": "packages/b"},
+            },
+        }
+        path = self.write("package-lock.json", json.dumps(lock))
+        before = js.snapshot(self.root, self.spec)
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+        lock["packages"]["node_modules/local-a"]["resolved"] = "packages/b"
+        path.write_text(json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "local dependency|link alias"):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+        lock["packages"]["node_modules/local-a"]["resolved"] = "packages/a"
+        lock["packages"]["packages/a"]["dependencies"] = {}
+        path.write_text(json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "local dependency declarations"):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+        lock["packages"]["packages/a"]["dependencies"] = {"local-b": "file:../b"}
+        lock["packages"]["packages/b"]["peerDependencies"] = {"local-a": "^2.0.0"}
+        self.manifest(
+            "packages/b/package.json",
+            {},
+            name="local-b",
+            version="1.0.0",
+            peerDependencies={"local-a": "^2.0.0"},
+        )
+        path.write_text(json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "incompatible npm peer"):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+
     def local_directory_fixture(self):
         self.manifest("package.json", {"local-provider": "file:packages/provider"})
         self.manifest(
@@ -1075,6 +1126,136 @@ class JavaScriptTests(unittest.TestCase):
             js.snapshot(self.root, self.spec)["identities"][0][-1].startswith("sha256:")
         )
 
+    def transitive_source_fixture(self):
+        import javascript_sources as sources
+
+        item, body, lock, commit = self.retained_fixture(
+            dependencies={"utility": "1.0.0"}
+        )
+        self.spec["retained_sources"][0].update(
+            parent="renderer@1.0.0",
+            parent_specifier="git+https://github.com/neutral/native-leaf.git",
+        )
+        item = sources.declarations(self.spec)[0]
+        self.manifest("package.json", {"renderer": "^1.0.0"})
+        self.write(
+            "pnpm-workspace.yaml",
+            "packages: []\noverrides:\n  'renderer@1.0.0>native-leaf': "
+            + item["specifier"]
+            + "\n  'utility@<1.1.0': 1.1.0\n",
+        )
+        self.release(
+            "renderer", "1.0.0", children={"native-leaf": item["parent_specifier"]}
+        )
+        self.release("renderer", "2.0.0")
+        self.release("utility", "1.0.0")
+        self.release("utility", "1.1.0", children={"nested": "1.0.0"})
+        self.release("nested", "1.0.0")
+        lock["importers"]["."]["dependencies"] = {
+            "renderer": {"specifier": "^1.0.0", "version": "1.0.0"}
+        }
+        lock["snapshots"]["native-leaf@" + item["url"]] = {
+            "dependencies": {"utility": "1.1.0"}
+        }
+        lock["snapshots"]["renderer@1.0.0"] = {
+            "dependencies": {"native-leaf": item["url"]}
+        }
+        lock["snapshots"]["utility@1.1.0"] = {"dependencies": {"nested": "1.0.0"}}
+        lock["snapshots"]["nested@1.0.0"] = {}
+        for name, version in (
+            ("renderer", "1.0.0"),
+            ("utility", "1.1.0"),
+            ("nested", "1.0.0"),
+        ):
+            lock["packages"][name + "@" + version] = {
+                "resolution": {
+                    "integrity": self.metadata[name]["versions"][version]["dist"][
+                        "integrity"
+                    ]
+                }
+            }
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+
+        def data(url):
+            if "api.github.com" in url:
+                return commit
+            if url.endswith("renderer/1.0.0"):
+                return self.metadata["renderer"]["versions"]["1.0.0"]
+            return self.fetch(url)
+
+        return item, body, lock, data
+
+    def test_transitive_source_binds_parent_and_audits_registry_children(self):
+        item, body, lock, data = self.transitive_source_fixture()
+        before = js.snapshot(self.root, self.spec)
+        with (
+            patch.object(registry, "data", side_effect=data),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+            self.assertEqual(self.selected()[1]["renderer"], "1.0.0")
+            self.release("nested", "1.0.0", days=1)
+            with self.assertRaisesRegex(ValueError, "not mature"):
+                js.audit(
+                    self.root,
+                    self.spec,
+                    {**before, "identities": []},
+                    self.policy,
+                    self.now,
+                )
+
+    def test_transitive_source_parent_graph_and_override_changes_fail(self):
+        for fault in (
+            "parent",
+            "source",
+            "missing-child",
+            "range",
+            "overridden-original",
+            "metadata",
+            "override",
+        ):
+            with self.subTest(fault=fault):
+                item, body, lock, data = self.transitive_source_fixture()
+                before = js.snapshot(self.root, self.spec)
+                if fault == "parent":
+                    lock["importers"]["."]["dependencies"]["renderer"]["version"] = (
+                        "2.0.0"
+                    )
+                elif fault == "source":
+                    lock["snapshots"]["renderer@1.0.0"]["dependencies"][
+                        "native-leaf"
+                    ] = item["url"].replace("a" * 40, "b" * 40)
+                elif fault == "missing-child":
+                    lock["snapshots"]["native-leaf@" + item["url"]] = {}
+                elif fault == "range":
+                    lock["snapshots"]["native-leaf@" + item["url"]]["dependencies"][
+                        "utility"
+                    ] = "4.0.0"
+                elif fault == "overridden-original":
+                    lock["snapshots"]["native-leaf@" + item["url"]]["dependencies"][
+                        "utility"
+                    ] = "1.0.0"
+                elif fault == "metadata":
+                    self.metadata["renderer"]["versions"]["1.0.0"]["dependencies"][
+                        "native-leaf"
+                    ] = "github:different/source#" + "a" * 40
+                else:
+                    path = self.root / "pnpm-workspace.yaml"
+                    path.write_text(
+                        path.read_text().replace(
+                            item["specifier"], "github:neutral/native-leaf#main"
+                        )
+                    )
+                self.write("pnpm-lock.yaml", json.dumps(lock))
+                with (
+                    patch.object(registry, "data", side_effect=data),
+                    patch.object(registry, "fetch", return_value=(body, {})),
+                    self.assertRaisesRegex(
+                        ValueError, "parent|source|range|override|graph"
+                    ),
+                ):
+                    js.audit(self.root, self.spec, before, self.policy, self.now)
+
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_GITHUB_SOURCE") == "1",
         "explicit pinned JavaScript and public source integration lane",
@@ -1107,6 +1288,14 @@ class JavaScriptTests(unittest.TestCase):
     )
     def test_real_npm_resolves_and_checks_a_neutral_package_lock(self):
         self.spec["manager"] = "npm"
+        self.manifest(
+            "package.json",
+            {"local-provider": "file:packages/provider"},
+            workspaces=["packages/*"],
+        )
+        self.manifest(
+            "packages/provider/package.json", {}, name="local-provider", version="1.0.0"
+        )
         result = js.resolve(self.root, self.spec, self.policy, self.now)
         self.assertIn("package-lock.json", result["changed_files"])
 

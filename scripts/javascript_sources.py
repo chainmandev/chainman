@@ -1,9 +1,10 @@
-"""Retain explicitly declared immutable GitHub leaf packages in pnpm locks.
+"""Retain explicitly declared immutable GitHub packages in pnpm locks.
 
 Registry selection never interprets a remote reference as a registry release.
 Retained sources name one manifest alias, repository, full commit, archive hash,
-and reason. Their archive manifest must have no dependency or peer graph; broader
-source graphs require a separately implemented and audited adapter.
+and reason. Transitive declarations also bind an exact registry parent and its
+original source declaration, with a mandatory immutable parent-scoped override.
+Source graphs may contain registry children; bundled or nested sources fail.
 """
 
 from datetime import timedelta
@@ -14,6 +15,9 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
+from urllib.parse import quote
+
+from semantic_version import NpmSpec, Version
 
 import registry
 import toolchain as tc
@@ -22,17 +26,18 @@ import toolchain as tc
 def declarations(spec):
     values = spec.get("retained_sources", [])
     if values and spec.get("manager", "pnpm") != "pnpm":
-        raise ValueError("Retained GitHub leaf sources currently require pnpm")
+        raise ValueError("Retained GitHub sources currently require pnpm")
     result, seen = [], set()
     for item in values:
-        if set(item) != {
+        required = {
             "manifest",
             "package",
             "repository",
             "commit",
             "sha256",
             "reason",
-        }:
+        }
+        if set(item) not in (required, required | {"parent", "parent_specifier"}):
             raise ValueError(
                 "Retained sources require manifest/package/repository/commit/sha256/reason"
             )
@@ -51,7 +56,27 @@ def declarations(spec):
                 "Retained sources require a full immutable commit and SHA-256"
             )
         registry.package_name("npm", item["package"])
-        key = (item["manifest"], item["package"])
+        if "parent" in item:
+            parent, separator, version = item["parent"].rpartition("@")
+            registry.package_name("npm", parent)
+            if (
+                not separator
+                or registry.version("npm", version) is None
+                or not isinstance(item["parent_specifier"], str)
+                or not item["parent_specifier"].strip()
+            ):
+                raise ValueError(
+                    "Retained transitive sources require an exact parent version and source declaration"
+                )
+            if item["parent_specifier"] not in (
+                f"github:{item['repository']}#{item['commit']}",
+                f"git+https://github.com/{item['repository']}.git",
+                f"git+https://github.com/{item['repository']}.git#{item['commit']}",
+            ):
+                raise ValueError(
+                    "Retained parent declaration must name the configured public GitHub repository"
+                )
+        key = (item["manifest"], item.get("parent"), item["package"])
         if key in seen:
             raise ValueError("Duplicate retained source manifest alias")
         seen.add(key)
@@ -69,17 +94,25 @@ def declarations(spec):
 
 def manifest_entries(directory, item):
     value = json.loads(tc.regular_input(directory, item["manifest"]))
+    alias = item["parent"].rpartition("@")[0] if "parent" in item else item["package"]
     matches = [
-        table[item["package"]]
+        table[alias]
         for section in (
             "dependencies",
             "devDependencies",
             "optionalDependencies",
             "peerDependencies",
         )
-        if item["package"] in (table := value.get(section, {}))
+        if alias in (table := value.get(section, {}))
     ]
-    if not matches or any(value != item["specifier"] for value in matches):
+    if "parent" in item:
+        valid = matches and all(
+            Version(item["parent"].rpartition("@")[2]) in NpmSpec(value)
+            for value in matches
+        )
+    else:
+        valid = matches and all(value == item["specifier"] for value in matches)
+    if not valid:
         raise ValueError(
             "Retained source manifest declaration differs from its immutable policy"
         )
@@ -89,11 +122,94 @@ def matched(spec, manifest, alias, value):
     candidates = [
         item
         for item in declarations(spec)
-        if (item["manifest"], item["package"]) == (manifest, alias)
+        if "parent" not in item
+        and (item["manifest"], item["package"]) == (manifest, alias)
     ]
     if candidates and value != candidates[0]["specifier"]:
         raise ValueError("Retained source declaration changed")
     return bool(candidates)
+
+
+def override(spec, selector, value):
+    candidates = [
+        i
+        for i in declarations(spec)
+        if i.get("parent", "") + ">" + i["package"] == selector
+    ]
+    if candidates and value != candidates[0]["specifier"]:
+        raise ValueError(
+            "Retained source override must preserve its exact immutable commit"
+        )
+    return bool(candidates)
+
+
+def configured(workspace):
+    overrides = {
+        **workspace.documents["package.json"][0].get("pnpm", {}).get("overrides", {}),
+        **workspace.settings.get("overrides", {}),
+    }
+    for item in declarations(workspace.spec):
+        if "parent" in item:
+            selector = item["parent"] + ">" + item["package"]
+            if overrides.get(selector) != item["specifier"]:
+                raise ValueError(
+                    "Retained transitive source requires its immutable parent-scoped override"
+                )
+
+
+def bound_edges(item, lock):
+    if "parent" in item:
+        parent_name, _, parent_version = item["parent"].rpartition("@")
+        importer = str(Path(item["manifest"]).parent)
+        incoming = [
+            v[parent_name].get("version")
+            for section in (
+                "dependencies",
+                "devDependencies",
+                "optionalDependencies",
+                "peerDependencies",
+            )
+            if parent_name
+            in (v := lock.get("importers", {}).get(importer, {}).get(section, {}))
+        ]
+        if not incoming or any(
+            value.partition("(")[0] != parent_version for value in incoming
+        ):
+            raise ValueError("Retained source registry parent changed")
+        parents = [
+            node
+            for context, node in lock.get("snapshots", {}).items()
+            if context.partition("(")[0] == item["parent"]
+        ]
+        edges = [
+            node.get("dependencies", {}).get(
+                item["package"],
+                node.get("optionalDependencies", {}).get(item["package"]),
+            )
+            for node in parents
+        ]
+        if not edges or any(value != item["url"] for value in edges):
+            raise ValueError(
+                "Retained source parent edge differs from its immutable declaration"
+            )
+    else:
+        importer = str(Path(item["manifest"]).parent)
+        edges = [
+            table[item["package"]]
+            for section in (
+                "dependencies",
+                "devDependencies",
+                "optionalDependencies",
+                "peerDependencies",
+            )
+            if item["package"]
+            in (table := lock.get("importers", {}).get(importer, {}).get(section, {}))
+        ]
+        if not edges or any(
+            edge != {"specifier": item["specifier"], "version": item["url"]}
+            for edge in edges
+        ):
+            raise ValueError("Retained source importer differs from its declaration")
 
 
 def registry_entries(root, spec, lock):
@@ -119,24 +235,10 @@ def registry_entries(root, spec, lock):
             raise ValueError(
                 "Retained source lock must declare a stable package version"
             )
-        importer = str(Path(item["manifest"]).parent)
-        edges = [
-            table[item["package"]]
-            for section in (
-                "dependencies",
-                "devDependencies",
-                "optionalDependencies",
-                "peerDependencies",
-            )
-            if item["package"]
-            in (table := lock.get("importers", {}).get(importer, {}).get(section, {}))
-        ]
-        if not edges or any(
-            edge != {"specifier": item["specifier"], "version": item["url"]}
-            for edge in edges
-        ):
-            raise ValueError("Retained source importer differs from its declaration")
-        if lock.get("snapshots", {}).get(key) != {}:
+        bound_edges(item, lock)
+        if key not in lock.get("snapshots", {}):
+            raise ValueError("Retained source lacks its locked dependency graph")
+        if "parent" not in item and lock["snapshots"][key] != {}:
             raise ValueError(
                 "Retained source must have an empty declared dependency graph"
             )
@@ -169,7 +271,8 @@ def is_target(spec, manifest, alias, raw):
     items = [
         item
         for item in declarations(spec)
-        if (item["manifest"], item["package"]) == (manifest, alias)
+        if "parent" not in item
+        and (item["manifest"], item["package"]) == (manifest, alias)
     ]
     if items and raw != items[0]["url"]:
         raise ValueError("Retained source importer resolution changed")
@@ -209,7 +312,7 @@ def bind(workspace, directory):
 
 def audit(workspace, before, policy, now):
     if not workspace.spec.get("retained_sources"):
-        return
+        return {}
     import javascript_updates as js
 
     lock = js.document(
@@ -217,28 +320,29 @@ def audit(workspace, before, policy, now):
         tc.regular_input(workspace.directory, workspace.lock).decode(),
     )[0]
     registry_entries(workspace.root, workspace.spec, lock)
+    contents = {}
+    configured(workspace)
     for item in declarations(workspace.spec):
         key = item["package"] + "@" + item["url"]
         package = lock.get("packages", {}).get(key, {})
         if package.get("resolution", {}).get("integrity") != item["integrity"]:
             raise ValueError("Retained source lock must bind its declared archive hash")
-        manifest = item["manifest"]
-        importer = str(Path(manifest).parent)
-        edges = [
-            table[item["package"]]
-            for section in js.SECTIONS
-            if item["package"]
-            in (table := lock.get("importers", {}).get(importer, {}).get(section, {}))
-        ]
-        if not edges or any(
-            edge != {"specifier": item["specifier"], "version": item["url"]}
-            for edge in edges
-        ):
-            raise ValueError("Retained source importer differs from its declaration")
-        if lock.get("snapshots", {}).get(key) != {}:
-            raise ValueError(
-                "Retained source must have an empty declared dependency graph"
+        bound_edges(item, lock)
+        if "parent" in item:
+            parent, _, version = item["parent"].rpartition("@")
+            parent_info = registry.data(
+                f"https://registry.npmjs.org/{quote(parent, safe='')}/{version}"
             )
+            declared = {
+                **parent_info.get("dependencies", {}),
+                **parent_info.get("optionalDependencies", {}),
+            }
+            if (
+                parent_info.get("name") != parent
+                or parent_info.get("version") != version
+                or declared.get(item["package"]) != item["parent_specifier"]
+            ):
+                raise ValueError("Retained source parent registry declaration changed")
         identity = (
             "github-source",
             item["package"],
@@ -251,6 +355,15 @@ def audit(workspace, before, policy, now):
         )
         if content.get("version") != package.get("version"):
             raise ValueError("Retained source archive version differs from lock")
+        if "parent" not in item and any(
+            content.get(section)
+            for section in ("dependencies", "optionalDependencies", "peerDependencies")
+        ):
+            raise ValueError(
+                "Direct retained source dependency graphs require an explicit registry parent"
+            )
+        contents[key] = content
+    return contents
 
 
 def audit_identity(identity, before, policy, now):
@@ -306,21 +419,26 @@ def audit_identity(identity, before, policy, now):
         or registry.version("npm", version) is None
     ):
         raise ValueError("Retained source archive package identity differs from lock")
-    if any(
-        content.get(section)
-        for section in (
-            "dependencies",
-            "optionalDependencies",
-            "peerDependencies",
-            "bundledDependencies",
-            "bundleDependencies",
-        )
-    ):
-        raise ValueError(
-            "Retained source dependency graphs require a dedicated adapter"
-        )
+    if content.get("bundledDependencies") or content.get("bundleDependencies"):
+        raise ValueError("Retained source bundled dependency graphs are unsupported")
+    import javascript_updates as js
+
+    for section in ("dependencies", "optionalDependencies", "peerDependencies"):
+        values = content.get(section, {})
+        if not isinstance(values, dict) or len(values) > 256:
+            raise ValueError(
+                "Retained source registry dependency graph exceeds its bound"
+            )
+        for alias, requirement in values.items():
+            if js.parse_requirement(alias, requirement) is None:
+                raise ValueError(
+                    "Retained source graphs cannot introduce nested local or remote sources"
+                )
     if not registry.compatible(
         "npm", content["version"], registry.constraint("npm", policy, package)
     ):
         raise ValueError("Retained source violates package compatibility")
+    safe = registry.minimum_safe("npm", policy, package)
+    if safe is not None and Version(content["version"]) < safe:
+        raise ValueError("Retained source is below its declared security safe floor")
     return content
