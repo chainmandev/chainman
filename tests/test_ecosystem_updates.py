@@ -201,6 +201,47 @@ class NativeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "partial"):
             native.snapshot(self.root, spec)
 
+    def test_native_initial_adoption_cannot_omit_its_final_lock(self):
+        for adapter, manifest, body, lock, empty in (
+            (
+                "rust",
+                "Cargo.toml",
+                '[package]\nname="fixture"\nversion="0.1.0"\n',
+                "Cargo.lock",
+                "version=4\npackage=[]\n",
+            ),
+            (
+                "python",
+                "pyproject.toml",
+                '[project]\nname="fixture"\nversion="0.1.0"\ndependencies=[]\n',
+                "uv.lock",
+                "version=1\npackage=[]\n",
+            ),
+            (
+                "flutter",
+                "pubspec.yaml",
+                "name: fixture\nversion: 0.1.0\n",
+                "pubspec.lock",
+                "packages: {}\n",
+            ),
+        ):
+            with self.subTest(adapter=adapter):
+                self.put(adapter + "/" + manifest, body)
+                spec = {"adapter": adapter, "directory": adapter}
+                before = native.snapshot(self.root, spec)
+                self.assertEqual(before["identities"], [])
+                with self.assertRaisesRegex(
+                    ValueError, "Missing resolved dependency lock"
+                ):
+                    native.audit(self.root, spec, before, {}, NOW)
+                path = self.put(adapter + "/" + lock, empty)
+                native.audit(self.root, spec, before, {}, NOW)
+                path.unlink()
+                with self.assertRaisesRegex(
+                    ValueError, "Missing resolved dependency lock"
+                ):
+                    native.audit(self.root, spec, before, {}, NOW)
+
     def test_gradle_bootstrap_flag_cannot_exempt_another_ecosystem(self):
         self.put("Cargo.toml", "[dependencies]\n")
         with self.assertRaisesRegex(ValueError, "Gradle-only"):

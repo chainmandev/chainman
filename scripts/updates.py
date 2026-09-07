@@ -644,6 +644,18 @@ def audit_locks(
     *,
     specs: dict | None = None,
 ) -> None:
+    for name in selected:
+        spec = module(name, root) if specs is None else specs[name]
+        filename = {
+            "crates": "Cargo.lock",
+            "pypi": "uv.lock",
+            "pub": "pubspec.lock",
+        }.get(spec.get("ecosystem"))
+        if filename:
+            directory = contained(root, spec["directory"])
+            path = contained(root, str((directory / filename).relative_to(root)))
+            if not path.is_file():
+                raise ValueError(f"Missing resolved dependency lock: {filename}")
     current = lock_identities(root, selected, specs=specs)
     for name in selected:
         spec = module(name, root) if specs is None else specs[name]

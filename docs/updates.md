@@ -86,6 +86,12 @@ configuration. Toolchain adapters probe Nix-supplied versions and synchronize
 declared JSON/TOML/YAML pointers or exact regex pins only after dated release evidence
 passes. Application generators and deployment-specific reconciliation remain hooks.
 
+Rust, Python and Flutter may adopt an initially missing lockfile, but their final
+audit requires the resolved Cargo, uv or pub lock. A resolver or reconciliation
+hook cannot turn a deleted lock into an empty artifact inventory. Go and Swift
+retain their native rules for dependency-free projects that legitimately omit sums
+or resolved pins.
+
 Gradle resolution additionally visits every resolvable project and buildscript
 configuration, requiring failures to stop the update. A root `dependencies` report
 alone does not cover child projects. Exact `local_projects` coordinate-to-directory
