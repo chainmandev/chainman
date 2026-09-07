@@ -1,208 +1,91 @@
-# Nix/just toolchain
+# Chainman
 
-A copyable development environment with a small working core and optional language
-modules. Copy this entire directory into a new project root, including dotfiles.
-Keep the modules you need and adapt their paths and commands to your application.
-The example has no dependency on an enclosing repository.
+Chainman keeps shared development machinery behind a project's `just` commands.
+Developers install `just`, Git, and either Docker/Podman or Nix. A checked-in launcher
+fetches a pinned source archive, verifies its SHA-256 NAR hash through Nix, and places
+the runtime in an ignored `.chainman/` directory. Python and development languages
+come from Nix. There is no global Chainman installation.
 
-## Start
+The intended public home is **chainman.dev**, with source at
+**github.com/chainmandev/chainman**. These are publication destinations; local release
+artifacts and bundled consumers work before anything is published there. Licensed
+under [MIT](LICENSE).
 
-Install `just` and either Docker or Podman. On Linux, use a working unprivileged
-engine configuration; on macOS use the engine's Linux VM. Windows development uses
-WSL2 with the project in its Linux filesystem and a working Linux container engine.
-Run from the copied directory:
+## Use in a project
+
+Start with the independent example produced by this repository:
 
 ```sh
-just doctor
+just release
+just example '/path/to/new-project'
+cd '/path/to/new-project'
 just setup
 just exec python3 examples/core/greeting.py
 just verify
 ```
 
-Containerized Nix is the default. Choose an engine explicitly with
-`TOOLCHAIN_CONTAINER_ENGINE=podman just verify` (or `docker`). The image is pinned by version
-and digest. Initial setup creates user/engine-scoped Nix and download-cache volumes;
-later invocations reuse them. It runs with your UID/GID and preserves project file
-ownership. No host language toolchain is required.
+`just release` requires a clean committed Chainman source tree. `just example` takes
+an empty destination and copies a small working core, optional modules and the exact
+runtime archive. It does not initialize Git or run the new project's commands.
+Its README explains adoption, caches, updates and native SDK requirements.
 
-For the host alternative, install `just` and Nix with flakes support:
+New consumers default to containerized Nix. Set `CHAINMAN_MODE=host-nix` for host Nix
+or `CHAINMAN_CONTAINER_ENGINE=podman` to select Podman. Linux and macOS are supported;
+Windows uses WSL2 with the checkout in the Linux filesystem. Native Apple SDK work
+uses host Nix on macOS. Native SDK discovery does not replace app packaging/device
+verification.
+
+An existing project keeps its `justfile`, flake, workspace organization and application
+commands. Copy `bootstrap/chainman.sh` to `scripts/chainman.sh` and `bootstrap/fetch.nix`
+to `scripts/chainman-fetch.nix`, adopt a release lock, ignore `.chainman/`, and call
+`./scripts/chainman.sh exec --profile default -- COMMAND...` from its existing adapter.
+See [configuration](docs/configuration.md) and [dependency updates](docs/updates.md).
+The bootstrap and helper are managed release files; custom behavior belongs in the
+project adapter/configuration, so self-updates can check and replace them safely.
+
+## Develop Chainman
+
+Chainman's own source development requires `just`, Git and host Nix. Its small source
+launcher enters the pinned core shell directly, avoiding a bootstrap dependency on
+an older release of itself. Consumer installation is exercised separately against
+real disposable archives and projects.
 
 ```sh
-TOOLCHAIN_MODE=host-nix just doctor
-TOOLCHAIN_MODE=host-nix just verify
+just setup
+just verify
+just module rust verify
+just module javascript verify
+just bootstrap-test docker
+just bootstrap-test podman
+just release
+just example
 ```
 
-Set these variables in your shell profile or per command. Mode changes are explicit;
-an active container shell cannot silently become a host shell. Commands locate the
-project from the justfile/scripts, support checkout paths containing spaces, and
-re-enter the locked environment after toolchain changes. From another directory use
-`just --justfile '/path with spaces/project/justfile' verify`.
+`just verify` runs syntax/format checks, unit tests, real neutral Git transactions,
+real host-Nix bootstrap tests, and the tiny deterministic demo build. Container
+tests opt into an installed engine. `just bootstrap-test` exposes the host engine
+client to the Nix test process; it does not use a host language interpreter.
+Optional modules cover JavaScript/TypeScript, Rust, Python, Go, Flutter/Dart,
+SwiftPM/SwiftUI and Gradle/Compose. They are loaded only when requested. The manually
+dispatched workflow contains portable and native Apple lanes; running one lane is
+not evidence that another platform works.
 
-The container receives the project, its declared Nix/download volumes, and selected
-environment settings only. It does not mount your home, SSH keys or Docker socket.
-Ordinary dependency downloads use the network. This is a reproducible development
-environment for trusted project commands, not an isolation policy for hostile code.
+The release uses [an explicit inventory](release-files.json) read from the clean Git
+commit, stable archive ordering, timestamps and permissions. It emits a source
+archive, `chainman-release.json` and `SHA256SUMS` under `dist/release/`. The metadata
+records the full source revision, flat archive SHA-256 and unpacked SHA-256 NAR hash.
+Build metadata is outside the archive to avoid self-referential hashes. Identical
+source produces identical artifacts. Nothing in these commands pushes or publishes.
 
-## Commands
+## Scope
 
-| Command | Result |
-|---|---|
-| `just setup` | Check prerequisites and prepare selected modules; reuse valid setup fingerprints |
-| `just exec COMMAND…` | Execute in the core shell with project cache settings |
-| `just exec-in rust COMMAND…` | Execute with one selected language profile |
-| `just build` / `just test` | Build or test every selected module |
-| `just verify` | Run each selected module's full verification |
-| `just format` | Run selected formatters and regenerate the neutral asset |
-| `just format-check` | Check core Python, shell, Nix and just formatting and workflow syntax |
-| `just module swift verify` | Exercise one optional module without enabling it globally |
-| `just deps-update --preview` | Resolve and verify a disposable copy; leave project files unchanged |
-| `just deps-update` | Update a clean adopted project, verify, and commit the exact candidate locally |
-| `just deps-update --no-commit` | Leave the verified update uncommitted for coordinated review |
-| `just cache-status` | Report disk availability and approximate project/shared cache bytes |
-| `just cache-prune` | Remove stale declared build contexts only when above the configured limit |
-| `just cache-prune --all` / `just clean` | Explicitly remove declared build contexts; clean also removes dist |
-| `just doctor` | Report actual tools, mode, platform and selected modules |
-| `just sdk-doctor apple` / `just sdk-doctor android` | Check explicitly installed native SDK prerequisites in host mode |
-| `just ci-prune --module flutter` | Preview guarded hosted-runner SDK cleanup, preserving the selected SDKs |
+Chainman owns environment entry, scoped caches, setup fingerprints, dependency update
+transactions and repeatable distribution. Projects own their requirements, dependency
+selection extensions, native SDK configuration and application commands. A custom
+resolver must explicitly accept eligibility responsibility; the transaction cannot
+infer release dates from arbitrary shell scripts. Keep specialized cleanup close to
+the outputs it understands.
 
-The core demonstrates an executable greeting, tests, a deterministic archive under
-`dist/`, and an asset generated from `examples/core/labels.json`. Verification checks
-the committed generated bytes without rewriting them. A stale asset is an error;
-run `just format`, inspect the change and verify again.
-
-## Optional modules
-
-Choose modules in `toolchain.toml`, for example `modules = ["core", "rust"]`.
-Only a requested profile loads its language tools. Each module declares its directory,
-fingerprint inputs, generated readiness artifacts, update outputs and command arrays.
-
-| Module | Working example |
-|---|---|
-| `javascript` | [pnpm workspace, TypeScript, Node tests and Prettier](examples/javascript/README.md) |
-| `rust` | [Cargo workspace, library and CLI, fmt/clippy/tests](examples/rust/README.md) |
-| `python` | [uv workspace, pinned Nix Python, package tests and Ruff](examples/python/README.md) |
-| `go` | [Go workspace with a shared module and executable](examples/go/README.md) |
-| `flutter` | [Dart/Flutter widget, analysis, test and release asset bundle](examples/flutter/README.md) |
-| `swift` | [SwiftPM shared library and conditional SwiftUI shell](examples/swift/README.md) |
-| `compose` | [Gradle/Kotlin shared logic and Compose desktop shell](examples/compose/README.md) |
-
-Apple SDKs come from an operator-installed Xcode on macOS, using host mode. Linux
-Swift validates the shared package, not SwiftUI or Apple deployment. Android requires
-an explicit Android SDK/JDK lane; Flutter's Linux ARM wrapper does not provide a
-working ARM Android aapt2. Platform-specific distribution/signing needs its native
-SDK, credentials and tests. Dependency resolution for a platform is not native
-execution on that platform. See each module's limits before choosing a target.
-
-The manual workflow runs all portable modules on Linux, both container engines for
-the core, and a separate macOS SwiftUI lane with Xcode preflight. It checks the exact
-requested commit and uses the same `just module NAME verify` command as local work.
-Hosted lanes must actually run before their results are claimed. Runner labels and
-installed tools follow the [GitHub runner inventory](https://github.com/actions/runner-images). WSL2 development
-uses the Linux commands; this example does not contain a Windows SDK-dependent
-module or claim native Windows packaging. Add a native Windows lane when your
-application requires one. The Android diagnostic establishes discovery only;
-licenses, generated platform shells, packaging and devices need explicit acceptance.
-
-## Dependency policy
-
-`dependencies.toml` holds registry sources, explicit pins, narrowly reasoned version
-constraints and security exceptions. The default release-age window is 30 days.
-The updater selects the latest eligible stable version, including major releases;
-compatibility constraints must have reasons. Nix branch inputs use commit age, and
-container tags use the registry's update time bound to their current digest. Neither
-is misrepresented as an upstream SDK's release date. Missing eligibility or artifact
-identity evidence fails visibly. Unsupported registries require an explicit adapter.
-
-Package manifests and lockfiles remain authoritative build inputs. Resolution happens
-after refreshing the Nix environment, then selected module verification runs in that
-environment. Lock audits check actual artifact identities and age. An exact unchanged
-locked artifact can retain its existing baseline eligibility; changed content cannot
-inherit it. Explicit constraints and expiring security exceptions are still enforced.
-Some resolvers may choose a too-young transitive release and fail the audit; resolve
-that with a supported version constraint, never by suppressing the failure.
-
-`sdk-versions.toml` declares which SDK-dependent fields follow fresh profile probes:
-Node/pnpm, recursive Go modules/workspaces, Python/Ruff, bundled Flutter/Dart, Swift
-tools and the Gradle JDK target. Rust editions/MSRVs are checked without arbitrary
-language-edition changes. Literal compatibility holds require reasons and must match
-the actual manifests and available SDK. An empty/missing declared target fails;
-delegating a built-in module's SDK ownership requires a reasoned `unmanaged_modules`
-entry and produces no probe evidence for that module. Native deployment floors
-remain application requirements.
-
-Python build backends are included in the ordinary `uv.lock`. The build dependency
-group is derived from each workspace member's `build-system.requires`; it is not
-another source of version policy. Setup installs that frozen group without building
-the workspace, then builds against it without isolation. Forced PEP 517 prevents a
-bundled backend shortcut from bypassing the selected backend. Verification builds
-both the source archive and wheel. Workflow action SHAs and the container digest
-are also explicit update targets.
-
-Automatic commits require the copied example to be its own Git project root with a
-clean index/worktree and an existing branch commit. A nested example refuses to use
-its parent's repository. Preview copies visible project files into a disposable
-repository, runs real resolution and verification, then discards it. Preview does
-not exercise your signing backend, local Git filters or commit hooks. Source and candidate mutations,
-unexpected verification changes, failed checks and concurrent Git changes prevent
-acceptance. Only declared verified files enter the commit. Normal Git identity and
-signing configuration apply; unavailable signing fails, with no unsigned fallback.
-Container mode transports selected Git identity/signing settings but does not mount
-private keys. Use host mode when your configured signer needs host resources.
-
-Updates never push, create empty commits, reset, stash or conceal failed changes.
-Required checks belong in module verification: the immutable candidate commit is
-created directly and does not run arbitrary commit hooks that could rewrite it.
-Review major-version changes and failures before rerunning.
-
-## Disk use and extension points
-
-Shared package downloads and the bounded compiler cache are separate from project
-build contexts. `toolchain.toml` configures build/ compiler limits and stale age.
-Setup fingerprints include mode, platform, toolchain and manifests; module-wide
-stamps prevent reusing an installation from another mode. An operation lock protects
-active managed builds even if their parent wrapper exits. Automatic pruning only
-touches declared disposable project outputs, never shared package downloads or the
-host Nix store. It refuses symlink escapes and reports actual deletion failures.
-
-Nix store collection is an explicit host operation: inspect your roots and other
-projects before running `nix-collect-garbage`. Removing a container volume is likewise
-an explicit engine operation affecting its shared cache; stop its users first. No
-ordinary setup or update performs host-wide garbage collection or SDK removal.
-
-`just ci-prune` is a separate preview for explicitly disposable GitHub-hosted Linux
-runners. `--apply` removes only named SDKs in `ci.disposable_sdks`, preserving native
-SDK requirements of configured modules and each `--module` argument. `--sudo` is a
-separate explicit opt-in to the runner's noninteractive privilege. The supplied
-workflow exposes this as a default-off boolean. All hosted markers must agree;
-self-hosted machines and container calls are refused. These guards prevent mistakes
-by trusted operators; environment variables are not a hostile-user security boundary.
-Paths and symlink escapes are checked before deletion, and failures remain failures.
-
-Add project-specific commands as argument arrays in a module. Declare their inputs,
-generated readiness artifacts, and exact update-output scope. Use a check-only
-generator like `scripts/generate.py` for committed assets. Keep architecture and
-business logic decisions in your project's own documentation; the tooling only
-supplies repeatable execution and dependency management.
-
-Cache overrides (`TOOLCHAIN_DOWNLOAD_CACHE` and `XDG_CACHE_HOME`) must select absolute
-paths. Package downloads and the bounded sccache share that root; project build
-outputs use separate contexts. Preview disables global/system Git configuration
-and Git-specific environment overrides inside its disposable transaction, restoring
-the caller settings afterward. Apply retains normal Git identity and signing.
-Preview still uses the trusted host/container and shared caches; it is not credential
-or hostile-code isolation. The age window governs newly selected dependencies; it
-does not retrospectively certify every existing baseline toolchain pin as mature.
-
-Rust module commands and `just exec-in rust` own a foreground compiler-cache server
-and wait for its exit after each batch. Its stable socket lives in a private per-user
-directory under `/tmp`; successful and failed builds release their project lock.
-An uncatchably terminated supervisor can leave a server holding that lock, preserving
-active compiler outputs. Inspect surviving project processes before recovery; the
-socket is derived from the checkout and mode and can be read without acquiring the
-operation lock with `scripts/enter.sh core python3 -c 'import sys; sys.path.insert(0,
-"scripts"); import toolchain; print(toolchain.environment()["SCCACHE_SERVER_UDS"])'`.
-After confirming the operation has stopped, use `scripts/enter.sh rust env
-SCCACHE_SERVER_UDS=/the/inspected/socket sccache --stop-server`. A shutdown failure is
-an error. The stop response can precede process exit and can leave its socket node:
-confirm the inspected server has exited, then remove only that inspected stale
-socket before retrying. No automatic cleanup force-releases another process's lock.
+Read [the runtime and bootstrap contract](docs/runtime.md) before extending mounts,
+cache lifetimes or managed release files. The development environment runs trusted
+project code with declared access; it is not a sandbox for hostile source.

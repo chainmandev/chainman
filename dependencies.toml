@@ -56,3 +56,19 @@ provider = "maven"
 name = "org.jetbrains.compose:compose-gradle-plugin"
 file = "examples/compose/gradle/libs.versions.toml"
 pointer = ["versions", "compose"]
+
+[[pins]]
+provider = "github"
+name = "actions/checkout"
+file = "template/.github/workflows/verify.yml"
+format = "regex"
+representation = "action"
+pattern = '(?m)^      - uses: actions/checkout@(?P<value>[a-f0-9]{40} # v[0-9]+\.[0-9]+\.[0-9]+)$'
+
+[[pins]]
+provider = "github"
+name = "cachix/install-nix-action"
+file = "template/.github/workflows/verify.yml"
+format = "regex"
+representation = "action"
+pattern = '(?m)^      - uses: cachix/install-nix-action@(?P<value>[a-f0-9]{40} # v[0-9]+\.[0-9]+\.[0-9]+)$'

@@ -15,11 +15,13 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     python = sorted(
         p
-        for directory in ("scripts", "tests", "examples/core")
+        for directory in ("scripts", "tests", "examples/core", "template/scripts")
         for p in (root / directory).rglob("*.py")
     )
-    shell = sorted((root / "scripts").glob("*.sh"))
-    nix = sorted((root / "nix").glob("*.nix"))
+    shell = sorted(
+        [*(root / "scripts").glob("*.sh"), *(root / "bootstrap").glob("*.sh")]
+    )
+    nix = sorted([*(root / "nix").glob("*.nix"), *(root / "bootstrap").glob("*.nix")])
     for path in python + shell + nix:
         contained(root, path.relative_to(root).as_posix())
     commands = [
