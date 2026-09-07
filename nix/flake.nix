@@ -86,6 +86,13 @@
                 export UV_PYTHON=${python}/bin/python3
                 export GOTOOLCHAIN=local
                 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+                # Repeated shell refreshes must not nest browser socket paths.
+                # With no caller override, retain Nix's first scoped directory.
+                if [ -n "''${CHAINMAN_TEMP_BASE:-}" ]; then
+                  export TMPDIR="$CHAINMAN_TEMP_BASE"
+                elif [ -n "''${TMPDIR:-}" ]; then
+                  export CHAINMAN_TEMP_BASE="$TMPDIR"
+                fi
                 ulimit -c 0 2>/dev/null || true
                 ${extra}
               '';

@@ -15,6 +15,9 @@ command -v nix > /dev/null 2>&1 || {
     echo 'Chainman development requires host Nix and just.' >&2
     exit 1
 }
+if [ -n "${TMPDIR:-}" ]; then
+    export CHAINMAN_TEMP_BASE="$TMPDIR"
+fi
 inputs=$(cksum "$root/nix/flake.nix" "$root/nix/flake.lock")
 if [ "${TOOLCHAIN_ACTIVE_PROFILE:-}" = "$profile" ] && [ "${TOOLCHAIN_ACTIVE_ROOT:-}" = "$root" ] && [ "${TOOLCHAIN_ACTIVE_INPUTS:-}" = "$inputs" ] && [ "${TOOLCHAIN_FRESH:-0}" != 1 ]; then
     cd "$root"

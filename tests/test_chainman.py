@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,60 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_nested_nix_refreshes_preserve_selected_temporary_base(self):
+        flake = self.root / "environment"
+        shutil.copytree(chainman.RUNTIME / "nix", flake)
+        path = flake / "flake.nix"
+        path.write_text(
+            path.read_text().replace(
+                "ulimit -c 0",
+                'export TMPDIR="$TMPDIR/consumer-shell"\n                ulimit -c 0',
+            )
+        )
+        child = self.write(
+            "reenter.py",
+            "import json, os, sys; from pathlib import Path\n"
+            f"sys.path.insert(0, {str(chainman.RUNTIME / 'scripts')!r})\n"
+            "import chainman\n"
+            "seen=json.loads(os.environ.get('TEMP_OBSERVED', '[]'))\n"
+            "seen.append(os.environ['TMPDIR'])\n"
+            "depth=int(sys.argv[1])\n"
+            "if depth:\n"
+            " os.environ.update(TOOLCHAIN_FRESH='1', TEMP_OBSERVED=json.dumps(seen))\n"
+            " chainman.execute(Path.cwd(), 'native', [sys.executable, __file__, str(depth-1)])\n"
+            "else: print(json.dumps(seen))\n",
+        )
+        caller = self.root / "caller temporary files"
+        caller.mkdir(mode=0o700)
+        for override in (False, True):
+            with self.subTest(profile_override=override):
+                config = (
+                    'schema=1\n[profiles.native]\nflake="environment/flake.nix#core"\n'
+                )
+                expected = caller
+                if override:
+                    expected = self.root / "profile temporary files"
+                    expected.mkdir(mode=0o700)
+                    config += '[profiles.native.environment]\nTMPDIR="{root}/profile temporary files"\n'
+                self.write("chainman.toml", config)
+                with patch.dict(os.environ, TMPDIR=str(caller)):
+                    result = chainman.execute(
+                        self.root,
+                        "native",
+                        [sys.executable, str(child), "3"],
+                        capture_output=True,
+                        text=True,
+                    )
+                self.assertEqual(json.loads(result.stdout), [str(expected)] * 4)
+
+    def test_temporary_routing_is_not_a_project_environment_setting(self):
+        self.write(
+            "chainman.toml",
+            'schema=1\n[environment.values]\nCHAINMAN_TEMP_BASE="/unexpected"\n',
+        )
+        with self.assertRaisesRegex(ValueError, "Configure TMPDIR"):
+            chainman.execute(self.root, "host", ["true"])
+
     def test_legacy_nix_hook_uses_shared_snapshot_resolution_and_final_audit(self):
         import dependency_api
         import source_updates

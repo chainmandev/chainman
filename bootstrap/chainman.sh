@@ -39,6 +39,11 @@ cd "$root"
 [ ! -L "$root/.chainman" ] || fail '.chainman must be a real directory.'
 
 if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
+    # Nix assigns TMPDIR on every shell entry. Keep the caller's selected base
+    # across the bootstrap and later profile refreshes, within this mode only.
+    if [ -n "${TMPDIR:-}" ]; then
+        export CHAINMAN_TEMP_BASE="$TMPDIR"
+    fi
     nix_bin=${CHAINMAN_NIX_BIN:-nix}
     if [ -n "${CHAINMAN_NIX_BIN:-}" ]; then
         case "$nix_bin" in /*) ;; *) fail 'CHAINMAN_NIX_BIN must be an absolute executable path.' ;; esac

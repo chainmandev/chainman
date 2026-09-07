@@ -48,6 +48,13 @@ variables cannot be unset. `cache.preserve_environment` preserves specifically n
 caller cache settings. `profiles.NAME.compiler_cache=true` opts a Rust-capable custom
 profile into the managed foreground sccache lifecycle; the profile must supply sccache.
 
+An explicit `TMPDIR` remains the temporary base across bootstrap and profile
+refreshes, including project/profile overrides. Without one, Chainman retains
+Nix's first scoped temporary directory. This prevents repeated shell entries from
+exceeding browser socket path limits. `CHAINMAN_TEMP_BASE` is internal routing;
+configure `TMPDIR` instead. Container mode selects its base inside the container;
+host temporary directories are not implicitly forwarded or mounted.
+
 pnpm uses `PNPM_CONFIG_STORE_DIR` for the shared download store. Explicitly preserved
 or configured `PNPM_STORE_DIR` and `npm_config_store_dir` values remain supported as
 adapter aliases: each environment layer synchronizes all three names. If one layer

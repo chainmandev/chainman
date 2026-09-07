@@ -143,6 +143,10 @@ def execute(
     ):
         expanded = {}
         for key, value in values.items():
+            if key == "CHAINMAN_TEMP_BASE":
+                raise ValueError(
+                    "Configure TMPDIR instead of internal temporary routing"
+                )
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(
                 value, str
             ):
@@ -169,6 +173,12 @@ def execute(
         and selected.get("CHAINMAN_ACTIVE_FINGERPRINT") == token
     )
     target = root if cwd is None else cwd
+    # Explicit project/profile TMPDIR settings supersede the inherited base.
+    # Restore it after external flakes as well as the bundled shell hook.
+    if selected.get("TMPDIR"):
+        selected["CHAINMAN_TEMP_BASE"] = selected["TMPDIR"]
+    else:
+        selected.pop("CHAINMAN_TEMP_BASE", None)
     command = argv
     if ref and (not active or selected.get("TOOLCHAIN_FRESH") == "1"):
         command = [
@@ -182,6 +192,8 @@ def execute(
             "sh",
             "-eu",
             "-c",
+            'if [ -n "${CHAINMAN_TEMP_BASE:-}" ]; then export TMPDIR="$CHAINMAN_TEMP_BASE"; '
+            'elif [ -n "${TMPDIR:-}" ]; then export CHAINMAN_TEMP_BASE="$TMPDIR"; fi; '
             'cd "$1"; shift; exec "$@"',
             "sh",
             str(target),
