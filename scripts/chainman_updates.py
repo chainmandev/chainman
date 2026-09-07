@@ -469,36 +469,8 @@ def preview(root: Path, opts, now: datetime):
     before = updates.snapshot(root)
     with tempfile.TemporaryDirectory(prefix="chainman-preview-") as directory:
         copy = Path(directory)
-        for name in before:
-            source = tc.contained(root, name)
-            if source.is_file():
-                target = copy / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-            elif source.exists():
-                raise ValueError(
-                    "Preview requires regular files; submodules need a separate transaction"
-                )
         with updates.preview_git_environment():
-            updates.git(copy, "init", "-b", "preview")
-            files = [n for n in before if (copy / n).is_file()]
-            if files:
-                updates.git(copy, "add", "--force", "--", *files)
-            updates.git(
-                copy,
-                "-c",
-                "user.name=Preview",
-                "-c",
-                "user.email=preview@example.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "commit",
-                "--allow-empty",
-                "-m",
-                "Disposable preview baseline",
-            )
+            updates.prepare_preview(root, copy, before)
             # Ignored installed runtimes are not copied. Nested launchers verify
             # the copied bundle or fetch the declared pin, just like a new checkout.
             saved = {

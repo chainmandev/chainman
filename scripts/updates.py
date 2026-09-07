@@ -102,19 +102,23 @@ def snapshot(root: Path) -> dict[str, str]:
         root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
     ).split("\0")
     result = {}
+    links = gitlinks(root)
     for name in paths:
         if not name:
             continue
         path = root / name
-        if path.is_symlink():
+        if name in links:
+            body = json.dumps(
+                submodule_state(root, name, links[name]), sort_keys=True
+            ).encode()
+        elif path.is_symlink():
             body = b"symlink\0" + os.readlink(path).encode()
         elif path.is_file():
             body = str(path.stat().st_mode & 0o777).encode() + b"\0" + path.read_bytes()
         elif not path.exists():
             body = b"deleted"
         else:
-            # Submodules are not inputs to this updater's file transaction.
-            body = b"directory"
+            raise ValueError("Unexpected directory in project source inventory")
         result[name] = hashlib.sha256(body).hexdigest()
     return result
 
@@ -150,12 +154,59 @@ def tree_entries(root: Path, revision: str) -> dict:
     return entries
 
 
+def gitlinks(root: Path) -> dict[str, str]:
+    return {
+        name: identity
+        for name, (mode, identity) in tree_entries(root, "HEAD").items()
+        if mode == "160000"
+    }
+
+
+def submodule_state(root: Path, name: str, identity: str) -> dict:
+    """Submodules are frozen inputs, never targets or implicitly fetched sources."""
+    path = contained(root, name)
+    if not path.exists() or (path.is_dir() and not any(path.iterdir())):
+        return {"commit": identity, "initialized": False}
+    if not path.is_dir() or not (path / ".git").exists():
+        raise ValueError("Submodule input is not an empty or initialized checkout")
+    if Path(git(path, "rev-parse", "--show-toplevel")).resolve() != path.resolve():
+        raise ValueError("Submodule input must own its checkout")
+    if git(path, "rev-parse", "HEAD") != identity:
+        raise ValueError(
+            "Submodule commit changed; update it in a separate transaction"
+        )
+    for entry in git(path, "ls-files", "--cached", "-v", "-z").split("\0"):
+        if entry and (entry[0].islower() or entry[0] == "S"):
+            raise ValueError("Submodule input has hidden index flags")
+    expected = tree_entries(path, identity)
+    if (
+        git(
+            path,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        )
+        or staged_entries(path) != expected
+        or raw_entries(path, expected) != expected
+    ):
+        raise ValueError(
+            "Submodule input changed; preserve it for separate verification"
+        )
+    return {"commit": identity, "initialized": True, "sources": snapshot(path)}
+
+
 def raw_entries(root: Path, names) -> dict:
     """Read actual tracked contents without Git stat-cache or clean-filter decisions."""
     entries = {}
+    links = gitlinks(root)
     for name in names:
         relative = Path(name)
         path = contained(root, str(relative.parent)) / relative.name
+        if name in links:
+            submodule_state(root, name, links[name])
+            entries[name] = ("160000", links[name])
+            continue
         if path.is_symlink():
             mode, body = "120000", os.fsencode(os.readlink(path))
         elif path.is_file():
@@ -167,7 +218,7 @@ def raw_entries(root: Path, names) -> dict:
             continue
         else:
             raise ValueError(
-                "Exact tracked-byte verification requires files or symlinks; submodule/directory sources are unsupported"
+                "Exact tracked-byte verification requires files, symlinks or unchanged submodules"
             )
         identity = (
             subprocess.run(
@@ -183,6 +234,121 @@ def raw_entries(root: Path, names) -> dict:
         )
         entries[name] = (mode, identity)
     return entries
+
+
+def copy_submodule(source: Path, target: Path, identity: str) -> None:
+    """Copy only the current commit and tree, with no history, remotes or hooks."""
+    target.mkdir(parents=True, exist_ok=True)
+    git(
+        target,
+        "init",
+        "-b",
+        "input",
+        "--object-format=" + git(source, "rev-parse", "--show-object-format"),
+    )
+    objects = {identity: "commit", git(source, "rev-parse", "HEAD^{tree}"): "tree"}
+    for record in git(source, "ls-tree", "-r", "-t", "-z", identity).split("\0"):
+        if record:
+            metadata, _ = record.split("\t", 1)
+            _, kind, oid = metadata.split()
+            if kind != "commit":
+                objects[oid] = kind
+    for oid, kind in objects.items():
+        body = subprocess.run(
+            ["git", "cat-file", kind, oid],
+            cwd=source,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+        actual = (
+            subprocess.run(
+                ["git", "hash-object", "-w", "-t", kind, "--stdin"],
+                cwd=target,
+                input=body,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            .stdout.decode()
+            .strip()
+        )
+        if actual != oid:
+            raise ValueError("Submodule preview object identity changed")
+    (target / ".git/shallow").write_text(identity + "\n")
+    git(target, "update-ref", "HEAD", identity)
+    git(target, "read-tree", identity)
+    for name, (mode, oid) in tree_entries(source, identity).items():
+        original = contained(source, str(Path(name).parent)) / Path(name).name
+        destination = target / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "160000":
+            state = submodule_state(source, name, oid)
+            destination.mkdir()
+            if state["initialized"]:
+                copy_submodule(original, destination, oid)
+        elif original.is_symlink():
+            destination.symlink_to(os.readlink(original))
+        else:
+            shutil.copy2(original, destination)
+    if raw_entries(target, tree_entries(source, identity)) != tree_entries(
+        source, identity
+    ):
+        raise ValueError("Submodule preview does not reproduce its current source tree")
+
+
+def prepare_preview(root: Path, copy: Path, before: dict) -> None:
+    """Create a source-only baseline, preserving frozen submodule identities."""
+    links = gitlinks(root)
+    git(
+        copy,
+        "init",
+        "-b",
+        "preview",
+        "--object-format=" + git(root, "rev-parse", "--show-object-format"),
+    )
+    files = []
+    for name in before:
+        source = contained(root, str(Path(name).parent)) / Path(name).name
+        target = copy / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if name in links:
+            state = submodule_state(root, name, links[name])
+            target.mkdir()
+            if state["initialized"]:
+                copy_submodule(source, target, links[name])
+            git(
+                copy,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000," + links[name] + "," + name,
+            )
+        elif source.is_symlink():
+            target.symlink_to(os.readlink(source))
+            files.append(name)
+        elif source.is_file():
+            shutil.copy2(source, target)
+            files.append(name)
+        elif source.exists():
+            raise ValueError("Preview requires regular sources or unchanged submodules")
+    if files:
+        git(copy, "add", "--force", "--", *files)
+    git(
+        copy,
+        "-c",
+        "user.name=Preview",
+        "-c",
+        "user.email=preview@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Disposable preview baseline",
+    )
 
 
 def expected_entries(root: Path, head: str, paths: list[str]) -> dict:
@@ -300,6 +466,8 @@ def transaction(
     update()
     updated = snapshot(root)
     paths = changed(before, updated)
+    if set(paths) & (set(gitlinks(root)) | {".gitmodules"}):
+        raise ValueError("Submodule inputs and metadata require a separate transaction")
     allowed(paths, patterns)
     if repository(root, clean=False) != (branch, head) or git(
         root, "diff", "--cached", "--name-only"
@@ -730,38 +898,7 @@ def preview(root: Path, now: datetime, selected: list[str]) -> dict:
         preview_git_environment(),
     ):
         copy = Path(tmp)
-        for name in before:
-            source = contained(root, name)
-            if source.is_file():
-                target = copy / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, target)
-            elif source.exists():
-                raise ValueError(
-                    "Preview requires regular project files; external submodules must have their own update transaction"
-                )
-        # This disposable baseline records the visible source inventory, including
-        # tracked inputs under ignored build directory names. No parent history,
-        # remotes, hooks, credentials, or repository identity is copied.
-        git(copy, "init", "-b", "preview")
-        files = [name for name in before if (copy / name).is_file()]
-        if files:
-            git(copy, "add", "--force", "--", *files)
-        git(
-            copy,
-            "-c",
-            "user.name=Preview",
-            "-c",
-            "user.email=preview@example.invalid",
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "Disposable preview baseline",
-        )
+        prepare_preview(root, copy, before)
         result = transaction(
             copy,
             patterns,

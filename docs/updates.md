@@ -12,6 +12,15 @@ A missing release source or eligibility date is an error, never an implicit exem
 stderr. The result includes `changed` (an array of project-relative paths), `commit`
 (an identity or null), and `verification`; previews additionally include `preview`.
 
+Tracked submodules remain frozen, read-only inputs. Uninitialized submodules stay
+empty; Chainman never fetches them. Initialized inputs must match their recorded
+commit, index, raw source bytes and executable modes, without hidden index flags
+or untracked files. A preview copies only each current commit and source tree into
+an independent shallow repository, without old objects, remotes, configuration or
+hooks. It preserves nested submodules by the same rules. Submodule source, pin,
+initialization and `.gitmodules` changes require a separate transaction, even when
+the project's output patterns contain a wildcard.
+
 The standalone example uses built-in registry adapters, `dependencies.toml`, module
 manifests/lockfiles and `sdk-versions.toml`. Explicit constraints require reasons;
 security maturity exceptions need a narrowly scoped advisory, minimum safe version

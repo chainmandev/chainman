@@ -76,6 +76,153 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.verify()
 
+    def submodule(self, initialized=True):
+        path = self.root / "vendor source"
+        path.mkdir()
+        updates.git(path, "init", "-b", "main")
+        updates.git(path, "config", "user.name", "Submodule Test")
+        updates.git(path, "config", "user.email", "submodule@example.invalid")
+        (path / "old.txt").write_text("old history excluded")
+        updates.git(path, "add", ".")
+        updates.git(path, "commit", "-m", "old input")
+        old = updates.git(path, "rev-parse", "HEAD")
+        (path / "old.txt").unlink()
+        (path / "input.txt").write_text("current input")
+        updates.git(path, "add", "--all")
+        updates.git(path, "commit", "-m", "current input")
+        identity = updates.git(path, "rev-parse", "HEAD")
+        updates.git(path, "remote", "add", "origin", "https://example.invalid/private")
+        (path / ".git/hooks/pre-commit").write_text("exit 99\n")
+        self.write(
+            ".gitmodules",
+            '[submodule "vendor"]\npath = vendor source\nurl = https://example.invalid/private\n',
+        )
+        self.git("add", ".gitmodules")
+        self.git(
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000," + identity + ",vendor source",
+        )
+        self.git("commit", "-m", "frozen source input")
+        if not initialized:
+            import shutil
+
+            shutil.rmtree(path)
+            path.mkdir()
+        return path, identity, old
+
+    def unchanged_submodule(self, initialized):
+        _, identity, _ = self.submodule(initialized)
+        result = updates.transaction(self.root, ["deps.txt"], self.update, self.verify)
+        self.assertIsNotNone(result["commit"])
+        self.assertEqual(
+            updates.tree_entries(self.root, "HEAD")["vendor source"],
+            ("160000", identity),
+        )
+        result = updates.transaction(self.root, ["deps.txt"], self.update, self.verify)
+        self.assertIsNone(result["commit"])
+
+    def test_initialized_submodule_commits_and_noop_with_no_fetch(self):
+        self.unchanged_submodule(True)
+
+    def test_uninitialized_submodule_commits_and_noop_with_no_fetch(self):
+        self.unchanged_submodule(False)
+
+    def test_uninitialized_submodule_preview_preserves_empty_input(self):
+        _, identity, _ = self.submodule(False)
+
+        def inspect(root, *_):
+            self.assertEqual(list((root / "vendor source").iterdir()), [])
+            self.assertEqual(
+                updates.tree_entries(root, "HEAD")["vendor source"],
+                ("160000", identity),
+            )
+
+        result = self.preview(
+            lambda root, *_: (root / "deps.txt").write_text("candidate\n"), inspect
+        )
+        self.assertEqual(result["changed"], ["deps.txt"])
+
+    def test_submodule_preview_copies_only_current_objects_and_preserves_pin(self):
+        source, identity, old = self.submodule()
+        before = updates.snapshot(self.root)
+
+        def inspect(root, *_):
+            child = root / "vendor source"
+            self.assertEqual(updates.git(child, "rev-parse", "HEAD"), identity)
+            self.assertEqual((child / "input.txt").read_text(), "current input")
+            self.assertEqual(updates.git(child, "remote"), "")
+            self.assertFalse((child / ".git/hooks/pre-commit").exists())
+            probe = subprocess.run(
+                ["git", "cat-file", "-e", old],
+                cwd=child,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertNotEqual(probe.returncode, 0)
+            self.assertEqual(updates.git(child, "rev-list", "--count", "HEAD"), "1")
+
+        result = self.preview(
+            lambda root, *_: (root / "deps.txt").write_text("candidate\n"), inspect
+        )
+        self.assertEqual(result["changed"], ["deps.txt"])
+        self.assertEqual(updates.snapshot(self.root), before)
+        self.assertTrue((source / ".git/hooks/pre-commit").exists())
+
+    def test_submodule_dirty_bytes_and_hidden_flags_fail_without_repair(self):
+        path, _, _ = self.submodule()
+        self.git("config", "submodule.vendor.ignore", "all")
+        updates.git(path, "config", "core.filemode", "false")
+        (path / "input.txt").chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "Submodule input changed"):
+            updates.transaction(self.root, ["*"], self.update, self.verify)
+        self.assertEqual((self.root / "deps.txt").read_text(), "before\n")
+        (path / "input.txt").chmod(0o644)
+        updates.git(path, "update-index", "--assume-unchanged", "input.txt")
+        with self.assertRaisesRegex(ValueError, "hidden index"):
+            updates.transaction(self.root, ["*"], self.update, self.verify)
+
+    def test_gitfile_submodule_preview_is_independent(self):
+        path, identity, _ = self.submodule()
+        self.git("submodule", "absorbgitdirs")
+        self.assertTrue((path / ".git").is_file())
+        original = (path / ".git").read_bytes()
+
+        def inspect(root, *_):
+            copied = root / "vendor source"
+            self.assertTrue((copied / ".git").is_dir())
+            self.assertEqual(updates.git(copied, "rev-parse", "HEAD"), identity)
+
+        self.preview(
+            lambda root, *_: (root / "deps.txt").write_text("candidate\n"), inspect
+        )
+        self.assertEqual((path / ".git").read_bytes(), original)
+
+    def test_submodule_metadata_is_read_only_with_commit_disabled(self):
+        self.submodule(False)
+        with self.assertRaisesRegex(ValueError, "separate transaction"):
+            updates.transaction(
+                self.root,
+                ["*"],
+                lambda: self.write(".gitmodules", "changed\n"),
+                lambda: None,
+                False,
+            )
+
+    def test_submodule_mutation_is_rejected_even_with_wildcard_outputs(self):
+        path, _, _ = self.submodule()
+
+        def mutate():
+            self.update()
+            (path / "input.txt").write_text("unexpected")
+
+        head = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(ValueError, "Submodule input changed"):
+            updates.transaction(self.root, ["*"], mutate, self.verify)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual((path / "input.txt").read_text(), "unexpected")
+
     def hidden_index_flag(self, flag):
         self.git("update-index", flag, "untouched.txt")
         self.write("untouched.txt", "hidden source mutation\n")
