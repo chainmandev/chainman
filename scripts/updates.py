@@ -326,6 +326,14 @@ def update_nix(root: Path, policy: dict, now: datetime, env: dict) -> None:
     # Nix branch inputs are commits, not published releases. This is explicitly
     # revision age; no tag publication age is inferred from Git commit timestamps.
     spec = policy.get("nix", {})
+    relative = spec.get("directory", "nix")
+    if not isinstance(relative, str) or not relative:
+        raise ValueError("Nix input directory must be a project-relative path")
+    directory = contained(root, relative)
+    if not directory.is_dir():
+        raise ValueError("Nix input directory must be an existing project directory")
+    lockpath = contained(root, str(Path(relative) / "flake.lock"))
+    contained(root, str(Path(relative) / "flake.nix"))
     repository_name = spec.get("repository", "NixOS/nixpkgs")
     branch = spec.get("branch", "nixos-unstable")
     cutoff = now - timedelta(days=policy.get("minimum_age_days", 30))
@@ -339,7 +347,6 @@ def update_nix(root: Path, policy: dict, now: datetime, env: dict) -> None:
     at = registry.timestamp(selected["commit"]["committer"]["date"])
     if at > cutoff or not re.fullmatch(r"[a-f0-9]{40}", selected["sha"]):
         raise ValueError("Invalid Nix revision-age evidence")
-    lockpath = contained(root, "nix/flake.lock")
     lock = json.loads(lockpath.read_text())
     name = spec.get("input", "nixpkgs")
     key = lock["nodes"][lock["root"]]["inputs"][name]
@@ -358,7 +365,7 @@ def update_nix(root: Path, policy: dict, now: datetime, env: dict) -> None:
             name,
             f"github:{repository_name}/{selected['sha']}",
         ],
-        cwd=root / "nix",
+        cwd=directory,
         env=env,
         check=True,
     )

@@ -38,6 +38,10 @@ inputs, and only resolve/generate files. Git operations belong to the surroundin
 transaction. Verification must fully exercise the selected project's requirements.
 For a Nix-only project, the `nix-update` internal command reuses the built-in age-aware
 Nix input adapter during a managed transaction; configure `updates.nix` explicitly.
+`updates.nix.directory` selects the project-relative directory containing `flake.nix`
+and `flake.lock`, defaulting to `"nix"`. Use `directory = "."` for a root flake.
+Absolute paths, parent traversal, `.git` components and symlinked path components
+are rejected. Declare the matching lockfile path in `updates.outputs`.
 
 Apply requires a clean repository whose top-level directory is the adopted project,
 a current branch and an existing commit. A nested example refuses its parent's Git
