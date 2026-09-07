@@ -297,6 +297,9 @@ def perform(
 
 
 def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
+    import dependency_api
+
+    policy = dependency_api.policy(root)
     env = tc.environment(root)
     env.update(
         TOOLCHAIN_FRESH="1",
@@ -304,8 +307,13 @@ def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
         CHAINMAN_PROJECT_ROOT=str(root),
         CHAINMAN_RUNTIME=str(chainman.RUNTIME),
         CHAINMAN_UPDATE_ACTIVE="1",
+        CHAINMAN_UPDATE_AT=now.isoformat(),
     )
-    if policy.get("resolver"):
+    if policy.get("steps"):
+        if policy.get("resolver"):
+            raise ValueError("Use ordered steps or a legacy resolver, not both")
+        dependency_api.run_steps(root, policy, now, extra)
+    elif policy.get("resolver"):
         if policy.get("eligibility") != "resolver":
             raise ValueError(
                 "Custom resolvers must explicitly own eligibility with updates.eligibility='resolver'"
@@ -384,7 +392,9 @@ def verify(root: Path, policy: dict, runtime: Path):
 
 
 def verify_current(root: Path):
-    policy = tc.config(root).get("updates", {})
+    import dependency_api
+
+    policy = dependency_api.policy(root)
     env = tc.environment(root)
     env.update(TOOLCHAIN_FRESH="1", CHAINMAN_UPDATE_ACTIVE="1")
     if policy.get("verify"):
@@ -404,7 +414,9 @@ def verify_current(root: Path):
 
 
 def apply(root: Path, opts, now: datetime):
-    policy = tc.config(root).get("updates", {})
+    import dependency_api
+
+    policy = dependency_api.policy(root)
     if not policy:
         raise ValueError("Declare project updates and verification first")
     patterns = [
@@ -417,7 +429,7 @@ def apply(root: Path, opts, now: datetime):
         lock = json.loads(tc.regular_input(root, "chainman.lock"))
         if lock.get("bundled_archive"):
             patterns.append(lock["bundled_archive"])
-    if not policy.get("resolver"):
+    if not policy.get("resolver") and not policy.get("steps"):
         patterns += [
             p
             for n in tc.config(root)["modules"]

@@ -235,14 +235,26 @@ def main(argv=None):
                     return execute(root, name, rest, env=owned, check=False).returncode
         elif args.action == "deps-update":
             return dependencies(root, rest)
+        elif args.action in {"deps-query", "deps-resolve"}:
+            import dependency_api
+
+            result = (
+                dependency_api.query_command(root, rest)
+                if args.action == "deps-query"
+                else dependency_api.resolve_command(root, rest)
+            )
+            print(json.dumps(result, sort_keys=True))
         elif args.action == "nix-update":
             if rest or os.environ.get("CHAINMAN_UPDATE_ACTIVE") != "1":
                 raise ValueError("nix-update is a resolver hook inside deps-update")
-            from datetime import datetime, timezone
+            import dependency_api
             import updates
 
             updates.update_nix(
-                root, cfg["updates"], datetime.now(timezone.utc), tc.environment(root)
+                root,
+                dependency_api.policy(root),
+                dependency_api.instant(),
+                tc.environment(root),
             )
         elif args.action == "module":
             if len(rest) not in (1, 2):

@@ -12,7 +12,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from ruamel.yaml import YAML
 
-from toolchain import contained, module
+from toolchain import contained, local_source, module
 
 
 def document(path: Path, *, body: str | None = None):
@@ -76,7 +76,9 @@ def js_pin(file: str, pointer: list, name: str, value: str):
     }
 
 
-def discover(root: Path, selected: list[str]) -> list[dict]:
+def discover(
+    root: Path, selected: list[str], *, specs: dict | None = None
+) -> list[dict]:
     pins = []
 
     def add(pin):
@@ -84,7 +86,7 @@ def discover(root: Path, selected: list[str]) -> list[dict]:
             pins.append(pin)
 
     for name in selected:
-        spec = module(name, root)
+        spec = module(name, root) if specs is None else specs[name]
         kind = spec.get("ecosystem")
         directory = contained(root, spec["directory"])
         if kind == "npm":
@@ -167,9 +169,12 @@ def discover(root: Path, selected: list[str]) -> list[dict]:
                                 location = pointer + [key, dependency]
                                 actual = dependency
                                 if isinstance(requirement, Mapping):
-                                    if requirement.get("path") or requirement.get(
-                                        "workspace"
-                                    ):
+                                    if requirement.get("path"):
+                                        local_source(
+                                            root, path.parent, requirement["path"]
+                                        )
+                                        continue
+                                    if requirement.get("workspace"):
                                         continue
                                     if requirement.get("git"):
                                         raise ValueError(
@@ -240,6 +245,10 @@ def discover(root: Path, selected: list[str]) -> list[dict]:
                             sources[parsed.name].get("workspace")
                             or sources[parsed.name].get("path")
                         ):
+                            if sources[parsed.name].get("path"):
+                                local_source(
+                                    root, path.parent, sources[parsed.name]["path"]
+                                )
                             continue
                         pins.append(
                             {
@@ -251,35 +260,50 @@ def discover(root: Path, selected: list[str]) -> list[dict]:
                             }
                         )
         elif kind == "pub":
-            path = directory / "pubspec.yaml"
-            rel = path.relative_to(root).as_posix()
-            content = document(path)[0]
-            for section in ("dependencies", "dev_dependencies", "dependency_overrides"):
-                for dependency, requirement in content.get(section, {}).items():
-                    if isinstance(requirement, Mapping):
-                        if requirement.get("sdk") or requirement.get("path"):
-                            continue
-                        raise ValueError(
-                            "Non-hosted Dart dependency needs an explicit release pin"
+            paths = {directory / "pubspec.yaml"}
+            for pattern in spec.get("inputs", []):
+                paths.update(p for p in root.glob(pattern) if p.name == "pubspec.yaml")
+            for path in sorted(paths):
+                rel = path.relative_to(root).as_posix()
+                content = document(contained(root, rel))[0]
+                for section in (
+                    "dependencies",
+                    "dev_dependencies",
+                    "dependency_overrides",
+                ):
+                    for dependency, requirement in content.get(section, {}).items():
+                        if isinstance(requirement, Mapping):
+                            if requirement.get("path"):
+                                local_source(root, path.parent, requirement["path"])
+                                continue
+                            if requirement.get("sdk"):
+                                continue
+                            raise ValueError(
+                                "Non-hosted Dart dependency needs an explicit release pin"
+                            )
+                        pins.append(
+                            {
+                                "provider": "pub",
+                                "name": dependency,
+                                "file": rel,
+                                "pointer": [section, dependency],
+                                "prefix": "^",
+                            }
                         )
-                    pins.append(
-                        {
-                            "provider": "pub",
-                            "name": dependency,
-                            "file": rel,
-                            "pointer": [section, dependency],
-                            "prefix": "^",
-                        }
-                    )
     return pins
 
 
 def configure_build_dependencies(
-    root: Path, selected: list[str], *, check: bool = False, validate_only: bool = False
+    root: Path,
+    selected: list[str],
+    *,
+    check: bool = False,
+    validate_only: bool = False,
+    specs: dict | None = None,
 ) -> None:
     """Put declared Python build requirements into the ordinary audited workspace lock."""
     for name in selected:
-        spec = module(name, root)
+        spec = module(name, root) if specs is None else specs[name]
         group = spec.get("build_dependency_group")
         if not group:
             continue

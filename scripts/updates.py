@@ -27,6 +27,7 @@ from toolchain import (
     atomic_json,
     config,
     contained,
+    local_source,
     environment,
     managed_run,
     module,
@@ -401,7 +402,7 @@ def current_version(pin: dict, root: Path):
 
 
 def lock_identities(
-    root: Path, selected: list[str]
+    root: Path, selected: list[str], *, specs: dict | None = None
 ) -> set[tuple[str, str, str, str, str]]:
     """One identity per actual distribution, with explicit URLs where the lock has them."""
     identities = set()
@@ -420,7 +421,7 @@ def lock_identities(
         )
 
     for name in selected:
-        spec = module(name, root)
+        spec = module(name, root) if specs is None else specs[name]
         directory = contained(root, spec["directory"])
         kind = spec.get("ecosystem")
         if kind in ("go", "swift", "maven"):
@@ -475,6 +476,7 @@ def lock_identities(
             for item in lock.get("package", []):
                 source = item["source"]
                 if set(source) in ({"virtual"}, {"editable"}):
+                    local_source(root, directory, next(iter(source.values())))
                     continue
                 if (
                     set(source) != {"registry"}
@@ -497,7 +499,10 @@ def lock_identities(
         elif kind == "pub":
             lock = manifests.document(path)[0]
             for package, item in lock.get("packages", {}).items():
-                if item["source"] in ("sdk", "path"):
+                if item["source"] == "path":
+                    local_source(root, directory, item["description"]["path"])
+                    continue
+                if item["source"] == "sdk":
                     continue
                 if (
                     item["source"] != "hosted"
@@ -517,13 +522,17 @@ def lock_identities(
 
 
 def audit_locks(
-    root: Path, selected: list[str], before: set, policy: dict, now: datetime
+    root: Path,
+    selected: list[str],
+    before: set,
+    policy: dict,
+    now: datetime,
+    *,
+    specs: dict | None = None,
 ) -> None:
-    cutoff = now - timedelta(days=registry.minimum_age(policy))
-    evidence = {}
-    current = lock_identities(root, selected)
+    current = lock_identities(root, selected, specs=specs)
     for name in selected:
-        spec = module(name, root)
+        spec = module(name, root) if specs is None else specs[name]
         if spec.get("ecosystem") == "go":
             lock_adapters.validate_go_sources(
                 root, spec, lock_adapters.identities(root, spec)
@@ -532,6 +541,15 @@ def audit_locks(
             lock_adapters.validate_swift_sources(
                 root, spec, lock_adapters.identities(root, spec)
             )
+    audit_identities(root, current, before, policy, now)
+
+
+def audit_identities(
+    root: Path, current: set, before: set, policy: dict, now: datetime
+) -> None:
+    """Check actual immutable artifacts; only the observed baseline is age-exempt."""
+    cutoff = now - timedelta(days=registry.minimum_age(policy))
+    evidence = {}
     for identity in sorted(current):
         provider, package, value, url, digest = identity
         key = (provider, package)

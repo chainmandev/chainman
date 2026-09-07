@@ -73,6 +73,21 @@ def regular_input(root: Path, relative: str) -> bytes:
         return stream.read()
 
 
+def local_source(root: Path, base: Path, relative: str) -> Path:
+    """Resolve sibling sources lexically without concealing a symlink traversal."""
+    if not isinstance(relative, str) or Path(relative).is_absolute():
+        raise ValueError("Local dependencies require a project-relative source")
+    current = contained(root, str(base.relative_to(root)))
+    for part in Path(relative).parts:
+        if part == "..":
+            if current == root:
+                raise ValueError("Local dependency escapes the adopted project")
+            current = current.parent
+        else:
+            current = contained(root, str((current / part).relative_to(root)))
+    return current
+
+
 def atomic_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
     if path.is_symlink() or (path.exists() and not stat.S_ISREG(path.lstat().st_mode)):
         raise ValueError("Output must be a regular file")

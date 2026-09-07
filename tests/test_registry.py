@@ -80,6 +80,38 @@ class PolicyTests(unittest.TestCase):
                     NOW,
                 )
 
+    def test_expired_exception_retires_only_with_eligible_safe_release(self):
+        exception = {
+            "package": "npm:demo",
+            "version": "2.0.0",
+            "minimum_safe": "2.0.0",
+            "reason": "specific security fix",
+            "advisory": "https://example.invalid/security/1",
+            "expires": NOW.isoformat(),
+        }
+        policy = {"exceptions": [exception]}
+        self.assertEqual(
+            registry.select("npm", [release("2.0.0", 30)], policy, "demo", NOW).version,
+            "2.0.0",
+        )
+        with self.assertRaisesRegex(ValueError, "Expired"):
+            registry.select("npm", [release("2.0.0", 29)], policy, "demo", NOW)
+        bounded = copy.deepcopy(policy)
+        bounded["constraints"] = {
+            "npm:demo": {"range": "<2", "reason": "explicit compatibility limit"}
+        }
+        with self.assertRaisesRegex(ValueError, "Expired"):
+            registry.select("npm", [release("2.0.0", 90)], bounded, "demo", NOW)
+        for key, bad in (
+            ("expires", "invalid"),
+            ("minimum_safe", "nonsense"),
+            ("advisory", ""),
+        ):
+            invalid = copy.deepcopy(policy)
+            invalid["exceptions"][0][key] = bad
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                registry.select("npm", [release("2.0.0", 90)], invalid, "demo", NOW)
+
 
 class ArtifactTests(unittest.TestCase):
     """Use actual lock and registry field shapes; expected identity is independent."""

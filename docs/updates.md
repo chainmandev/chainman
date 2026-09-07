@@ -18,7 +18,85 @@ Toolchain changes force fresh environment entry before resolution and verificati
 The runtime image is updated together with Chainman; consumer Nix inputs and workflow
 revision pins remain project-owned update targets.
 
-Existing projects can keep their resolver and verification hooks:
+Projects declare shared adapters and ordered application hooks:
+
+```toml
+[updates]
+minimum_age_days = 30
+profile = "default"
+verify = [["just", "verify"]]
+outputs = ["nix/flake.lock", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "generated/labels.json"]
+targets = ["assets"]
+
+[updates.adapters.nix]
+adapter = "nix"
+inputs = [{ directory = "nix", input = "nixpkgs", repository = "NixOS/nixpkgs", branch = "nixos-unstable" }]
+
+[updates.adapters.javascript]
+adapter = "javascript"
+directory = "."
+profile = "default"
+manager = "pnpm"
+
+[[updates.steps]]
+resolve = "nix"
+[[updates.steps]]
+resolve = "javascript"
+[[updates.steps]]
+targets = ["javascript", "assets"]
+commands = [["node", "scripts/generate-labels.mjs"]]
+```
+
+`just deps-update --skip-chainman -- --targets javascript,assets` selects these
+targets. `--policy compatible` retains the original dependency ranges; the default
+is `aggressive`, subject to every explicit constraint. `--target-policy name=compatible`
+sets an individual target's mode. `updates.target_groups` maps aliases to target
+lists. Command-only targets are declared in `updates.targets` and require a matching
+command step. Hooks receive JSON `CHAINMAN_UPDATE_TARGETS` and
+`CHAINMAN_UPDATE_POLICIES`, plus the frozen `CHAINMAN_UPDATE_AT` timestamp.
+
+Adapters snapshot their original identities before any mutation. Nix steps precede
+toolchain synchronization, which precedes package resolution. Each command enters
+the current Nix profile afresh. Reconciliation finishes before all selected adapters
+audit the final identities; the surrounding transaction then freezes, verifies and
+commits those exact files. Verification must report drift, never regenerate and retry.
+
+Supported adapters are `javascript` (pnpm/npm), `rust`, `python`, `go`, `flutter`,
+`swift`, `gradle`, `actions`, `oci`, `nix` and `toolchain`. Package adapters accept a
+project-relative `directory` (native adapters also accept `directories`) and a Nix
+`profile`. Native `manifests` explicitly bound discovery; Gradle `catalogs` locate
+version catalogs. Each adapter's optional `policy` adds scoped rules to the global
+policy. A TOML `updates.policy_file` keeps larger policy tables outside the primary
+configuration. Toolchain adapters probe Nix-supplied versions and synchronize
+declared JSON/TOML/YAML pointers or exact regex pins only after dated release evidence
+passes. Application generators and deployment-specific reconciliation remain hooks.
+
+JavaScript discovery includes workspaces, catalogs, aliases, scoped overrides and
+actual resolved peer relationships. Documented package/catalog/prefix constraints
+remain effective during bounded resolution retries. Version-scoped overrides retain
+their explicit compatibility ranges. Exact SDK-owned dependencies can be declared
+as `held_dependencies` with a manifest, package and reason; changed artifacts still
+require age and identity evidence. Registry and native lock audits cover transitive
+artifacts as well as direct declarations. Expired security exceptions fail while
+still needed; a mature constrained safe alternative retires an otherwise valid
+exception. Retirement never exempts a newly selected young artifact.
+
+Native integrations use `scripts/chainman.sh deps-query`: one JSON request on stdin,
+one schema-versioned JSON response on stdout. Schema 1 supports `select`, `metadata`
+and `audit`; providers include npm, PyPI, crates, pub, GitHub, Docker, Go, Swift and
+Maven. Selection accepts `provider`, `package`, optional `current`, and an optional
+`constraint={range,reason}`. A retained current version is labelled `retained` and
+does not acquire eligibility evidence from an older candidate. `metadata` requires
+an exact `version` and returns evidence without claiming eligibility. `audit` takes
+`artifacts`, an array of `[provider,package,version,url,digest]` identities; caller
+baseline claims never bypass maturity. `artifact-metadata` and `artifact-audit`
+accept an exact HTTPS `url` and `sha256:...` digest, download and hash the bytes, and
+label their age basis as origin artifact modification time, not release publication.
+Missing, future or inconsistent evidence fails. `deps-resolve NAME` exposes a
+configured adapter inside an active update transaction. Consumer code must not
+import runtime Python modules.
+
+Legacy projects can keep an explicitly owned resolver during migration:
 
 ```toml
 [updates]

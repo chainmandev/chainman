@@ -1,0 +1,358 @@
+"""npm package-lock v2/v3 execution and immutable graph auditing."""
+
+import json
+import re
+import subprocess
+import tempfile
+from datetime import timedelta
+from pathlib import Path
+
+import javascript_updates as js
+import registry
+import toolchain as tc
+import updates
+from semantic_version import NpmSpec, Version
+
+
+def read(workspace):
+    path = tc.contained(workspace.directory, workspace.lock)
+    if not path.exists():
+        return {"lockfileVersion": 3, "packages": {}}
+    value = json.loads(tc.regular_input(workspace.directory, workspace.lock))
+    if value.get("lockfileVersion") not in (2, 3) or not isinstance(
+        value.get("packages"), dict
+    ):
+        raise ValueError("npm auditing requires package-lock version 2 or 3")
+    for location in value["packages"]:
+        tc.contained(workspace.directory, location or ".")
+    return value
+
+
+def local_locations(workspace):
+    return {
+        "" if Path(name).parent == Path(".") else Path(name).parent.as_posix()
+        for name in workspace.manifests
+    }
+
+
+def name_at(location, item):
+    suffix = location.rsplit("node_modules/", 1)[-1]
+    return js.package_name(item.get("name", suffix))
+
+
+def identities(workspace):
+    result = set()
+    lock = read(workspace)
+    locals = local_locations(workspace)
+    for location, item in lock["packages"].items():
+        if location in locals:
+            if item.get("resolved") or item.get("integrity"):
+                raise ValueError(
+                    "A local npm workspace cannot carry a registry resolution"
+                )
+            continue
+        if item.get("link") is True:
+            if item.get("resolved") not in locals or set(item) - {"resolved", "link"}:
+                raise ValueError("npm link must name one declared local workspace")
+            continue
+        if not re.search(r"(?:^|/)node_modules/", location):
+            raise ValueError("npm lock contains an undeclared local package")
+        name, version = name_at(location, item), item.get("version")
+        if registry.version("npm", version) is None:
+            raise ValueError("npm lock lacks a stable registry version")
+        result.add(
+            (
+                "npm",
+                name,
+                version,
+                registry.artifact_url(item.get("resolved")),
+                registry.digest(item.get("integrity"), npm=True),
+            )
+        )
+    return result
+
+
+def locate(packages, source, name):
+    js.package_name(name)
+    path = Path(source or ".")
+    for parent in [path, *path.parents]:
+        if parent.name == "node_modules":
+            continue
+        key = (parent / "node_modules" / name).as_posix().removeprefix("./")
+        if key in packages:
+            if packages[key].get("link") is True:
+                key = packages[key].get("resolved")
+                if key not in packages or packages[key].get("link"):
+                    raise ValueError("Invalid or recursive npm workspace link")
+            return key
+    return None
+
+
+def allowed(workspace, pin):
+    result = js.effective_requirements(workspace, pin)
+    replacement = (
+        workspace.documents["package.json"][0].get("overrides", {}).get(pin.alias)
+    )
+    if isinstance(replacement, dict):
+        replacement = replacement.get(".")
+    if isinstance(replacement, str) and not replacement.startswith("$"):
+        parsed = js.parse_requirement(pin.alias, replacement)
+        if parsed:
+            result.append((parsed[0], parsed[2]))
+    return result
+
+
+def audit(workspace, before, policy, now):
+    current = identities(workspace)
+    updates.audit_identities(
+        workspace.root, current, {tuple(i) for i in before["identities"]}, policy, now
+    )
+    lock, evidence = read(workspace), js.Evidence(policy, now)
+    packages, options = lock["packages"], policy.get("javascript", {})
+    locals = local_locations(workspace)
+    for manifest, refs in workspace.refs.items():
+        importer = (
+            ""
+            if Path(manifest).parent == Path(".")
+            else Path(manifest).parent.as_posix()
+        )
+        if importer not in packages:
+            raise ValueError("npm lock is missing a declared workspace")
+        queue = []
+        for alias, index in refs.items():
+            pin = workspace.pins[index]
+            location = locate(packages, importer, alias)
+            if location is None:
+                raise ValueError("npm lock is missing a declared dependency")
+            item = packages[location]
+            actual, version = name_at(location, item), item.get("version")
+            if not any(
+                actual == name and Version(version) in NpmSpec(bound)
+                for name, bound in allowed(workspace, pin)
+            ):
+                raise ValueError(
+                    "npm locked dependency disagrees with its manifest or override"
+                )
+            if any(
+                Version(version) not in NpmSpec(bound)
+                for bound in js.compatibility(pin, options)
+            ):
+                raise ValueError(
+                    "npm dependency violates scoped JavaScript compatibility"
+                )
+            if (
+                workspace.spec.get("mode", options.get("mode", "aggressive"))
+                == "compatible"
+                and not pin.held
+            ):
+                previous = next(
+                    (
+                        p
+                        for p in before.get("requirements", [])
+                        if p["file"] == pin.file
+                        and tuple(p["pointer"]) == pin.pointer
+                        and p["name"] == pin.name
+                    ),
+                    None,
+                )
+                floor = (
+                    re.match(r"(?:[~^]|>=?)?([0-9]+)", previous["requirement"])
+                    if previous
+                    else None
+                )
+                if floor is None or Version(version).major != int(floor[1]):
+                    raise ValueError("npm dependency escaped the compatible-mode major")
+            queue.append(location)
+        visited = set()
+        while queue:
+            location = queue.pop()
+            if location in visited:
+                continue
+            visited.add(location)
+            if len(visited) > 100000:
+                raise ValueError("npm graph exceeds its audit bound")
+            item = packages[location]
+            if location in locals:
+                info = workspace.documents[
+                    (location + "/" if location else "") + "package.json"
+                ][0]
+                actual = info["name"]
+                peers, metadata = (
+                    info.get("peerDependencies", {}),
+                    info.get("peerDependenciesMeta", {}),
+                )
+            else:
+                actual = name_at(location, item)
+                peers, metadata = evidence.peers(actual, item["version"])
+                for rule in options.get("prefix_constraints", []):
+                    if (
+                        actual.startswith(rule["prefix"])
+                        and actual not in rule.get("exclude", [])
+                        and Version(item["version"]) not in NpmSpec(js.rule_range(rule))
+                    ):
+                        raise ValueError(
+                            "npm transitive dependency violates prefix compatibility"
+                        )
+            for peer, bound in peers.items():
+                if js.peer_ignored(options, manifest, actual, peer):
+                    continue
+                target = locate(packages, location, peer)
+                if target is None and metadata.get(peer, {}).get("optional") is True:
+                    continue
+                if target is None or Version(
+                    packages[target]["version"]
+                ) not in NpmSpec(bound):
+                    raise ValueError(
+                        f"Missing or incompatible npm peer {actual}>{peer} in {manifest}"
+                    )
+            for name in {
+                **item.get("dependencies", {}),
+                **item.get("optionalDependencies", {}),
+            }:
+                child = locate(packages, location, name)
+                if child is None:
+                    if name not in item.get("optionalDependencies", {}):
+                        raise ValueError(
+                            "npm lock is missing a required transitive dependency"
+                        )
+                else:
+                    queue.append(child)
+
+
+def resolve(workspace, before, evidence, selected, policy, now):
+    root, spec = workspace.root, workspace.spec
+    options = policy.get("javascript", {})
+    active = [
+        r
+        for e in policy.get("exceptions", [])
+        if e.get("package", "").startswith("npm:")
+        for r in registry.active_exceptions(
+            "npm", evidence.get(e["package"][4:])[0], policy, e["package"][4:], now
+        )
+    ]
+    # npm has one cutoff. With exact security exceptions, admit candidates at
+    # the present cutoff and independently reject every other young artifact.
+    # A failure stays visible; it never broadens the audited exception set.
+    cutoff = (
+        now
+        if active or js.baseline_maturity_exclusions(before, evidence)
+        else now - timedelta(days=registry.minimum_age(policy))
+    )
+    peer_option = (
+        "--legacy-peer-deps" if options.get("peer_exceptions") else "--strict-peer-deps"
+    )
+    parent = tc.contained(root, ".cache/toolchain/work")
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="npm-update-", dir=parent) as name:
+        temporary = Path(name)
+        content = workspace.render(selected, resolver_pins=True)
+        for relative, data in content.items():
+            if relative != workspace.lock:
+                tc.atomic_bytes(
+                    tc.contained(temporary, relative),
+                    data,
+                    workspace.modes.get(relative, 0o644),
+                )
+        command = [
+            "npm",
+            "install",
+            "--package-lock-only",
+            "--ignore-scripts",
+            "--no-audit",
+            "--before=" + cutoff.isoformat(),
+            peer_option,
+        ]
+        result = js.chainman.execute(
+            root,
+            spec.get("profile", "javascript"),
+            command,
+            cwd=temporary,
+            env=tc.environment(root),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode:
+            raise ValueError(
+                f"npm resolution failed with exit {result.returncode}; no files were installed"
+            )
+        for relative, data in content.items():
+            if (
+                relative != workspace.lock
+                and tc.regular_input(temporary, relative) != data
+            ):
+                raise ValueError(
+                    "npm changed an input outside the planned dependency edits"
+                )
+        content = workspace.render(selected)
+        for relative, data in content.items():
+            if relative != workspace.lock:
+                tc.atomic_bytes(
+                    tc.contained(temporary, relative),
+                    data,
+                    workspace.modes.get(relative, 0o644),
+                )
+        path = tc.contained(temporary, workspace.lock)
+        lock = json.loads(tc.regular_input(temporary, workspace.lock))
+        for manifest in workspace.manifests:
+            key = (
+                ""
+                if Path(manifest).parent == Path(".")
+                else Path(manifest).parent.as_posix()
+            )
+            entry = lock.get("packages", {}).get(key)
+            if entry is None:
+                raise ValueError("npm resolver omitted a declared workspace")
+            for section in js.SECTIONS:
+                if section in workspace.documents[manifest][0]:
+                    entry[section] = workspace.documents[manifest][0][section]
+        tc.atomic_bytes(path, (json.dumps(lock, indent=2) + "\n").encode(), 0o644)
+        checked = js.chainman.execute(
+            root,
+            spec.get("profile", "javascript"),
+            [
+                "npm",
+                "ci",
+                "--dry-run",
+                "--ignore-scripts",
+                "--offline",
+                "--no-audit",
+                peer_option,
+            ],
+            cwd=temporary,
+            env=tc.environment(root),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if checked.returncode:
+            raise ValueError("npm ci rejected the restored manifest ranges")
+        copied = js.Workspace(temporary, {**spec, "directory": "."})
+        audit(copied, before, policy, now)
+        for relative, data in content.items():
+            if (
+                relative != workspace.lock
+                and tc.regular_input(temporary, relative) != data
+            ):
+                raise ValueError("npm verification changed a declared resolver input")
+        content[workspace.lock] = tc.regular_input(temporary, workspace.lock)
+        for relative, data in workspace.original.items():
+            if tc.regular_input(workspace.directory, relative) != data:
+                raise ValueError("JavaScript inputs changed concurrently")
+        for relative in content.keys() - workspace.original.keys():
+            if tc.contained(workspace.directory, relative).exists():
+                raise ValueError("JavaScript output appeared concurrently")
+        changed = []
+        for relative, data in content.items():
+            if workspace.original.get(relative) != data:
+                tc.atomic_bytes(
+                    tc.contained(workspace.directory, relative),
+                    data,
+                    workspace.modes.get(relative, 0o644),
+                )
+                changed.append(
+                    (workspace.directory / relative).relative_to(root).as_posix()
+                )
+    return {"changed_files": sorted(changed), "resolution_attempts": 1}

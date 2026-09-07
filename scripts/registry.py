@@ -230,14 +230,15 @@ def active_exceptions(
             raise ValueError(
                 "Security exceptions require exact version, safe floor, reason, advisory, and expiry"
             )
-        if timestamp(exception["expires"]) <= now:
-            raise ValueError(f"Expired security exception for {name}")
+        expiry = timestamp(exception["expires"])
         safe = version(provider, exception["minimum_safe"])
         admitted = version(provider, exception["version"])
         if safe is None or admitted is None or admitted < safe:
             raise ValueError("Invalid exception safe floor")
         if any(version(provider, release.version) >= safe for release in mature):
             continue
+        if expiry <= now:
+            raise ValueError(f"Expired security exception for {name}")
         for release in releases:
             if (
                 release.version == exception["version"]

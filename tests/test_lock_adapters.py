@@ -524,6 +524,15 @@ class NativeLockTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "mature|eligible"):
                     self.audit(kind, set(), days=1, policy={"exceptions": [exception]})
                 exception["expires"] = NOW.isoformat()
+                # The mature safe alternative retires this exception; unchanged
+                # baseline bytes retain only their ordinary age grandfathering.
+                self.audit(
+                    kind,
+                    updates.lock_identities(self.root, [kind]),
+                    days=1,
+                    policy={"exceptions": [exception]},
+                )
+                candidates.pop()
                 with self.assertRaisesRegex(ValueError, "Expired"):
                     self.audit(
                         kind,
