@@ -625,6 +625,59 @@ class NativeLockTests(unittest.TestCase):
             self.assertEqual(evidence[0].published, changed)
             self.assertTrue(all(a.published == changed for a in evidence[0].artifacts))
 
+    def test_swift_exception_uses_commit_age_for_retained_and_new_artifacts(self):
+        import source_updates
+
+        current = updates.lock_identities(self.root, ["swift"])
+        exception = {
+            "package": "swift:" + SWIFT,
+            "version": "1.5.0",
+            "minimum_safe": "1.5.0",
+            "reason": "Security repair",
+            "advisory": "https://example.invalid/advisory",
+            "expires": (NOW - timedelta(days=1)).isoformat(),
+        }
+        with (
+            patch.object(
+                registry,
+                "github_releases",
+                return_value=[
+                    registry.Release("v1.5.0", NOW - timedelta(days=90), "v1.5.0")
+                ],
+            ),
+            patch.object(registry, "github_commit", return_value="a" * 40),
+            patch.object(
+                source_updates, "commit_time", return_value=NOW - timedelta(days=1)
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "Expired"):
+                updates.audit_identities(
+                    self.root, current, current, {"exceptions": [exception]}, NOW
+                )
+            active = {**exception, "expires": (NOW + timedelta(days=2)).isoformat()}
+            updates.audit_identities(
+                self.root, current, set(), {"exceptions": [active]}, NOW
+            )
+
+    def test_older_duplicate_metadata_cannot_retire_needed_exception(self):
+        exception = {
+            "package": "maven:sample:library",
+            "version": "1.0.0",
+            "minimum_safe": "1.0.0",
+            "reason": "Security repair",
+            "advisory": "https://example.invalid/advisory",
+            "expires": (NOW - timedelta(days=1)).isoformat(),
+        }
+        values = [
+            registry.Release("1.0.0", NOW - timedelta(days=60)),
+            registry.Release("1.0.0", NOW - timedelta(days=1)),
+        ]
+        for ordered in (values, list(reversed(values))):
+            with self.assertRaisesRegex(ValueError, "Expired"):
+                registry.active_exceptions(
+                    "maven", ordered, {"exceptions": [exception]}, "sample:library", NOW
+                )
+
     def test_maven_hash_fallback_requires_unchanged_artifact_date(self):
         class Response(io.BytesIO):
             headers = {"Last-Modified": "Wed, 01 Jul 2026 00:00:00 GMT"}

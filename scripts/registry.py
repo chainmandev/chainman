@@ -230,6 +230,11 @@ def maturity(
     safe = minimum_safe(provider, policy, name)
     cutoff = now - timedelta(days=minimum_age(policy))
     candidates = []
+    dates = {}
+    for release in releases:
+        dates[release.version] = max(
+            dates.get(release.version, release.published), release.published
+        )
     for release in releases:
         rank = version(provider, release.version)
         if (
@@ -239,9 +244,9 @@ def maturity(
             or not compatible(provider, release.version, bound)
         ):
             continue
-        if release.published > now:
+        if dates[release.version] > now:
             raise ValueError(f"Future registry timestamp for {name}")
-        if release.published <= cutoff:
+        if dates[release.version] <= cutoff:
             candidates.append(release)
     return candidates
 
@@ -538,8 +543,19 @@ def releases(
             if version("go", value) is not None and go_version(value)
         ]
     if provider == "swift":
+        import source_updates
+
         return [
-            Release(r.version.removeprefix("v"), r.published, r.version)
+            Release(
+                r.version.removeprefix("v"),
+                max(
+                    r.published,
+                    source_updates.commit_time(
+                        package, github_commit(package, r.version)
+                    ),
+                ),
+                r.version,
+            )
             for r in github_releases(package)
         ]
     if provider == "npm":
