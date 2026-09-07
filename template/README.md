@@ -55,7 +55,7 @@ Initialize and commit this directory as its own Git project before applying upda
 A nested example refuses to adopt its enclosing repository. Preview performs real
 resolution and verification, discards the copy, and never commits to the original.
 Automatic commits require a clean repository, cover only declared verified files,
-preserve Git identity/signing and never push. See [update policy](docs/updates.md).
+preserve Git identity/signing and never push. See [update policy](../docs/updates.md).
 
 ## Optional modules
 
@@ -65,13 +65,13 @@ artifacts, frozen setup, resolution, verification and update-output scope.
 
 | Module | Example |
 |---|---|
-| javascript | [pnpm workspace, TypeScript, Node tests and Prettier](examples/javascript/README.md) |
-| rust | [Cargo workspace, library, CLI, fmt/clippy/tests](examples/rust/README.md) |
-| python | [uv workspace, locked build backends, package tests and Ruff](examples/python/README.md) |
-| go | [Go workspace, shared module and executable](examples/go/README.md) |
-| flutter | [Dart/Flutter widget, analysis, tests and release assets](examples/flutter/README.md) |
-| swift | [SwiftPM shared library and conditional SwiftUI shell](examples/swift/README.md) |
-| compose | [Gradle/Kotlin logic and Compose desktop shell](examples/compose/README.md) |
+| javascript | [pnpm workspace, TypeScript, Node tests and Prettier](../examples/javascript/README.md) |
+| rust | [Cargo workspace, library, CLI, fmt/clippy/tests](../examples/rust/README.md) |
+| python | [uv workspace, locked build backends, package tests and Ruff](../examples/python/README.md) |
+| go | [Go workspace, shared module and executable](../examples/go/README.md) |
+| flutter | [Dart/Flutter widget, analysis, tests and release assets](../examples/flutter/README.md) |
+| swift | [SwiftPM shared library and conditional SwiftUI shell](../examples/swift/README.md) |
+| compose | [Gradle/Kotlin logic and Compose desktop shell](../examples/compose/README.md) |
 
 `sdk-versions.toml` coordinates tool versions and manifest targets; `dependencies.toml`
 contains explicit pins, constraints, age policy exceptions and registry sources.
@@ -89,7 +89,7 @@ Downloads/compiler caches are shared separately from project build outputs.
 project lock across child commands and foreground compiler-cache lifetimes. Cleanup
 rejects symlink escapes and reports deletion errors; it does not collect the host
 Nix store or remove SDKs. Application outputs outside managed contexts, such as
-`dist/`, remain application-owned. See [runtime contract](docs/runtime.md).
+`dist/`, remain application-owned. See [runtime contract](../docs/runtime.md).
 
 The manual workflow uses the same verification commands locally and in CI, including
 both container engines and an Apple lane. Apple SDKs require macOS/Xcode and host Nix.
@@ -99,6 +99,6 @@ a working ARM aapt2. Native Windows packaging needs a separate native SDK lane w
 an application requires it. A lane's existence is not evidence that it has run.
 
 Add command arrays, project profiles and explicit environment/mount declarations as
-shown in [configuration](docs/configuration.md). Keep architecture choices and native
+shown in [configuration](../docs/configuration.md). Keep architecture choices and native
 application shells in your project's requirements. The shared tooling supplies
 repeatable execution; the project owns its application behavior and acceptance.

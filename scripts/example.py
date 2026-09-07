@@ -90,6 +90,11 @@ def create(destination: Path, metadata_path: Path):
     )
     for name, (data, mode) in selected.items():
         if name.endswith(".md"):
+            # The template README moves up one level in the adopted project.
+            if name == "README.md":
+                data = data.replace(b"](../docs/", b"](docs/").replace(
+                    b"](../examples/", b"](examples/"
+                )
             selected[name] = (
                 data.replace(b"TOOLCHAIN_MODE", b"CHAINMAN_MODE")
                 .replace(b"TOOLCHAIN_CONTAINER_ENGINE", b"CHAINMAN_CONTAINER_ENGINE")
