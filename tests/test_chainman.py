@@ -69,6 +69,22 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_current_directory_flake_spellings_agree(self):
+        self.write("flake.nix", "{}")
+        for value in (
+            ".#default",
+            "./#default",
+            "flake.nix#default",
+            "./flake.nix#default",
+        ):
+            with self.subTest(value=value):
+                self.write(
+                    "chainman.toml",
+                    "schema=1\n[profiles.native]\nflake=" + json.dumps(value) + "\n",
+                )
+                ref, _ = chainman.profile(self.root, "native")
+                self.assertEqual(unquote(ref), f"path:{self.root}#default")
+
     def test_file_flake_and_spaces_preserve_literal_arguments(self):
         self.write("environments/native shell/flake.nix", "{}")
         self.write(
@@ -96,6 +112,7 @@ flake="environments/native shell/flake.nix#default"
             "/outside#default",
             "flake.nix",
             "flake.nix#bad/attr",
+            "#default",
         ):
             with self.subTest(value=value):
                 self.write(

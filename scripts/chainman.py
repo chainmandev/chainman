@@ -47,11 +47,11 @@ def profile(root: Path, name: str) -> tuple[str | None, dict]:
         spec = {"runtime_profile": "core" if name == "default" else name}
     if "flake" in spec:
         path, sep, attribute = spec["flake"].partition("#")
-        if not sep or not re.fullmatch(r"[A-Za-z0-9_.-]+", attribute):
+        if not path or not sep or not re.fullmatch(r"[A-Za-z0-9_.-]+", attribute):
             raise ValueError("A project profile must select a flake path#shell")
         if path.endswith("/flake.nix") or path == "flake.nix":
             path = str(Path(path).parent)
-        location = tc.contained(root, path)
+        location = tc.contained(root, str(Path(path)))
         tc.regular_input(location, "flake.nix")
     else:
         location = RUNTIME / "nix"
