@@ -179,6 +179,16 @@ class Workspace:
             }
             (excluded if negative else included).update(found)
         self.manifests = sorted(included - excluded)
+        if spec.get("retained_sources"):
+            import javascript_sources
+
+            if any(
+                item["manifest"] not in self.manifests
+                for item in javascript_sources.declarations(spec)
+            ):
+                raise ValueError(
+                    "Retained sources must belong to declared JavaScript manifests"
+                )
         for path in self.manifests:
             if not path.endswith("package.json"):
                 raise ValueError(
@@ -255,6 +265,11 @@ class Workspace:
         return result
 
     def add(self, file, pointer, alias, value, *, catalog=None, user=None):
+        if self.spec.get("retained_sources") and user:
+            import javascript_sources
+
+            if javascript_sources.matched(self.spec, user, alias, value):
+                return None
         if value == "-" or (isinstance(value, str) and value.startswith("$")):
             return None  # Removal and dependency-reference overrides are structural.
         parsed = parse_requirement(alias, value)
@@ -332,7 +347,7 @@ class Workspace:
 
     def override(self, file, pointer, selector, requirement):
         # Keep parent/version selectors intact while updating their replacement.
-        target = selector.rsplit(">", 1)[-1].strip()
+        target = re.split(r">(?=@?[A-Za-z_~])", selector)[-1].strip()
         match = re.fullmatch(rf"({NAME})(?:@(.+))?", target)
         if not match:
             raise ValueError("Unsupported pnpm override selector")
@@ -678,7 +693,7 @@ def effective_requirements(workspace, pin):
         **workspace.settings.get("overrides", {}),
     }
     for selector, replacement in overrides.items():
-        if ">" in selector:
+        if re.search(r">(?=@?[A-Za-z_~])", selector):
             continue  # Parent-scoped rules apply inside that parent's graph.
         match = re.fullmatch(rf"({NAME})(?:@(.+))?", selector)
         if not match or match[1] not in (pin.alias, pin.name):
@@ -698,6 +713,8 @@ def effective_requirements(workspace, pin):
 
 
 def audit_peers(workspace, evidence, options):
+    import javascript_sources
+
     lock = document(
         Path(workspace.lock),
         tc.regular_input(workspace.directory, workspace.lock).decode(),
@@ -712,7 +729,14 @@ def audit_peers(workspace, evidence, options):
         roots = {}
         for section in SECTIONS:
             for alias, value in info.get(section, {}).items():
-                roots[alias] = lock_target(alias, value.get("version"))
+                raw = value.get("version")
+                roots[alias] = (
+                    None
+                    if javascript_sources.is_target(
+                        workspace.spec, manifest, alias, raw
+                    )
+                    else lock_target(alias, raw)
+                )
         queue, visited = [t for t in roots.values() if t], set()
         while queue:
             actual, version, context = queue.pop()
@@ -798,6 +822,9 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
         now,
         specs={"javascript": lock_spec(spec)},
     )
+    import javascript_sources
+
+    javascript_sources.audit(workspace, before, policy, now)
     evidence = Evidence(policy, now)
     options = policy.get("javascript", {})
     # Recheck policy at actual locked versions; ranges/wildcards may resolve to
@@ -1045,6 +1072,9 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                     data,
                     workspace.modes.get(relative, 0o644),
                 )
+        import javascript_sources
+
+        javascript_sources.bind(workspace, temporary)
         restore_lock_specifiers(workspace, temporary)
         checked = chainman.execute(
             root,

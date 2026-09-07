@@ -455,7 +455,13 @@ def lock_identities(
             continue
         if kind == "npm":
             lock = manifests.document(path)[0]
-            for key, item in lock.get("packages", {}).items():
+            entries = lock.get("packages", {})
+            if spec.get("retained_sources"):
+                import javascript_sources
+
+                entries = javascript_sources.registry_entries(root, spec, lock)
+                identities.update(javascript_sources.lock_identities(root, spec, lock))
+            for key, item in entries.items():
                 package, _, version = key.partition("(")[0].rpartition("@")
                 resolution = item.get("resolution", {})
                 if set(resolution) - {"integrity", "tarball"}:
@@ -567,6 +573,11 @@ def audit_identities(
     evidence = {}
     for identity in sorted(current):
         provider, package, value, url, digest = identity
+        if provider == "github-source":
+            import javascript_sources
+
+            javascript_sources.audit_identity(identity, before, policy, now)
+            continue
         key = (provider, package)
         if key not in evidence:
             if provider in ("go", "swift", "maven"):

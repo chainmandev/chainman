@@ -94,6 +94,7 @@
     "scripts/format.py",
     "scripts/generate.py",
     "scripts/javascript_npm.py",
+    "scripts/javascript_sources.py",
     "scripts/javascript_updates.py",
     "scripts/lock_adapters.py",
     "scripts/manifests.py",

@@ -2,11 +2,13 @@
 
 import base64
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import tarfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -29,6 +31,7 @@ class JavaScriptTests(unittest.TestCase):
         self.now = datetime(2026, 9, 7, tzinfo=timezone.utc)
         self.policy = {"minimum_age_days": 30}
         self.metadata = {}
+        self.real_data = registry.data
         self.write("chainman.toml", 'schema=1\n[project]\ndefault_profile="host"\n')
         self.manifest("package.json", {})
         self.write("pnpm-workspace.yaml", "packages:\n  - packages/*\n")
@@ -276,6 +279,7 @@ class JavaScriptTests(unittest.TestCase):
             pnpm={
                 "overrides": {
                     "parent@^2>library@<4": "~3.0.0",
+                    "library@>=1 <4": "3.0.0",
                     "removed": "-",
                     "same": "$library",
                 }
@@ -289,7 +293,12 @@ class JavaScriptTests(unittest.TestCase):
         self.assertEqual(rendered["dependencies"]["library"], ">=1 <2 || >=3 <4")
         self.assertEqual(
             rendered["pnpm"]["overrides"],
-            {"parent@^2>library@<4": "~3.0.0", "removed": "-", "same": "$library"},
+            {
+                "parent@^2>library@<4": "~3.0.0",
+                "library@>=1 <4": "3.0.0",
+                "removed": "-",
+                "same": "$library",
+            },
         )
 
     def test_peer_solver_retargets_source_without_relaxing_target_constraint(self):
@@ -682,6 +691,188 @@ class JavaScriptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "incompatible npm peer"):
             self.resolve(self.fake_npm)
         self.assertFalse((self.root / "package-lock.json").exists())
+
+    def retained_fixture(self, *, days=60, dependencies=None, integrity=True):
+        import javascript_sources as sources
+
+        archive_bytes = io.BytesIO()
+        manifest = json.dumps(
+            {
+                "name": "native-leaf",
+                "version": "1.0.0",
+                "dependencies": dependencies or {},
+            }
+        ).encode()
+        with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+            member = tarfile.TarInfo("source/package.json")
+            member.size = len(manifest)
+            archive.addfile(member, io.BytesIO(manifest))
+        body = archive_bytes.getvalue()
+        self.spec["retained_sources"] = [
+            {
+                "manifest": "package.json",
+                "package": "native-leaf",
+                "repository": "neutral/native-leaf",
+                "commit": "a" * 40,
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "reason": "Retained native compatibility source.",
+            }
+        ]
+        item = sources.declarations(self.spec)[0]
+        self.manifest("package.json", {"native-leaf": item["specifier"]})
+        key = "native-leaf@" + item["url"]
+        resolution = {"gitHosted": True, "tarball": item["url"]}
+        if integrity:
+            resolution["integrity"] = item["integrity"]
+        lock = {
+            "lockfileVersion": "9.0",
+            "importers": {
+                ".": {
+                    "dependencies": {
+                        "native-leaf": {
+                            "specifier": item["specifier"],
+                            "version": item["url"],
+                        }
+                    }
+                }
+            },
+            "packages": {key: {"version": "1.0.0", "resolution": resolution}},
+            "snapshots": {key: {}},
+        }
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        return (
+            item,
+            body,
+            lock,
+            {
+                "sha": item["commit"],
+                "commit": {
+                    "committer": {"date": (self.now - timedelta(days=days)).isoformat()}
+                },
+            },
+        )
+
+    def test_retained_source_is_explicit_and_generic_audit_checks_its_bytes(self):
+        import updates
+
+        item, body, lock, commit = self.retained_fixture()
+        before = js.snapshot(self.root, self.spec)
+        self.assertEqual(before["identities"][0][0], "github-source")
+        with (
+            patch.object(registry, "data", return_value=commit),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+            updates.audit_identities(
+                self.root,
+                {tuple(i) for i in before["identities"]},
+                set(),
+                self.policy,
+                self.now,
+            )
+        with (
+            patch.object(registry, "data", return_value=commit),
+            patch.object(registry, "fetch", return_value=(body + b"tampered", {})),
+        ):
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                updates.audit_identities(
+                    self.root,
+                    {tuple(i) for i in before["identities"]},
+                    set(),
+                    self.policy,
+                    self.now,
+                )
+        self.spec["retained_sources"][0]["commit"] = "main"
+        with self.assertRaisesRegex(ValueError, "immutable commit"):
+            js.Workspace(self.root, self.spec)
+
+    def test_retained_source_new_age_and_dependency_graph_cannot_be_bypassed(self):
+        item, body, lock, commit = self.retained_fixture(days=1)
+        before = js.snapshot(self.root, self.spec)
+        with (
+            patch.object(registry, "data", return_value=commit),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+            with self.assertRaisesRegex(ValueError, "commit-age"):
+                js.audit(
+                    self.root,
+                    self.spec,
+                    {**before, "identities": []},
+                    self.policy,
+                    self.now,
+                )
+        item, body, lock, commit = self.retained_fixture(
+            dependencies={"untracked": "1.0.0"}
+        )
+        before = js.snapshot(self.root, self.spec)
+        with (
+            patch.object(registry, "data", return_value=commit),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            with self.assertRaisesRegex(ValueError, "dependency graphs"):
+                js.audit(self.root, self.spec, before, self.policy, self.now)
+        lock["importers"]["."]["dependencies"]["native-leaf"]["version"] = (
+            "https://example.invalid/archive.tgz"
+        )
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "importer"):
+            js.snapshot(self.root, self.spec)
+
+    def test_retained_source_resolver_binds_archive_integrity_before_freeze(self):
+        item, body, lock, commit = self.retained_fixture(integrity=False)
+        next(iter(lock["packages"].values()))["resolution"]["integrity"] = (
+            "sha512-" + base64.b64encode(hashlib.sha512(body).digest()).decode()
+        )
+
+        def execute(root, profile, argv, *, cwd, **kwargs):
+            if "--frozen-lockfile" not in argv:
+                (cwd / "pnpm-lock.yaml").write_text(json.dumps(lock))
+            else:
+                current = js.document(
+                    Path("pnpm-lock.yaml"), (cwd / "pnpm-lock.yaml").read_text()
+                )[0]
+                self.assertEqual(
+                    next(iter(current["packages"].values()))["resolution"]["integrity"],
+                    item["integrity"],
+                )
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(registry, "data", return_value=commit),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            result = self.resolve(execute)
+        self.assertIn("pnpm-lock.yaml", result["changed_files"])
+        self.assertTrue(
+            js.snapshot(self.root, self.spec)["identities"][0][-1].startswith("sha256:")
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_GITHUB_SOURCE") == "1",
+        "explicit pinned JavaScript and public source integration lane",
+    )
+    def test_real_pnpm_binds_a_public_source_before_frozen_verification(self):
+        source = {
+            "manifest": "package.json",
+            "package": "is-number",
+            "repository": "jonschlinkert/is-number",
+            "commit": "98e8ff1da1a89f93d1397a24d7413ed15421c139",
+            "sha256": "4e169d1ea361d1b92907a6ab2dd6bcd781c85027858d99df1596a712aab49506",
+            "reason": "Public dependency-free source fixture for immutable archive verification.",
+        }
+        self.spec["retained_sources"] = [source]
+        self.manifest(
+            "package.json",
+            {"is-number": f"github:{source['repository']}#{source['commit']}"},
+        )
+        with patch.object(registry, "data", side_effect=self.real_data):
+            result = js.resolve(self.root, self.spec, self.policy, self.now)
+        self.assertIn("pnpm-lock.yaml", result["changed_files"])
+        self.assertEqual(
+            js.snapshot(self.root, self.spec)["identities"][0][-1],
+            "sha256:" + source["sha256"],
+        )
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_PNPM") == "1",
