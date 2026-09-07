@@ -231,7 +231,12 @@ def signing_required(root: Path) -> bool:
 
 
 def commit_verified(
-    root: Path, branch: str, head: str, candidate: dict, paths: list[str]
+    root: Path,
+    branch: str,
+    head: str,
+    candidate: dict,
+    paths: list[str],
+    message: str = "chore: update dependencies",
 ) -> str:
     if repository(root, clean=False) != (branch, head) or snapshot(root) != candidate:
         raise ValueError("The verified candidate changed before staging")
@@ -251,7 +256,7 @@ def commit_verified(
         )
     if snapshot(root) != candidate or repository(root, clean=False) != (branch, head):
         raise ValueError("The candidate changed during staging")
-    args = ["commit-tree", tree, "-p", head, "-m", "chore: update dependencies"]
+    args = ["commit-tree", tree, "-p", head, "-m", message]
     if signing:
         args.append("-S")
     # Commit the immutable verified tree, then compare-and-swap the named branch.
@@ -281,8 +286,16 @@ def commit_verified(
 
 
 def transaction(
-    root: Path, patterns: list[str], update, verify, commit: bool = True
+    root: Path,
+    patterns: list[str],
+    update,
+    verify,
+    commit: bool = True,
+    *,
+    message: str = "chore: update dependencies",
 ) -> dict:
+    if not isinstance(message, str) or not message.strip() or "\0" in message:
+        raise ValueError("Commit message must be nonempty text without NUL")
     branch, head = repository(root)
     before = snapshot(root)
     update()
@@ -308,7 +321,9 @@ def transaction(
             "Verification changed Git HEAD or index; changes are preserved"
         )
     identifier = (
-        commit_verified(root, branch, head, candidate, paths) if commit else None
+        commit_verified(root, branch, head, candidate, paths, message)
+        if commit
+        else None
     )
     return {"changed": paths, "commit": identifier, "verification": "passed"}
 

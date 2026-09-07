@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -456,6 +457,7 @@ def apply(root: Path, opts, now: datetime):
             change,
             lambda: verify(root, policy, runtime[0]),
             not opts.no_commit,
+            message=getattr(opts, "message", "chore: update dependencies"),
         )
     except BaseException:
         managed.restore()
@@ -528,10 +530,33 @@ def preview(root: Path, opts, now: datetime):
         return {"preview": True, **result}
 
 
+@contextmanager
+def machine_output(enabled: bool):
+    """Keep inherited child-process output out of the JSON result stream."""
+    if not enabled:
+        yield
+        return
+    sys.stdout.flush()
+    saved = os.dup(1)
+    try:
+        os.dup2(2, 1)
+        yield
+    finally:
+        sys.stdout.flush()
+        os.dup2(saved, 1)
+        os.close(saved)
+
+
 def run(root: Path, args: list[str]):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--no-commit", action="store_true")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Write one schema-1 JSON result; send command output to stderr",
+    )
+    parser.add_argument("--message", default="chore: update dependencies")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--only-chainman", action="store_true")
     group.add_argument("--skip-chainman", action="store_true")
@@ -542,9 +567,9 @@ def run(root: Path, args: list[str]):
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start another update")
     now = datetime.now(timezone.utc)
-    with tc.operation(root):
+    with machine_output(opts.json), tc.operation(root):
         result = preview(root, opts, now) if opts.preview else apply(root, opts, now)
-    print(json.dumps(result, indent=2))
+    print(json.dumps({"schema": 1, **result}, indent=2))
     return 0
 
 

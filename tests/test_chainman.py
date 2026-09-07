@@ -465,6 +465,59 @@ outputs=["deps.txt"]
         self.assertEqual(self.update("--", "2.0"), 0)
         self.assertEqual(self.git("rev-parse", "HEAD"), new_head)
 
+    def test_machine_result_separates_child_logs_and_preserves_commit_message(self):
+        resolver = self.root / "resolver.py"
+        resolver.write_text(
+            resolver.read_text() + '\nprint("resolver progress on stdout")\n'
+        )
+        self.git("add", "resolver.py")
+        self.git("commit", "-m", "Fixture emits native command output")
+        message = "Refresh dependencies: literal $(do-not-run)\n\nVerified candidate."
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(chainman.RUNTIME / "scripts/chainman.py"),
+                "--root",
+                str(self.root),
+                "deps-update",
+                "--skip-chainman",
+                "--json",
+                "--message",
+                message,
+                "--",
+                "2.0",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        record = json.loads(result.stdout)
+        self.assertEqual(record["schema"], 1)
+        self.assertEqual(record["changed"], ["deps.txt"])
+        self.assertEqual(record["commit"], self.git("rev-parse", "HEAD"))
+        self.assertEqual(self.git("log", "-1", "--format=%B"), message)
+        self.assertIn("resolver progress on stdout", result.stderr)
+
+    def test_failed_machine_update_has_no_success_json(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(chainman.RUNTIME / "scripts/chainman.py"),
+                "--root",
+                str(self.root),
+                "deps-update",
+                "--skip-chainman",
+                "--json",
+                "--",
+                "bad",
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+
     def test_commit_disabled_still_verifies_without_staging(self):
         self.assertEqual(self.update("--no-commit", "--", "2.0"), 0)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)

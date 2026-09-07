@@ -7,6 +7,10 @@ checkpoint. `--only-chainman` updates the runtime pin and managed bootstrap;
 `--skip-chainman` updates project dependencies without querying runtime releases.
 Until the first public Chainman release is published, use `--skip-chainman` explicitly.
 A missing release source or eligibility date is an error, never an implicit exemption.
+`--message TEXT` supplies the verified commit's message. Native callers can use
+`--json` for exactly one schema-1 JSON result on stdout, with command output on
+stderr. The result includes `changed` (an array of project-relative paths), `commit`
+(an identity or null), and `verification`; previews additionally include `preview`.
 
 The standalone example uses built-in registry adapters, `dependencies.toml`, module
 manifests/lockfiles and `sdk-versions.toml`. Explicit constraints require reasons;
