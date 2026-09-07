@@ -27,12 +27,21 @@ def main() -> None:
     commands = [
         [
             "ruff",
+            "--isolated",
             "format",
             "--no-cache",
             *(["--check"] if args.check else []),
             *map(str, python),
         ],
-        ["ruff", "check", "--no-cache", "--select", "E9,F63,F7,F82", *map(str, python)],
+        [
+            "ruff",
+            "--isolated",
+            "check",
+            "--no-cache",
+            "--select",
+            "E9,F63,F7,F82",
+            *map(str, python),
+        ],
         [
             "shfmt",
             "-i",

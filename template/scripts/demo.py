@@ -43,6 +43,7 @@ def main():
         subprocess.run(
             [
                 "ruff",
+                "--isolated",
                 "format",
                 "--no-cache",
                 *(["--check"] if args.check else []),
@@ -50,7 +51,9 @@ def main():
             ],
             check=True,
         )
-        subprocess.run(["ruff", "check", "--no-cache", *python], check=True)
+        subprocess.run(
+            ["ruff", "--isolated", "check", "--no-cache", *python], check=True
+        )
 
 
 if __name__ == "__main__":
