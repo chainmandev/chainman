@@ -31,7 +31,9 @@ container owns only its named Nix and download volumes, never a writable host pr
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.
 Package managers own locking in shared downloads. Rust compiler cache servers run
-in the foreground and retain the project operation lock until they exit. A process
+in the foreground and retain the project operation lock until they exit. Cold Nix
+environment realization completes before the cache-server readiness deadline starts.
+A process
 that is forcibly killed can leave children holding that lock; inspect those processes
 before stopping an exact compiler endpoint. Do not remove a live operation lock.
 

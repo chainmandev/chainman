@@ -115,6 +115,18 @@ class RuntimeTests(unittest.TestCase):
                     self.fail("Started work at an unowned endpoint")
         self.assertEqual(endpoint.read_bytes(), b"unowned")
 
+    def test_failed_environment_realization_never_starts_a_cache_server(self):
+        env = self.cache_fixture()
+        enter = self.root / "scripts/enter.sh"
+        enter.write_text("#!/bin/sh\nexit 37\n")
+        with toolchain.operation(self.root):
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                with toolchain.compiler_cache("rust", env, self.root):
+                    self.fail("Unrealized environment entered work")
+            self.assertEqual(failure.exception.returncode, 37)
+        with toolchain.operation(self.root):
+            self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
+
     def test_cache_stop_failure_preserves_command_error_and_active_lock(self):
         env = self.cache_fixture()
         env["FAIL_STOP"] = "1"
@@ -151,7 +163,8 @@ class RuntimeTests(unittest.TestCase):
                 env=env,
                 check=True,
             )
-            processes[0].wait(timeout=5)
+            for process in processes:
+                process.wait(timeout=5)
             Path(env["SCCACHE_SERVER_UDS"]).unlink()
         with toolchain.operation(self.root):
             self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())

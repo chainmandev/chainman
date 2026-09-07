@@ -338,6 +338,14 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         SCCACHE_NO_DAEMON="1",
         CHAINMAN_COMPILER_OWNER=str(root),
     )
+    # Realizing a cold Nix closure can take longer than a server readiness
+    # deadline. Finish it synchronously before starting the owned server clock.
+    managed_run(
+        [*prefix, "sh", "-eu", "-c", "command -v sccache >/dev/null"],
+        cwd=root,
+        env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
+        check=True,
+    )
     server = subprocess.Popen(
         [*prefix, "sccache"],
         **managed_options({"cwd": root, "env": server_env}),
