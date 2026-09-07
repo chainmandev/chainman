@@ -38,7 +38,9 @@ def archive_bytes(files: dict[str, tuple[bytes, int]], version: str) -> bytes:
 
 
 def git(root, *args) -> bytes:
-    return subprocess.check_output(["git", "-C", str(root), *args])
+    return subprocess.check_output(
+        ["git", "--literal-pathspecs", "-C", str(root), *args]
+    )
 
 
 def release(root: Path, output: Path) -> dict:
@@ -50,18 +52,21 @@ def release(root: Path, output: Path) -> dict:
     if git(root, "status", "--porcelain", "--untracked-files=all"):
         raise ValueError("Commit the intended release source first")
     revision = git(root, "rev-parse", "HEAD").decode().strip()
-    inventory = json.loads(git(root, "show", "HEAD:release-files.json"))
+    inventory = json.loads(git(root, "show", f"{revision}:release-files.json"))
     if inventory.get("schema") != 1 or len(inventory["files"]) != len(
         set(inventory["files"])
     ):
         raise ValueError("Malformed release inventory")
     files = {}
     for name in inventory["files"]:
-        entry = git(root, "ls-tree", "HEAD", "--", name).decode().strip()
+        entry = git(root, "ls-tree", revision, "--", name).decode().strip()
         meta, sep, actual = entry.partition("\t")
         if not sep or actual != name or meta.split()[0] not in {"100644", "100755"}:
             raise ValueError(f"Release input is missing or not regular: {name}")
-        files[name] = (git(root, "show", f"HEAD:{name}"), int(meta.split()[0][-3:], 8))
+        files[name] = (
+            git(root, "show", f"{revision}:{name}"),
+            int(meta.split()[0][-3:], 8),
+        )
     version = files["VERSION"][0].decode().strip()
     body = archive_bytes(files, version)
     with tempfile.TemporaryDirectory(prefix="chainman-release-") as directory:
