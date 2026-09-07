@@ -59,4 +59,4 @@ example destination="dist/nix-just-toolchain":
     @./scripts/enter.sh core python3 scripts/example.py "$1"
 
 bootstrap-test engine="docker":
-    @engine_dir=$(dirname "$(command -v "$1")"); ./scripts/enter.sh core env CHAINMAN_TEST_ENGINE_DIR="$engine_dir" CHAINMAN_TEST_CONTAINER="$1" sh -eu -c 'export PATH="$PATH:$CHAINMAN_TEST_ENGINE_DIR"; python3 -B -m unittest discover -s tests -p test_bootstrap.py -v'
+    @command -v "$1" >/dev/null; ./scripts/enter.sh core env CHAINMAN_TEST_ENGINE_PATH="$PATH" CHAINMAN_TEST_CONTAINER="$1" sh -eu -c 'export PATH="$PATH:$CHAINMAN_TEST_ENGINE_PATH"; python3 -B -m unittest discover -s tests -p test_bootstrap.py -v'
