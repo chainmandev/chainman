@@ -342,6 +342,14 @@ class SDKTests(unittest.TestCase):
         self,
     ):
         events = []
+        import module_updates
+        import source_updates
+        from unittest.mock import Mock
+
+        engine = Mock()
+        engine.snapshot.side_effect = lambda *a: events.append("baseline") or {}
+        engine.resolve.side_effect = lambda *a: events.append("resolve") or {}
+        engine.audit.side_effect = lambda *a: events.append("audit")
         spec = {
             "name": "demo",
             "profile": "go",
@@ -359,8 +367,20 @@ class SDKTests(unittest.TestCase):
             patch.object(
                 updates, "settings", return_value={"docker": {"enabled": False}}
             ),
+            patch.object(source_updates, "snapshot", return_value={}),
             patch.object(
-                updates, "update_nix", side_effect=lambda *a: events.append("nix")
+                source_updates, "resolve", side_effect=lambda *a: events.append("nix")
+            ),
+            patch.object(
+                source_updates,
+                "audit",
+                side_effect=lambda *a: events.append("nix-audit"),
+            ),
+            patch.object(
+                module_updates, "adapters", return_value={"demo": {"adapter": "go"}}
+            ),
+            patch.object(
+                module_updates.dependency_api, "implementation", return_value=engine
             ),
             patch.object(updates, "managed_run", side_effect=launch),
             patch.object(updates, "module", return_value=spec),
@@ -395,9 +415,12 @@ class SDKTests(unittest.TestCase):
             [
                 "nix",
                 "fresh-core",
+                "baseline",
                 "sdk-update",
-                "packages",
                 "resolve",
+                "audit",
+                "sdk-check",
+                "nix-audit",
                 "sdk-check",
                 "setup",
                 "verify",

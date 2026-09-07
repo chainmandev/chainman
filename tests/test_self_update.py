@@ -104,9 +104,12 @@ class SelfUpdateTests(unittest.TestCase):
             )
         }
 
-    def transaction(self, root, patterns, update, verify, commit):
+    def transaction(self, root, patterns, update, verify, commit, *, message):
         # This callback exercises publication and verification without Git or
         # consumer execution; Git transaction integrity has its own real tests.
+        self.assertEqual(
+            message, getattr(self.opts, "message", "chore: update dependencies")
+        )
         update()
         verify()
         return {"verification": "passed"}
