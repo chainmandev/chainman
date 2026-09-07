@@ -334,6 +334,36 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
 
     for package, value, _, _ in identities:
         check_policy(package, value)
+    public_requirements = [
+        item
+        for body in after["members"].values()
+        for item in body.get("Require") or []
+        if item["Path"] not in local
+    ]
+    for item in public_requirements:
+        check_policy(item["Path"], item["Version"])
+    public_packages = {item[0] for item in identities} | {
+        item["Path"] for item in public_requirements
+    }
+    for package in sorted(public_packages):
+        registry.minimum_safe("go", policy, package)
+        if not any(
+            item.get("package") == "go:" + package
+            for item in policy.get("exceptions", [])
+        ):
+            continue
+        candidates = go_candidates(root, spec, package)
+        if spec.get("mode", "aggressive") == "compatible":
+            for previous in old_versions.get(package, ()):
+                if registry.version("go", previous) is not None:
+                    candidates = [
+                        item
+                        for item in candidates
+                        if registry.compatible(
+                            "go", item.version, compatible_bound(previous)
+                        )
+                    ]
+        registry.active_exceptions("go", candidates, policy, package, now)
     for name, body in after["members"].items():
         previous = {
             item["Path"]: item["Version"]

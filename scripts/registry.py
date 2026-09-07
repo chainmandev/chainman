@@ -216,6 +216,7 @@ def minimum_safe(provider: str, policy: dict, name: str):
             )
         floor = version(provider, exception["minimum_safe"])
         admitted = version(provider, exception["version"])
+        timestamp(exception["expires"])
         if floor is None or admitted is None or admitted < floor:
             raise ValueError("Invalid exception safe floor")
         floors.append(floor)

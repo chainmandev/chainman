@@ -542,6 +542,64 @@ class GoTests(Fixture):
         with self.assertRaisesRegex(ValueError, "escapes"):
             source_go.local_directory(self.root, self.root, "../outside")
 
+    def test_unchanged_go_requirement_needs_valid_exception_expiry_and_retirement_evidence(
+        self,
+    ):
+        exception = {
+            "package": "go:example.test/library",
+            "version": "v1.2.0",
+            "minimum_safe": "v1.2.0",
+            "reason": "Required security repair",
+            "advisory": "https://example.invalid/advisory",
+            "expires": NOW.isoformat(),
+        }
+        for published, accepted in [(YOUNG, False), (OLD, True)]:
+            with (
+                self.subTest(published=published),
+                patch.object(source_go, "snapshot", return_value=self.before),
+                patch.object(
+                    source_go,
+                    "go_candidates",
+                    return_value=[registry.Release("v1.2.0", published)],
+                ),
+                patch.object(source_go, "execute"),
+            ):
+                if accepted:
+                    source_go.audit(
+                        self.root,
+                        self.spec,
+                        self.before,
+                        {"exceptions": [exception]},
+                        NOW,
+                    )
+                else:
+                    with self.assertRaisesRegex(ValueError, "Expired"):
+                        source_go.audit(
+                            self.root,
+                            self.spec,
+                            self.before,
+                            {"exceptions": [exception]},
+                            NOW,
+                        )
+        with (
+            patch.object(source_go, "snapshot", return_value=self.before),
+            patch.object(
+                source_go,
+                "go_candidates",
+                side_effect=AssertionError(
+                    "Malformed policy must fail before fetching"
+                ),
+            ),
+            self.assertRaises(ValueError),
+        ):
+            source_go.audit(
+                self.root,
+                self.spec,
+                self.before,
+                {"exceptions": [{**exception, "expires": "invalid"}]},
+                NOW,
+            )
+
     def test_new_transitive_and_reused_checksum_require_age_audit(self):
         checksum = "h1:" + base64.b64encode(b"x" * 32).decode()
         url = "https://proxy.golang.org/example.test/library/@v/v1.2.1.zip"
