@@ -182,6 +182,32 @@ class NativeTests(unittest.TestCase):
             (self.root / "pyproject.toml").read_text(),
         )
 
+    def test_gradle_initial_adoption_requires_explicit_empty_baseline_and_final_locks(
+        self,
+    ):
+        self.put("build.gradle.kts", "")
+        spec = {"adapter": "gradle", "bootstrap_verification": True}
+        before = native.snapshot(self.root, spec)
+        self.assertEqual(before["identities"], [])
+        with self.assertRaisesRegex(ValueError, "required component locks"):
+            native.audit(self.root, spec, before, {}, NOW)
+        self.put("gradle.lockfile", "sample:library:1.0.0=runtimeClasspath\n")
+        with self.assertRaisesRegex(ValueError, "partial"):
+            native.snapshot(self.root, spec)
+        with self.assertRaisesRegex(ValueError, "verification metadata"):
+            native.audit(self.root, spec, before, {}, NOW)
+        (self.root / "gradle.lockfile").unlink()
+        self.put("gradle/verification-metadata.xml", "<invalid/>")
+        with self.assertRaisesRegex(ValueError, "partial"):
+            native.snapshot(self.root, spec)
+
+    def test_gradle_bootstrap_flag_cannot_exempt_another_ecosystem(self):
+        self.put("Cargo.toml", "[dependencies]\n")
+        with self.assertRaisesRegex(ValueError, "Gradle-only"):
+            native.snapshot(
+                self.root, {"adapter": "rust", "bootstrap_verification": True}
+            )
+
     def test_gradle_shared_version_requires_candidate_intersection(self):
         self.put("build.gradle.kts", "")
         self.put(

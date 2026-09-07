@@ -96,7 +96,26 @@ def specifications(root: Path, spec: dict) -> dict:
 
 def snapshot(root: Path, spec: dict) -> dict:
     specs = specifications(root, spec)
-    identities = updates.lock_identities(root, list(specs), specs=specs)
+    bootstrap = spec.get("bootstrap_verification", False)
+    if type(bootstrap) is not bool or (bootstrap and spec["adapter"] != "gradle"):
+        raise ValueError("bootstrap_verification is a Gradle-only boolean")
+    adopted = {}
+    for name, member in specs.items():
+        directory = tc.contained(root, member["directory"])
+        if bootstrap:
+            locks = lock_adapters.paths(root, directory, "*.lockfile")
+            metadata = tc.contained(
+                root,
+                str((directory / "gradle/verification-metadata.xml").relative_to(root)),
+            )
+            if not locks and not metadata.exists():
+                continue
+            if not locks or not metadata.is_file():
+                raise ValueError(
+                    "Gradle adoption cannot ignore a partial lock/verification baseline"
+                )
+        adopted[name] = member
+    identities = updates.lock_identities(root, list(adopted), specs=adopted)
     requirements = [
         {
             "provider": pin["provider"],
@@ -414,6 +433,14 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
 
 def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     specs = specifications(root, spec)
+    if spec.get("bootstrap_verification"):
+        for member in specs.values():
+            if not lock_adapters.paths(
+                root, tc.contained(root, member["directory"]), "*.lockfile"
+            ):
+                raise ValueError(
+                    "Gradle resolution did not produce its required component locks"
+                )
     for item in before.get("resolution", {}).get("pins", []):
         if old_requirement(root, item["pin"]) != item["value"]:
             raise ValueError("A project hook changed a selected dependency pin")
