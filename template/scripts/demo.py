@@ -3,9 +3,9 @@
 import argparse
 import io
 import json
-from pathlib import Path
 import subprocess
 import tarfile
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -40,6 +40,20 @@ def main():
             *map(str, sorted((ROOT / "examples/core").glob("*.py"))),
             str(Path(__file__)),
         ]
+        if not args.check:
+            subprocess.run(
+                [
+                    "ruff",
+                    "--isolated",
+                    "check",
+                    "--no-cache",
+                    "--select",
+                    "I",
+                    "--fix",
+                    *python,
+                ],
+                check=True,
+            )
         subprocess.run(
             [
                 "ruff",
