@@ -3,12 +3,6 @@
   "files": [
     ".github/workflows/verify.yml",
     ".gitignore",
-    ".ruff_cache/.gitignore",
-    ".ruff_cache/0.16.5/13353333605628095116",
-    ".ruff_cache/0.16.5/2681006641282819397",
-    ".ruff_cache/0.16.5/7671575426064225805",
-    ".ruff_cache/0.16.5/9808136580368020898",
-    ".ruff_cache/CACHEDIR.TAG",
     "AGENTS.md",
     "LICENSE",
     "README.md",
