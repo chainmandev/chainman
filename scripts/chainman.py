@@ -290,14 +290,15 @@ def main(argv=None):
             if rest or os.environ.get("CHAINMAN_UPDATE_ACTIVE") != "1":
                 raise ValueError("nix-update is a resolver hook inside deps-update")
             import dependency_api
-            import updates
+            import module_updates
+            import source_updates
 
-            updates.update_nix(
-                root,
-                dependency_api.policy(root),
-                dependency_api.instant(),
-                tc.environment(root),
-            )
+            policy, now = dependency_api.policy(root), dependency_api.instant()
+            spec = module_updates.nix_spec(policy)
+            if spec is not None:
+                before = source_updates.snapshot(root, spec)
+                source_updates.resolve(root, spec, policy, now)
+                source_updates.audit(root, spec, before, policy, now)
         elif args.action == "module":
             if len(rest) not in (1, 2):
                 raise ValueError("module requires a name and optional action")

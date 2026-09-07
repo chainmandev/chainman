@@ -69,6 +69,38 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_legacy_nix_hook_uses_shared_snapshot_resolution_and_final_audit(self):
+        import dependency_api
+        import source_updates
+
+        events = []
+        with (
+            patch.object(
+                sys, "argv", ["chainman.py", "--root", str(self.root), "nix-update"]
+            ),
+            patch.dict(os.environ, CHAINMAN_UPDATE_ACTIVE="1"),
+            patch.object(dependency_api, "policy", return_value={}),
+            patch.object(
+                source_updates,
+                "snapshot",
+                side_effect=lambda *a: events.append("before") or {"baseline": True},
+            ),
+            patch.object(
+                source_updates,
+                "resolve",
+                side_effect=lambda *a: events.append("resolve"),
+            ),
+            patch.object(
+                source_updates,
+                "audit",
+                side_effect=lambda root, spec, before, *a: events.append(
+                    ("audit", before)
+                ),
+            ),
+        ):
+            self.assertEqual(chainman.main(), 0)
+        self.assertEqual(events, ["before", "resolve", ("audit", {"baseline": True})])
+
     def test_adopted_git_flake_excludes_caches_and_uses_dirty_tracked_bytes(self):
         self.write(
             "flake.nix",
