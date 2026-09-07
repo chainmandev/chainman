@@ -182,6 +182,16 @@ def compatible(provider: str, value: str, constraint: str) -> bool:
     return Semver(value.removeprefix("v")) in NpmSpec(constraint)
 
 
+def lock_version(provider: str, value: str):
+    """Parse existing npm prereleases without making them selectable releases."""
+    if provider != "npm":
+        return version(provider, value)
+    try:
+        return Semver(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def minimum_age(policy: dict) -> int:
     days = policy.get("minimum_age_days", 30)
     if type(days) is not int or days < 0:
@@ -189,16 +199,41 @@ def minimum_age(policy: dict) -> int:
     return days
 
 
+def minimum_safe(provider: str, policy: dict, name: str):
+    floors = []
+    for exception in policy.get("exceptions", []):
+        scope, _, package = exception.get("package", "").partition(":")
+        if scope != provider or package_name(provider, package) != package_name(
+            provider, name
+        ):
+            continue
+        if not all(
+            exception.get(key)
+            for key in ("version", "minimum_safe", "reason", "advisory", "expires")
+        ):
+            raise ValueError(
+                "Security exceptions require exact version, safe floor, reason, advisory, and expiry"
+            )
+        floor = version(provider, exception["minimum_safe"])
+        admitted = version(provider, exception["version"])
+        if floor is None or admitted is None or admitted < floor:
+            raise ValueError("Invalid exception safe floor")
+        floors.append(floor)
+    return max(floors) if floors else None
+
+
 def maturity(
     provider: str, releases: list[Release], policy: dict, name: str, now: datetime
 ) -> list[Release]:
     bound = constraint(provider, policy, name)
+    safe = minimum_safe(provider, policy, name)
     cutoff = now - timedelta(days=minimum_age(policy))
     candidates = []
     for release in releases:
         rank = version(provider, release.version)
         if (
             rank is None
+            or (safe is not None and rank < safe)
             or release.python == "unsupported"
             or not compatible(provider, release.version, bound)
         ):
@@ -215,6 +250,7 @@ def active_exceptions(
 ) -> list[Release]:
     mature = maturity(provider, releases, policy, name, now)
     bound = constraint(provider, policy, name)
+    required_safe = minimum_safe(provider, policy, name)
     candidates = []
     # An exception admits one exact version only while a mature safe version is absent.
     for exception in policy.get("exceptions", []):
@@ -242,6 +278,7 @@ def active_exceptions(
         for release in releases:
             if (
                 release.version == exception["version"]
+                and version(provider, release.version) >= required_safe
                 and release.python != "unsupported"
                 and compatible(provider, release.version, bound)
             ):
@@ -484,7 +521,9 @@ def maven_releases(package: str, repository: str = "central") -> list[Release]:
     return result
 
 
-def releases(provider: str, package: str) -> list[Release]:
+def releases(
+    provider: str, package: str, *, include_prerelease: bool = False
+) -> list[Release]:
     if provider == "go":
         values = (
             fetch(f"https://proxy.golang.org/{go_path(package)}/@v/list", "text/plain")[
@@ -507,7 +546,12 @@ def releases(provider: str, package: str) -> list[Release]:
         body = data(f"https://registry.npmjs.org/{quote(package, safe='')}")
         result = []
         for value, info in body["versions"].items():
-            if version(provider, value) is None or info.get("deprecated"):
+            parsed = (
+                lock_version(provider, value)
+                if include_prerelease
+                else version(provider, value)
+            )
+            if parsed is None or info.get("deprecated"):
                 continue
             dist = info.get("dist", {})
             integrity = dist.get("integrity")

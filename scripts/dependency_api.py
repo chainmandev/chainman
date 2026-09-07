@@ -74,6 +74,10 @@ def implementation(spec: dict):
         import source_updates
 
         return source_updates
+    if adapter == "artifact":
+        import source_artifacts
+
+        return source_artifacts
     if adapter in {"rust", "python", "flutter", "swift", "gradle"}:
         import ecosystem_updates
 
@@ -111,11 +115,19 @@ def selection(settings: dict, extra: list[str]) -> tuple[set[str], dict[str, str
     parser.add_argument("--target-policy", action="append", default=[])
     args = parser.parse_args(extra)
     names = target_names(settings)
+    automatic = {
+        name
+        for name in names
+        if not settings.get("adapters", {}).get(name, {}).get("explicit_only", False)
+    }
+    for spec in settings.get("adapters", {}).values():
+        if type(spec.get("explicit_only", False)) is not bool:
+            raise ValueError("Adapter explicit_only must be a boolean")
     groups = settings.get("target_groups", {})
     targets = set()
     for name in args.targets.split(","):
         if name == "all":
-            targets.update(names)
+            targets.update(automatic)
         elif name in groups:
             targets.update(groups[name])
         else:
@@ -288,9 +300,13 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
 
         url, digest = request.get("url"), request.get("digest")
         result = (
-            source_artifact.audit(url, digest, settings, now)
+            source_artifact.audit(
+                url, digest, settings, now, max_bytes=request.get("max_bytes")
+            )
             if operation == "artifact-audit"
-            else source_artifact.inspect(url, digest, now)
+            else source_artifact.inspect(
+                url, digest, now, max_bytes=request.get("max_bytes")
+            )
         )
         return {"schema": 1, "operation": operation, **result}
     if operation in {"select", "metadata"}:
@@ -309,7 +325,14 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
             raise ValueError("Unsupported registry provider")
         if not isinstance(package, str) or not package:
             raise ValueError("Selection requires a package identity")
-        if provider == "go":
+        tag_pattern = request.get("tag_pattern")
+        if tag_pattern is not None and provider != "github":
+            raise ValueError("Tag patterns are supported only for GitHub releases")
+        if tag_pattern is not None:
+            import source_github
+
+            candidates = source_github.releases(package, tag_pattern)
+        elif provider == "go":
             import lock_adapters
 
             candidates = lock_adapters.go_candidates(root, package)
@@ -338,13 +361,30 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
                 candidate
                 for candidate in candidates
                 if candidate.version == request.get("version")
+                or (
+                    tag_pattern is not None
+                    and candidate.identity == request.get("version")
+                )
             ]
             if not matches:
                 raise ValueError("Exact release metadata is unavailable")
             chosen = max(matches, key=lambda candidate: candidate.published)
         else:
             chosen = registry.select(provider, candidates, settings, package, now)
-        if provider == "github":
+        extra = {}
+        if tag_pattern is not None:
+            if operation == "select":
+                tagged = source_github.select(
+                    package, tag_pattern, settings, now, values=candidates
+                )
+            else:
+                tagged = {
+                    "release": source_github.bind(package, chosen),
+                    "tag": chosen.identity,
+                }
+            chosen = tagged["release"]
+            extra["tag"] = tagged["tag"]
+        elif provider == "github":
             import source_updates
 
             identity = registry.github_commit(package, chosen.version)
@@ -359,7 +399,12 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
             ):
                 raise ValueError("Selected release tag now points to immature contents")
         if operation == "metadata":
-            return {"schema": 1, "disposition": "metadata", **release_record(chosen)}
+            return {
+                "schema": 1,
+                "disposition": "metadata",
+                **release_record(chosen),
+                **extra,
+            }
         current = request.get("current")
         rank = registry.version(provider, current) if isinstance(current, str) else None
         if rank is not None and registry.version(provider, chosen.version) <= rank:
@@ -368,9 +413,14 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
                 "disposition": "retained",
                 "version": current,
                 "reason": "No newer eligible version",
-                "eligible_candidate": release_record(chosen),
+                "eligible_candidate": {**release_record(chosen), **extra},
             }
-        return {"schema": 1, "disposition": "selected", **release_record(chosen)}
+        return {
+            "schema": 1,
+            "disposition": "selected",
+            **release_record(chosen),
+            **extra,
+        }
     if operation == "audit":
         items = request.get("artifacts")
         if not isinstance(items, list) or any(

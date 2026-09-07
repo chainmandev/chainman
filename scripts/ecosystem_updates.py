@@ -258,8 +258,10 @@ def accepts(provider: str, version: str, requirement: str) -> bool:
 
 def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
     provider, package = pin["provider"], pin["name"]
+    requirement = old_requirement(root, pin)
+    coordinates = pin.get("coordinated", [package])
     inventories = []
-    for coordinate in pin.get("coordinated", [package]):
+    for coordinate in coordinates:
         candidates = (
             registry.maven_releases(
                 coordinate, lock_adapters.maven_repository(spec, coordinate)
@@ -267,18 +269,58 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
             if provider == "maven"
             else registry.releases(provider, coordinate)
         )
-        candidates = registry.eligible(provider, candidates, policy, coordinate, now)
+        if spec.get("mode", "aggressive") == "compatible":
+            candidates = [
+                item
+                for item in candidates
+                if accepts(provider, item.version, pin.get("bound", requirement))
+            ]
+        candidates = [
+            item
+            for item in candidates
+            if registry.compatible(
+                provider,
+                item.version,
+                registry.constraint(provider, policy, coordinate),
+            )
+        ]
         inventories.append(candidates)
     common = set.intersection(
         *({item.version for item in values} for values in inventories)
     )
-    candidates = [item for item in inventories[0] if item.version in common]
-    requirement = old_requirement(root, pin)
-    if spec.get("mode", "aggressive") == "compatible":
-        bound = pin.get("bound", requirement)
-        candidates = [
-            item for item in candidates if accepts(provider, item.version, bound)
-        ]
+    dates = {
+        value: max(
+            item.published
+            for inventory in inventories
+            for item in inventory
+            if item.version == value
+        )
+        for value in common
+    }
+    eligible = [
+        registry.eligible(
+            provider,
+            [
+                registry.Release(
+                    item.version,
+                    dates[item.version],
+                    item.identity,
+                    item.python,
+                    item.artifacts,
+                )
+                for item in inventory
+                if item.version in common
+            ],
+            policy,
+            coordinate,
+            now,
+        )
+        for coordinate, inventory in zip(coordinates, inventories, strict=True)
+    ]
+    common = set.intersection(
+        *({item.version for item in values} for values in eligible)
+    )
+    candidates = [item for item in eligible[0] if item.version in common]
     if not candidates:
         raise ValueError(
             f"No eligible version satisfies the declared policy for {provider}:{package}"

@@ -59,6 +59,7 @@
             coreutils
             gnugrep
             gnused
+            gawk
             findutils
             diffutils
             curl

@@ -58,7 +58,7 @@ def identities(workspace):
         if not re.search(r"(?:^|/)node_modules/", location):
             raise ValueError("npm lock contains an undeclared local package")
         name, version = name_at(location, item), item.get("version")
-        if registry.version("npm", version) is None:
+        if registry.lock_version("npm", version) is None:
             raise ValueError("npm lock lacks a stable registry version")
         result.add(
             (
@@ -103,12 +103,9 @@ def allowed(workspace, pin):
 
 
 def audit(workspace, before, policy, now):
-    current = identities(workspace)
-    updates.audit_identities(
-        workspace.root, current, {tuple(i) for i in before["identities"]}, policy, now
-    )
     lock, evidence = read(workspace), js.Evidence(policy, now)
     packages, options = lock["packages"], policy.get("javascript", {})
+    scopes = {}
     locals = local_locations(workspace)
     for manifest, refs in workspace.refs.items():
         importer = (
@@ -140,6 +137,9 @@ def audit(workspace, before, policy, now):
                 raise ValueError(
                     "npm dependency violates scoped JavaScript compatibility"
                 )
+            scopes.setdefault((actual, version), []).extend(
+                js.direct_scope(pin, workspace.spec, options, version)
+            )
             if (
                 workspace.spec.get("mode", options.get("mode", "aggressive"))
                 == "compatible"
@@ -205,6 +205,9 @@ def audit(workspace, before, policy, now):
                     raise ValueError(
                         f"Missing or incompatible npm peer {actual}>{peer} in {manifest}"
                     )
+                scopes.setdefault(
+                    (name_at(target, packages[target]), packages[target]["version"]), []
+                ).append(bound)
             for name in {
                 **item.get("dependencies", {}),
                 **item.get("optionalDependencies", {}),
@@ -217,6 +220,7 @@ def audit(workspace, before, policy, now):
                         )
                 else:
                     queue.append(child)
+    return js.audit_artifacts(workspace, before, policy, now, scopes)
 
 
 def resolve(workspace, before, evidence, selected, policy, now):
@@ -235,7 +239,12 @@ def resolve(workspace, before, evidence, selected, policy, now):
     # A failure stays visible; it never broadens the audited exception set.
     cutoff = (
         now
-        if active or js.baseline_maturity_exclusions(before, evidence)
+        if active
+        or any(
+            e.get("package", "").startswith("npm:")
+            for e in policy.get("exceptions", [])
+        )
+        or js.baseline_maturity_exclusions(before, evidence)
         else now - timedelta(days=registry.minimum_age(policy))
     )
     peer_option = (

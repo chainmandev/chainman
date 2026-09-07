@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import itertools
 import json
 import re
 import subprocess
@@ -225,7 +226,10 @@ class Workspace:
         if lock.exists():
             self.keep(self.lock)
         self.discover()
-        for rule in spec.get("held_dependencies", []):
+        self.apply_held()
+
+    def apply_held(self):
+        for rule in self.spec.get("held_dependencies", []):
             if (
                 set(rule) != {"manifest", "package", "reason"}
                 or not str(rule["reason"]).strip()
@@ -265,6 +269,11 @@ class Workspace:
         return result
 
     def add(self, file, pointer, alias, value, *, catalog=None, user=None):
+        if isinstance(value, str) and value.startswith(
+            ("file:", "link:", "workspace:")
+        ):
+            self.local_manifest(alias, value, str(Path(user or file).parent))
+            return None
         if self.spec.get("retained_sources") and user:
             import javascript_sources
 
@@ -291,6 +300,37 @@ class Workspace:
             pin.users.add(user)
         self.pins.append(pin)
         return len(self.pins) - 1
+
+    def local_manifest(self, alias, value, base="."):
+        """Bind local declarations to the explicitly included workspace inputs."""
+        protocol, _, relative = value.partition(":")
+        if protocol == "workspace" and not relative.startswith((".", "/")):
+            manifest = self.locals.get(alias)
+            if manifest is None:
+                raise ValueError(
+                    "Workspace dependency names an undeclared local package"
+                )
+            version = self.documents[manifest][0].get("version")
+            requirement = "*" if relative in ("*", "^", "~") else relative
+            if registry.lock_version("npm", version) is None or Version(
+                version
+            ) not in NpmSpec(requirement):
+                raise ValueError(
+                    "Workspace dependency violates the declared local version"
+                )
+        else:
+            path = tc.local_source(
+                self.directory, tc.contained(self.directory, base), relative
+            )
+            manifest = (path / "package.json").relative_to(self.directory).as_posix()
+        if (
+            manifest not in self.manifests
+            or self.documents[manifest][0].get("name") != alias
+        ):
+            raise ValueError(
+                "Local dependency must bind its name to a declared workspace manifest"
+            )
+        return manifest
 
     def discover(self):
         catalogs = {}
@@ -395,7 +435,7 @@ class Evidence:
             body = registry.data(f"https://registry.npmjs.org/{quote(name, safe='')}")
             if body.get("name") != name:
                 raise ValueError("Registry package identity disagrees with its request")
-            releases = registry.releases("npm", name)
+            releases = registry.releases("npm", name, include_prerelease=True)
             versions = body.get("versions", {})
             for release in releases:
                 if release.published > self.now:
@@ -469,6 +509,124 @@ def compatibility(pin, options):
     return ranges
 
 
+def scoped_policy(policy, name, ranges):
+    common = registry.constraint("npm", policy, name)
+    bounds = [bound for bound in [common, *ranges] if bound]
+    alternatives = [bound.split("||") for bound in bounds]
+    count = 1
+    for choices in alternatives:
+        count *= len(choices)
+    if count > 128:
+        raise ValueError("JavaScript constraint intersection exceeds its bound")
+    combined = (
+        " || ".join(
+            " ".join(part.strip() for part in choice)
+            for choice in itertools.product(*alternatives)
+        )
+        if alternatives
+        else "*"
+    )
+    NpmSpec(combined)
+    return {
+        **policy,
+        "constraints": {
+            **policy.get("constraints", {}),
+            "npm:" + name: {
+                "range": combined,
+                "reason": "Intersection of the active JavaScript compatibility contracts.",
+            },
+        },
+    }
+
+
+def selected_policy(workspace, pin, selected, evidence, options):
+    ranges = list(pin.ranges)
+    if (
+        workspace.spec.get("mode", options.get("mode", "aggressive")) == "compatible"
+        and not Version(selected[workspace.pins.index(pin)]).prerelease
+    ):
+        major = Version(selected[workspace.pins.index(pin)]).major
+        ranges.append(f">={major}.0.0 <{major + 1}.0.0")
+    for manifest in pin.users:
+        for index in workspace.refs[manifest].values():
+            source = workspace.pins[index]
+            for peer, bound in evidence.peers(source.name, selected[index])[0].items():
+                if peer in (pin.alias, pin.name) and not peer_ignored(
+                    options, manifest, source.name, peer
+                ):
+                    ranges.append(bound)
+    return scoped_policy(evidence.policy, pin.name, ranges)
+
+
+def reconcile_policy(workspace, policy, *, check=False):
+    """Apply declared shared catalog/range policy without project-specific code."""
+    if not workspace.spec.get("reconcile_policy"):
+        return
+    if workspace.manager != "pnpm":
+        raise ValueError("Catalog policy reconciliation requires pnpm")
+    options = policy.get("javascript", {})
+    catalogs = options.get("catalog_constraints", {})
+    packages = options.get("package_constraints", {})
+    changed = False
+
+    def assign(table, key, expected):
+        nonlocal changed
+        changed |= table.get(key) != expected
+        table[key] = expected
+
+    if workspace.workspace not in workspace.documents:
+        workspace.documents[workspace.workspace] = document(
+            Path(workspace.workspace), "{}\n"
+        )
+        workspace.settings = workspace.documents[workspace.workspace][0]
+    for name, rules in catalogs.items():
+        table = (
+            workspace.settings.setdefault("catalog", {})
+            if name == "default"
+            else workspace.settings.setdefault("catalogs", {}).setdefault(name, {})
+        )
+        for alias, rule in rules.items():
+            package_name(alias)
+            assign(table, alias, rule_range(rule))
+    for file in workspace.manifests:
+        content = workspace.documents[file][0]
+        for section in SECTIONS:
+            for alias, value in content.get(section, {}).items():
+                exception = packages.get(file, {}).get(alias)
+                if exception:
+                    assign(content[section], alias, rule_range(exception))
+                elif alias in catalogs.get("default", {}) and not value.startswith(
+                    ("workspace:", "file:", "link:", "catalog:")
+                ):
+                    assign(content[section], alias, "catalog:")
+    overrides = options.get("override_constraints", {})
+    if overrides:
+        table = (
+            workspace.documents["package.json"][0]
+            .setdefault("pnpm", {})
+            .setdefault("overrides", {})
+        )
+        for selector, rule in overrides.items():
+            assign(table, selector, rule_range(rule))
+    if check and changed:
+        raise ValueError(
+            "JavaScript catalog references or declared policy ranges drifted"
+        )
+    workspace.pins, workspace.refs, workspace.duplicates = [], {}, []
+    workspace.discover()
+    workspace.apply_held()
+    # Governed ranges are contractual strings, not caret/tilde update templates.
+    # The resolver still receives exact chosen versions and the final lock is
+    # checked against the restored policy strings.
+    for pin in workspace.pins:
+        if (
+            (pin.catalog and pin.alias in catalogs.get(pin.catalog, {}))
+            or any(pin.alias in packages.get(user, {}) for user in pin.users)
+            or ("overrides" in pin.pointer and pin.pointer[-1] in overrides)
+        ):
+            pin.operator = None
+
+
 def plan(workspace, policy, now):
     options = policy.get("javascript", {})
     mode = workspace.spec.get("mode", options.get("mode", "aggressive"))
@@ -476,6 +634,7 @@ def plan(workspace, policy, now):
         raise ValueError("JavaScript update mode must be aggressive or compatible")
     evidence = Evidence(policy, now)
     baseline = locked_identities(workspace)
+    evidence.baseline = baseline
     for pin in workspace.pins:
         pin.ranges = compatibility(pin, options)
         if pin.operator is None or "overrides" in pin.pointer:
@@ -495,15 +654,50 @@ def plan(workspace, policy, now):
                 raise ValueError(
                     "Compatible updates require an explicit current version or lower bound"
                 )
-            pin.ranges.append(f">={floor.major}.0.0 <{floor.major + 1}.0.0")
         for selector in workspace.patches:
             match = re.fullmatch(rf"({NAME})@(.+)", selector)
             if match and match[1] == pin.name and floor and floor in NpmSpec(match[2]):
                 pin.ranges.append(match[2])
         releases = evidence.get(pin.name)[0]
+        active_policy = scoped_policy(
+            policy,
+            pin.name,
+            [
+                *pin.ranges,
+                *(
+                    [f">={floor.major}.0.0 <{floor.major + 1}.0.0"]
+                    if mode == "compatible"
+                    else []
+                ),
+            ],
+        )
         eligible = registry.maturity(
-            "npm", releases, policy, pin.name, now
-        ) + registry.active_exceptions("npm", releases, policy, pin.name, now)
+            "npm", releases, active_policy, pin.name, now
+        ) + registry.active_exceptions("npm", releases, active_policy, pin.name, now)
+        # A peer constraint can make a globally mature alternative unusable.
+        # Keep exact declared exception candidates until the selected peer graph
+        # supplies the final scope; the solver rechecks retirement and expiry.
+        eligible += [
+            r
+            for r in releases
+            if any(
+                e.get("package") == "npm:" + pin.name and e.get("version") == r.version
+                for e in policy.get("exceptions", [])
+            )
+        ]
+        baseline_versions = {
+            i[2] for i in baseline if i[0] == "npm" and i[1] == pin.name
+        }
+        eligible += [
+            r
+            for r in releases
+            if r.version in baseline_versions
+            and registry.version("npm", r.version) is None
+            and Version(r.version) in NpmSpec(pin.requirement)
+            and registry.compatible(
+                "npm", r.version, registry.constraint("npm", policy, pin.name)
+            )
+        ]
         # An already locked immutable artifact can be retained when the mature
         # selection is older. It receives no exemption from identity or range
         # auditing, and no new young artifact can inherit this allowance.
@@ -523,6 +717,12 @@ def plan(workspace, policy, now):
                 r.version
                 for r in eligible
                 if all(Version(r.version) in NpmSpec(bound) for bound in pin.ranges)
+                and (mode != "compatible" or Version(r.version).major == floor.major)
+                and (
+                    registry.minimum_safe("npm", policy, pin.name) is None
+                    or Version(r.version)
+                    >= registry.minimum_safe("npm", policy, pin.name)
+                )
             },
             key=Version,
             reverse=True,
@@ -577,6 +777,14 @@ def solve(workspace, evidence, options, initial=None):
                         ) + registry.active_exceptions(
                             "npm", releases, evidence.policy, peer, evidence.now
                         )
+                        eligible += [
+                            r
+                            for r in releases
+                            if any(
+                                i[:3] == ("npm", peer, r.version)
+                                for i in getattr(evidence, "baseline", set())
+                            )
+                        ]
                         if not any(
                             Version(r.version) in NpmSpec(requirement) for r in eligible
                         ):
@@ -592,7 +800,27 @@ def solve(workspace, evidence, options, initial=None):
             if conflict:
                 break
         if conflict is None:
-            return selected
+            for index, pin in enumerate(workspace.pins):
+                if not any(
+                    e.get("package") == "npm:" + pin.name
+                    for e in evidence.policy.get("exceptions", [])
+                ):
+                    continue
+                scoped = selected_policy(workspace, pin, selected, evidence, options)
+                releases = evidence.get(pin.name)[0]
+                allowed = registry.maturity(
+                    "npm", releases, scoped, pin.name, evidence.now
+                ) + registry.active_exceptions(
+                    "npm", releases, scoped, pin.name, evidence.now
+                )
+                if selected[index] not in {r.version for r in allowed} and not any(
+                    i[:3] == ("npm", pin.name, selected[index])
+                    for i in getattr(evidence, "baseline", set())
+                ):
+                    conflict = (index,)
+                    break
+            if conflict is None:
+                return selected
         # Change only a participant in the witnessed conflict. Never weaken a
         # compatibility/age rule to make the package manager return success.
         for index in reversed(conflict):
@@ -670,16 +898,121 @@ def snapshot(root: Path, spec: dict) -> dict:
     }
 
 
-def lock_target(alias, raw):
+def has_local_resolution(lock):
+    local = False
+    for item in lock.get("packages", {}).values():
+        resolution = item.get("resolution", {})
+        if "directory" in resolution or resolution.get("type") == "directory":
+            if (
+                set(resolution) != {"directory", "type"}
+                or resolution["type"] != "directory"
+            ):
+                raise ValueError("Unrecognized npm lock resolution source")
+            local = True
+    if local:
+        return True
+    for kind in ("importers", "snapshots"):
+        for node in lock.get(kind, {}).values():
+            for section in SECTIONS:
+                for edge in node.get(section, {}).values():
+                    raw = edge.get("version", "") if isinstance(edge, Mapping) else edge
+                    if isinstance(raw, str) and raw.startswith(
+                        ("file:", "link:", "workspace:")
+                    ):
+                        return True
+    return False
+
+
+def local_registry_entries(workspace, lock, entries):
+    """Local directory packages have no registry identity; validate their binding."""
+    remaining = dict(entries)
+    local_keys = {}
+    for key, item in entries.items():
+        resolution = item.get("resolution", {})
+        if "directory" not in resolution and resolution.get("type") != "directory":
+            continue
+        if (
+            set(resolution) != {"directory", "type"}
+            or resolution["type"] != "directory"
+        ):
+            raise ValueError(
+                "Local pnpm resolution must contain only its directory and type"
+            )
+        alias, _, raw = key.partition("(")[0].rpartition("@file:")
+        if not alias or raw != resolution["directory"]:
+            raise ValueError("Local pnpm resolution disagrees with its package key")
+        manifest = workspace.local_manifest(alias, "file:" + raw)
+        if item.get(
+            "version", workspace.documents[manifest][0].get("version")
+        ) != workspace.documents[manifest][0].get("version"):
+            raise ValueError("Local pnpm package version disagrees with its manifest")
+        local_keys[alias + "@file:" + raw] = manifest
+        del remaining[key]
+    for importer, info in lock.get("importers", {}).items():
+        manifest = "package.json" if importer == "." else importer + "/package.json"
+        if manifest not in workspace.manifests:
+            raise ValueError("Lockfile contains an undeclared workspace importer")
+        for section in SECTIONS:
+            for alias, edge in info.get(section, {}).items():
+                raw = edge.get("version", "")
+                if raw.startswith("link:"):
+                    target = workspace.local_manifest(alias, raw, importer)
+                elif raw.startswith("file:"):
+                    target = workspace.local_manifest(alias, raw.partition("(")[0])
+                    if alias + "@" + raw.partition("(")[0] not in local_keys:
+                        raise ValueError(
+                            "Local pnpm importer lacks its directory package"
+                        )
+                else:
+                    continue
+                declared = workspace.documents[manifest][0].get(section, {}).get(alias)
+                if (
+                    not isinstance(declared, str)
+                    or not declared.startswith(("workspace:", "file:", "link:"))
+                    or workspace.local_manifest(alias, declared, importer) != target
+                ):
+                    raise ValueError(
+                        "Local pnpm importer differs from its manifest declaration"
+                    )
+    for context, node in lock.get("snapshots", {}).items():
+        for section in ("dependencies", "optionalDependencies"):
+            for alias, raw in node.get(section, {}).items():
+                if raw.startswith("link:"):
+                    workspace.local_manifest(alias, raw)
+                elif raw.startswith("file:"):
+                    workspace.local_manifest(alias, raw.partition("(")[0])
+                    if alias + "@" + raw.partition("(")[0] not in local_keys:
+                        raise ValueError(
+                            "Local pnpm snapshot lacks its directory package"
+                        )
+        if "@file:" in context:
+            if context.partition("(")[0] not in local_keys:
+                raise ValueError("Undeclared local pnpm snapshot")
+    if any(key not in lock.get("snapshots", {}) for key in local_keys):
+        raise ValueError("Local pnpm package lacks its snapshot")
+    return remaining
+
+
+def lock_target(alias, raw, workspace=None):
     if not isinstance(raw, str):
         raise ValueError("pnpm lock dependency resolution must be a string")
     if raw.startswith(("link:", "workspace:")):
         return None
+    if raw.startswith("file:"):
+        if workspace is None:
+            raise ValueError(
+                "Local pnpm dependency requires a declared workspace context"
+            )
+        manifest = workspace.local_manifest(alias, raw.partition("(")[0])
+        version = workspace.documents[manifest][0].get("version")
+        if registry.lock_version("npm", version) is None:
+            raise ValueError("Local pnpm package requires a valid declared version")
+        return alias, version, alias + "@" + raw
     base = raw.partition("(")[0]
-    if registry.version("npm", base) is not None:
+    if registry.lock_version("npm", base) is not None:
         return alias, base, f"{alias}@{raw}"
     name, separator, version = base.rpartition("@")
-    if separator and registry.version("npm", version) is not None:
+    if separator and registry.lock_version("npm", version) is not None:
         package_name(name)
         return name, version, raw
     raise ValueError("Unrecognized pnpm dependency context")
@@ -722,6 +1055,7 @@ def audit_peers(workspace, evidence, options):
     packages, snapshots = lock.get("packages", {}), lock.get("snapshots", {})
     if not str(lock.get("lockfileVersion", "")).startswith("9"):
         raise ValueError("JavaScript peer audit requires pnpm lockfile version 9")
+    scopes = {}
     for importer, info in lock.get("importers", {}).items():
         manifest = "package.json" if importer == "." else importer + "/package.json"
         if manifest not in workspace.manifests:
@@ -735,7 +1069,7 @@ def audit_peers(workspace, evidence, options):
                     if javascript_sources.is_target(
                         workspace.spec, manifest, alias, raw
                     )
-                    else lock_target(alias, raw)
+                    else lock_target(alias, raw, workspace)
                 )
         queue, visited = [t for t in roots.values() if t], set()
         while queue:
@@ -756,7 +1090,10 @@ def audit_peers(workspace, evidence, options):
                     raise ValueError(
                         "Resolved transitive dependency violates JavaScript prefix compatibility"
                     )
-            if f"{actual}@{version}" not in packages or context not in snapshots:
+            local = "@file:" in context
+            if (
+                not local and f"{actual}@{version}" not in packages
+            ) or context not in snapshots:
                 raise ValueError("pnpm lock lacks the resolved package context")
             node = snapshots[context]
             dependencies = {
@@ -764,9 +1101,52 @@ def audit_peers(workspace, evidence, options):
                 **node.get("optionalDependencies", {}),
             }
             children = {
-                alias: lock_target(alias, raw) for alias, raw in dependencies.items()
+                alias: lock_target(alias, raw, workspace)
+                for alias, raw in dependencies.items()
             }
-            peers, metadata = evidence.peers(actual, version)
+            if local:
+                source = workspace.locals[actual]
+                content = workspace.documents[source][0]
+                peers, metadata = (
+                    content.get("peerDependencies", {}),
+                    content.get("peerDependenciesMeta", {}),
+                )
+                declared = {
+                    **content.get("dependencies", {}),
+                    **content.get("optionalDependencies", {}),
+                    **peers,
+                }
+                if set(dependencies) - set(declared) or set(
+                    content.get("dependencies", {})
+                ) - set(dependencies):
+                    raise ValueError(
+                        "Local pnpm dependency graph differs from its manifest"
+                    )
+                for alias, raw in dependencies.items():
+                    requirement = declared[alias]
+                    if requirement.startswith(("workspace:", "file:", "link:")):
+                        expected = workspace.local_manifest(
+                            alias, requirement, str(Path(source).parent)
+                        )
+                        observed = workspace.local_manifest(
+                            alias, raw.partition("(")[0]
+                        )
+                        if expected != observed:
+                            raise ValueError(
+                                "Local pnpm graph points to a different workspace"
+                            )
+                    else:
+                        pin = workspace.pins[workspace.refs[source][alias]]
+                        target = children[alias]
+                        if target is None or not any(
+                            target[0] == name and Version(target[1]) in NpmSpec(bound)
+                            for name, bound in effective_requirements(workspace, pin)
+                        ):
+                            raise ValueError(
+                                "Local pnpm dependency violates its manifest range"
+                            )
+            else:
+                peers, metadata = evidence.peers(actual, version)
             for peer, requirement in peers.items():
                 if peer_ignored(options, manifest, actual, peer):
                     continue
@@ -785,19 +1165,67 @@ def audit_peers(workspace, evidence, options):
                         )
                 else:
                     target_version = target[1]
-                if registry.version("npm", target_version) is None or Version(
+                    scopes.setdefault(target[:2], []).append(requirement)
+                if registry.lock_version("npm", target_version) is None or Version(
                     target_version
                 ) not in NpmSpec(requirement):
                     raise ValueError(
                         f"Incompatible resolved peer {actual}>{peer} in {manifest}"
                     )
             queue.extend(t for t in children.values() if t)
+    return scopes
 
 
-def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> None:
+def audit_artifacts(workspace, before, policy, now, scopes):
+    identities = locked_identities(workspace)
+    old = {tuple(i) for i in before["identities"]}
+    exclusions = set()
+    groups = {}
+    for identity in identities:
+        provider, name, version, *_ = identity
+        bounds = list(scopes.get((name, version), [])) if provider == "npm" else []
+        if provider == "npm":
+            for rule in policy.get("javascript", {}).get("prefix_constraints", []):
+                if name.startswith(rule["prefix"]) and name not in rule.get(
+                    "exclude", []
+                ):
+                    bounds.append(rule_range(rule))
+        key = (name if bounds else "", tuple(sorted(set(bounds))))
+        groups.setdefault(key, set()).add(identity)
+    for (name, bounds), group in groups.items():
+        scoped = scoped_policy(policy, name, bounds) if bounds else policy
+        updates.audit_identities(workspace.root, group, old, scoped, now)
+        for identity in group:
+            if identity[0] != "npm":
+                continue
+            for release in registry.active_exceptions(
+                "npm", registry.releases("npm", identity[1]), scoped, identity[1], now
+            ):
+                if release.version == identity[2]:
+                    exclusions.add(identity[1] + "@" + release.version)
+    return sorted(exclusions)
+
+
+def direct_scope(pin, spec, options, version):
+    bounds = compatibility(pin, options)
+    if pin.operator is None or pin.held:
+        bounds.append(pin.requirement)
+    if (
+        spec.get("mode", options.get("mode", "aggressive")) == "compatible"
+        and not Version(version).prerelease
+    ):
+        match = re.match(r"(?:[~^]|>=?)?(\d+)", pin.requirement)
+        if match:
+            major = int(match[1])
+            bounds.append(f">={major}.0.0 <{major + 1}.0.0")
+    return bounds
+
+
+def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     if before.get("schema") != 1:
         raise ValueError("Unsupported JavaScript audit baseline")
     workspace = Workspace(root, spec)
+    reconcile_policy(workspace, policy, check=True)
     patches = {
         selector: {
             "path": path,
@@ -812,21 +1240,13 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
     if workspace.manager == "npm":
         import javascript_npm
 
-        javascript_npm.audit(workspace, before, policy, now)
-        return
-    updates.audit_locks(
-        root,
-        ["javascript"],
-        {tuple(identity) for identity in before["identities"]},
-        policy,
-        now,
-        specs={"javascript": lock_spec(spec)},
-    )
+        return javascript_npm.audit(workspace, before, policy, now)
     import javascript_sources
 
     javascript_sources.audit(workspace, before, policy, now)
     evidence = Evidence(policy, now)
     options = policy.get("javascript", {})
+    scopes = audit_peers(workspace, evidence, options)
     # Recheck policy at actual locked versions; ranges/wildcards may resolve to
     # another version from the planner's preferred candidate.
     lock = document(Path(workspace.lock), workspace.original[workspace.lock].decode())[
@@ -861,6 +1281,9 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
                     raise ValueError(
                         "Resolved dependency violates scoped JavaScript compatibility"
                     )
+                scopes.setdefault(target[:2], []).extend(
+                    direct_scope(pin, spec, options, target[1])
+                )
                 mode = spec.get("mode", options.get("mode", "aggressive"))
                 if mode == "compatible" and not pin.held:
                     previous = next(
@@ -882,7 +1305,11 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
                         raise ValueError(
                             "Resolved dependency escaped the compatible-mode major"
                         )
-    audit_peers(workspace, evidence, options)
+    return audit_artifacts(workspace, before, policy, now, scopes)
+
+
+def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> None:
+    audit_details(root, spec, before, policy, now)
 
 
 def fallback(workspace, selected, message, temporary):
@@ -969,6 +1396,7 @@ def restore_lock_specifiers(workspace, directory):
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     workspace = Workspace(root, spec)
     before = snapshot(root, spec)
+    reconcile_policy(workspace, policy)
     evidence, selected = plan(workspace, policy, now)
     if workspace.manager == "npm":
         import javascript_npm
@@ -996,6 +1424,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                     "npm", evidence.get(name)[0], policy, name, now
                 )
             )
+            excludes.append(f"{name}@{exception['version']}")
     workspace.settings["minimumReleaseAgeExclude"] = sorted(set(excludes))
     baseline_excludes = baseline_maturity_exclusions(before, evidence)
     parent = tc.contained(root, ".cache/toolchain/work")
@@ -1076,6 +1505,17 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
 
         javascript_sources.bind(workspace, temporary)
         restore_lock_specifiers(workspace, temporary)
+        workspace.settings["minimumReleaseAgeExclude"] = audit_details(
+            temporary, {**spec, "directory": "."}, before, policy, now
+        )
+        content = workspace.render(selected)
+        for relative, data in content.items():
+            if relative != workspace.lock:
+                tc.atomic_bytes(
+                    tc.contained(temporary, relative),
+                    data,
+                    workspace.modes.get(relative, 0o644),
+                )
         checked = chainman.execute(
             root,
             spec.get("profile", "javascript"),

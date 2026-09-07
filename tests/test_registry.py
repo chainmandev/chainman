@@ -66,6 +66,30 @@ class PolicyTests(unittest.TestCase):
                 for r in registry.eligible("npm", candidates, policy, "demo", NOW)
             ],
         )
+        self.assertNotIn(
+            "1.2.2",
+            [
+                r.version
+                for r in registry.eligible("npm", candidates, policy, "demo", NOW)
+            ],
+        )
+
+    def test_an_unchanged_lock_cannot_bypass_the_security_safe_floor(self):
+        identity = ("npm", "demo", "1.0.0", "", "sha256:" + "a" * 64)
+        policy = {
+            "exceptions": [
+                {
+                    "package": "npm:demo",
+                    "version": "1.1.0",
+                    "minimum_safe": "1.1.0",
+                    "reason": "Verified supported-line correction.",
+                    "advisory": "https://example.invalid/advisory",
+                    "expires": "2026-09-01T00:00:00Z",
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "safe floor"):
+            updates.audit_identities(Path("."), {identity}, {identity}, policy, NOW)
 
     def test_no_age_evidence_and_invalid_age_fail_closed(self):
         with self.assertRaises(ValueError):

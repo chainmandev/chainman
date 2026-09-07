@@ -206,6 +206,56 @@ class QueryTests(unittest.TestCase):
                     now=NOW,
                 )
 
+    def test_wrapped_github_tags_keep_actual_identity_and_constraint(self):
+        import source_github
+
+        values = [
+            registry.Release("6.1.0", NOW - timedelta(days=90), "swift-6.1-RELEASE"),
+            registry.Release("7.0.0", NOW - timedelta(days=60), "swift-7.0-RELEASE"),
+        ]
+        request = {
+            "schema": 1,
+            "operation": "select",
+            "provider": "github",
+            "package": "example/compiler",
+            "tag_pattern": r"^swift-(?P<version>\d+\.\d+(?:\.\d+)?)-RELEASE$",
+            "constraint": {"range": "^6", "reason": "Selected SDK ABI"},
+        }
+        with (
+            patch.object(source_github, "releases", return_value=values),
+            patch.object(
+                source_github,
+                "bind",
+                side_effect=lambda repo, item: registry.Release(
+                    item.version, item.published, "a" * 40
+                ),
+            ),
+        ):
+            result = api.query(self.root, request, now=NOW)
+            self.assertEqual(result["version"], "6.1.0")
+            self.assertEqual(result["tag"], "swift-6.1-RELEASE")
+            self.assertEqual(result["identity"], "a" * 40)
+            result = api.query(
+                self.root,
+                {**request, "operation": "metadata", "version": "swift-7.0-RELEASE"},
+                now=NOW,
+            )
+            self.assertEqual(result["version"], "7.0.0")
+
+    def test_tag_pattern_cannot_change_another_provider_contract(self):
+        with self.assertRaisesRegex(ValueError, "only for GitHub"):
+            api.query(
+                self.root,
+                {
+                    "schema": 1,
+                    "operation": "select",
+                    "provider": "npm",
+                    "package": "sample",
+                    "tag_pattern": "bad",
+                },
+                now=NOW,
+            )
+
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
@@ -277,6 +327,23 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(
             self.events, [("snapshot", "nix"), ("resolve", "nix"), ("audit", "nix")]
         )
+
+    def test_explicit_only_adapters_require_named_selection_or_group(self):
+        self.settings["adapters"]["packages"]["explicit_only"] = True
+        self.settings["target_groups"] = {"optional": ["packages"]}
+        self.assertEqual(api.selection(self.settings, [])[0], {"tools"})
+        self.assertEqual(
+            api.selection(self.settings, ["--targets", "all"])[0], {"tools"}
+        )
+        self.assertEqual(
+            api.selection(self.settings, ["--targets", "packages"])[0], {"packages"}
+        )
+        self.assertEqual(
+            api.selection(self.settings, ["--targets", "optional"])[0], {"packages"}
+        )
+        self.settings["adapters"]["packages"]["explicit_only"] = "false"
+        with self.assertRaisesRegex(ValueError, "boolean"):
+            api.selection(self.settings, [])
 
     def test_named_project_hook_does_not_require_a_package_adapter(self):
         self.settings["targets"] = ["assets"]

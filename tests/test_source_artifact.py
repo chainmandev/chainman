@@ -1,7 +1,9 @@
 """Artifact identity, bounded origin evidence, and redirect negative controls."""
 
 import hashlib
+import json
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from io import BytesIO
@@ -11,6 +13,7 @@ from urllib.request import Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import source_artifact as artifacts
+import source_artifacts as adapter
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 URL = "https://downloads.example.org/tool/1.2.3/tool.tar.gz"
@@ -87,6 +90,95 @@ class ArtifactTests(unittest.TestCase):
             artifacts.PublicRedirects().redirect_request(
                 Request(URL), None, 302, "Found", {}, "http://downloads.example.org/a"
             )
+
+    def test_explicit_large_limit_is_bounded_and_invalid_values_fail(self):
+        for value in (True, 0, -1, "large", artifacts.MAX_DECLARED_BYTES + 1):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "limit"):
+                artifacts.inspect(URL, DIGEST, NOW, max_bytes=value)
+        with patch.object(artifacts, "build_opener") as factory:
+            factory.return_value.open.return_value = Response()
+            self.assertEqual(
+                artifacts.inspect(URL, DIGEST, NOW, max_bytes=4 * artifacts.MAX_BYTES)[
+                    "size"
+                ],
+                len(BODY),
+            )
+
+    def test_signed_cdn_only_follows_versioned_github_release_origin(self):
+        origin = "https://github.com/example/tool/releases/download/v1.2.3/tool.tar.gz"
+        cdn = "https://release-assets.githubusercontent.com/github-production-release-asset/object?sig=transport-token"
+        accepted = artifacts.PublicRedirects(origin).redirect_request(
+            Request(origin), None, 302, "Found", {}, cdn
+        )
+        self.assertEqual(accepted.full_url, cdn)
+        for source, target in (
+            (URL, cdn),
+            (
+                origin,
+                cdn.replace(
+                    "release-assets.githubusercontent.com", "downloads.example.org"
+                ),
+            ),
+            (origin, cdn.replace("https://", "https://user:secret@")),
+        ):
+            with (
+                self.subTest(source=source, target=target),
+                self.assertRaises(ValueError),
+            ):
+                artifacts.PublicRedirects(source).redirect_request(
+                    Request(source), None, 302, "Found", {}, target
+                )
+        response = Response()
+        response.geturl = lambda: cdn
+        with patch.object(artifacts, "build_opener") as factory:
+            factory.return_value.open.return_value = response
+            result = artifacts.inspect(origin, DIGEST, NOW)
+        self.assertEqual(result["resolved_url"], cdn.split("?")[0])
+        self.assertNotIn("transport-token", json.dumps(result))
+
+    def test_artifact_adapter_preserves_baseline_and_freezes_selected_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "sources.json"
+            path.write_text(json.dumps({"sdk": {"url": URL, "digest": DIGEST}}))
+            spec = {
+                "adapter": "artifact",
+                "entries": [{"file": "sources.json", "pointer": ["sdk"]}],
+            }
+            before = adapter.snapshot(root, spec)
+            with patch.object(artifacts, "audit") as checked:
+                before["resolution"] = adapter.resolve(root, spec, {}, NOW)
+                adapter.audit(root, spec, before, {}, NOW)
+                self.assertEqual(checked.call_count, 2)
+            path.write_text(
+                json.dumps(
+                    {"sdk": {"url": URL.replace("1.2.3", "1.2.4"), "digest": DIGEST}}
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "selected artifact identity"):
+                adapter.audit(root, spec, before, {}, NOW)
+
+    def test_artifact_adapter_does_not_repair_missing_evidence_or_escape_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "sources.json"
+            original = json.dumps({"sdk": {"url": URL, "digest": DIGEST}})
+            path.write_text(original)
+            spec = {
+                "adapter": "artifact",
+                "entries": [{"file": "sources.json", "pointer": ["sdk"]}],
+            }
+            with (
+                patch.object(
+                    artifacts, "audit", side_effect=ValueError("missing date")
+                ),
+                self.assertRaisesRegex(ValueError, "missing date"),
+            ):
+                adapter.resolve(root, spec, {}, NOW)
+            self.assertEqual(path.read_text(), original)
+            spec["entries"][0]["file"] = "../outside.json"
+            with self.assertRaises(ValueError):
+                adapter.snapshot(root, spec)
 
 
 if __name__ == "__main__":

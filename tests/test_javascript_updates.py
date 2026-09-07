@@ -115,8 +115,17 @@ class JavaScriptTests(unittest.TestCase):
                 return
             info = self.metadata[name]["versions"][version]
             packages[key] = {"resolution": {"integrity": info["dist"]["integrity"]}}
-            snapshots[key] = {"dependencies": info["dependencies"]}
-            for child, chosen in info["dependencies"].items():
+            dependencies = dict(info["dependencies"])
+            for peer, bound in info["peerDependencies"].items():
+                available = [
+                    v
+                    for v in self.metadata.get(peer, {}).get("versions", {})
+                    if Version(v) in NpmSpec(bound)
+                ]
+                if peer not in dependencies and available:
+                    dependencies[peer] = str(max(map(Version, available)))
+            snapshots[key] = {"dependencies": dependencies}
+            for child, chosen in dependencies.items():
                 add(child, chosen)
 
         for path in workspace.manifests:
@@ -442,6 +451,56 @@ class JavaScriptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity mismatch"):
             self.selected()
 
+    def test_declarative_catalog_reconciliation_preserves_exception_ranges(self):
+        self.spec["reconcile_policy"] = True
+        self.manifest("package.json", {"compiler": "1.0.0"})
+        self.manifest("packages/bridge/package.json", {"compiler": "^1.0.0"})
+        for version in ("1.0.0", "1.2.0", "2.0.0", "2.2.0"):
+            self.release("compiler", version)
+        self.release("utility", "1.1.0")
+        self.policy["javascript"] = {
+            "catalog_constraints": {
+                "default": {
+                    "compiler": {"range": "^2.0.0", "reason": "Shared compiler line."}
+                }
+            },
+            "package_constraints": {
+                "packages/bridge/package.json": {
+                    "compiler": {
+                        "range": "^1.0.0",
+                        "reason": "Native interface stays on its validated major.",
+                    }
+                }
+            },
+            "override_constraints": {
+                "utility": {
+                    "range": "^1.0.0",
+                    "reason": "Shared transitive compatibility.",
+                }
+            },
+        }
+        self.resolve()
+        workspace = js.Workspace(self.root, self.spec)
+        self.assertEqual(workspace.settings["catalog"]["compiler"], "^2.0.0")
+        self.assertEqual(
+            workspace.documents["package.json"][0]["dependencies"]["compiler"],
+            "catalog:",
+        )
+        self.assertEqual(
+            workspace.documents["packages/bridge/package.json"][0]["dependencies"][
+                "compiler"
+            ],
+            "^1.0.0",
+        )
+        self.assertEqual(
+            workspace.documents["package.json"][0]["pnpm"]["overrides"]["utility"],
+            "^1.0.0",
+        )
+        before = js.snapshot(self.root, self.spec)
+        self.manifest("packages/bridge/package.json", {"compiler": "^2.0.0"})
+        with self.assertRaisesRegex(ValueError, "policy ranges drifted"):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+
     def test_existing_young_identity_is_retained_without_persistent_age_bypass(self):
         self.manifest("package.json", {"library": "2.0.0"})
         self.release("library", "1.0.0")
@@ -460,6 +519,49 @@ class JavaScriptTests(unittest.TestCase):
             }
         }
         self.assertEqual(self.selected()[1]["library"], "1.0.0")
+
+    def test_only_unchanged_prerelease_artifacts_can_survive_a_baseline(self):
+        import updates
+
+        self.manifest("package.json", {"library": "1.0.0-beta.1"})
+        self.release("library", "1.0.0-beta.1")
+        # Seed a pre-existing lock directly; selection may not create it.
+        temporary = self.root / "seed"
+        temporary.mkdir()
+        (temporary / "package.json").write_bytes(
+            (self.root / "package.json").read_bytes()
+        )
+        self.fake_pnpm(
+            self.root,
+            "host",
+            ["pnpm", "install", "--lockfile-only", "--ignore-scripts"],
+            cwd=temporary,
+        )
+        (self.root / "pnpm-lock.yaml").write_bytes(
+            (temporary / "pnpm-lock.yaml").read_bytes()
+        )
+        before = js.snapshot(self.root, self.spec)
+        self.assertEqual(self.selected()[1]["library"], "1.0.0-beta.1")
+        self.spec["mode"] = "compatible"
+        self.assertEqual(self.selected()[1]["library"], "1.0.0-beta.1")
+        self.resolve()
+        identities = {tuple(i) for i in before["identities"]}
+        updates.audit_identities(
+            self.root, identities, identities, self.policy, self.now
+        )
+        with self.assertRaisesRegex(ValueError, "prerelease"):
+            updates.audit_identities(
+                self.root, identities, set(), self.policy, self.now
+            )
+        tampered = {(*i[:-1], "sha512:" + "0" * 128) for i in identities}
+        with self.assertRaisesRegex(ValueError, "prerelease"):
+            updates.audit_identities(
+                self.root, tampered, identities, self.policy, self.now
+            )
+        self.assertEqual(registry.releases("npm", "library"), [])
+        self.assertEqual(
+            len(registry.releases("npm", "library", include_prerelease=True)), 1
+        )
 
     def test_exact_security_exception_retires_when_safe_release_matures(self):
         self.manifest("package.json", {"library": "1.0.0"})
@@ -487,6 +589,64 @@ class JavaScriptTests(unittest.TestCase):
         self.policy["exceptions"][0].pop("advisory")
         with self.assertRaisesRegex(ValueError, "advisory"):
             self.selected()
+
+    def test_exception_retirement_respects_catalog_package_mode_and_peer_scope(self):
+        for scope in ("catalog", "package", "compatible", "peer"):
+            with self.subTest(scope=scope):
+                self.spec = {"directory": ".", "profile": "host"}
+                (self.root / "pnpm-lock.yaml").unlink(missing_ok=True)
+                self.write("pnpm-workspace.yaml", "packages: []\n")
+                self.manifest("package.json", {"library": "1.8.0"})
+                for version, days in (("1.8.0", 60), ("1.9.0", 1), ("2.0.0", 60)):
+                    self.release("library", version, days=days)
+                self.policy = {
+                    "minimum_age_days": 30,
+                    "javascript": {},
+                    "exceptions": [
+                        {
+                            "package": "npm:library",
+                            "version": "1.9.0",
+                            "minimum_safe": "1.9.0",
+                            "reason": "Exact supported-line security correction.",
+                            "advisory": "https://example.invalid/advisory",
+                            "expires": self.now.isoformat(),
+                        }
+                    ],
+                }
+                rule = {"range": "^1.8.0", "reason": "Supported interface line."}
+                if scope == "catalog":
+                    self.manifest("package.json", {"library": "catalog:"})
+                    self.write(
+                        "pnpm-workspace.yaml",
+                        "packages: []\ncatalog:\n  library: ^1.8.0\n",
+                    )
+                    self.policy["javascript"]["catalog_constraints"] = {
+                        "default": {"library": rule}
+                    }
+                elif scope == "package":
+                    self.policy["javascript"]["package_constraints"] = {
+                        "package.json": {"library": rule}
+                    }
+                elif scope == "compatible":
+                    self.spec["mode"] = "compatible"
+                else:
+                    self.manifest(
+                        "package.json", {"library": "1.8.0", "renderer": "1.0.0"}
+                    )
+                    self.release("renderer", "1.0.0", peers={"library": "^1.8.0"})
+                with self.assertRaisesRegex(ValueError, "Expired"):
+                    self.selected()
+                self.policy["exceptions"][0]["expires"] = (
+                    self.now + timedelta(days=10)
+                ).isoformat()
+                self.assertEqual(self.selected()[1]["library"], "1.9.0")
+                self.resolve()
+                self.assertEqual(
+                    js.Workspace(self.root, self.spec).settings[
+                        "minimumReleaseAgeExclude"
+                    ],
+                    ["library@1.9.0"],
+                )
 
     def test_resolve_installs_only_audited_files_and_serializable_baseline(self):
         self.manifest("package.json", {"library": "1.0.0"})
@@ -681,16 +841,83 @@ class JavaScriptTests(unittest.TestCase):
             "renderer",
             "1.0.0",
             children={"framework": "1.0.0"},
-            peers={"framework": "^2"},
         )
         self.release("framework", "1.0.0", days=2)
         self.release("framework", "2.0.0")
         with self.assertRaisesRegex(ValueError, "not mature"):
             self.resolve(self.fake_npm)
         self.release("framework", "1.0.0")
+        self.release(
+            "renderer",
+            "1.0.0",
+            children={"framework": "1.0.0"},
+            peers={"framework": "^2"},
+        )
         with self.assertRaisesRegex(ValueError, "incompatible npm peer"):
             self.resolve(self.fake_npm)
         self.assertFalse((self.root / "package-lock.json").exists())
+
+    def local_directory_fixture(self):
+        self.manifest("package.json", {"local-provider": "file:packages/provider"})
+        self.manifest(
+            "packages/provider/package.json", {}, name="local-provider", version="1.0.0"
+        )
+        lock = {
+            "lockfileVersion": "9.0",
+            "importers": {
+                ".": {
+                    "dependencies": {
+                        "local-provider": {
+                            "specifier": "file:packages/provider",
+                            "version": "file:packages/provider",
+                        }
+                    }
+                },
+                "packages/provider": {},
+            },
+            "packages": {
+                "local-provider@file:packages/provider": {
+                    "resolution": {
+                        "directory": "packages/provider",
+                        "type": "directory",
+                    }
+                }
+            },
+            "snapshots": {"local-provider@file:packages/provider": {}},
+        }
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        return lock
+
+    def test_local_directory_sources_bind_declared_workspace_manifests(self):
+        lock = self.local_directory_fixture()
+        before = js.snapshot(self.root, self.spec)
+        self.assertEqual(before["identities"], [])
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+        for fault in ("../outside", "packages/missing"):
+            with self.subTest(fault=fault):
+                self.manifest("package.json", {"local-provider": "file:" + fault})
+                with self.assertRaisesRegex(ValueError, "escapes|declared workspace"):
+                    js.snapshot(self.root, self.spec)
+        self.local_directory_fixture()
+        self.manifest(
+            "packages/provider/package.json", {}, name="different-name", version="1.0.0"
+        )
+        with self.assertRaisesRegex(ValueError, "declared workspace"):
+            js.snapshot(self.root, self.spec)
+        self.local_directory_fixture()
+        lock["packages"]["local-provider@file:packages/provider"]["resolution"][
+            "directory"
+        ] = "../outside"
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "package key"):
+            js.snapshot(self.root, self.spec)
+        self.local_directory_fixture()
+        lock["snapshots"]["local-provider@file:packages/provider"] = {
+            "dependencies": {"undeclared": "1.0.0"}
+        }
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        with self.assertRaisesRegex(ValueError, "graph differs"):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
 
     def retained_fixture(self, *, days=60, dependencies=None, integrity=True):
         import javascript_sources as sources
@@ -893,6 +1120,17 @@ class JavaScriptTests(unittest.TestCase):
         result = js.resolve(self.root, self.spec, self.policy, self.now)
         self.assertIn("pnpm-lock.yaml", result["changed_files"])
         self.assertEqual(result["resolution_attempts"], 1)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_PNPM") == "1",
+        "explicit pinned JavaScript profile integration lane",
+    )
+    def test_real_pnpm_resolves_declared_local_directory_sources(self):
+        self.local_directory_fixture()
+        (self.root / "pnpm-lock.yaml").unlink()
+        result = js.resolve(self.root, self.spec, self.policy, self.now)
+        self.assertIn("pnpm-lock.yaml", result["changed_files"])
+        self.assertEqual(js.snapshot(self.root, self.spec)["identities"], [])
 
 
 if __name__ == "__main__":

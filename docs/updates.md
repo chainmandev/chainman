@@ -56,7 +56,9 @@ targets. `--policy compatible` retains the original dependency ranges; the defau
 is `aggressive`, subject to every explicit constraint. `--target-policy name=compatible`
 sets an individual target's mode. `updates.target_groups` maps aliases to target
 lists. Command-only targets are declared in `updates.targets` and require a matching
-command step. Hooks receive JSON `CHAINMAN_UPDATE_TARGETS` and
+command step. An adapter with `explicit_only = true` is excluded from default and
+`all` selection; select it by name or a declared group. This is useful for optional
+SDK source refreshes that require additional upstream evidence. Hooks receive JSON `CHAINMAN_UPDATE_TARGETS` and
 `CHAINMAN_UPDATE_POLICIES`, plus the frozen `CHAINMAN_UPDATE_AT` timestamp.
 
 Adapters snapshot their original identities before any mutation. Nix steps precede
@@ -66,7 +68,7 @@ audit the final identities; the surrounding transaction then freezes, verifies a
 commits those exact files. Verification must report drift, never regenerate and retry.
 
 Supported adapters are `javascript` (pnpm/npm), `rust`, `python`, `go`, `flutter`,
-`swift`, `gradle`, `actions`, `oci`, `nix` and `toolchain`. Package adapters accept a
+`swift`, `gradle`, `actions`, `oci`, `nix`, `toolchain` and `artifact`. Package adapters accept a
 project-relative `directory` (native adapters also accept `directories`) and a Nix
 `profile`. Native `manifests` explicitly bound discovery; Gradle `catalogs` locate
 version catalogs. Each adapter's optional `policy` adds scoped rules to the global
@@ -84,6 +86,26 @@ require age and identity evidence. Registry and native lock audits cover transit
 artifacts as well as direct declarations. Expired security exceptions fail while
 still needed; a mature constrained safe alternative retires an otherwise valid
 exception. Retirement never exempts a newly selected young artifact.
+Every declared security safe floor also applies to mature and unchanged artifacts;
+peer constraints cannot force a fallback below it. Existing npm prerelease identities
+may remain only with unchanged registry artifact evidence and valid constraints.
+Stable candidate selection never introduces a prerelease.
+
+For centrally governed pnpm projects, `reconcile_policy=true` applies
+`javascript.catalog_constraints`, `package_constraints` and `override_constraints`
+before solving. Each rule contains a `range` and `reason`. Default catalog rules
+replace direct registry declarations with `catalog:`; explicit named catalog and
+local workspace references remain intact. Per-manifest rules retain intentional
+range exceptions. Final audit checks the same declarations for drift.
+
+Local `file:`, `link:` and `workspace:` dependencies must bind their package names
+to included workspace manifests within the adopted project. Directory lock entries
+are validated against those manifests, and their resolved dependency and peer graph
+is audited. Archives, undeclared directories, symlink traversal and escapes fail.
+The optional `retained_sources` list supports dependency-free GitHub source packages
+with exact `manifest`, `package`, `repository`, full `commit`, archive `sha256` and
+`reason` fields. Actual dated archive bytes and native lock integrity must agree;
+mutable references and undeclared source graphs are rejected.
 
 Native integrations use `scripts/chainman.sh deps-query`: one JSON request on stdin,
 one schema-versioned JSON response on stdout. Schema 1 supports `select`, `metadata`

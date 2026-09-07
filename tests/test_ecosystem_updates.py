@@ -77,6 +77,33 @@ class NativeTests(unittest.TestCase):
         self.assertFalse(native.accepts("crates", "2.0.0", "1.2"))
         self.assertFalse(native.accepts("crates", "0.3.0", "0.2.1"))
 
+    def test_incompatible_mature_release_cannot_retire_needed_security_exception(self):
+        self.put("Cargo.toml", '[dependencies]\nsample="^1.8.0"\n')
+        spec = {"adapter": "rust", "mode": "compatible"}
+        pin = native.pins(self.root, spec, native.specifications(self.root, spec))[0]
+        policy = {
+            "exceptions": [
+                {
+                    "package": "crates:sample",
+                    "version": "1.9.0",
+                    "minimum_safe": "1.9.0",
+                    "reason": "Specific security fix",
+                    "advisory": "https://example.invalid/advisory",
+                    "expires": NOW.isoformat(),
+                }
+            ]
+        }
+        releases = [
+            registry.Release("1.8.0", NOW - timedelta(days=90)),
+            registry.Release("1.9.0", NOW - timedelta(days=1)),
+            registry.Release("2.0.0", NOW - timedelta(days=60)),
+        ]
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            self.assertRaisesRegex(ValueError, "Expired"),
+        ):
+            native.choose(self.root, pin, spec, policy, NOW)
+
     def test_swift_literal_dependency_preserves_the_declaration(self):
         path = self.put(
             "Package.swift",
@@ -94,6 +121,38 @@ class NativeTests(unittest.TestCase):
             path.read_text(),
             '// declaration\nlet deps = [.package(url: "https://github.com/example/package", from: "1.2.0")]\n',
         )
+
+    def test_coordinated_exception_cannot_retire_against_partly_young_release(self):
+        self.put("Cargo.toml", '[dependencies]\nsample="1.8.0"\n')
+        spec = {"adapter": "rust"}
+        pin = native.pins(self.root, spec, native.specifications(self.root, spec))[0]
+        pin["coordinated"] = ["sample", "companion"]
+        policy = {
+            "exceptions": [
+                {
+                    "package": "crates:sample",
+                    "version": "1.9.0",
+                    "minimum_safe": "1.9.0",
+                    "reason": "Specific security fix",
+                    "advisory": "https://example.invalid/advisory",
+                    "expires": NOW.isoformat(),
+                }
+            ]
+        }
+
+        def inventory(provider, name):
+            return [
+                registry.Release("1.8.0", NOW - timedelta(days=90)),
+                registry.Release(
+                    "1.9.0", NOW - timedelta(days=60 if name == "sample" else 1)
+                ),
+            ]
+
+        with (
+            patch.object(registry, "releases", side_effect=inventory),
+            self.assertRaisesRegex(ValueError, "Expired"),
+        ):
+            native.choose(self.root, pin, spec, policy, NOW)
 
     def test_undeclared_swift_branch_and_outside_local_source_fail(self):
         for declaration in (

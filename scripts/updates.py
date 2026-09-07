@@ -16,7 +16,6 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from urllib.parse import urlencode
 
 import manifests
 import lock_adapters
@@ -336,86 +335,6 @@ def settings(root: Path) -> dict:
     return policy
 
 
-def update_nix(root: Path, policy: dict, now: datetime, env: dict) -> None:
-    if not policy.get("nix", {}).get("enabled", True):
-        return
-    # Nix branch inputs are commits, not published releases. This is explicitly
-    # revision age; no tag publication age is inferred from Git commit timestamps.
-    spec = policy.get("nix", {})
-    relative = spec.get("directory", "nix")
-    if not isinstance(relative, str) or not relative:
-        raise ValueError("Nix input directory must be a project-relative path")
-    directory = contained(root, relative)
-    if not directory.is_dir():
-        raise ValueError("Nix input directory must be an existing project directory")
-    lockpath = contained(root, str(Path(relative) / "flake.lock"))
-    contained(root, str(Path(relative) / "flake.nix"))
-    repository_name = spec.get("repository", "NixOS/nixpkgs")
-    branch = spec.get("branch", "nixos-unstable")
-    cutoff = now - timedelta(days=policy.get("minimum_age_days", 30))
-    query = urlencode({"sha": branch, "until": cutoff.isoformat(), "per_page": 1})
-    candidates = registry.data(
-        f"https://api.github.com/repos/{repository_name}/commits?{query}"
-    )
-    if not candidates:
-        raise ValueError("No mature Nix revision is available")
-    selected = candidates[0]
-    at = registry.timestamp(selected["commit"]["committer"]["date"])
-    if at > cutoff or not re.fullmatch(r"[a-f0-9]{40}", selected["sha"]):
-        raise ValueError("Invalid Nix revision-age evidence")
-    lock = json.loads(lockpath.read_text())
-    name = spec.get("input", "nixpkgs")
-    key = lock["nodes"][lock["root"]]["inputs"][name]
-    current = lock["nodes"][key]["locked"]
-    if current["lastModified"] >= at.timestamp():
-        return
-    managed_run(
-        [
-            "nix",
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "flake",
-            "lock",
-            "path:.",
-            "--override-input",
-            name,
-            f"github:{repository_name}/{selected['sha']}",
-        ],
-        cwd=directory,
-        env=env,
-        check=True,
-    )
-
-
-def current_version(pin: dict, root: Path):
-    if pin.get("format") == "regex":
-        matches = list(
-            re.finditer(
-                pin["pattern"], contained(root, pin["file"]).read_text(), re.MULTILINE
-            )
-        )
-        if len(matches) != 1:
-            raise ValueError("Explicit pin must match once")
-        raw = matches[0].group("value")
-        if pin.get("representation") == "action":
-            raw = raw.split(" # ", 1)[1]
-    else:
-        content = manifests.document(contained(root, pin["file"]))[0]
-        raw = manifests.lookup(content, pin["pointer"])
-        if pin.get("representation") == "requirement":
-            from packaging.requirements import Requirement
-
-            bounds = [
-                s.version
-                for s in Requirement(raw).specifier
-                if s.operator in (">=", "==", "~=")
-            ]
-            raw = bounds[0] if len(bounds) == 1 else ""
-        else:
-            raw = raw.removeprefix(pin.get("prefix", ""))
-    return registry.version(pin["provider"], raw)
-
-
 def lock_identities(
     root: Path, selected: list[str], *, specs: dict | None = None
 ) -> set[tuple[str, str, str, str, str]]:
@@ -423,7 +342,7 @@ def lock_identities(
     identities = set()
 
     def add(provider, package, value, url, digest):
-        if not package or registry.version(provider, value) is None:
+        if not package or registry.lock_version(provider, value) is None:
             raise ValueError("Unrecognized stable lock identity")
         identities.add(
             (
@@ -461,6 +380,12 @@ def lock_identities(
 
                 entries = javascript_sources.registry_entries(root, spec, lock)
                 identities.update(javascript_sources.lock_identities(root, spec, lock))
+            import javascript_updates
+
+            if javascript_updates.has_local_resolution(lock):
+                entries = javascript_updates.local_registry_entries(
+                    javascript_updates.Workspace(root, spec), lock, entries
+                )
             for key, item in entries.items():
                 package, _, version = key.partition("(")[0].rpartition("@")
                 resolution = item.get("resolution", {})
@@ -578,6 +503,19 @@ def audit_identities(
 
             javascript_sources.audit_identity(identity, before, policy, now)
             continue
+        if (
+            provider == "npm"
+            and registry.version(provider, value) is None
+            and identity not in before
+        ):
+            raise ValueError(
+                "A new or changed npm prerelease identity requires explicit project migration"
+            )
+        safe = registry.minimum_safe(provider, policy, package)
+        if safe is not None and registry.lock_version(provider, value) < safe:
+            raise ValueError(
+                "Locked artifact is below its declared security safe floor"
+            )
         key = (provider, package)
         if key not in evidence:
             if provider in ("go", "swift", "maven"):
@@ -595,7 +533,11 @@ def audit_identities(
                     else:
                         candidates += registry.releases(provider, package)
             else:
-                candidates = registry.releases(provider, package)
+                candidates = (
+                    registry.releases(provider, package, include_prerelease=True)
+                    if provider == "npm"
+                    else registry.releases(provider, package)
+                )
             exceptions = registry.active_exceptions(
                 provider, candidates, policy, package, now
             )
@@ -730,124 +672,21 @@ def retain_uv_noop(
 
 
 def resolve(root: Path, now: datetime, selected: list[str]) -> None:
-    policy = settings(root)
-    env = environment(root)
-    env["TOOLCHAIN_FRESH"] = "1"
-    manifests.configure_build_dependencies(root, selected, validate_only=True)
-    sdk_versions.synchronize(root, selected)
-    before = lock_identities(root, selected)
-    pins = manifests.discover(root, selected)
-    pins.extend(
-        pin
-        for pin in policy.get("pins", [])
-        if not pin.get("module") or pin["module"] in selected
-    )
-    seen = set()
-    for pin in pins:
-        target = (pin["file"], str(pin.get("pointer", pin.get("pattern"))))
-        if target in seen:
-            raise ValueError(
-                "Duplicate dependency target; use one authoritative declaration"
-            )
-        seen.add(target)
-        provider, name = pin["provider"], pin["name"]
-        if provider == "go":
-            if pin.get("format") != "regex" or not pin["file"].endswith("go.mod"):
-                raise ValueError(
-                    "Go updates require an explicit exact go.mod version regex pin"
-                )
-            candidates = lock_adapters.go_candidates(root, name)
-        elif provider == "maven" and pin.get("module"):
-            candidates = registry.maven_releases(
-                name, lock_adapters.maven_repository(module(pin["module"], root), name)
-            )
-        else:
-            candidates = registry.releases(provider, name)
-        chosen = registry.select(provider, candidates, policy, name, now)
-        if provider == "swift" and (
-            pin.get("format") != "regex"
-            or not pin["file"].endswith("Package.swift")
-            or pin.get("identity")
-        ):
-            raise ValueError(
-                "SwiftPM updates require an explicit exact Package.swift version regex pin"
-            )
-        old = current_version(pin, root)
-        if old is not None and registry.version(provider, chosen.version) <= old:
-            continue
-        if provider == "github" and (
-            pin.get("identity") or pin.get("representation") == "action"
-        ):
-            chosen = registry.Release(
-                chosen.version,
-                chosen.published,
-                registry.github_commit(name, chosen.version),
-            )
-        manifests.replace(pin, chosen, root)
-        print(f"Selected {provider}:{name}@{chosen.version}")
-    image_spec = policy.get("docker", {})
-    if image_spec.get("enabled", True):
-        package = image_spec.get("repository", "nixos/nix")
-        chosen = registry.select(
-            "docker", registry.releases("docker", package), policy, package, now
-        )
-        path = contained(root, "nix/container-image.txt")
-        current = path.read_text().strip()
-        old = registry.version("docker", current.split("@", 1)[0].rsplit(":", 1)[-1])
-        if old is None:
-            raise ValueError("Current container image lacks a stable version tag")
-        if registry.version("docker", chosen.version) >= old:
-            image = f"docker.io/{package}:{chosen.version}@{chosen.identity}"
-            bootstrap = contained(root, "bootstrap/chainman.sh")
-            if bootstrap.exists():
-                content, count = re.subn(
-                    r"(?m)^image=\S+$",
-                    lambda _: "image=" + image,
-                    bootstrap.read_text(),
-                )
-                if count != 1:
-                    raise ValueError(
-                        "Source bootstrap must declare exactly one managed image"
-                    )
-                bootstrap.write_text(content)
-            path.write_text(image + "\n")
-    manifests.configure_build_dependencies(root, selected)
-    for name in selected:
-        spec = module(name, root)
-        if "resolve" in spec.get("commands", {}):
-            if spec.get("ecosystem") == "pypi":
-                options = uv_resolution_options(policy, now)
-                commands = spec["commands"]["resolve"]
-                if any(argv[:2] != ["uv", "lock"] for argv in commands):
-                    raise ValueError(
-                        "Python resolution requires explicit uv lock commands for scoped age policy"
-                    )
-                directory = contained(root, spec["directory"])
-                manifest = contained(
-                    root, str((directory / "pyproject.toml").relative_to(root))
-                )
-                lock = contained(root, str((directory / "uv.lock").relative_to(root)))
-                old_manifest, old_lock = (
-                    manifest.read_text(),
-                    lock.read_text() if lock.exists() else None,
-                )
-                configured = configure_uv(root, spec, options)
-                spec = {
-                    **spec,
-                    "commands": {
-                        **spec["commands"],
-                        "resolve": [argv + options for argv in commands],
-                    },
-                }
-            run_commands(spec, "resolve", env, root)
-            if spec.get("ecosystem") == "pypi":
-                retain_uv_noop(root, spec, old_manifest, old_lock, configured)
-    audit_locks(root, selected, before, policy, now)
+    import module_updates
+
+    module_updates.resolve(root, selected, settings(root), now)
 
 
 def perform(root: Path, now: datetime, selected: list[str]) -> None:
     env = environment(root)
-    update_nix(root, settings(root), now, env)
+    import module_updates
+    import source_updates
+
+    policy = settings(root)
+    spec = module_updates.nix_spec(policy)
+    before = source_updates.snapshot(root, spec) if spec is not None else None
+    if spec is not None:
+        source_updates.resolve(root, spec, policy, now)
     env["TOOLCHAIN_FRESH"] = "1"
     # Resolve with the updated Python, package managers and SDKs, not the parent shell.
     managed_run(
@@ -864,6 +703,9 @@ def perform(root: Path, now: datetime, selected: list[str]) -> None:
         env=env,
         check=True,
     )
+
+    if spec is not None:
+        source_updates.audit(root, spec, before, policy, now)
 
 
 def verify(root: Path, selected: list[str]) -> None:
