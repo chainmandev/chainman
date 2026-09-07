@@ -30,6 +30,11 @@
             p.semantic-version
             p.ruamel-yaml
           ]);
+          # Package wrappers otherwise embed nixpkgs' default Node even when a
+          # newer node executable leads PATH, splitting engine checks from builds.
+          nodejs = pkgs.nodejs_latest;
+          pnpm = pkgs.pnpm.override { nodejs-slim = nodejs; };
+          prettier = pkgs.prettier.override { inherit nodejs; };
           # Flutter's Linux wrapper references aapt even for non-Android commands.
           # Its aapt2 binary remains x86_64-only; this only enables those commands on ARM.
           flutterPkgs =
@@ -88,7 +93,7 @@
         {
           core = shell "core" [ ] "";
           default = shell "core" [ ] "";
-          javascript = shell "javascript" [ pkgs.nodejs_latest pkgs.pnpm pkgs.prettier ] "";
+          javascript = shell "javascript" [ nodejs pnpm prettier ] "";
           rust = shell "rust" [
             pkgs.rustc
             pkgs.cargo
@@ -120,7 +125,7 @@
                 ''
               );
           compose = shell "compose" [ pkgs.gradle pkgs.jdk21 pkgs.ktlint ] "";
-          browser = shell "browser" [ pkgs.nodejs_latest pkgs.pnpm pkgs.playwright-driver.browsers ] ''
+          browser = shell "browser" [ nodejs pnpm pkgs.playwright-driver.browsers ] ''
             export PLAYWRIGHT_BROWSERS_PATH=${pkgs.playwright-driver.browsers}
           '';
         }

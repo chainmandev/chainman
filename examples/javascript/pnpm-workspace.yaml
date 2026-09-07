@@ -2,6 +2,7 @@ packages:
   - packages/*
 
 pmOnFail: error
+engineStrict: true
 minimumReleaseAge: 43200
 minimumReleaseAgeIgnoreMissingTime: false
 

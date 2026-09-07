@@ -34,6 +34,12 @@ under `modules/`. Each declares directory, input globs, readiness artifacts, com
 and update outputs. A project may keep its own modules and flake; runtime updates
 never replace those application-owned files.
 
+The JavaScript and browser shells bind pnpm to the same Nix Node executable used
+by project commands; JavaScript's Prettier wrapper uses it too. Merely putting Node
+first in `PATH` does not change an executable's pinned interpreter. The JavaScript
+example sets `engineStrict: true` so an incompatible package-manager runtime fails
+setup instead of producing a warning that successful builds can hide.
+
 `environment.values` and profile `environment` map names to literal strings; `{root}`
 expands to the selected project directory. `environment.unset` removes named inherited
 or default cache variables after those values are applied, for example a legacy
