@@ -27,6 +27,7 @@ def plan(root: Path, filesystem: Path, env: dict, selected: list[str]) -> list[P
     if (
         any(env.get(key) != value for key, value in expected.items())
         or env.get("TOOLCHAIN_CONTAINER") == "1"
+        or env.get("CHAINMAN_MODE") == "container-nix"
     ):
         raise ValueError(
             "SDK cleanup requires an explicitly disposable GitHub-hosted Linux host"

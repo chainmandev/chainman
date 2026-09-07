@@ -20,8 +20,24 @@ import tempfile
 import time
 import tomllib
 
-ROOT = Path(__file__).resolve().parents[1]
+RUNTIME = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
 _operation_fd: int | None = None
+
+
+def entry_command(root: Path, profile: str) -> list[str]:
+    if (root / "chainman.toml").is_file():
+        return [
+            sys.executable,
+            str(RUNTIME / "scripts/chainman.py"),
+            "--root",
+            str(root),
+            "exec",
+            "--profile",
+            profile,
+            "--",
+        ]
+    return [str(root / "scripts/enter.sh"), profile]
 
 
 def contained(root: Path, relative: str) -> Path:
@@ -76,9 +92,12 @@ def atomic_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
 
 
 def config(root: Path = ROOT) -> dict:
-    data = tomllib.loads(contained(root, "toolchain.toml").read_text())
+    name = "chainman.toml" if (root / "chainman.toml").exists() else "toolchain.toml"
+    data = tomllib.loads(contained(root, name).read_text())
+    if name == "chainman.toml":
+        data.setdefault("modules", ["project"])
     if data.get("schema") != 1 or not data.get("modules"):
-        raise ValueError("toolchain.toml requires schema=1 and a nonempty modules list")
+        raise ValueError(f"{name} requires schema=1 and a nonempty modules list")
     cache = data.get("cache", {})
     for key, default in (
         ("build_limit_gib", 12),
@@ -103,7 +122,19 @@ def config(root: Path = ROOT) -> dict:
 def module(name: str, root: Path = ROOT) -> dict:
     if not name.replace("-", "").isalnum():
         raise ValueError("invalid module name")
-    data = tomllib.loads(contained(root, f"modules/{name}.toml").read_text())
+    if name == "project" and (root / "chainman.toml").exists():
+        cfg = config(root)
+        data = {
+            "name": name,
+            "directory": ".",
+            "profile": cfg.get("project", {}).get("default_profile", "default"),
+            "commands": cfg.get("commands", {}),
+            "inputs": cfg.get("setup", {}).get("inputs", []),
+            "artifacts": cfg.get("setup", {}).get("artifacts", []),
+            "cache_setup": bool(cfg.get("setup", {}).get("inputs")),
+        }
+    else:
+        data = tomllib.loads(contained(root, f"modules/{name}.toml").read_text())
     if data.get("name") != name:
         raise ValueError("module identity mismatch")
     contained(root, data["directory"])
@@ -117,7 +148,7 @@ def module(name: str, root: Path = ROOT) -> dict:
 
 
 def context_id() -> str:
-    mode = os.environ.get("TOOLCHAIN_MODE", "host-nix")
+    mode = os.environ.get("CHAINMAN_MODE", os.environ.get("TOOLCHAIN_MODE", "host-nix"))
     return f"{mode}-{platform.system().lower()}-{platform.machine()}"
 
 
@@ -131,6 +162,26 @@ def operation(root: Path = ROOT):
     directory = cache_root(root)
     directory.mkdir(parents=True, exist_ok=True)
     path = contained(root, ".cache/toolchain/operation.lock")
+    inherited = (
+        _operation_fd
+        if _operation_fd is not None
+        else os.environ.get("TOOLCHAIN_LOCK_FD")
+    )
+    if inherited:
+        descriptor = int(inherited)
+        actual = os.fstat(descriptor)
+        expected = path.stat() if path.exists() else None
+        if expected is not None and (actual.st_dev, actual.st_ino) == (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            previous = _operation_fd
+            _operation_fd = descriptor
+            try:
+                yield False
+            finally:
+                _operation_fd = previous
+            return
     if path.exists() and not stat.S_ISREG(path.lstat().st_mode):
         raise ValueError("Operation lock must be a regular file")
     with path.open("a") as lock:
@@ -145,7 +196,7 @@ def operation(root: Path = ROOT):
         previous = _operation_fd
         _operation_fd = lock.fileno()
         try:
-            yield
+            yield True
         finally:
             _operation_fd = previous
 
@@ -223,13 +274,24 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         TOOLCHAIN_WORK=str(work),
         TOOLCHAIN_DOWNLOAD_CACHE=str(downloads),
     )
+    for name in config(root).get("cache", {}).get("preserve_environment", []):
+        if name in {"RUSTC_WRAPPER", "SCCACHE_SERVER_UDS", "TOOLCHAIN_LOCK_FD"}:
+            raise ValueError("Cannot override managed compiler-cache lifecycle")
+        if name in os.environ:
+            env[name] = os.environ[name]
     (work / "last-used").touch()
     return env
 
 
 @contextlib.contextmanager
 def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
-    if profile != "rust":
+    owns_cache = (
+        config(root).get("profiles", {}).get(profile, {}).get("compiler_cache", False)
+    )
+    if profile != "rust" and not owns_cache:
+        yield env
+        return
+    if env.get("CHAINMAN_COMPILER_OWNER") == str(root):
         yield env
         return
     endpoint = Path(env["SCCACHE_SERVER_UDS"])
@@ -237,8 +299,13 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         raise ValueError(
             "Compiler cache endpoint already exists; inspect the previous Rust operation before stopping its server"
         )
-    prefix = [str(root / "scripts/enter.sh"), "rust"]
-    server_env = dict(env, SCCACHE_START_SERVER="1", SCCACHE_NO_DAEMON="1")
+    prefix = entry_command(root, profile)
+    server_env = dict(
+        env,
+        SCCACHE_START_SERVER="1",
+        SCCACHE_NO_DAEMON="1",
+        CHAINMAN_COMPILER_OWNER=str(root),
+    )
     server = subprocess.Popen(
         [*prefix, "sccache"],
         **managed_options({"cwd": root, "env": server_env}),
@@ -268,7 +335,7 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         raise
     primary = None
     try:
-        yield dict(env, RUSTC_WRAPPER="sccache")
+        yield dict(env, RUSTC_WRAPPER="sccache", CHAINMAN_COMPILER_OWNER=str(root))
     except BaseException as exc:
         primary = exc
         raise
@@ -278,7 +345,7 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
                 managed_run(
                     [*prefix, "sccache", "--stop-server"],
                     cwd=root,
-                    env=env,
+                    env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                     check=True,
                     timeout=15,
                 )
@@ -314,7 +381,13 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
 def fingerprint(spec: dict, root: Path = ROOT) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps([2, context_id(), spec], sort_keys=True).encode())
-    paths = {root / "toolchain.toml"}
+    paths = {root / "toolchain.toml", root / "chainman.toml", root / "chainman.lock"}
+    digest.update(str(RUNTIME).encode())
+    if (root / "chainman.toml").exists():
+        import chainman
+
+        ref, _ = chainman.profile(root, spec["profile"])
+        digest.update(chainman.profile_fingerprint(root, spec["profile"], ref).encode())
     for directory in ("scripts", "nix", "modules"):
         paths.update(
             p
@@ -348,8 +421,7 @@ def run_commands(
     def launch(argv, selected_env):
         # The working directory travels as an argument, never shell syntax.
         launch = [
-            str(root / "scripts/enter.sh"),
-            spec["profile"],
+            *entry_command(root, spec["profile"]),
             "sh",
             "-eu",
             "-c",
@@ -388,6 +460,11 @@ def artifact_ready(root: Path, artifact, env: dict[str, str]) -> bool:
 
 
 def setup(spec: dict, env: dict[str, str], root: Path = ROOT) -> None:
+    if not spec.get("cache_setup", True):
+        # An opaque project adapter owns its readiness checks until it explicitly
+        # declares fingerprint inputs; never cache an unknown manifest surface.
+        run_commands(spec, "setup", env, root)
+        return
     # A project-local installed environment can belong to only one active context.
     # A stamp per context would falsely reuse files last installed by another mode.
     stamp = contained(root, f".cache/toolchain/setup/{spec['name']}.json")

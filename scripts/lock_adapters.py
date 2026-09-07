@@ -11,7 +11,7 @@ from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
 import registry
-from toolchain import contained, environment, managed_run
+from toolchain import contained, environment, managed_run, entry_command
 
 
 def paths(root: Path, directory: Path, filename: str) -> list[Path]:
@@ -41,8 +41,7 @@ def native(
     with tempfile.TemporaryDirectory(prefix="toolchain-evidence-") as tmp:
         result = managed_run(
             [
-                str(root / "scripts/enter.sh"),
-                profile,
+                *entry_command(root, profile),
                 "sh",
                 "-eu",
                 "-c",

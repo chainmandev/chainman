@@ -33,6 +33,8 @@ from toolchain import (
     operation,
     run_commands,
     setup,
+    entry_command,
+    RUNTIME,
 )
 
 
@@ -744,7 +746,20 @@ def resolve(root: Path, now: datetime, selected: list[str]) -> None:
         if old is None:
             raise ValueError("Current container image lacks a stable version tag")
         if registry.version("docker", chosen.version) >= old:
-            path.write_text(f"docker.io/{package}:{chosen.version}@{chosen.identity}\n")
+            image = f"docker.io/{package}:{chosen.version}@{chosen.identity}"
+            bootstrap = contained(root, "bootstrap/chainman.sh")
+            if bootstrap.exists():
+                content, count = re.subn(
+                    r"(?m)^image=\S+$",
+                    lambda _: "image=" + image,
+                    bootstrap.read_text(),
+                )
+                if count != 1:
+                    raise ValueError(
+                        "Source bootstrap must declare exactly one managed image"
+                    )
+                bootstrap.write_text(content)
+            path.write_text(image + "\n")
     manifests.configure_build_dependencies(root, selected)
     for name in selected:
         spec = module(name, root)
@@ -786,10 +801,9 @@ def perform(root: Path, now: datetime, selected: list[str]) -> None:
     # Resolve with the updated Python, package managers and SDKs, not the parent shell.
     managed_run(
         [
-            str(root / "scripts/enter.sh"),
-            "core",
+            *entry_command(root, "core"),
             "python3",
-            "scripts/updates.py",
+            str(RUNTIME / "scripts/updates.py"),
             "--resolve-at",
             now.isoformat(),
             "--modules",

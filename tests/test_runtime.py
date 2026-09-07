@@ -19,6 +19,13 @@ import toolchain
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
+        # Each fixture is an independent project. Its raw subprocesses must not
+        # advertise the outer test runner's FD without inheriting that descriptor.
+        fixture_env = dict(os.environ)
+        fixture_env.pop("TOOLCHAIN_LOCK_FD", None)
+        isolated = patch.dict(os.environ, fixture_env, clear=True)
+        isolated.start()
+        self.addCleanup(isolated.stop)
         self.temporary = tempfile.TemporaryDirectory(prefix="toolchain runtime ")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)

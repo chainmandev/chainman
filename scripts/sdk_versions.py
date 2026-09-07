@@ -16,7 +16,7 @@ from packaging.version import Version
 from semantic_version import NpmSpec, Version as Semver
 
 import manifests
-from toolchain import contained, environment, managed_run, module
+from toolchain import contained, environment, managed_run, module, entry_command
 
 KINDS = {
     "pnpm": "javascript",
@@ -56,8 +56,7 @@ def probe(root: Path, spec: dict) -> dict[str, Version]:
         with tempfile.TemporaryDirectory(prefix="toolchain-sdk-probe-") as cwd:
             result = managed_run(
                 [
-                    str(root / "scripts/enter.sh"),
-                    spec["profile"],
+                    *entry_command(root, spec["profile"]),
                     "sh",
                     "-eu",
                     "-c",

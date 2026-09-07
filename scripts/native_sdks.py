@@ -11,7 +11,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("platform", choices=["apple", "android"])
     args = parser.parse_args()
-    if os.environ.get("TOOLCHAIN_CONTAINER") == "1":
+    if (
+        os.environ.get("TOOLCHAIN_CONTAINER") == "1"
+        or os.environ.get("CHAINMAN_MODE") == "container-nix"
+    ):
         raise SystemExit(
             "Native SDK lanes require host Nix with the platform SDK explicitly installed."
         )
