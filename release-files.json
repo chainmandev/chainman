@@ -93,6 +93,7 @@
     "scripts/example.py",
     "scripts/format.py",
     "scripts/generate.py",
+    "scripts/gradle-resolve.init.gradle",
     "scripts/javascript_npm.py",
     "scripts/javascript_sources.py",
     "scripts/javascript_updates.py",

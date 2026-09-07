@@ -131,6 +131,23 @@ def maven_repository(spec: dict, package: str) -> str:
     return name
 
 
+def local_gradle_projects(root: Path, spec: dict) -> dict:
+    declared = spec.get("local_projects", {})
+    if not isinstance(declared, dict):
+        raise ValueError(
+            "Local Gradle projects require exact coordinate-to-directory bindings"
+        )
+    for package, relative in declared.items():
+        registry.maven_prefix(package)
+        directory = contained(root, relative)
+        if not any(
+            contained(root, str((directory / name).relative_to(root))).is_file()
+            for name in ("build.gradle", "build.gradle.kts")
+        ):
+            raise ValueError("Local Gradle project lacks its declared build source")
+    return declared
+
+
 def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
     directory = contained(root, spec["directory"])
     kind, result = spec["ecosystem"], set()
@@ -182,6 +199,7 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
                 seen.add(package)
                 result.add((kind, package, value, url, "git:" + revision))
     elif kind == "maven":
+        local = local_gradle_projects(root, spec)
         required = [
             p for p in spec.get("artifacts", []) if p.endswith((".lockfile", ".xml"))
         ]
@@ -204,6 +222,10 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
                 if len(fields) != 3 or registry.version("maven", fields[2]) is None:
                     raise ValueError("Unsupported Gradle lock coordinates")
                 package = ":".join(fields[:2])
+                if package in local:
+                    raise ValueError(
+                        "Declared local Gradle project resolved as an external module"
+                    )
                 registry.maven_prefix(package, maven_repository(spec, package))
                 locked.add((package, fields[2]))
         metadata = contained(
@@ -230,6 +252,10 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
         seen = set()
         for component in document.findall(f"{ns}components/{ns}component"):
             package = component.get("group", "") + ":" + component.get("name", "")
+            if package in local:
+                raise ValueError(
+                    "Declared local Gradle project has external artifact metadata"
+                )
             value = component.get("version", "")
             repository = maven_repository(spec, package)
             prefix = registry.maven_prefix(package, repository)

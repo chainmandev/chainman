@@ -180,6 +180,7 @@ def swift_pins(root: Path, specs: dict) -> list[dict]:
 
 def gradle_pins(root: Path, spec: dict) -> list[dict]:
     result = []
+    local = lock_adapters.local_gradle_projects(root, spec)
     for name in spec.get("catalogs", []):
         document = manifests.document(tc.contained(root, name))[0]
         grouped = {}
@@ -200,6 +201,8 @@ def gradle_pins(root: Path, spec: dict) -> list[dict]:
                     raise ValueError(
                         "Gradle catalog entry lacks a dependency coordinate"
                     )
+                if package in local:
+                    continue
                 value = item.get("version")
                 if isinstance(value, Mapping) and set(value) == {"ref"}:
                     pointer = ["versions", value["ref"]]
@@ -419,6 +422,26 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         for command in commands:
             chainman.execute(
                 root, spec.get("profile", kind), command, cwd=directory, env=env
+            )
+        if kind == "gradle":
+            # The ordinary dependencies task visits only one project. Traverse all
+            # resolvable project and buildscript configurations before final audit.
+            executable = "./gradlew" if (directory / "gradlew").is_file() else "gradle"
+            chainman.execute(
+                root,
+                spec.get("profile", kind),
+                [
+                    executable,
+                    "--no-daemon",
+                    "--init-script",
+                    str(tc.RUNTIME / "scripts/gradle-resolve.init.gradle"),
+                    "chainmanResolveAll",
+                    "--write-locks",
+                    "--write-verification-metadata",
+                    "sha256",
+                ],
+                cwd=directory,
+                env=env,
             )
         if kind == "python":
             updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)

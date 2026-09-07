@@ -208,6 +208,37 @@ class NativeTests(unittest.TestCase):
                 self.root, {"adapter": "rust", "bootstrap_verification": True}
             )
 
+    def test_gradle_local_catalog_coordinates_require_bound_source_and_no_external_lock(
+        self,
+    ):
+        import lock_adapters
+
+        self.put("build.gradle.kts", "")
+        self.put("local/library/build.gradle.kts", "")
+        self.put(
+            "gradle/libs.versions.toml",
+            '[libraries]\nlocal={module="sample:local",version="0.1.0"}\nexternal={module="sample:external",version="1.0.0"}\n',
+        )
+        spec = {
+            "adapter": "gradle",
+            "ecosystem": "maven",
+            "directory": ".",
+            "catalogs": ["gradle/libs.versions.toml"],
+            "local_projects": {"sample:local": "local/library"},
+        }
+        self.assertEqual(
+            [p["name"] for p in native.gradle_pins(self.root, spec)],
+            ["sample:external"],
+        )
+        self.put("gradle.lockfile", "sample:local:0.1.0=runtimeClasspath\n")
+        with self.assertRaisesRegex(ValueError, "external module"):
+            lock_adapters.identities(self.root, spec)
+        for relative in ("../outside", "missing"):
+            with self.subTest(relative=relative), self.assertRaises(ValueError):
+                native.gradle_pins(
+                    self.root, {**spec, "local_projects": {"sample:local": relative}}
+                )
+
     def test_gradle_shared_version_requires_candidate_intersection(self):
         self.put("build.gradle.kts", "")
         self.put(

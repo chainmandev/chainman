@@ -1,0 +1,28 @@
+// Resolve and lock every project configuration, including buildscript inputs.
+// This script is passed explicitly by the updater; it is never installed globally.
+gradle.beforeProject { project ->
+    project.dependencyLocking.lockAllConfigurations()
+    project.buildscript.configurations.configureEach {
+        resolutionStrategy.activateDependencyLocking()
+    }
+}
+
+gradle.rootProject { root ->
+    root.tasks.register('chainmanResolveAll') {
+        notCompatibleWithConfigurationCache('Dependency update resolves the complete configuration inventory')
+        doLast {
+            if (!gradle.startParameter.writeDependencyLocks) {
+                throw new GradleException('chainmanResolveAll requires --write-locks')
+            }
+            root.allprojects.each { project ->
+                [project.configurations, project.buildscript.configurations].each { configurations ->
+                    configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
+                        // resolve() throws on unresolved dependencies; the report-only
+                        // dependencies task can otherwise print FAILED and still exit 0.
+                        configuration.resolve()
+                    }
+                }
+            }
+        }
+    }
+}

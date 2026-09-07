@@ -86,6 +86,15 @@ configuration. Toolchain adapters probe Nix-supplied versions and synchronize
 declared JSON/TOML/YAML pointers or exact regex pins only after dated release evidence
 passes. Application generators and deployment-specific reconciliation remain hooks.
 
+Gradle resolution additionally visits every resolvable project and buildscript
+configuration, requiring failures to stop the update. A root `dependencies` report
+alone does not cover child projects. Exact `local_projects` coordinate-to-directory
+bindings keep first-party composite/project dependencies out of registry selection;
+each binding must remain inside the adopted project and contain its Gradle build
+source. Corresponding external lock or verification artifacts are rejected, so this
+is not a publication-age exemption for artifacts from Maven Local or a registry.
+The project owns its actual `includeBuild`/dependency-substitution configuration.
+
 JavaScript discovery includes workspaces, catalogs, aliases, scoped overrides and
 actual resolved peer relationships. Documented package/catalog/prefix constraints
 remain effective during bounded resolution retries. Version-scoped overrides retain
