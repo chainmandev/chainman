@@ -1,0 +1,18 @@
+schema = 1
+modules = ["core"]
+
+[cache]
+build_limit_gib = 12
+compiler_limit_gib = 8
+stale_hours = 48
+automatic_prune = true
+
+[updates]
+minimum_age_days = 30
+# Only these files may change during the update transaction.
+outputs = ["nix/flake.lock", "nix/container-image.txt", ".github/workflows/verify.yml"]
+# Additional pins and ecosystem lock audits live in dependencies.toml.
+
+[ci]
+# Explicit ci-prune only; never part of normal setup, verification or cleanup.
+disposable_sdks = ["android", "dotnet", "haskell"]

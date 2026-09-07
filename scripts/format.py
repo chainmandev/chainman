@@ -1,0 +1,63 @@
+"""Format or check the core tooling; optional modules own their language formatters."""
+
+import argparse
+from pathlib import Path
+import subprocess
+import yaml
+
+from toolchain import contained
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(__doc__)
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    python = sorted(
+        p
+        for directory in ("scripts", "tests", "examples/core")
+        for p in (root / directory).rglob("*.py")
+    )
+    shell = sorted((root / "scripts").glob("*.sh"))
+    nix = sorted((root / "nix").glob("*.nix"))
+    for path in python + shell + nix:
+        contained(root, path.relative_to(root).as_posix())
+    commands = [
+        [
+            "ruff",
+            "format",
+            "--no-cache",
+            *(["--check"] if args.check else []),
+            *map(str, python),
+        ],
+        ["ruff", "check", "--no-cache", "--select", "E9,F63,F7,F82", *map(str, python)],
+        [
+            "shfmt",
+            "-i",
+            "4",
+            "-bn",
+            "-ci",
+            "-sr",
+            "-d" if args.check else "-w",
+            *map(str, shell),
+        ],
+        ["shellcheck", *map(str, shell)],
+        ["nixfmt", *(["--check"] if args.check else []), *map(str, nix)],
+        [
+            "just",
+            "--unstable",
+            "--fmt",
+            *(["--check"] if args.check else []),
+            "--justfile",
+            str(root / "justfile"),
+        ],
+    ]
+    for command in commands:
+        subprocess.run(command, cwd=root, check=True)
+    for path in (root / ".github/workflows").glob("*.yml"):
+        contained(root, path.relative_to(root).as_posix())
+        yaml.safe_load(path.read_text())
+
+
+if __name__ == "__main__":
+    main()

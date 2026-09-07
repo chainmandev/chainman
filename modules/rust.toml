@@ -1,0 +1,15 @@
+name = "rust"
+profile = "rust"
+directory = "examples/rust"
+ecosystem = "crates"
+inputs = ["sdk-versions.toml", "examples/rust/Cargo.toml", "examples/rust/crates/*/Cargo.toml", "examples/rust/apps/*/Cargo.toml", "examples/rust/Cargo.lock"]
+artifacts = ["examples/rust/Cargo.lock"]
+update_outputs = ["examples/rust/Cargo.toml", "examples/rust/crates/*/Cargo.toml", "examples/rust/apps/*/Cargo.toml", "examples/rust/Cargo.lock"]
+
+[commands]
+setup = [["cargo", "fetch", "--locked"]]
+resolve = [["cargo", "generate-lockfile"]]
+build = [["cargo", "build", "--workspace", "--locked"]]
+test = [["cargo", "test", "--workspace", "--locked"]]
+verify = [["cargo", "fmt", "--all", "--", "--check"], ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], ["cargo", "build", "--workspace", "--locked"], ["cargo", "test", "--workspace", "--locked"]]
+format = [["cargo", "fmt", "--all"]]

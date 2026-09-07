@@ -1,0 +1,58 @@
+# Compatibility constraints belong here when a major must intentionally be held.
+# [constraints."npm:some-package"]
+# range = "^2.0.0"
+# reason = "The adopted public API currently requires major 2."
+#
+# [[exceptions]]
+# package = "npm:some-package"
+# version = "2.3.4"
+# minimum_safe = "2.3.4"
+# reason = "A reviewed security fix is required before its maturity window ends."
+# advisory = "https://example.invalid/advisory"
+# expires = "2030-01-01T00:00:00Z"
+
+[constraints."pypi:uv-build"]
+range = ">=0.12.3,<0.13"
+reason = "The example's sdist and wheel are qualified with the mature uv_build 0.12.3 backend. Retain the 0.12 interface until build-backend compatibility is qualified for a newer minor."
+
+[nix]
+enabled = true
+input = "nixpkgs"
+repository = "NixOS/nixpkgs"
+branch = "nixos-unstable"
+# This adapter checks commit age. A branch revision has no release publication date.
+
+[docker]
+enabled = true
+repository = "nixos/nix"
+# Age is the registry's last tag update, bound to its current manifest digest.
+
+[[pins]]
+provider = "github"
+name = "actions/checkout"
+file = ".github/workflows/verify.yml"
+format = "regex"
+representation = "action"
+pattern = '(?m)^      - uses: actions/checkout@(?P<value>[a-f0-9]{40} # v[0-9]+\.[0-9]+\.[0-9]+)$'
+
+[[pins]]
+provider = "github"
+name = "cachix/install-nix-action"
+file = ".github/workflows/verify.yml"
+format = "regex"
+representation = "action"
+pattern = '(?m)^      - uses: cachix/install-nix-action@(?P<value>[a-f0-9]{40} # v[0-9]+\.[0-9]+\.[0-9]+)$'
+
+[[pins]]
+module = "compose"
+provider = "maven"
+name = "org.jetbrains.kotlin:kotlin-gradle-plugin"
+file = "examples/compose/gradle/libs.versions.toml"
+pointer = ["versions", "kotlin"]
+
+[[pins]]
+module = "compose"
+provider = "maven"
+name = "org.jetbrains.compose:compose-gradle-plugin"
+file = "examples/compose/gradle/libs.versions.toml"
+pointer = ["versions", "compose"]

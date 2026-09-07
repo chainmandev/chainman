@@ -1,0 +1,17 @@
+name = "compose"
+ecosystem = "maven"
+maven_repositories = ["central", "google", "plugins"]
+maven_plugin_packages = ["org.jetbrains.compose.hot-reload:hot-reload-gradle-plugin", "org.jetbrains.compose:compose-gradle-plugin", "org.jetbrains.compose:org.jetbrains.compose.gradle.plugin", "org.jetbrains.kotlin.jvm:org.jetbrains.kotlin.jvm.gradle.plugin", "org.jetbrains.kotlin.plugin.compose:org.jetbrains.kotlin.plugin.compose.gradle.plugin"]
+profile = "compose"
+directory = "examples/compose"
+inputs = ["sdk-versions.toml", "examples/compose/settings.gradle.kts", "examples/compose/settings-gradle.lockfile", "examples/compose/build.gradle.kts", "examples/compose/gradle/libs.versions.toml", "examples/compose/gradle/verification-metadata.xml", "examples/compose/gradle/dependency-locks/*.lockfile"]
+artifacts = ["examples/compose/settings-gradle.lockfile", "examples/compose/gradle/verification-metadata.xml", "examples/compose/gradle/dependency-locks/linux-arm64.lockfile", "examples/compose/gradle/dependency-locks/linux-x64.lockfile", "examples/compose/gradle/dependency-locks/macos-arm64.lockfile", "examples/compose/gradle/dependency-locks/macos-x64.lockfile", "examples/compose/gradle/dependency-locks/windows-x64.lockfile"]
+update_outputs = ["examples/compose/settings.gradle.kts", "examples/compose/settings-gradle.lockfile", "examples/compose/build.gradle.kts", "examples/compose/gradle/libs.versions.toml", "examples/compose/gradle/verification-metadata.xml", "examples/compose/gradle/dependency-locks/*.lockfile"]
+
+[commands]
+setup = [["sh", "-eu", "-c", "gradle --dependency-verification strict --no-daemon --console=plain --project-cache-dir \"$TOOLCHAIN_WORK/compose-project-cache\" dependencies"]]
+resolve = [["sh", "-eu", "-c", "for target in linux-arm64 linux-x64 macos-arm64 macos-x64 windows-x64; do gradle --dependency-verification strict --no-daemon --console=plain --project-cache-dir \"$TOOLCHAIN_WORK/compose-project-cache\" -PcomposeTarget=$target dependencies --write-locks --write-verification-metadata sha256; done"]]
+build = [["sh", "-eu", "-c", "gradle --dependency-verification strict --no-daemon --console=plain --project-cache-dir \"$TOOLCHAIN_WORK/compose-project-cache\" build"]]
+test = [["sh", "-eu", "-c", "gradle --dependency-verification strict --no-daemon --console=plain --project-cache-dir \"$TOOLCHAIN_WORK/compose-project-cache\" test"]]
+verify = [["ktlint", "**/*.kt", "*.kts"], ["sh", "-eu", "-c", "gradle --dependency-verification strict --no-daemon --console=plain --project-cache-dir \"$TOOLCHAIN_WORK/compose-project-cache\" build"]]
+format = [["ktlint", "--format", "**/*.kt", "*.kts"]]

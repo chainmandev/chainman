@@ -1,0 +1,15 @@
+name = "go"
+ecosystem = "go"
+profile = "go"
+directory = "examples/go"
+inputs = ["sdk-versions.toml", "examples/go/go.work", "examples/go/**/go.work", "examples/go/go.work.sum", "examples/go/**/go.mod", "examples/go/**/go.sum"]
+artifacts = ["examples/go/go.work"]
+update_outputs = ["examples/go/go.work", "examples/go/**/go.work", "examples/go/go.work.sum", "examples/go/**/go.mod", "examples/go/**/go.sum"]
+
+[commands]
+setup = [["go", "list", "-mod=readonly", "./textcore/...", "./cmd/textdemo/..."]]
+resolve = [["sh", "-eu", "-c", "find . -name go.mod -type f -exec sh -eu -c 'for manifest do GOWORK=off go -C \"$(dirname \"$manifest\")\" mod tidy; done' sh {} +; go work sync"]]
+build = [["sh", "-eu", "-c", "mkdir -p \"$TOOLCHAIN_WORK/go\"; go build -mod=readonly -o \"$TOOLCHAIN_WORK/go/textdemo\" ./cmd/textdemo"]]
+test = [["go", "test", "-mod=readonly", "./textcore/...", "./cmd/textdemo/..."]]
+verify = [["sh", "-eu", "-c", "test -z \"$(gofmt -l .)\""], ["go", "vet", "-mod=readonly", "./textcore/...", "./cmd/textdemo/..."], ["sh", "-eu", "-c", "mkdir -p \"$TOOLCHAIN_WORK/go\"; go build -mod=readonly -o \"$TOOLCHAIN_WORK/go/textdemo\" ./cmd/textdemo"], ["go", "test", "-mod=readonly", "./textcore/...", "./cmd/textdemo/..."]]
+format = [["go", "fmt", "./textcore/...", "./cmd/textdemo/..."]]

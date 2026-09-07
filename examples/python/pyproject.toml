@@ -1,0 +1,16 @@
+[project]
+name = "python-workspace-example"
+version = "0.1.0"
+requires-python = ">=3.14"
+
+[tool.uv]
+exclude-newer = "2026-08-08T09:57:19.238045+00:00"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.ruff]
+target-version = "py314"
+
+[dependency-groups]
+toolchain-build = ["uv-build==0.12.3"]

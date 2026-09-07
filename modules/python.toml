@@ -1,0 +1,16 @@
+name = "python"
+profile = "python"
+directory = "examples/python"
+ecosystem = "pypi"
+build_dependency_group = "toolchain-build"
+inputs = ["sdk-versions.toml", "examples/python/pyproject.toml", "examples/python/packages/*/pyproject.toml", "examples/python/uv.lock"]
+artifacts = [{ path = "examples/python/.venv/bin/python", interpreter = "python" }]
+update_outputs = ["examples/python/pyproject.toml", "examples/python/packages/*/pyproject.toml", "examples/python/uv.lock"]
+
+[commands]
+setup = [["uv", "sync", "--only-group", "toolchain-build", "--no-install-workspace", "--no-build", "--frozen"], ["uv", "sync", "--all-packages", "--group", "toolchain-build", "--no-build-isolation", "--frozen"]]
+resolve = [["uv", "lock"]]
+build = [["sh", "-eu", "-c", "rm -rf \"$TOOLCHAIN_WORK/python-dist\"; uv build --package text-tools --force-pep517 --no-build-isolation --python .venv/bin/python --out-dir \"$TOOLCHAIN_WORK/python-dist\""]]
+test = [["uv", "run", "--frozen", "--group", "toolchain-build", "--no-build-isolation", "--package", "text-tools", "python", "-m", "unittest", "discover", "-s", "packages/text-tools/tests"]]
+verify = [["uv", "lock", "--check"], ["ruff", "check", "."], ["ruff", "format", "--check", "."], ["sh", "-eu", "-c", "rm -rf \"$TOOLCHAIN_WORK/python-dist\"; uv build --package text-tools --force-pep517 --no-build-isolation --python .venv/bin/python --out-dir \"$TOOLCHAIN_WORK/python-dist\""], ["uv", "run", "--frozen", "--group", "toolchain-build", "--no-build-isolation", "--package", "text-tools", "python", "-m", "unittest", "discover", "-s", "packages/text-tools/tests"]]
+format = [["ruff", "format", "."]]

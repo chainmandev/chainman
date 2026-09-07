@@ -1,0 +1,15 @@
+name = "swift"
+ecosystem = "swift"
+profile = "swift"
+directory = "examples/swift"
+inputs = ["sdk-versions.toml", "examples/swift/Package.swift", "examples/swift/Package.resolved"]
+artifacts = ["examples/swift/Package.swift"]
+update_outputs = ["examples/swift/Package.swift", "examples/swift/Package.resolved"]
+
+[commands]
+setup = [["sh", "-eu", "-c", "if [ -f Package.resolved ]; then swift package --scratch-path \"$TOOLCHAIN_WORK/swift-build\" --force-resolved-versions resolve; else swift package --scratch-path \"$TOOLCHAIN_WORK/swift-build\" resolve; fi"]]
+resolve = [["sh", "-eu", "-c", "swift package --scratch-path \"$TOOLCHAIN_WORK/swift-build\" update"]]
+build = [["sh", "-eu", "-c", "swift build --scratch-path \"$TOOLCHAIN_WORK/swift-build\""]]
+test = [["sh", "-eu", "-c", "swift test --scratch-path \"$TOOLCHAIN_WORK/swift-build\""]]
+verify = [["swift-format", "lint", "--strict", "--recursive", "Package.swift", "Sources", "Tests"], ["swift", "package", "dump-package"], ["sh", "-eu", "-c", "swift build --scratch-path \"$TOOLCHAIN_WORK/swift-build\""], ["sh", "-eu", "-c", "swift test --scratch-path \"$TOOLCHAIN_WORK/swift-build\""]]
+format = [["swift-format", "format", "--in-place", "--recursive", "Package.swift", "Sources", "Tests"]]

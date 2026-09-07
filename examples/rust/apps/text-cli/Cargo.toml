@@ -1,0 +1,7 @@
+[package]
+name = "text-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+text-core = { path = "../../crates/text-core" }

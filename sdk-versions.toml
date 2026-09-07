@@ -1,0 +1,56 @@
+# These exact target kinds opt in to following the refreshed selected Nix SDK.
+# A hold_value plus hold_reason preserves an existing compatible contract;
+# incompatible SDKs, custom ranges without holds, and missing targets fail visibly.
+# SDK identity comes from fresh profile probes. Nix revision age is not upstream SDK release age.
+# A selected built-in module needs targets. To delegate SDK ownership explicitly,
+# add [unmanaged_modules] with module = "specific compatibility-owner reason".
+# Targeted modules cannot also be unmanaged; no probe evidence is claimed for opt-outs.
+schema = 1
+
+[[targets]]
+module = "javascript"
+kind = "pnpm"
+files = ["examples/javascript/package.json"]
+
+[[targets]]
+module = "javascript"
+kind = "node"
+files = ["examples/javascript/package.json"]
+
+[[targets]]
+module = "go"
+kind = "go"
+files = ["examples/go/**/go.mod", "examples/go/**/go.work"]
+
+[[targets]]
+module = "python"
+kind = "python"
+files = ["examples/python/pyproject.toml", "examples/python/packages/*/pyproject.toml"]
+
+[[targets]]
+module = "python"
+kind = "ruff"
+files = ["examples/python/pyproject.toml"]
+
+[[targets]]
+module = "flutter"
+kind = "dart"
+files = ["examples/flutter/pubspec.yaml"]
+
+[[targets]]
+module = "swift"
+kind = "swift"
+files = ["examples/swift/Package.swift"]
+
+[[targets]]
+module = "compose"
+kind = "jdk"
+files = ["examples/compose/build.gradle.kts"]
+hold_value = "21"
+hold_reason = "JDK 21 is the example's qualified compiler target with the Gradle 8.14 baseline; changing this target requires coordinated Gradle qualification."
+
+[[targets]]
+module = "rust"
+kind = "rust"
+workspace = "examples/rust/Cargo.toml"
+files = ["examples/rust/**/Cargo.toml"]

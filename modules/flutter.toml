@@ -1,0 +1,15 @@
+name = "flutter"
+profile = "flutter"
+directory = "examples/flutter"
+ecosystem = "pub"
+inputs = ["sdk-versions.toml", "examples/flutter/pubspec.yaml", "examples/flutter/pubspec.lock"]
+artifacts = ["examples/flutter/.dart_tool/package_config.json"]
+update_outputs = ["examples/flutter/pubspec.yaml", "examples/flutter/pubspec.lock"]
+
+[commands]
+setup = [["flutter", "pub", "get", "--enforce-lockfile"]]
+resolve = [["flutter", "pub", "upgrade"]]
+build = [["sh", "-eu", "-c", "rm -rf \"$TOOLCHAIN_WORK/flutter-bundle\"; flutter build bundle --release --asset-dir \"$TOOLCHAIN_WORK/flutter-bundle\""]]
+test = [["flutter", "test"]]
+verify = [["dart", "format", "--output=none", "--set-exit-if-changed", "lib", "test"], ["flutter", "analyze"], ["sh", "-eu", "-c", "rm -rf \"$TOOLCHAIN_WORK/flutter-bundle\"; flutter build bundle --release --asset-dir \"$TOOLCHAIN_WORK/flutter-bundle\""], ["flutter", "test"]]
+format = [["dart", "format", "lib", "test"]]

@@ -1,0 +1,12 @@
+/.cache/
+/dist/
+**/__pycache__/
+*.pyc
+**/node_modules/
+**/target/
+**/.dart_tool/
+**/.build/
+**/.gradle/
+**/build/
+**/.venv/
+*.egg-info/

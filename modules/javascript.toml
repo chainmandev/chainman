@@ -1,0 +1,15 @@
+name = "javascript"
+profile = "javascript"
+directory = "examples/javascript"
+ecosystem = "npm"
+inputs = ["sdk-versions.toml", "examples/javascript/package.json", "examples/javascript/pnpm-workspace.yaml", "examples/javascript/packages/*/package.json", "examples/javascript/pnpm-lock.yaml"]
+artifacts = ["examples/javascript/node_modules/.pnpm/lock.yaml"]
+update_outputs = ["examples/javascript/package.json", "examples/javascript/pnpm-workspace.yaml", "examples/javascript/packages/*/package.json", "examples/javascript/pnpm-lock.yaml"]
+
+[commands]
+setup = [["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"]]
+resolve = [["pnpm", "install", "--lockfile-only", "--ignore-scripts"]]
+build = [["pnpm", "--recursive", "run", "build"]]
+test = [["pnpm", "--recursive", "run", "test"]]
+verify = [["prettier", "--check", "package.json", "pnpm-workspace.yaml", "packages/*/package.json", "packages/*/tsconfig.json", "packages/*/src/**/*.ts"], ["pnpm", "--recursive", "run", "check"], ["pnpm", "--recursive", "run", "build"], ["pnpm", "--recursive", "run", "test"]]
+format = [["prettier", "--write", "package.json", "pnpm-workspace.yaml", "packages/*/package.json", "packages/*/tsconfig.json", "packages/*/src/**/*.ts"]]
