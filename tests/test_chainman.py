@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import chainman
@@ -69,6 +69,47 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_adopted_git_flake_excludes_caches_and_uses_dirty_tracked_bytes(self):
+        self.write(
+            "flake.nix",
+            "{ outputs = { self }: { marker = builtins.readFile ./marker; cacheVisible = builtins.pathExists ./.cache; }; }",
+        )
+        self.write("marker", "original")
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="flake.nix#default"\n'
+        )
+        self.init_git()
+        self.write(".cache/large-package-download", "not source")
+        self.write("marker", "edited")
+        ref, _ = chainman.profile(self.root, "native")
+        self.assertTrue(ref.startswith("git+file:"))
+        for attribute, expected in (("marker", "edited"), ("cacheVisible", False)):
+            output = subprocess.check_output(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "eval",
+                    "--json",
+                    "--no-write-lock-file",
+                    ref.rsplit("#", 1)[0] + "#" + attribute,
+                ],
+                cwd=self.root,
+                text=True,
+            )
+            self.assertEqual(json.loads(output), expected)
+
+    def test_nested_copy_does_not_adopt_parent_git_source(self):
+        self.write("marker", "parent")
+        self.init_git()
+        nested = self.root / "copied project"
+        nested.mkdir()
+        (nested / "flake.nix").write_text("{}")
+        self.assertEqual(
+            chainman.flake_reference(nested, nested, "core"),
+            "path:" + quote(str(nested), safe="/") + "#core",
+        )
+
     def test_pnpm_store_overrides_follow_project_then_profile_layers(self):
         self.write("flake.nix", "{}")
         self.write(

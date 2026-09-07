@@ -1,5 +1,11 @@
 # Runtime and distribution contract
 
+For an adopted repository, project shells use the local Git flake source: tracked
+working-tree edits are visible, while untracked package downloads and build caches
+stay out of the Nix store. Add new flake inputs to Git before importing them. Copies
+without their own Git repository use a path source and never borrow a parent
+repository as their project. Installed runtime sources remain immutable store paths.
+
 The checked-in launcher, companion Nix expression, lock and selected Nix/container
 bootstrap are the trust base. The lock identifies a version and source revision,
 an HTTPS release URL and SHA-256 SRI NAR hash. Git revision identity and archive

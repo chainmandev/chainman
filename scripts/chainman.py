@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
-from urllib.parse import quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import toolchain as tc
 
@@ -20,6 +20,41 @@ RUNTIME = Path(__file__).resolve().parents[1]
 
 def configuration(root: Path) -> dict:
     return tc.config(root)
+
+
+def flake_reference(root: Path, location: Path, attribute: str) -> str:
+    """Use an adopted Git source so package caches never enter the Nix store."""
+    if location.is_relative_to(root):
+        owner = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        if (
+            owner.returncode == 0
+            and Path(owner.stdout.strip()).resolve() == root.resolve()
+        ):
+            relative = location.relative_to(root)
+            tracked = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "ls-files",
+                    "--error-unmatch",
+                    "--",
+                    str(relative / "flake.nix"),
+                ],
+                capture_output=True,
+            )
+            if tracked.returncode == 0:
+                directory = (
+                    ""
+                    if str(relative) == "."
+                    else "?dir=" + quote(str(relative), safe="")
+                )
+                return f"git+file://{quote(str(root), safe='/')}{directory}#{attribute}"
+    return f"path:{quote(str(location), safe='/')}#{attribute}"
 
 
 def profile(root: Path, name: str) -> tuple[str | None, dict]:
@@ -58,7 +93,7 @@ def profile(root: Path, name: str) -> tuple[str | None, dict]:
         attribute = spec.get("runtime_profile", "core")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", attribute):
             raise ValueError("Invalid runtime shell")
-    return f"path:{quote(str(location), safe='/')}#{attribute}", spec
+    return flake_reference(root, location, attribute), spec
 
 
 def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
@@ -68,7 +103,13 @@ def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
         if path.exists():
             digest.update(tc.regular_input(root, path.name))
     if ref:
-        directory = Path(unquote(ref[5:].partition("#")[0]))
+        if ref.startswith("git+file:"):
+            parsed = urlsplit(ref)
+            directory = (
+                Path(unquote(parsed.path)) / parse_qs(parsed.query).get("dir", [""])[0]
+            )
+        else:
+            directory = Path(unquote(ref[5:].partition("#")[0]))
         for name in ("flake.nix", "flake.lock"):
             if (directory / name).exists():
                 digest.update(tc.regular_input(directory, name))
