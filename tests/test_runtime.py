@@ -46,6 +46,8 @@ class RuntimeTests(unittest.TestCase):
                 import os, socket, sys, time
                 from pathlib import Path
                 endpoint = os.environ["SCCACHE_SERVER_UDS"]
+                if os.environ.get("CACHE_DIAGNOSTICS"):
+                    print("cache stop" if "--stop-server" in sys.argv else "cache supervisor", flush=True)
                 if "--stop-server" in sys.argv:
                     if os.environ.get("FAIL_STOP"):
                         sys.exit(42)
@@ -77,6 +79,59 @@ class RuntimeTests(unittest.TestCase):
         env = toolchain.environment(self.root)
         env["PATH"] = str(scripts) + os.pathsep + env["PATH"]
         return env
+
+    def test_cache_diagnostics_preserve_project_output_and_exit_status(self):
+        env = self.cache_fixture()
+        env["CACHE_DIAGNOSTICS"] = "1"
+        (self.root / "scripts/enter.sh").write_text(
+            "#!/bin/sh\nshift\n"
+            'if [ "${4:-}" = "command -v sccache >/dev/null" ]; then echo "cache setup"; fi\n'
+            'exec "$@"\n'
+        )
+        wrapper = textwrap.dedent("""\
+            import os, subprocess, sys
+            from pathlib import Path
+            sys.path.insert(0, sys.argv[1])
+            import toolchain
+            root = Path(sys.argv[2])
+            spec = {
+                "profile": "rust",
+                "directory": ".",
+                "commands": {"verify": [[sys.executable, "-c",
+                    "import sys; print('project output'); print('project diagnostic', file=sys.stderr); sys.exit(" + sys.argv[3] + ")"]]},
+            }
+            try:
+                with toolchain.operation(root):
+                    toolchain.run_commands(spec, "verify", dict(os.environ), root)
+            except subprocess.CalledProcessError as failure:
+                sys.exit(failure.returncode)
+            """)
+        for status in (0, 23):
+            with self.subTest(status=status):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        wrapper,
+                        str(Path(toolchain.__file__).parent),
+                        str(self.root),
+                        str(status),
+                    ],
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(result.stdout, "project output\n")
+                for diagnostic in (
+                    "cache setup",
+                    "cache supervisor",
+                    "cache stop",
+                    "project diagnostic",
+                ):
+                    self.assertIn(diagnostic + "\n", result.stderr)
+                self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
 
     def test_owned_cache_exits_and_releases_lock_after_success_and_failure(self):
         env = self.cache_fixture()

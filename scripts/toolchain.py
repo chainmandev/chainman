@@ -345,10 +345,11 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         cwd=root,
         env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
         check=True,
+        stdout=sys.stderr,
     )
     server = subprocess.Popen(
         [*prefix, "sccache"],
-        **managed_options({"cwd": root, "env": server_env}),
+        **managed_options({"cwd": root, "env": server_env, "stdout": sys.stderr}),
     )
     deadline = time.monotonic() + 120
     try:
@@ -388,6 +389,7 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
                     env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                     check=True,
                     timeout=15,
+                    stdout=sys.stderr,
                 )
             except subprocess.TimeoutExpired:
                 raise ValueError(
