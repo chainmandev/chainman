@@ -218,6 +218,21 @@ def managed_run(argv, **kwargs):
     return subprocess.run(argv, **managed_options(kwargs))
 
 
+PNPM_STORE_VARIABLES = (
+    "PNPM_CONFIG_STORE_DIR",
+    "PNPM_STORE_DIR",
+    "npm_config_store_dir",
+)
+
+
+def pnpm_store_environment(env: dict[str, str], values: dict[str, str]) -> None:
+    """Keep pnpm's current setting and legacy adapter aliases on one store."""
+    for name in PNPM_STORE_VARIABLES:
+        if name in values:
+            env.update(dict.fromkeys(PNPM_STORE_VARIABLES, values[name]))
+            return
+
+
 def environment(root: Path = ROOT) -> dict[str, str]:
     env = dict(os.environ)
     work = contained(root, f".cache/toolchain/work/{context_id()}")
@@ -260,8 +275,6 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         SCCACHE_SERVER_UDS=str(socket_directory / socket_name),
         RUSTC_WRAPPER="",
         CARGO_INCREMENTAL="0",
-        PNPM_STORE_DIR=str(downloads / "pnpm"),
-        npm_config_store_dir=str(downloads / "pnpm"),
         UV_CACHE_DIR=str(downloads / "uv"),
         RUFF_CACHE_DIR=str(work / "ruff"),
         PIP_CACHE_DIR=str(downloads / "pip"),
@@ -274,11 +287,15 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         TOOLCHAIN_WORK=str(work),
         TOOLCHAIN_DOWNLOAD_CACHE=str(downloads),
     )
+    pnpm_store_environment(env, {"PNPM_CONFIG_STORE_DIR": str(downloads / "pnpm")})
+    preserved = {}
     for name in config(root).get("cache", {}).get("preserve_environment", []):
         if name in {"RUSTC_WRAPPER", "SCCACHE_SERVER_UDS", "TOOLCHAIN_LOCK_FD"}:
             raise ValueError("Cannot override managed compiler-cache lifecycle")
         if name in os.environ:
             env[name] = os.environ[name]
+            preserved[name] = os.environ[name]
+    pnpm_store_environment(env, preserved)
     (work / "last-used").touch()
     return env
 

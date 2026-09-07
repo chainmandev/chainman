@@ -69,6 +69,28 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_pnpm_store_overrides_follow_project_then_profile_layers(self):
+        self.write("flake.nix", "{}")
+        self.write(
+            "chainman.toml",
+            """schema=1
+[environment.values]
+PNPM_CONFIG_STORE_DIR="{root}/canonical"
+PNPM_STORE_DIR="{root}/legacy"
+[profiles.native]
+flake="flake.nix#default"
+[profiles.native.environment]
+npm_config_store_dir="{root}/profile store"
+""",
+        )
+        for profile, expected in (("host", "canonical"), ("native", "profile store")):
+            with self.subTest(profile=profile):
+                with patch.object(toolchain, "managed_run") as execute:
+                    chainman.execute(self.root, profile, ["true"])
+                selected = execute.call_args.kwargs["env"]
+                for name in toolchain.PNPM_STORE_VARIABLES:
+                    self.assertEqual(selected[name], str(self.root / expected))
+
     def test_current_directory_flake_spellings_agree(self):
         self.write("flake.nix", "{}")
         for value in (

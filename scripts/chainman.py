@@ -99,6 +99,7 @@ def execute(
         configuration(root).get("environment", {}).get("values", {}),
         spec.get("environment", {}),
     ):
+        expanded = {}
         for key, value in values.items():
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(
                 value, str
@@ -106,7 +107,9 @@ def execute(
                 raise ValueError(
                     "Environment entries require variable names and strings"
                 )
-            selected[key] = value.replace("{root}", str(root))
+            expanded[key] = value.replace("{root}", str(root))
+        selected.update(expanded)
+        tc.pnpm_store_environment(selected, expanded)
     for key in configuration(root).get("environment", {}).get("unset", []):
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise ValueError("Environment unset entries must be variable names")

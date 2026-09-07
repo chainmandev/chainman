@@ -48,6 +48,13 @@ variables cannot be unset. `cache.preserve_environment` preserves specifically n
 caller cache settings. `profiles.NAME.compiler_cache=true` opts a Rust-capable custom
 profile into the managed foreground sccache lifecycle; the profile must supply sccache.
 
+pnpm uses `PNPM_CONFIG_STORE_DIR` for the shared download store. Explicitly preserved
+or configured `PNPM_STORE_DIR` and `npm_config_store_dir` values remain supported as
+adapter aliases: each environment layer synchronizes all three names. If one layer
+provides conflicting aliases, the canonical name takes precedence, followed by
+`PNPM_STORE_DIR`. Project values override preserved caller values, and profile values
+override project values, as with other environment settings.
+
 Container configuration uses `environment.pass = ["CI", "DEMO_*"]` for selected
 variable names and `container.mounts = [{source="relative/cache", target="/cache",
 read_only=false}]` for explicit project/SDK/service paths. `container.ports` lists

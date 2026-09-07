@@ -182,6 +182,29 @@ class RuntimeTests(unittest.TestCase):
                         toolchain.environment(self.root)
         self.assertFalse((self.root / "relative-cache").exists())
 
+    def test_pnpm_store_defaults_ignore_unselected_caller_settings(self):
+        downloads = self.root / "shared downloads"
+        overrides = dict.fromkeys(toolchain.PNPM_STORE_VARIABLES, "/unselected")
+        overrides["TOOLCHAIN_DOWNLOAD_CACHE"] = str(downloads)
+        with patch.dict(os.environ, overrides):
+            env = toolchain.environment(self.root)
+        for name in toolchain.PNPM_STORE_VARIABLES:
+            self.assertEqual(env[name], str(downloads / "pnpm"))
+
+    def test_preserved_pnpm_store_alias_controls_every_interpreter(self):
+        for selected in toolchain.PNPM_STORE_VARIABLES:
+            with self.subTest(selected=selected):
+                (self.root / "toolchain.toml").write_text(
+                    'schema=1\nmodules=["core"]\n[cache]\n'
+                    f'preserve_environment=["{selected}"]\n'
+                )
+                overrides = dict.fromkeys(toolchain.PNPM_STORE_VARIABLES, "/ignored")
+                overrides[selected] = str(self.root / "selected store")
+                with patch.dict(os.environ, overrides):
+                    env = toolchain.environment(self.root)
+                for name in toolchain.PNPM_STORE_VARIABLES:
+                    self.assertEqual(env[name], overrides[selected])
+
     def test_special_operation_lock_fails_without_blocking(self):
         directory = self.root / ".cache/toolchain"
         directory.mkdir(parents=True)
