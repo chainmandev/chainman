@@ -479,6 +479,53 @@ class GoTests(Fixture):
                 self.root, self.spec, "example.test/library", "v1.2.0", {}, NOW
             )
 
+    def test_security_floor_applies_to_baseline_requirements_and_all_checksums(self):
+        policy = {
+            "exceptions": [
+                {
+                    "package": "go:example.test/library",
+                    "version": "v1.2.2",
+                    "minimum_safe": "v1.2.2",
+                    "reason": "Required security repair",
+                    "advisory": "https://example.invalid/advisory",
+                    "expires": "2030-01-01T00:00:00Z",
+                }
+            ]
+        }
+        for kind in (
+            "requirement",
+            "baseline-checksum",
+            "new-checksum",
+            "pseudoversion",
+        ):
+            before = copy.deepcopy(self.before)
+            after = copy.deepcopy(self.before)
+            if kind != "requirement":
+                before["members"]["module"]["Require"] = []
+                after["members"]["module"]["Require"] = []
+                value = (
+                    "v1.2.2-0.20260101000000-aaaaaaaaaaaa"
+                    if kind == "pseudoversion"
+                    else "v1.2.0"
+                )
+                identity = [
+                    "example.test/library",
+                    value,
+                    "https://proxy.golang.org/example.test/library/@v/"
+                    + value
+                    + ".zip",
+                    "h1:" + base64.b64encode(b"x" * 32).decode(),
+                ]
+                after["identities"] = [identity]
+                if kind == "baseline-checksum":
+                    before["identities"] = [identity]
+            with (
+                self.subTest(kind=kind),
+                patch.object(source_go, "snapshot", return_value=after),
+                self.assertRaisesRegex(ValueError, "safe floor"),
+            ):
+                source_go.audit(self.root, self.spec, before, policy, NOW)
+
     def test_native_metadata_rejects_worktree_escape_and_remote_replacement(self):
         body = copy.deepcopy(self.module)
         body["Replace"] = [

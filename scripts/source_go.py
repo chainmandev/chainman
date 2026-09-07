@@ -322,6 +322,18 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
     identities = set(map(tuple, after["identities"]))
     added = identities - set(map(tuple, before["identities"]))
     local = {body["Module"]["Path"] for body in after["members"].values()}
+
+    def check_policy(package, value):
+        floor = registry.minimum_safe("go", policy, package)
+        if floor is not None and registry.Semver(value.removeprefix("v")) < floor:
+            raise ValueError("Go identity is below its declared security safe floor")
+        if not registry.compatible(
+            "go", value, registry.constraint("go", policy, package)
+        ):
+            raise ValueError("Go identity violates a declared constraint")
+
+    for package, value, _, _ in identities:
+        check_policy(package, value)
     for name, body in after["members"].items():
         previous = {
             item["Path"]: item["Version"]
@@ -329,7 +341,10 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
         }
         for item in body.get("Require") or []:
             package, value = item["Path"], item["Version"]
-            if package in local or previous.get(package) == value:
+            if package in local:
+                continue
+            check_policy(package, value)
+            if previous.get(package) == value:
                 continue
             # Existing indirect lock entries cannot bypass eligibility when promoted
             # to a newly selected requirement by resolution or reconciliation.
