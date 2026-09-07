@@ -445,9 +445,8 @@ def maven_prefix(package: str, repository: str = "central") -> str:
         repository == "google" and not group.startswith(("androidx.", "com.android."))
     ):
         raise ValueError("Unsupported Maven repository or group scope")
-    if repository == "plugins" and (
-        not group.startswith("org.jetbrains.")
-        or not name.endswith(("-gradle-plugin", ".gradle.plugin"))
+    if repository == "plugins" and not name.endswith(
+        ("-gradle-plugin", ".gradle.plugin")
     ):
         raise ValueError("Unsupported Gradle Plugin Portal coordinate scope")
     return f"{bases[repository]}/{group.replace('.', '/')}/{name}"

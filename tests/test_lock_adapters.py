@@ -165,6 +165,11 @@ class NativeLockTests(unittest.TestCase):
                 ]
             if "/git/ref/tags/" in url:
                 return {"object": {"type": "commit", "sha": checksum or "a" * 40}}
+            if "/commits/" in url:
+                return {
+                    "sha": checksum or "a" * 40,
+                    "commit": {"committer": {"date": at.isoformat()}},
+                }
             self.fail(f"Unexpected metadata query: {url}")
 
         def fetch(url, accept="application/json", method="GET"):
@@ -587,7 +592,38 @@ class NativeLockTests(unittest.TestCase):
                 {"maven_plugin_packages": [package]}, package
             )
         with self.assertRaises(ValueError):
-            registry.maven_prefix("org.unrelated:unexpected-gradle-plugin", "plugins")
+            registry.maven_prefix("org.unrelated:ordinary-library", "plugins")
+        marker = "dev.example.compiler:dev.example.compiler.gradle.plugin"
+        configured = {
+            "maven_repositories": ["central", "plugins"],
+            "maven_plugin_packages": [marker],
+        }
+        self.assertEqual(lock_adapters.maven_repository(configured, marker), "plugins")
+        self.assertEqual(
+            lock_adapters.maven_repository(
+                configured, "dev.example.other:dev.example.other.gradle.plugin"
+            ),
+            "central",
+        )
+
+    def test_swift_retargeted_release_uses_newer_commit_age(self):
+        import source_updates
+
+        items = updates.lock_identities(self.root, ["swift"])
+        published = NOW - timedelta(days=90)
+        changed = NOW - timedelta(days=1)
+        with (
+            patch.object(
+                registry,
+                "releases",
+                return_value=[registry.Release("1.5.0", published, "v1.5.0")],
+            ),
+            patch.object(registry, "github_commit", return_value="a" * 40),
+            patch.object(source_updates, "commit_time", return_value=changed),
+        ):
+            evidence = lock_adapters.evidence(self.root, "swift", SWIFT, items)
+            self.assertEqual(evidence[0].published, changed)
+            self.assertTrue(all(a.published == changed for a in evidence[0].artifacts))
 
     def test_maven_hash_fallback_requires_unchanged_artifact_date(self):
         class Response(io.BytesIO):

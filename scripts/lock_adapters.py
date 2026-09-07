@@ -285,19 +285,22 @@ def evidence(
             )
         return result
     if provider == "swift":
+        import source_updates
+
         result = []
         for release in registry.releases(provider, package):
             if release.version in values:
                 revision = registry.github_commit(package, release.identity)
+                published = max(
+                    release.published, source_updates.commit_time(package, revision)
+                )
                 artifacts = tuple(
-                    registry.Artifact(url, "git:" + revision, release.published)
+                    registry.Artifact(url, "git:" + revision, published)
                     for _, _, value, url, _ in items
                     if value == release.version
                 )
                 result.append(
-                    registry.Release(
-                        release.version, release.published, artifacts=artifacts
-                    )
+                    registry.Release(release.version, published, artifacts=artifacts)
                 )
         return result
     if provider == "maven":
