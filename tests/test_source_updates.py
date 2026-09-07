@@ -405,6 +405,8 @@ class NixTests(Fixture):
         for mutate in (
             lambda lock: lock["nodes"]["pkgs"]["locked"].update(rev=C),
             lambda lock: lock["nodes"]["root"]["inputs"].update(extra="overlay"),
+            lambda lock: lock["nodes"]["pkgs"].update(inputs={"injected": "overlay"}),
+            lambda lock: lock["nodes"]["pkgs"]["original"].update(repo="unrelated"),
             lambda lock: lock["nodes"]["pkgs"]["locked"].update(dir="unexpected"),
             lambda lock: lock["nodes"]["pkgs"]["locked"].update(
                 narHash="sha256-" + base64.b64encode(b"b" * 32).decode()
@@ -416,6 +418,30 @@ class NixTests(Fixture):
             self.json("flake.lock", content)
             with self.assertRaisesRegex(ValueError, "Nix"):
                 sources.audit(self.root, self.spec, before, {}, NOW)
+
+    def test_selected_input_dependency_structure_cannot_be_removed(self):
+        self.lock["nodes"]["pkgs"]["inputs"] = {"overlay": "overlay"}
+        self.json("flake.lock", self.lock)
+        before = sources.snapshot(self.root, self.spec)
+        self.apply_selection()
+        content = json.loads((self.root / "flake.lock").read_text())
+        del content["nodes"]["pkgs"]["inputs"]
+        self.json("flake.lock", content)
+        with self.assertRaisesRegex(ValueError, "dependency structure"):
+            sources.audit(self.root, self.spec, before, {}, NOW)
+
+    def test_exact_override_original_is_a_permitted_nix_representation(self):
+        before = sources.snapshot(self.root, self.spec)
+        self.apply_selection()
+        content = json.loads((self.root / "flake.lock").read_text())
+        content["nodes"]["pkgs"]["original"] = {
+            "type": "github",
+            "owner": "sample",
+            "repo": "packages",
+            "rev": B,
+        }
+        self.json("flake.lock", content)
+        sources.audit(self.root, self.spec, before, {}, NOW)
 
     def test_missing_declared_source_and_symlink_fail_before_execution(self):
         self.spec["inputs"][0]["repository"] = "other/packages"

@@ -110,6 +110,16 @@ class ExecutionTests(ConsumerFixture):
             "path:" + quote(str(nested), safe="/") + "#core",
         )
 
+    def test_untracked_bracket_directory_is_not_a_tracked_git_pathspec_match(self):
+        self.write("nix x/flake.nix", "{}")
+        self.init_git()
+        self.write("nix [x]/flake.nix", "{}")
+        location = self.root / "nix [x]"
+        self.assertEqual(
+            chainman.flake_reference(self.root, location, "default"),
+            "path:" + quote(str(location), safe="/") + "#default",
+        )
+
     def test_pnpm_store_overrides_follow_project_then_profile_layers(self):
         self.write("flake.nix", "{}")
         self.write(

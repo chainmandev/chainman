@@ -38,6 +38,7 @@ def flake_reference(root: Path, location: Path, attribute: str) -> str:
             tracked = subprocess.run(
                 [
                     "git",
+                    "--literal-pathspecs",
                     "-C",
                     str(root),
                     "ls-files",

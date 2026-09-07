@@ -713,11 +713,27 @@ def audit_nix(
                 continue
             plan = expected[key]
             selected = new["nodes"][key]["locked"]
-            if any(
-                new["nodes"][key].get(k) != value
-                for k, value in node.items()
-                if k not in ("locked", "original")
+            owner, repository = plan["repository"].split("/")
+            canonical_original = {
+                "type": "github",
+                "owner": owner,
+                "repo": repository,
+                "rev": plan["revision"],
+            }
+            if new["nodes"][key].get("original") not in (
+                node.get("original"),
+                canonical_original,
             ):
+                raise ValueError(
+                    "Nix changed the input's declared source beyond its exact selected revision"
+                )
+            if {
+                k: value
+                for k, value in new["nodes"][key].items()
+                if k not in ("locked", "original")
+            } != {
+                k: value for k, value in node.items() if k not in ("locked", "original")
+            }:
                 raise ValueError(
                     "Nix changed the selected input's dependency structure"
                 )
