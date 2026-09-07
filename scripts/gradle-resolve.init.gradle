@@ -1,28 +1,56 @@
 // Resolve and lock every project configuration, including buildscript inputs.
 // This script is passed explicitly by the updater; it is never installed globally.
+import groovy.json.JsonOutput
+import org.gradle.api.artifacts.component.ModuleComponentSelector
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+import org.gradle.api.artifacts.dsl.LockMode
+import java.security.MessageDigest
+
 gradle.beforeProject { project ->
     project.dependencyLocking.lockAllConfigurations()
+    if (!gradle.startParameter.writeDependencyLocks) {
+        project.dependencyLocking.lockMode = LockMode.STRICT
+    }
     project.buildscript.configurations.configureEach {
         resolutionStrategy.activateDependencyLocking()
     }
 }
 
 gradle.rootProject { root ->
-    root.tasks.register('chainmanResolveAll') {
+    ['chainmanResolveAll', 'chainmanInspect'].each { taskName ->
+    root.tasks.register(taskName) {
         notCompatibleWithConfigurationCache('Dependency update resolves the complete configuration inventory')
+        dependsOn { gradle.includedBuilds.collect { it.task(':' + taskName) } }
         doLast {
-            if (!gradle.startParameter.writeDependencyLocks) {
-                throw new GradleException('chainmanResolveAll requires --write-locks')
+            if (gradle.startParameter.writeDependencyLocks != (taskName == 'chainmanResolveAll')) {
+                throw new GradleException('Chainman resolution writes locks; inspection must not write them')
             }
+            def projects = []
+            def edges = []
             root.allprojects.each { project ->
+                projects.add([id: project.buildTreePath, directory: project.projectDir.absolutePath])
                 [project.configurations, project.buildscript.configurations].each { configurations ->
                     configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
                         // resolve() throws on unresolved dependencies; the report-only
                         // dependencies task can otherwise print FAILED and still exit 0.
                         configuration.resolve()
+                        configuration.incoming.resolutionResult.allDependencies.each { dependency ->
+                            if (dependency instanceof ResolvedDependencyResult && dependency.selected.id instanceof ProjectComponentIdentifier) {
+                                def requested = dependency.requested
+                                edges.add([coordinate: requested instanceof ModuleComponentSelector ? "${requested.group}:${requested.module}" : null,
+                                    selected: dependency.selected.id.buildTreePath])
+                            }
+                        }
                     }
                 }
             }
+            def destination = System.getenv('CHAINMAN_GRADLE_REPORT_DIR')
+            if (destination) {
+                def key = MessageDigest.getInstance('SHA-256').digest(root.projectDir.absolutePath.bytes).encodeHex().toString()
+                new File(destination, key + '.json').text = JsonOutput.toJson([schema: 1, projects: projects, edges: edges])
+            }
         }
+    }
     }
 }

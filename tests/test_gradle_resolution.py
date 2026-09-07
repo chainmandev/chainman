@@ -1,18 +1,125 @@
 """Real multi-project resolution against disposable, offline Maven fixtures."""
 
+import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import lock_adapters
 
 
 @unittest.skipUnless(
     os.environ.get("CHAINMAN_TEST_GRADLE") == "1", "requires the pinned Gradle profile"
 )
 class GradleResolutionTests(unittest.TestCase):
+    def test_composite_graph_binds_actual_sources_and_inspection_is_read_only(self):
+        with tempfile.TemporaryDirectory(prefix="gradle composite ") as temporary:
+            root = Path(temporary)
+            (root / "settings.gradle").write_text(
+                "rootProject.name='app'\nincludeBuild('library')\n"
+            )
+            (root / "build.gradle").write_text(
+                "plugins { id 'java' }\ndependencies { implementation 'sample:library:1.0.0' }\n"
+            )
+            library = root / "library"
+            library.mkdir()
+            (library / "settings.gradle").write_text("rootProject.name='library'\n")
+            (library / "build.gradle").write_text(
+                "plugins { id 'java-library' }\ngroup='sample'\nversion='1.0.0'\n"
+            )
+            reports = root / "reports"
+            reports.mkdir()
+            env = dict(
+                os.environ,
+                GRADLE_USER_HOME=str(root / "gradle-home"),
+                CHAINMAN_GRADLE_REPORT_DIR=str(reports),
+            )
+            base = [
+                shutil.which("gradle"),
+                "--offline",
+                "--no-daemon",
+                "--max-workers=2",
+                "--console=plain",
+                "--init-script",
+                str(
+                    Path(__file__).resolve().parents[1]
+                    / "scripts/gradle-resolve.init.gradle"
+                ),
+            ]
+
+            def run(arguments):
+                for previous in reports.glob("*.json"):
+                    previous.unlink()
+                result = subprocess.run(
+                    base + arguments,
+                    cwd=root,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=120,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout)
+                return [
+                    json.loads(p.read_text()) for p in sorted(reports.glob("*.json"))
+                ]
+
+            report = run(
+                [
+                    "chainmanResolveAll",
+                    "--write-locks",
+                    "--write-verification-metadata",
+                    "sha256",
+                ]
+            )
+            spec = {"local_projects": {"sample:library": "library"}}
+            graph = lock_adapters.validate_gradle_projects(root, spec, report)
+            self.assertTrue(
+                any(edge["coordinate"] == "sample:library" for edge in graph["edges"])
+            )
+            locks = {
+                p: p.read_bytes()
+                for pattern in ("*.lockfile", "verification-metadata.xml")
+                for p in root.rglob(pattern)
+            }
+            self.assertTrue(locks)
+            inspected = run(["--dependency-verification", "strict", "chainmanInspect"])
+            self.assertEqual(
+                lock_adapters.validate_gradle_projects(root, spec, inspected), graph
+            )
+            self.assertEqual({p: p.read_bytes() for p in locks}, locks)
+            dummy = root / "dummy"
+            dummy.mkdir()
+            (dummy / "build.gradle").write_text("")
+            with self.assertRaisesRegex(ValueError, "binding"):
+                lock_adapters.validate_gradle_projects(
+                    root, {"local_projects": {"sample:library": "dummy"}}, inspected
+                )
+            with self.assertRaisesRegex(ValueError, "binding"):
+                lock_adapters.validate_gradle_projects(root, {}, inspected)
+            escaped = json.loads(json.dumps(inspected))
+            escaped[0]["projects"][0]["directory"] = str(root.parent / "outside")
+            with self.assertRaisesRegex(ValueError, "escapes"):
+                lock_adapters.validate_gradle_projects(root, spec, escaped)
+            (root / "settings.gradle").write_text(
+                "rootProject.name='app'\nincludeBuild('dummy') { dependencySubstitution { substitute module('sample:library') using project(':') } }\n"
+            )
+            (dummy / "build.gradle").write_text((library / "build.gradle").read_text())
+            (dummy / "settings.gradle").write_text("rootProject.name='dummy'\n")
+            # A reconciliation hook can redirect substitution after resolution.
+            # Reinspect the actual graph instead of trusting the earlier report.
+            for lock in library.glob("*.lockfile"):
+                shutil.copyfile(lock, dummy / lock.name)
+            redirected = run(["--dependency-verification", "strict", "chainmanInspect"])
+            with self.assertRaisesRegex(ValueError, "binding"):
+                lock_adapters.validate_gradle_projects(root, spec, redirected)
+
     def test_child_configuration_and_transitive_locks_and_resolution_failure(self):
         with tempfile.TemporaryDirectory(prefix="gradle project ") as temporary:
             root = Path(temporary)

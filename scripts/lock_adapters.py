@@ -139,6 +139,10 @@ def local_gradle_projects(root: Path, spec: dict) -> dict:
         )
     for package, relative in declared.items():
         registry.maven_prefix(package)
+        if not isinstance(relative, str) or not relative:
+            raise ValueError(
+                "Local Gradle project directories must be nonempty relative paths"
+            )
         directory = contained(root, relative)
         if not any(
             contained(root, str((directory / name).relative_to(root))).is_file()
@@ -146,6 +150,50 @@ def local_gradle_projects(root: Path, spec: dict) -> dict:
         ):
             raise ValueError("Local Gradle project lacks its declared build source")
     return declared
+
+
+def validate_gradle_projects(root: Path, spec: dict, reports: list) -> dict:
+    """Join native build-tree identities to actual paths before admitting locals."""
+    local = local_gradle_projects(root, spec)
+    projects, edges = {}, []
+    if not reports:
+        raise ValueError("Gradle resolution did not report its native project graph")
+    for report in reports:
+        if (
+            report.get("schema") != 1
+            or not isinstance(report.get("projects"), list)
+            or not isinstance(report.get("edges"), list)
+        ):
+            raise ValueError("Malformed Gradle project graph evidence")
+        for project in report["projects"]:
+            identity, location = project.get("id"), project.get("directory")
+            if (
+                not isinstance(identity, str)
+                or not identity.startswith(":")
+                or not isinstance(location, str)
+            ):
+                raise ValueError("Malformed native Gradle project identity")
+            path = Path(location)
+            if not path.is_absolute() or not path.is_relative_to(root):
+                raise ValueError(
+                    "Native Gradle project source escapes the adopted project"
+                )
+            relative = str(path.relative_to(root))
+            contained(root, relative)
+            if identity in projects and projects[identity] != relative:
+                raise ValueError("Ambiguous native Gradle build-tree identity")
+            projects[identity] = relative
+        edges.extend(report["edges"])
+    for edge in edges:
+        selected, coordinate = edge.get("selected"), edge.get("coordinate")
+        if selected not in projects:
+            raise ValueError("Gradle selected an unreported native project")
+        if coordinate is not None:
+            if coordinate not in local or projects[selected] != local[coordinate]:
+                raise ValueError(
+                    "Gradle module substitution differs from its declared local project binding"
+                )
+    return {"projects": projects, "edges": edges}
 
 
 def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:

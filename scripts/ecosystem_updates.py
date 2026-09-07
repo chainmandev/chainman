@@ -8,6 +8,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import tempfile
 
 from packaging.requirements import Requirement
 from packaging.version import Version
@@ -362,6 +363,41 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
     return chosen
 
 
+def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dict:
+    """Ask Gradle for actual local identities; final inspection never rewrites locks."""
+    executable = "./gradlew" if (directory / "gradlew").is_file() else "gradle"
+    command = [
+        executable,
+        "--no-daemon",
+        "--init-script",
+        str(tc.RUNTIME / "scripts/gradle-resolve.init.gradle"),
+    ]
+    command += (
+        [
+            "chainmanResolveAll",
+            "--write-locks",
+            "--write-verification-metadata",
+            "sha256",
+        ]
+        if write
+        else ["--offline", "--dependency-verification", "strict", "chainmanInspect"]
+    )
+    with tempfile.TemporaryDirectory(prefix="chainman-gradle-") as reports:
+        env = {
+            **tc.environment(root),
+            "TOOLCHAIN_FRESH": "1",
+            "CHAINMAN_GRADLE_REPORT_DIR": reports,
+        }
+        chainman.execute(
+            root, spec.get("profile", "gradle"), command, cwd=directory, env=env
+        )
+        values = [
+            json.loads(path.read_text())
+            for path in sorted(Path(reports).glob("*.json"))
+        ]
+        return lock_adapters.validate_gradle_projects(root, spec, values)
+
+
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
@@ -375,6 +411,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         (pin, choose(root, pin, spec, policy, now)) for pin in pins(root, spec, specs)
     ]
     changed = []
+    project_graphs = []
     for pin, chosen in planned:
         if chosen and manifests.replace(pin, chosen, root):
             changed.append(pin["file"])
@@ -426,28 +463,13 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         if kind == "gradle":
             # The ordinary dependencies task visits only one project. Traverse all
             # resolvable project and buildscript configurations before final audit.
-            executable = "./gradlew" if (directory / "gradlew").is_file() else "gradle"
-            chainman.execute(
-                root,
-                spec.get("profile", kind),
-                [
-                    executable,
-                    "--no-daemon",
-                    "--init-script",
-                    str(tc.RUNTIME / "scripts/gradle-resolve.init.gradle"),
-                    "chainmanResolveAll",
-                    "--write-locks",
-                    "--write-verification-metadata",
-                    "sha256",
-                ],
-                cwd=directory,
-                env=env,
-            )
+            project_graphs.append(gradle_graph(root, spec, directory, write=True))
         if kind == "python":
             updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)
     audit(root, spec, before, policy, now)
     return {
         "changed_manifests": sorted(set(changed)),
+        "project_graphs": project_graphs,
         "pins": [
             {"pin": pin, "value": old_requirement(root, pin)} for pin, _ in planned
         ],
@@ -488,3 +510,8 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
         now,
         specs=specs,
     )
+    if spec["adapter"] == "gradle":
+        for member in specs.values():
+            gradle_graph(
+                root, spec, tc.contained(root, member["directory"]), write=False
+            )

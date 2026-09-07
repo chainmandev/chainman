@@ -91,7 +91,11 @@ configuration, requiring failures to stop the update. A root `dependencies` repo
 alone does not cover child projects. Exact `local_projects` coordinate-to-directory
 bindings keep first-party composite/project dependencies out of registry selection;
 each binding must remain inside the adopted project and contain its Gradle build
-source. Corresponding external lock or verification artifacts are rejected, so this
+source. Gradle 8.3 or later reports actual build-tree identities and directories,
+including included builds. Module substitutions must resolve to the exact declared
+directory; undeclared and outside-project selections fail. After reconciliation,
+an offline native inspection with strict locks and artifact verification repeats
+that check without regenerating locks. Corresponding external lock or verification artifacts are rejected, so this
 is not a publication-age exemption for artifacts from Maven Local or a registry.
 The project owns its actual `includeBuild`/dependency-substitution configuration.
 
