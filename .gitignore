@@ -1,5 +1,6 @@
 /.cache/
 /dist/
+examples/javascript/packages/*/dist/
 **/__pycache__/
 *.pyc
 **/node_modules/
