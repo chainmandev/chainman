@@ -39,7 +39,7 @@ def archive_bytes(files: dict[str, tuple[bytes, int]], version: str) -> bytes:
 
 def git(root, *args) -> bytes:
     return subprocess.check_output(
-        ["git", "--literal-pathspecs", "-C", str(root), *args]
+        ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(root), *args]
     )
 
 

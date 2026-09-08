@@ -17,6 +17,12 @@ import package
 
 class DistributionTests(unittest.TestCase):
     def test_release_reads_one_immutable_commit_when_head_moves(self):
+        self.release_revision_case(replace=False)
+
+    def test_release_ignores_replacement_refs_added_after_revision_capture(self):
+        self.release_revision_case(replace=True)
+
+    def release_revision_case(self, *, replace):
         with (
             tempfile.TemporaryDirectory(prefix="release source ") as temporary,
             patch.dict(
@@ -63,14 +69,20 @@ class DistributionTests(unittest.TestCase):
             def advancing_git(directory, *args):
                 result = git(directory, *args)
                 if args == ("rev-parse", "HEAD"):
-                    git(root, "checkout", "--detach", later)
+                    if replace:
+                        git(root, "replace", original, later)
+                    else:
+                        git(root, "checkout", "--detach", later)
                 return result
 
             output = Path(temporary) / "release"
             with patch.object(package, "git", side_effect=advancing_git):
                 metadata = package.release(root, output)
             self.assertEqual(metadata["revision"], original)
-            self.assertEqual(git(root, "rev-parse", "HEAD").decode().strip(), later)
+            self.assertEqual(
+                git(root, "rev-parse", "HEAD").decode().strip(),
+                original if replace else later,
+            )
             self.assertEqual(
                 example.read_archive(
                     (output / "chainman-1.0.0.tar.gz").read_bytes(), "1.0.0"
