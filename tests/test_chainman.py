@@ -721,16 +721,62 @@ class RuntimeReleaseTests(ConsumerFixture):
         for name, value in (
             ("github_releases", releases),
             ("github_commit", "b" * 40),
-            ("data", self.metadata),
         ):
             mocked = patch.object(registry, name, return_value=value)
             mocked.start()
             self.addCleanup(mocked.stop)
-        downloaded = patch.object(
-            registry, "fetch", return_value=(b"expected archive", {})
+        self.api = "https://api.github.com/repos/chainmandev/chainman"
+        dated = patch.object(
+            consumer_updates.source_updates,
+            "commit_time",
+            return_value=releases[0].published,
         )
+        dated.start()
+        self.addCleanup(dated.stop)
+        metadata = patch.object(registry, "data", side_effect=self.release_metadata)
+        metadata.start()
+        self.addCleanup(metadata.stop)
+        downloaded = patch.object(registry, "fetch", side_effect=self.release_download)
         self.download = downloaded.start()
         self.addCleanup(downloaded.stop)
+
+    def release_metadata(self, url):
+        self.assertEqual(url, self.api + "/releases/tags/v2.0.0")
+        published = (self.now - timedelta(days=40)).isoformat()
+        return {
+            "tag_name": "v2.0.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": published,
+            "assets": [
+                {
+                    "id": number,
+                    "name": name,
+                    "state": "uploaded",
+                    "size": len(body),
+                    "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                    "created_at": published,
+                    "updated_at": published,
+                }
+                for number, name, body in (
+                    (1, "chainman-release.json", json.dumps(self.metadata).encode()),
+                    (2, "chainman-2.0.0.tar.gz", b"expected archive"),
+                )
+            ],
+        }
+
+    def release_download(self, url, *, accept):
+        self.assertEqual(accept, "application/octet-stream")
+        if url == self.api + "/releases/assets/1":
+            return json.dumps(self.metadata).encode(), {}
+        self.assertEqual(url, self.api + "/releases/assets/2")
+        return b"expected archive", {}
+
+    def assert_downloaded_exact_assets(self):
+        self.assertEqual(
+            [call.args[0] for call in self.download.call_args_list],
+            [self.api + "/releases/assets/1", self.api + "/releases/assets/2"],
+        )
 
     def test_ineligible_release_fails_without_fetching_or_rewriting_pin(self):
         with (
@@ -751,15 +797,14 @@ class RuntimeReleaseTests(ConsumerFixture):
         for overrides in ({"version": "9.0.0"}, {"revision": "c" * 40}):
             with (
                 self.subTest(overrides=overrides),
-                patch.object(
-                    registry, "data", return_value={**self.metadata, **overrides}
-                ),
+                patch.dict(self.metadata, overrides),
                 patch.object(toolchain, "managed_run") as fetch,
             ):
                 with self.assertRaises(ValueError):
                     consumer_updates.runtime_candidate(self.root, self.policy, self.now)
                 fetch.assert_not_called()
-                self.download.assert_not_called()
+                self.assert_downloaded_exact_assets()
+                self.download.reset_mock()
                 self.assertEqual(
                     (self.root / "chainman.lock").read_bytes(), self.initial_lock
                 )
@@ -771,9 +816,7 @@ class RuntimeReleaseTests(ConsumerFixture):
         with patch.object(toolchain, "managed_run", side_effect=failed):
             with self.assertRaises(subprocess.CalledProcessError):
                 consumer_updates.runtime_candidate(self.root, self.policy, self.now)
-        self.download.assert_called_once_with(
-            self.metadata["url"], accept="application/octet-stream"
-        )
+        self.assert_downloaded_exact_assets()
         self.assertEqual((self.root / "chainman.lock").read_bytes(), self.initial_lock)
 
     @classmethod
@@ -832,9 +875,7 @@ class RuntimeReleaseTests(ConsumerFixture):
         self.assertEqual(lock["revision"], "b" * 40)
         self.assertEqual(lock["narHash"], self.metadata["narHash"])
         self.assertIn("--raw", fetch.call_args.args[0])
-        self.download.assert_called_once_with(
-            self.metadata["url"], accept="application/octet-stream"
-        )
+        self.assert_downloaded_exact_assets()
 
     def test_bundled_checksum_failure_never_commits_or_replaces_bundle(self):
         candidate = self.stored_candidate()
@@ -853,7 +894,7 @@ class RuntimeReleaseTests(ConsumerFixture):
                     ["nix"], 0, str(candidate) + "\n"
                 ),
             ),
-            patch.object(registry, "fetch", return_value=(b"wrong archive", {})),
+            patch.dict(self.metadata, {"archive_sha256": "0" * 64}),
             patch.object(consumer_updates, "verify") as verify,
         ):
             with self.assertRaisesRegex(ValueError, "checksum"):
