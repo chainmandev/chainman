@@ -64,11 +64,18 @@ class RuntimeTests(unittest.TestCase):
                         Path(endpoint).write_bytes(b"replacement")
                 else:
                     os.fstat(int(os.environ["TOOLCHAIN_LOCK_FD"]))
+                    Path("server-idle-timeout").write_text(os.environ["SCCACHE_IDLE_TIMEOUT"])
                     with socket.socket(socket.AF_UNIX) as listener:
                         listener.bind(endpoint)
                         listener.listen()
+                        listener.settimeout(0.05)
                         while True:
-                            connection, _ = listener.accept()
+                            if Path("exit-server").exists():
+                                sys.exit(int(Path("exit-server").read_text()))
+                            try:
+                                connection, _ = listener.accept()
+                            except socket.timeout:
+                                continue
                             with connection:
                                 if connection.recv(16) == b"stop":
                                     break
@@ -169,6 +176,40 @@ class RuntimeTests(unittest.TestCase):
                 with toolchain.compiler_cache("rust", env, self.root):
                     self.fail("Started work at an unowned endpoint")
         self.assertEqual(endpoint.read_bytes(), b"unowned")
+
+    def test_owned_server_disables_idle_exit_and_reaps_early_exit(self):
+        env = self.cache_fixture()
+        env["SCCACHE_IDLE_TIMEOUT"] = "1"
+        endpoint = Path(env["SCCACHE_SERVER_UDS"])
+        for status in (0, 29):
+            with self.subTest(status=status):
+                with toolchain.operation(self.root):
+                    with (
+                        self.assertRaisesRegex(ValueError, "status 29")
+                        if status
+                        else toolchain.contextlib.nullcontext()
+                    ):
+                        with toolchain.compiler_cache("rust", env, self.root):
+                            self.assertEqual(
+                                (self.root / "server-idle-timeout").read_text(), "0"
+                            )
+                            (self.root / "exit-server").write_text(str(status))
+                            deadline = time.monotonic() + 5
+                            while True:
+                                try:
+                                    with toolchain.socket.socket(
+                                        toolchain.socket.AF_UNIX
+                                    ) as connection:
+                                        connection.connect(str(endpoint))
+                                except ConnectionRefusedError:
+                                    break
+                                if time.monotonic() >= deadline:
+                                    self.fail("Owned test server did not exit")
+                                time.sleep(0.01)
+                self.assertFalse(endpoint.exists())
+                with toolchain.operation(self.root):
+                    pass
+                (self.root / "exit-server").unlink()
 
     def test_failed_environment_realization_never_starts_a_cache_server(self):
         env = self.cache_fixture()

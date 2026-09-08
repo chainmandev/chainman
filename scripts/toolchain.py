@@ -336,6 +336,9 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         env,
         SCCACHE_START_SERVER="1",
         SCCACHE_NO_DAEMON="1",
+        # The owned server spans the entire operation, including long browser or
+        # service phases with no Rust compilation. Cleanup owns its shutdown.
+        SCCACHE_IDLE_TIMEOUT="0",
         CHAINMAN_COMPILER_OWNER=str(root),
     )
     # Realizing a cold Nix closure can take longer than a server readiness
@@ -382,19 +385,25 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         raise
     finally:
         try:
-            try:
-                managed_run(
-                    [*prefix, "sccache", "--stop-server"],
-                    cwd=root,
-                    env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
-                    check=True,
-                    timeout=15,
-                    stdout=sys.stderr,
-                )
-            except subprocess.TimeoutExpired:
-                raise ValueError(
-                    "Compiler cache stop request timed out; the server retains its operation lock"
-                ) from None
+            if server.poll() is None:
+                try:
+                    managed_run(
+                        [*prefix, "sccache", "--stop-server"],
+                        cwd=root,
+                        env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
+                        check=True,
+                        timeout=15,
+                        stdout=sys.stderr,
+                    )
+                except subprocess.CalledProcessError:
+                    # It may have exited between poll and the stop request.
+                    # Only a reaped owned process permits endpoint cleanup.
+                    if server.poll() is None:
+                        raise
+                except subprocess.TimeoutExpired:
+                    raise ValueError(
+                        "Compiler cache stop request timed out; inspect the owned server and its operation lock"
+                    ) from None
             try:
                 status = server.wait(timeout=15)
             except subprocess.TimeoutExpired:

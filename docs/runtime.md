@@ -37,7 +37,9 @@ Git identity and signing policy without mounting or inheriting their enclosing r
 Package managers own locking in shared downloads. Rust compiler cache servers run
 in the foreground and retain the project operation lock until they exit. Cold Nix
 environment realization completes before the cache-server readiness deadline starts.
-A process
+The owned server has no idle timeout, so a long non-Rust phase cannot outlive it.
+Cleanup reaps an already-exited server, removes only its unchanged socket, and
+reports a nonzero server exit. A process
 that is forcibly killed can leave children holding that lock; inspect those processes
 before stopping an exact compiler endpoint. Do not remove a live operation lock.
 
