@@ -57,8 +57,9 @@ The pinned Nix 2.34.8 includes a narrow patch for renaming read-only owned outpu
 directories as capability-free root. It preserves fresh-inode copying, hash checks
 and original modes, including restoration on rename failure. Updating Nix requires
 reviewing or retiring that version-bounded patch; it is never applied speculatively
-to a new version. Run `just verify-nix` on the host to repeat the full patched
-Nix package build and its upstream unit/functional gates after either changes.
+to a new version. In the Chainman source checkout, run `just verify-nix` on the
+host to repeat the full patched Nix package build and its upstream unit/functional
+gates after changing either the patch or pin.
 
 Cache reporting distinguishes project builds, shared downloads and free disk bytes.
 Limits and stale age live in `cache`; automatic pruning removes only old declared
