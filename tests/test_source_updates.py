@@ -586,6 +586,75 @@ class GoTests(Fixture):
             "identities": [],
         }
 
+    def test_local_module_identity_uses_go_import_path_rules(self):
+        for module in (
+            "api",
+            "local_app",
+            "local+tool",
+            "Example/local.v1",
+            ".local/api",
+        ):
+            with self.subTest(module=module):
+                source_go.local_module_path(module)
+        for module in (
+            None,
+            "",
+            "-local",
+            "/local",
+            "local/",
+            "local//api",
+            "local/..",
+            "local/...",
+            "local/end.",
+            "local/CON.txt",
+            "local/lpt9",
+            "local/x~12.go",
+            "local/a b",
+            "local/@v",
+            "local/%2f",
+            "local\\api",
+            "local/é",
+        ):
+            with (
+                self.subTest(module=module),
+                self.assertRaisesRegex(ValueError, "local Go"),
+            ):
+                source_go.local_module_path(module)
+
+    def test_local_names_never_relax_remote_queries_or_checksums(self):
+        for module in ("api", "local_app", "local+tool"):
+            with (
+                self.subTest(module=module),
+                patch.object(source_go, "native_json") as native,
+                self.assertRaisesRegex(ValueError, "public Go"),
+            ):
+                source_go.query(self.root, self.spec, module, "latest")
+            native.assert_not_called()
+            self.write(
+                "module/go.sum",
+                module + " v1.2.0 h1:" + base64.b64encode(b"x" * 32).decode() + "\n",
+            )
+            with self.assertRaisesRegex(ValueError, "public Go"):
+                source_go.checksum_identities(self.root, {"module": self.module}, {})
+        self.assertEqual(
+            registry.go_path("example.test/library"), "example.test/library"
+        )
+
+    def test_undeclared_local_requirement_fails_before_resolution_or_native_audit(self):
+        state = copy.deepcopy(self.before)
+        state["members"]["module"]["Require"][0]["Path"] = "undeclared_local"
+        with (
+            patch.object(source_go, "snapshot", return_value=state),
+            patch.object(source_go, "go_candidates") as candidates,
+            patch.object(source_go, "execute") as native,
+        ):
+            with self.assertRaisesRegex(ValueError, "public Go"):
+                source_go.resolve(self.root, self.spec, {}, NOW)
+            with self.assertRaisesRegex(ValueError, "public Go"):
+                source_go.audit(self.root, self.spec, state, {}, NOW)
+        candidates.assert_not_called()
+        native.assert_not_called()
+
     def test_compatible_never_falls_through_to_a_major(self):
         candidates = [registry.Release("v1.3.0", OLD), registry.Release("v2.0.0", OLD)]
         with (
@@ -817,6 +886,42 @@ class GoTests(Fixture):
         result = sources.resolve(self.root, spec, {}, NOW)
         self.assertEqual(result["changed"], [])
         sources.audit(self.root, spec, before, {}, NOW)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_GO_NATIVE") == "1", "explicit native Go lane"
+    )
+    def test_real_go_workspace_with_declared_local_names_and_replacement(self):
+        self.write("workspace/go.work", "go 1.20\n\nuse (\n\t./app\n\t./lib\n)\n")
+        self.write(
+            "workspace/app/go.mod",
+            "module api+cli\n\ngo 1.20\n\nrequire local_lib v0.0.0\n\nreplace local_lib => ../lib\n",
+        )
+        self.write(
+            "workspace/app/main.go",
+            'package main\nimport "local_lib"\nfunc main() { _ = local_lib.Value }\n',
+        )
+        self.write("workspace/lib/go.mod", "module local_lib\n\ngo 1.20\n")
+        self.write("workspace/lib/value.go", "package local_lib\nconst Value = 1\n")
+        spec = {"adapter": "go", "directories": ["workspace"]}
+        with patch.object(
+            source_go, "query", side_effect=AssertionError("local source fetched")
+        ):
+            before = sources.snapshot(self.root, spec)
+            self.assertEqual(before["identities"], [])
+            result = sources.resolve(self.root, spec, {}, NOW)
+            self.assertEqual(result["changed"], [])
+            sources.audit(self.root, spec, before, {}, NOW)
+            source_go.execute(
+                self.root,
+                spec,
+                ["go", "test", "./..."],
+                directory=self.root / "workspace/app",
+                workspace="workspace/go.work",
+            )
+        with self.assertRaisesRegex(ValueError, "not a declared workspace module"):
+            sources.snapshot(
+                self.root, {"adapter": "go", "directories": ["workspace/app"]}
+            )
 
 
 class ToolchainTests(Fixture):

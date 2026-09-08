@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import tempfile
 from datetime import datetime, timedelta
@@ -102,6 +103,26 @@ def local_directory(root: Path, base: Path, value: str) -> Path:
     return location
 
 
+def local_module_path(module: str) -> None:
+    # Go checks main/local module names as import paths, not public fetch paths.
+    # Match x/mod/module.CheckImportPath while keeping registry.go_path strict.
+    if (
+        not isinstance(module, str)
+        or not re.fullmatch(r"[A-Za-z0-9._~+/-]+", module)
+        or module.startswith("-")
+    ):
+        raise ValueError("Invalid local Go module identity")
+    for part in module.split("/"):
+        short = part.split(".", 1)[0]
+        if (
+            not part
+            or part.endswith(".")
+            or re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])", short)
+            or re.search(r"~[0-9]+$", short)
+        ):
+            raise ValueError("Invalid local Go module identity")
+
+
 def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
     directories = spec.get("directories")
     if not isinstance(directories, list) or not directories:
@@ -132,7 +153,7 @@ def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
             root, spec, ["go", "mod", "edit", "-json", str(directory / "go.mod")]
         )
         module = body.get("Module", {}).get("Path")
-        registry.go_path(module)
+        local_module_path(module)
         if any(m.get("Module", {}).get("Path") == module for m in members.values()):
             raise ValueError("Go workspace has duplicate module identities")
         members[str(directory.relative_to(root))] = body
@@ -251,6 +272,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
             package, current = item["Path"], item["Version"]
             if package in local:
                 continue
+            registry.go_path(package)
             if registry.version("go", current) is None:
                 # Existing exact pseudoversions remain explicit pins. A changed
                 # pseudoversion introduced by a hook still undergoes the final audit.
@@ -341,6 +363,7 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
         if item["Path"] not in local
     ]
     for item in public_requirements:
+        registry.go_path(item["Path"])
         check_policy(item["Path"], item["Version"])
     public_packages = {item[0] for item in identities} | {
         item["Path"] for item in public_requirements
