@@ -196,7 +196,9 @@ run; all required checks belong in verification.
 
 Preview copies visible project files into a disposable Git repository, rebinds the
 project root and executes the same update and verification path. Nested launchers
-verify/fetch the copied pin. It preserves the original checkout, disables external
+verify/fetch the copied pin. Source symlinks must be relative and remain within
+their copied project or submodule; absolute, escaping and cyclic links are rejected
+before update hooks execute. It preserves the original checkout, disables external
 Git configuration in the copy, and does not test the operator's signing backend or
 filters. It uses the existing development host and shared caches, so it is not a
 sandbox for hostile update scripts. Linked submodules require their own transactions.

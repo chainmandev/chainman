@@ -236,6 +236,29 @@ def raw_entries(root: Path, names) -> dict:
     return entries
 
 
+def preview_link(root: Path, path: Path) -> str:
+    """Keep copied link text relative and contained before any workflow executes."""
+    value = os.readlink(path)
+    if Path(value).is_absolute():
+        raise ValueError("Preview rejects absolute source symlinks")
+    lexical = Path(os.path.abspath(path.parent / value))
+    try:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            pass  # A portable link may target a not-yet-generated file.
+        actual = path.resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise ValueError(
+            "Preview rejects unresolved or cyclic source symlinks"
+        ) from None
+    if not lexical.is_relative_to(root) or not actual.is_relative_to(root):
+        raise ValueError(
+            "Preview rejects source symlinks escaping their copied project"
+        )
+    return value
+
+
 def copy_submodule(source: Path, target: Path, identity: str) -> None:
     """Copy only the current commit and tree, with no history, remotes or hooks."""
     target.mkdir(parents=True, exist_ok=True)
@@ -288,7 +311,7 @@ def copy_submodule(source: Path, target: Path, identity: str) -> None:
             if state["initialized"]:
                 copy_submodule(original, destination, oid)
         elif original.is_symlink():
-            destination.symlink_to(os.readlink(original))
+            destination.symlink_to(preview_link(source, original))
         else:
             shutil.copy2(original, destination)
     if raw_entries(target, tree_entries(source, identity)) != tree_entries(
@@ -325,7 +348,7 @@ def prepare_preview(root: Path, copy: Path, before: dict) -> None:
                 "160000," + links[name] + "," + name,
             )
         elif source.is_symlink():
-            target.symlink_to(os.readlink(source))
+            target.symlink_to(preview_link(root, source))
             files.append(name)
         elif source.is_file():
             shutil.copy2(source, target)

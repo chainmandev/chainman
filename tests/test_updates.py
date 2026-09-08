@@ -506,6 +506,83 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.assertEqual((self.root / "deps.txt").read_text(), "before\n")
 
+    def test_preview_rejects_links_to_original_or_external_files_before_hooks(self):
+        with tempfile.TemporaryDirectory(prefix="preview external ") as external:
+            canary = Path(external) / "canary.txt"
+            canary.write_text("untouched")
+            for target in (
+                str(self.root / "deps.txt"),
+                str(canary),
+                os.path.relpath(canary, self.root),
+                "cycle",
+            ):
+                with self.subTest(target=target):
+                    link = self.root / "cycle"
+                    link.symlink_to(target)
+                    self.git("add", "cycle")
+                    self.git("commit", "-m", "source link")
+                    with self.assertRaisesRegex(ValueError, "Preview rejects"):
+                        self.preview(
+                            lambda root, *_: (root / "cycle").write_text("changed"),
+                            lambda *_: self.fail("verification must not run"),
+                        )
+                    self.assertEqual(canary.read_text(), "untouched")
+                    self.assertEqual((self.root / "deps.txt").read_text(), "before\n")
+                    link.unlink()
+                    self.git("add", "cycle")
+                    self.git("commit", "-m", "remove source link")
+
+    def test_preview_preserves_contained_relative_and_dangling_links(self):
+        (self.root / "alias").symlink_to("deps.txt")
+        (self.root / "dangling").symlink_to("build/not-created.txt")
+        self.git("add", "alias", "dangling")
+        self.git("commit", "-m", "portable source links")
+
+        def inspect(root, *_):
+            self.assertEqual(os.readlink(root / "alias"), "deps.txt")
+            self.assertEqual(os.readlink(root / "dangling"), "build/not-created.txt")
+            self.assertEqual((root / "alias").read_text(), "candidate\n")
+
+        result = self.preview(
+            lambda root, *_: (root / "alias").write_text("candidate\n"), inspect
+        )
+        self.assertEqual(result["changed"], ["deps.txt"])
+        self.assertEqual((self.root / "alias").read_text(), "before\n")
+
+    def test_submodule_preview_links_cannot_escape_copied_input(self):
+        source, _, _ = self.submodule()
+        link = source / "alias"
+        for target in ("input.txt", "../deps.txt", str(source / "input.txt")):
+            with self.subTest(target=target):
+                link.unlink(missing_ok=True)
+                link.symlink_to(target)
+                updates.git(source, "add", "alias")
+                updates.git(
+                    source,
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "commit",
+                    "-m",
+                    "source link",
+                )
+                self.git("add", "vendor source")
+                self.git("commit", "-m", "pin source link")
+                if target == "input.txt":
+                    self.preview(
+                        lambda root, *_: (root / "deps.txt").write_text("candidate\n"),
+                        lambda root, *_: self.assertEqual(
+                            (root / "vendor source/alias").read_text(), "current input"
+                        ),
+                    )
+                else:
+                    with self.assertRaisesRegex(ValueError, "Preview rejects"):
+                        self.preview(
+                            lambda *_: self.fail("update must not run"),
+                            lambda *_: self.fail("verification must not run"),
+                        )
+                self.assertEqual((source / "input.txt").read_text(), "current input")
+                self.assertEqual((self.root / "deps.txt").read_text(), "before\n")
+
     def test_preview_is_disposable_and_reports_tracked_ignored_paths(self):
         self.write("build/tracked.txt", "old\n")
         self.git("add", "-f", "build/tracked.txt")
