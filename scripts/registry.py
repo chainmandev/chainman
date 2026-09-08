@@ -22,6 +22,8 @@ from packaging.version import InvalidVersion, Version as PythonVersion
 from packaging.utils import canonicalize_name
 from semantic_version import NpmSpec, Version as Semver
 
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class Artifact:
@@ -135,9 +137,11 @@ def fetch(
                 method=method,
             )
             with urlopen(request, timeout=30) as response:
-                body = response.read(32 * 1024 * 1024 + 1)
-                if len(body) > 32 * 1024 * 1024:
-                    raise ValueError("Registry response exceeds 32 MiB")
+                body = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise ValueError(
+                        f"Registry response exceeds 64 MiB from {parsed.hostname}"
+                    )
                 return body, dict(response.headers.items())
         except HTTPError as exc:
             if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:

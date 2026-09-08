@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import base64
 import copy
+import io
 import json
 from pathlib import Path
 import sys
@@ -20,6 +21,60 @@ NOW = datetime(2026, 8, 1, tzinfo=timezone.utc)
 
 def release(version, days):
     return registry.Release(version, NOW - timedelta(days=days))
+
+
+class RegistryTransportTests(unittest.TestCase):
+    def setUp(self):
+        registry.fetch.cache_clear()
+        self.addCleanup(registry.fetch.cache_clear)
+
+    def test_large_package_history_keeps_exact_maturity_and_artifact_evidence(self):
+        metadata = {
+            "versions": {
+                "1.0.0": {
+                    "dist": {
+                        "tarball": "https://registry.npmjs.org/sample/-/sample-1.0.0.tgz",
+                        "integrity": "sha512-" + base64.b64encode(b"x" * 64).decode(),
+                    }
+                }
+            },
+            "time": {"1.0.0": "2026-07-02T00:00:00Z"},
+        }
+        body = json.dumps(metadata).encode()
+        # Real package histories can exceed the former 32 MiB transport cap.
+        # Whitespace makes a neutral, fully parsed 39 MiB JSON response.
+        body += b" " * (39 * 1024 * 1024 - len(body))
+        with io.BytesIO(body) as response:
+            response.headers = {"Content-Type": "application/json"}
+            with patch.object(registry, "urlopen", return_value=response):
+                releases = registry.releases("npm", "sample")
+        chosen = registry.select("npm", releases, {}, "sample", NOW)
+        self.assertEqual(chosen.version, "1.0.0")
+        self.assertEqual(chosen.published, datetime(2026, 7, 2, tzinfo=timezone.utc))
+        self.assertEqual(chosen.artifacts[0].digest, "sha512:" + (b"x" * 64).hex())
+        with self.assertRaises(ValueError):
+            registry.select("npm", releases, {}, "sample", NOW - timedelta(seconds=1))
+
+    def test_response_limit_is_bounded_and_diagnostic_omits_url_secrets(self):
+        limit = 64 * 1024 * 1024
+        for size in (limit, limit + 1):
+            with self.subTest(size=size), io.BytesIO(b"x" * size) as response:
+                response.headers = {}
+                with (
+                    patch.object(registry, "urlopen", return_value=response),
+                    patch.object(response, "read", wraps=response.read) as read,
+                ):
+                    url = f"https://registry.example.invalid/private-name?token=hidden-{size}"
+                    if size == limit:
+                        self.assertEqual(len(registry.fetch(url)[0]), limit)
+                    else:
+                        with self.assertRaises(ValueError) as caught:
+                            registry.fetch(url)
+                        self.assertEqual(
+                            str(caught.exception),
+                            "Registry response exceeds 64 MiB from registry.example.invalid",
+                        )
+                    read.assert_called_once_with(limit + 1)
 
 
 class PolicyTests(unittest.TestCase):

@@ -7,6 +7,8 @@ checkpoint. `--only-chainman` updates the runtime pin and managed bootstrap;
 `--skip-chainman` updates project dependencies without querying runtime releases.
 Until the first public Chainman release is published, use `--skip-chainman` explicitly.
 A missing release source or eligibility date is an error, never an implicit exemption.
+Registry metadata responses are bounded to 64 MiB, including complete package
+histories; a larger response fails explicitly rather than dropping release evidence.
 `--message TEXT` supplies the verified commit's message. Native callers can use
 `--json` for exactly one schema-1 JSON result on stdout, with command output on
 stderr. The result includes `changed` (an array of project-relative paths), `commit`
