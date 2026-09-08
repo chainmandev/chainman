@@ -332,6 +332,119 @@ class JavaScriptTests(unittest.TestCase):
             workspace.render(tuple(selected.values()))["pnpm-workspace.yaml"].decode(),
         )
 
+    def test_compatible_mode_preserves_original_nonbreaking_bounds(self):
+        self.spec["mode"] = "compatible"
+        cases = (
+            ("^0.5.16", ["0.4.1", "0.5.16", "0.5.20", "0.6.0"], "0.5.20"),
+            ("0.0.3", ["0.0.2", "0.0.3", "0.0.4", "0.1.0"], "0.0.3"),
+            ("~0.0.3", ["0.0.3", "0.0.4", "0.1.0"], "0.0.4"),
+            ("1.2.3", ["1.2.2", "1.2.3", "1.9.0", "2.0.0"], "1.9.0"),
+            ("~1.2.3", ["1.2.3", "1.2.9", "1.3.0"], "1.2.9"),
+            ("^1.2.3 || ^2.4.5", ["1.9.0", "2.0.0", "2.9.0", "3.0.0"], "2.9.0"),
+            (">=1.2.3 <3", ["1.2.2", "1.2.3", "2.9.0", "3.0.0"], "2.9.0"),
+        )
+        for requirement, versions, expected in cases:
+            with self.subTest(requirement=requirement):
+                self.metadata = {}
+                self.manifest("package.json", {"library": requirement})
+                for version in versions:
+                    self.release("library", version)
+                self.assertEqual(self.selected()[1]["library"], expected)
+        self.metadata = {}
+        self.manifest("package.json", {"library": "^1.2.3"})
+        self.release("library", "1.1.0")
+        with self.assertRaisesRegex(ValueError, "No eligible release"):
+            self.selected()
+
+    def test_compatible_peer_fallback_cannot_cross_the_original_zero_major_floor(self):
+        self.spec["mode"] = "compatible"
+        self.manifest("package.json", {"renderer": "^1.0.0", "framework": "^0.5.0"})
+        self.release("renderer", "1.0.0", peers={"framework": "^0.5.0"})
+        self.release("renderer", "1.1.0", peers={"framework": "^0.4.0"})
+        self.release("framework", "0.4.9")
+        self.release("framework", "0.5.9")
+        self.assertEqual(
+            self.selected()[1], {"renderer": "1.0.0", "framework": "0.5.9"}
+        )
+
+    def test_compatible_final_audits_bind_original_versions_and_declarations(self):
+        for manager in ("pnpm", "npm"):
+            for replacement in ("^0.6.0", "*", "^0.4.0 || ^0.5.0"):
+                with self.subTest(manager=manager, replacement=replacement):
+                    self.spec["manager"] = manager
+                    self.spec["mode"] = "aggressive"
+                    for lock in ("pnpm-lock.yaml", "package-lock.json"):
+                        (self.root / lock).unlink(missing_ok=True)
+                    self.metadata = {}
+                    self.manifest("package.json", {"library": "^0.5.0"})
+                    for version in ("0.5.0", "0.5.9"):
+                        self.release("library", version)
+                    if replacement == "^0.6.0":
+                        self.release("library", "0.6.0")
+                    before = js.snapshot(self.root, self.spec)
+                    self.manifest("package.json", {"library": replacement})
+                    self.resolve(self.fake_npm if manager == "npm" else self.fake_pnpm)
+                    self.spec["mode"] = "compatible"
+                    with self.assertRaisesRegex(ValueError, "compatible"):
+                        js.audit(self.root, self.spec, before, self.policy, self.now)
+
+    def test_compatible_update_and_unchanged_young_artifact_keep_their_bounds(self):
+        self.spec["mode"] = "compatible"
+        for manager in ("pnpm", "npm"):
+            with self.subTest(manager=manager):
+                self.spec["manager"] = manager
+                self.metadata = {}
+                self.manifest("package.json", {"library": "^0.5.0"})
+                self.release("library", "0.5.0")
+                self.release("library", "0.5.9")
+                self.resolve(self.fake_npm if manager == "npm" else self.fake_pnpm)
+                self.assertEqual(
+                    json.loads((self.root / "package.json").read_text())[
+                        "dependencies"
+                    ],
+                    {"library": "^0.5.9"},
+                )
+                self.release("library", "0.5.9", days=1)
+                self.release("library", "0.6.0")
+                self.assertEqual(self.selected()[1]["library"], "0.5.9")
+                self.resolve(self.fake_npm if manager == "npm" else self.fake_pnpm)
+
+    def test_compatible_catalog_and_alias_audits_require_one_original_identity(self):
+        self.spec["mode"] = "compatible"
+        for manager in ("pnpm", "npm"):
+            with self.subTest(manager=manager):
+                self.spec["manager"] = manager
+                if manager == "pnpm":
+                    self.manifest("package.json", {"library": "catalog:shared"})
+                    self.write(
+                        "pnpm-workspace.yaml",
+                        "packages: []\ncatalogs:\n  shared:\n    library: ^0.5.0\n",
+                    )
+                else:
+                    self.manifest("package.json", {"alias": "npm:library@^0.5.0"})
+                for version in ("0.5.0", "0.5.9", "0.6.0"):
+                    self.release("library", version)
+                before = js.snapshot(self.root, self.spec)
+                self.resolve(self.fake_npm if manager == "npm" else self.fake_pnpm)
+                js.audit(self.root, self.spec, before, self.policy, self.now)
+                original = before["requirements"][0]
+                for requirements in (
+                    [],
+                    [original, original],
+                    [{**original, "name": "other-library"}],
+                ):
+                    with (
+                        self.subTest(requirements=requirements),
+                        self.assertRaisesRegex(ValueError, "original compatible"),
+                    ):
+                        js.audit(
+                            self.root,
+                            self.spec,
+                            {**before, "requirements": requirements},
+                            self.policy,
+                            self.now,
+                        )
+
     def test_complex_ranges_and_override_selectors_are_preserved(self):
         self.manifest(
             "package.json",

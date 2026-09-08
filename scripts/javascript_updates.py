@@ -570,14 +570,34 @@ def scoped_policy(policy, name, ranges):
     }
 
 
+def compatible_scope(pin, before, *, check_declaration=False):
+    originals = [
+        value
+        for value in before.get("requirements", [])
+        if value["file"] == pin.file
+        and tuple(value["pointer"]) == pin.pointer
+        and value["name"] == pin.name
+    ]
+    if len(originals) != 1:
+        raise ValueError("Missing or ambiguous original compatible dependency scope")
+    original = originals[0]["requirement"]
+    simple = re.fullmatch(r"([~^]?)([0-9]+\.[0-9]+\.[0-9]+)", original)
+    bound = (simple[1] or "^") + simple[2] if simple else original
+    NpmSpec(bound)
+    if check_declaration and pin.requirement != original:
+        current = re.fullmatch(r"([~^]?)([0-9]+\.[0-9]+\.[0-9]+)", pin.requirement)
+        if (
+            not simple
+            or not current
+            or current[1] != simple[1]
+            or Version(current[2]) not in NpmSpec(bound)
+        ):
+            raise ValueError("Written dependency escaped its original compatible range")
+    return bound
+
+
 def selected_policy(workspace, pin, selected, evidence, options):
     ranges = list(pin.ranges)
-    if (
-        workspace.spec.get("mode", options.get("mode", "aggressive")) == "compatible"
-        and not Version(selected[workspace.pins.index(pin)]).prerelease
-    ):
-        major = Version(selected[workspace.pins.index(pin)]).major
-        ranges.append(f">={major}.0.0 <{major + 1}.0.0")
     for manifest in pin.users:
         for index in workspace.refs[manifest].values():
             source = workspace.pins[index]
@@ -660,11 +680,13 @@ def reconcile_policy(workspace, policy, *, check=False):
             pin.operator = None
 
 
-def plan(workspace, policy, now):
+def plan(workspace, policy, now, *, before=None):
     options = policy.get("javascript", {})
     mode = workspace.spec.get("mode", options.get("mode", "aggressive"))
     if mode not in ("aggressive", "compatible"):
         raise ValueError("JavaScript update mode must be aggressive or compatible")
+    if mode == "compatible" and before is None:
+        before = snapshot(workspace.root, workspace.spec)
     evidence = Evidence(policy, now)
     baseline = locked_identities(workspace)
     evidence.baseline = baseline
@@ -684,6 +706,8 @@ def plan(workspace, policy, now):
             pin.ranges.append(pin.requirement)
         if pin.held:
             pin.ranges.append(pin.requirement)
+        elif mode == "compatible":
+            pin.ranges.append(compatible_scope(pin, before))
         floor_match = re.match(
             r"(?:[~^]|>=?)?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?", pin.requirement
         )
@@ -692,28 +716,12 @@ def plan(workspace, policy, now):
             if floor_match
             else None
         )
-        if mode == "compatible":
-            if floor is None:
-                raise ValueError(
-                    "Compatible updates require an explicit current version or lower bound"
-                )
         for selector in workspace.patches:
             match = re.fullmatch(rf"({NAME})@(.+)", selector)
             if match and match[1] == pin.name and floor and floor in NpmSpec(match[2]):
                 pin.ranges.append(match[2])
         releases = evidence.get(pin.name)[0]
-        active_policy = scoped_policy(
-            policy,
-            pin.name,
-            [
-                *pin.ranges,
-                *(
-                    [f">={floor.major}.0.0 <{floor.major + 1}.0.0"]
-                    if mode == "compatible"
-                    else []
-                ),
-            ],
-        )
+        active_policy = scoped_policy(policy, pin.name, pin.ranges)
         eligible = registry.maturity(
             "npm", releases, active_policy, pin.name, now
         ) + registry.active_exceptions("npm", releases, active_policy, pin.name, now)
@@ -780,7 +788,6 @@ def plan(workspace, policy, now):
                 r.version
                 for r in eligible
                 if all(Version(r.version) in NpmSpec(bound) for bound in pin.ranges)
-                and (mode != "compatible" or Version(r.version).major == floor.major)
                 and (
                     registry.minimum_safe("npm", policy, pin.name) is None
                     or Version(r.version)
@@ -1438,18 +1445,20 @@ def audit_artifacts(workspace, before, policy, now, scopes):
     return sorted(exclusions)
 
 
-def direct_scope(pin, spec, options, version):
+def direct_scope(pin, spec, options, version, before):
     bounds = compatibility(pin, options)
     if pin.operator is None or pin.held:
         bounds.append(pin.requirement)
     if (
         spec.get("mode", options.get("mode", "aggressive")) == "compatible"
-        and not Version(version).prerelease
+        and not pin.held
     ):
-        match = re.match(r"(?:[~^]|>=?)?(\d+)", pin.requirement)
-        if match:
-            major = int(match[1])
-            bounds.append(f">={major}.0.0 <{major + 1}.0.0")
+        bound = compatible_scope(pin, before, check_declaration=True)
+        if Version(version) not in NpmSpec(bound):
+            raise ValueError(
+                "Resolved dependency escaped its original compatible range"
+            )
+        bounds.append(bound)
     return bounds
 
 
@@ -1514,29 +1523,8 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
                         "Resolved dependency violates scoped JavaScript compatibility"
                     )
                 scopes.setdefault(target[:2], []).extend(
-                    direct_scope(pin, spec, options, target[1])
+                    direct_scope(pin, spec, options, target[1], before)
                 )
-                mode = spec.get("mode", options.get("mode", "aggressive"))
-                if mode == "compatible" and not pin.held:
-                    previous = next(
-                        (
-                            p
-                            for p in before.get("requirements", [])
-                            if p["file"] == pin.file
-                            and tuple(p["pointer"]) == pin.pointer
-                            and p["name"] == pin.name
-                        ),
-                        None,
-                    )
-                    floor = (
-                        re.match(r"(?:[~^]|>=?)?([0-9]+)", previous["requirement"])
-                        if previous
-                        else None
-                    )
-                    if floor is None or Version(target[1]).major != int(floor[1]):
-                        raise ValueError(
-                            "Resolved dependency escaped the compatible-mode major"
-                        )
     return audit_artifacts(workspace, before, policy, now, scopes)
 
 
@@ -1629,7 +1617,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     workspace = Workspace(root, spec)
     before = snapshot(root, spec)
     reconcile_policy(workspace, policy)
-    evidence, selected = plan(workspace, policy, now)
+    evidence, selected = plan(workspace, policy, now, before=before)
     if workspace.manager == "npm":
         import javascript_npm
 

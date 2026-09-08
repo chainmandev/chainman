@@ -158,30 +158,8 @@ def audit(workspace, before, policy, now):
                     "npm dependency violates scoped JavaScript compatibility"
                 )
             scopes.setdefault((actual, version), []).extend(
-                js.direct_scope(pin, workspace.spec, options, version)
+                js.direct_scope(pin, workspace.spec, options, version, before)
             )
-            if (
-                workspace.spec.get("mode", options.get("mode", "aggressive"))
-                == "compatible"
-                and not pin.held
-            ):
-                previous = next(
-                    (
-                        p
-                        for p in before.get("requirements", [])
-                        if p["file"] == pin.file
-                        and tuple(p["pointer"]) == pin.pointer
-                        and p["name"] == pin.name
-                    ),
-                    None,
-                )
-                floor = (
-                    re.match(r"(?:[~^]|>=?)?([0-9]+)", previous["requirement"])
-                    if previous
-                    else None
-                )
-                if floor is None or Version(version).major != int(floor[1]):
-                    raise ValueError("npm dependency escaped the compatible-mode major")
             queue.append(location)
         visited = set()
         while queue:

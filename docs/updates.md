@@ -67,8 +67,14 @@ commands = [["node", "scripts/generate-labels.mjs"]]
 ```
 
 `just deps-update --skip-chainman -- --targets javascript,assets` selects these
-targets. `--policy compatible` retains the original dependency ranges; the default
-is `aggressive`, subject to every explicit constraint. `--target-policy name=compatible`
+targets. For JavaScript, `--policy compatible` preserves original caret/tilde and
+complex dependency ranges, including their lower and `0.x` compatibility bounds.
+Simple exact versions are update templates bounded by the original version's caret
+range; held versions and explicit policy/override constraints remain stricter.
+Final declarations preserve their original range form, with only a simple version
+advance within that bound; reconcile other declaration changes separately.
+Selection, fallback and final lock audits use the original recorded requirements.
+The default is `aggressive`, subject to every explicit constraint. `--target-policy name=compatible`
 sets an individual target's mode. `updates.target_groups` maps aliases to target
 lists. Command-only targets are declared in `updates.targets` and require a matching
 command step. An adapter with `explicit_only = true` is excluded from default and
