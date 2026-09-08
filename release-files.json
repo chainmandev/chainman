@@ -80,6 +80,7 @@
     "modules/python.toml",
     "modules/rust.toml",
     "modules/swift.toml",
+    "nix/capless-root-move-path.patch",
     "nix/container-image.txt",
     "nix/flake.lock",
     "nix/flake.nix",

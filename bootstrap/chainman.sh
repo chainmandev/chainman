@@ -81,11 +81,14 @@ EOF
     # even the verified flake, so extraction cannot introduce an outside path.
     [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
     export CHAINMAN_MODE="$mode" CHAINMAN_ACTIVE_MODE="$mode"
-    unset IN_NIX_SHELL
+    # Core entry replaces an external project shell. Its old profile token no
+    # longer describes PATH, even when the project inputs themselves are unchanged.
+    unset IN_NIX_SHELL CHAINMAN_ACTIVE_PROFILE CHAINMAN_ACTIVE_FINGERPRINT
     exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#core" --no-write-lock-file \
         --command python3 -c '
 import fcntl, os, pathlib, shutil, stat, subprocess, sys, tempfile, urllib.parse
 root, content_id, expected, store, *args = sys.argv[1:]
+nix = os.path.join(os.environ["CHAINMAN_RUNTIME_NIX_BIN"], "nix")
 cache = pathlib.Path(root) / ".chainman"
 try:
     cache.mkdir(mode=0o700, exist_ok=True)
@@ -106,7 +109,7 @@ try:
     def verify(path):
         if path.is_symlink() or not path.is_dir():
             raise ValueError("runtime must be a real directory")
-        actual = subprocess.check_output(["nix", "--extra-experimental-features", "nix-command", "hash", "path", str(path)], text=True).strip()
+        actual = subprocess.check_output([nix, "--extra-experimental-features", "nix-command", "hash", "path", str(path)], text=True).strip()
         if actual != expected:
             raise ValueError("installed runtime failed NAR verification")
     if not os.path.lexists(runtime):
@@ -128,7 +131,7 @@ try:
     os.chdir(root)
     os.environ.update(CHAINMAN_RUNTIME=str(runtime), CHAINMAN_ROOT=root, CHAINMAN_PROJECT_ROOT=root,
                       PYTHONDONTWRITEBYTECODE="1")
-    os.execvp("nix", ["nix", "--extra-experimental-features", "nix-command flakes", "develop",
+    os.execv(nix, [nix, "--extra-experimental-features", "nix-command flakes", "develop",
         "path:" + urllib.parse.quote(str(runtime / "nix"), safe="/") + "#core", "--no-write-lock-file", "--command",
         "python3", str(runtime / "scripts/chainman.py"), "--root", root, *args])
 except (OSError, ValueError, subprocess.CalledProcessError) as error:
@@ -149,6 +152,19 @@ case "$engine" in docker | podman) ;; *) fail 'Container mode requires Docker or
 image=docker.io/nixos/nix:2.33.3@sha256:c2f7db70a432d00c6759af108ff4fbc74a4c00e2d4517162e72338e7b9449c1f
 uid=$(id -u)
 gid=$(id -g)
+container_uid=$uid
+container_gid=$gid
+if [ "$engine" = docker ]; then
+    security_options=$("$engine" info --format '{{range .SecurityOptions}}{{println .}}{{end}}') || fail 'Cannot determine Docker daemon identity mapping.'
+    while IFS= read -r option; do
+        if [ "$option" = name=rootless ]; then
+            container_uid=0
+            container_gid=0
+        fi
+    done << EOF
+$security_options
+EOF
+fi
 volume=chainman-nix-$uid
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
 trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
@@ -187,8 +203,8 @@ run --rm --user 0:0 --mount "type=volume,src=$volume,dst=/nix" --mount "type=vol
     [ ! -d /nix/store/.links ] || chown "$1:$2" /nix/store/.links
     chown -R "$1:$2" /nix/var
     chown "$1:$2" /chainman-downloads
-' sh "$uid" "$gid"
-run --rm --user "$uid:$gid" --security-opt no-new-privileges --cap-drop ALL \
+' sh "$container_uid" "$container_gid"
+run --rm --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
     --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
     --env 'NIX_CONFIG=build-users-group =' \
@@ -345,7 +361,7 @@ if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
     set -- --env "CHAINMAN_ARCHIVE=$archive" "$@"
 fi
 case "$self" in "$root"/*) ;; *) set -- --mount "type=bind,src=$script_dir,dst=$script_dir,readonly" "$@" ;; esac
-set -- --rm --init --interactive --user "$uid:$gid" --security-opt no-new-privileges --cap-drop ALL \
+set -- --rm --init --interactive --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \

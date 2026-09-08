@@ -25,6 +25,34 @@ ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
 _operation_fd: int | None = None
 
 
+def nix_command(env=None) -> str:
+    """The verified core shell owns Nix after bootstrap, including legacy tools."""
+    selected = os.environ if env is None else env
+    directory = selected.get("CHAINMAN_RUNTIME_NIX_BIN")
+    return (
+        str(Path(directory) / "nix")
+        if directory
+        else selected.get("CHAINMAN_NIX_BIN", "nix")
+    )
+
+
+def runtime_nix_environment(env: dict[str, str]) -> None:
+    directory = env.get("CHAINMAN_RUNTIME_NIX_BIN")
+    if directory:
+        if not Path(directory).is_absolute() or not (Path(directory) / "nix").is_file():
+            raise ValueError("Invalid internal runtime Nix executable directory")
+        env["PATH"] = os.pathsep.join(
+            [
+                directory,
+                *[
+                    part
+                    for part in env.get("PATH", "").split(os.pathsep)
+                    if part != directory
+                ],
+            ]
+        )
+
+
 def entry_command(root: Path, profile: str) -> list[str]:
     if (root / "chainman.toml").is_file():
         return [

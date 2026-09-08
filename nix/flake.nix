@@ -18,11 +18,35 @@
             value = f nixpkgs.legacyPackages.${system};
           }) systems
         );
+      nixTooling =
+        pkgs:
+        let
+          # 2.34.8 assumes UID 0 can rename a read-only directory across parents.
+          # Rootless containers deliberately drop that capability. Keep fresh-inode
+          # registration and canonical modes; retire/review this patch on an update.
+          nixComponents =
+            assert pkgs.nix.version == "2.34.8";
+            pkgs.nixVersions.nixComponents_2_34.appendPatches [ ./capless-root-move-path.patch ];
+          # Consumers need the executable family and Linux namespace helper,
+          # not Nix's C++ development headers or generated manual builds.
+          runtimeNix = pkgs.symlinkJoin {
+            name = "nix-runtime-${nixComponents.version}";
+            paths = [
+              nixComponents.nix-cli
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ nixComponents.nix-nswrapper ];
+          };
+        in
+        {
+          runtime = runtimeNix;
+          qualification = nixComponents.nix-everything;
+        };
     in
     {
       devShells = each (
         pkgs:
         let
+          runtimeNix = (nixTooling pkgs).runtime;
           python = pkgs.python3.withPackages (p: [
             p.packaging
             p.tomlkit
@@ -54,7 +78,7 @@
             python
             git
             just
-            nix
+            runtimeNix
             bash
             coreutils
             gnugrep
@@ -81,6 +105,7 @@
                   pkgs.lib.optionalString (name == "swift" && pkgs.stdenv.hostPlatform.isDarwin) ":/usr/bin:/bin"
                 }
                 export TOOLCHAIN_ACTIVE_PROFILE=${name}
+                export CHAINMAN_RUNTIME_NIX_BIN=${runtimeNix}/bin
                 export PYTHONDONTWRITEBYTECODE=1
                 export UV_PYTHON_DOWNLOADS=never
                 export UV_PYTHON=${python}/bin/python3
@@ -140,6 +165,9 @@
       );
       packages = each (pkgs: {
         just = pkgs.just;
+      });
+      checks = each (pkgs: {
+        nix-upstream = (nixTooling pkgs).qualification;
       });
       formatter = each (pkgs: pkgs.nixfmt);
     };

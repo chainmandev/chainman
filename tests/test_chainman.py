@@ -70,6 +70,74 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_runtime_nix_survives_external_shells_refresh_and_active_reentry(self):
+        # Bind the real Nix package, never a directory containing host language tools.
+        binding = str(Path(shutil.which("nix")).resolve().parent)
+        competing = self.root / "project executables"
+        competing.mkdir()
+        for name in ("nix", "nix-store"):
+            self.write(f"project executables/{name}", "#!/bin/sh\nexit 97\n").chmod(
+                0o755
+            )
+        self.write(
+            "project executables/python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n'
+        ).chmod(0o755)
+        shutil.copytree(chainman.RUNTIME / "nix", self.root / "environment")
+        flake = self.root / "environment/flake.nix"
+        flake.write_text(
+            flake.read_text().replace(
+                "ulimit -c 0",
+                f'export PATH="{competing}:$PATH"\n                export CHAINMAN_RUNTIME_NIX_BIN="{competing}"\n                ulimit -c 0',
+            )
+        )
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="environment#core"\n'
+        )
+        child = self.write(
+            "reenter.py",
+            "import json, os, shutil, subprocess, sys; from pathlib import Path\n"
+            f"sys.path.insert(0, {str(chainman.RUNTIME / 'scripts')!r})\n"
+            "import chainman\n"
+            "seen=json.loads(os.environ.get('OBSERVED', '[]'))\n"
+            "seen.append([shutil.which(n) for n in ('nix', 'nix-store', 'python3')])\n"
+            "subprocess.run(['nix', '--version'], check=True, stdout=subprocess.DEVNULL)\n"
+            "subprocess.run(['nix-store', '--version'], check=True, stdout=subprocess.DEVNULL)\n"
+            "depth=int(sys.argv[1])\n"
+            "if depth:\n"
+            " os.environ.update(OBSERVED=json.dumps(seen), TOOLCHAIN_FRESH=str(depth % 2))\n"
+            f" os.environ['PATH']={str(competing)!r}+os.pathsep+os.environ['PATH']\n"
+            " chainman.execute(Path.cwd(), 'native', [sys.executable, __file__, str(depth-1)])\n"
+            "else: print(json.dumps(seen))\n",
+        )
+        with patch.dict(os.environ, CHAINMAN_RUNTIME_NIX_BIN=binding):
+            result = chainman.execute(
+                self.root,
+                "native",
+                [sys.executable, str(child), "3"],
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                [
+                    str(Path(binding) / "nix"),
+                    str(Path(binding) / "nix-store"),
+                    str(competing / "python3"),
+                ]
+            ]
+            * 4,
+        )
+
+    def test_runtime_nix_binding_cannot_be_overwritten_by_configuration(self):
+        for section in ("environment.values", "profiles.native.environment"):
+            self.write(
+                "chainman.toml",
+                f'schema=1\n[profiles.native]\nruntime_profile="core"\n[{section}]\nCHAINMAN_RUNTIME_NIX_BIN="/different"\n',
+            )
+            with self.assertRaisesRegex(ValueError, "internal runtime Nix binding"):
+                chainman.execute(self.root, "native", ["true"])
+
     def test_nested_nix_refreshes_preserve_selected_temporary_base(self):
         flake = self.root / "environment"
         shutil.copytree(chainman.RUNTIME / "nix", flake)

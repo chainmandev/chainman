@@ -147,6 +147,8 @@ def execute(
                 raise ValueError(
                     "Configure TMPDIR instead of internal temporary routing"
                 )
+            if key == "CHAINMAN_RUNTIME_NIX_BIN":
+                raise ValueError("Cannot override the internal runtime Nix binding")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(
                 value, str
             ):
@@ -167,6 +169,7 @@ def execute(
                 "Cannot unset managed runtime and cache lifecycle variables"
             )
         selected.pop(key, None)
+    tc.runtime_nix_environment(selected)
     token = profile_fingerprint(root, name, ref)
     active = (
         selected.get("CHAINMAN_ACTIVE_PROFILE") == name
@@ -182,7 +185,7 @@ def execute(
     command = argv
     if ref and (not active or selected.get("TOOLCHAIN_FRESH") == "1"):
         command = [
-            selected.get("CHAINMAN_NIX_BIN", "nix"),
+            tc.nix_command(selected),
             "--extra-experimental-features",
             "nix-command flakes",
             "develop",
@@ -194,8 +197,11 @@ def execute(
             "-c",
             'if [ -n "${CHAINMAN_TEMP_BASE:-}" ]; then export TMPDIR="$CHAINMAN_TEMP_BASE"; '
             'elif [ -n "${TMPDIR:-}" ]; then export CHAINMAN_TEMP_BASE="$TMPDIR"; fi; '
+            "runtime_nix=$1; shift; "
+            'if [ -n "$runtime_nix" ]; then export CHAINMAN_RUNTIME_NIX_BIN="$runtime_nix" PATH="$runtime_nix:$PATH"; fi; '
             'cd "$1"; shift; exec "$@"',
             "sh",
+            selected.get("CHAINMAN_RUNTIME_NIX_BIN", ""),
             str(target),
             *argv,
         ]

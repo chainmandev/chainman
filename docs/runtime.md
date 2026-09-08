@@ -25,9 +25,11 @@ ordinary local POSIX directories, atomic same-filesystem rename and cooperating
 process locks. Hard power-loss durability of every downloaded byte is not claimed;
 a later launch rechecks identity and fails on corrupt state.
 
-The container runs project commands as the calling UID/GID. Nix runs without a
-build-users group inside the container, including when the caller is namespace
-root; this does not require adding container capabilities. A short preparatory
+The container maps project commands to the calling user's ownership: rootful Docker
+uses the caller's UID/GID, rootless Docker uses its mapped `0:0`, and Podman uses
+`keep-id`. A failed Docker identity probe stops before execution. Nix runs without a
+build-users group inside the container, with all capabilities dropped and
+`no-new-privileges` set. A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.
@@ -42,6 +44,21 @@ Cleanup reaps an already-exited server, removes only its unchanged socket, and
 reports a nonzero server exit. A process
 that is forcibly killed can leave children holding that lock; inspect those processes
 before stopping an exact compiler endpoint. Do not remove a live operation lock.
+
+After bootstrap, the verified core shell supplies the Nix executable family ahead
+of project tools, including after shell refreshes. Other languages still come from
+the selected project shell. `CHAINMAN_NIX_BIN` selects the initial bootstrap only;
+`CHAINMAN_RUNTIME_NIX_BIN` is internal and cannot be set in project configuration.
+Core entry invalidates a previous project-profile token, so nested launchers reload
+the actual project shell. The runtime includes Nix's CLI and Linux namespace helper;
+Nix's combined development package and generated manuals are excluded from the
+consumer shell.
+The pinned Nix 2.34.8 includes a narrow patch for renaming read-only owned output
+directories as capability-free root. It preserves fresh-inode copying, hash checks
+and original modes, including restoration on rename failure. Updating Nix requires
+reviewing or retiring that version-bounded patch; it is never applied speculatively
+to a new version. Run `just verify-nix` on the host to repeat the full patched
+Nix package build and its upstream unit/functional gates after either changes.
 
 Cache reporting distinguishes project builds, shared downloads and free disk bytes.
 Limits and stale age live in `cache`; automatic pruning removes only old declared

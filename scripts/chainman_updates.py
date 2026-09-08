@@ -91,7 +91,7 @@ def fetch_runtime(candidate: dict, body: bytes) -> Path:
         runtime = Path(
             tc.managed_run(
                 [
-                    os.environ.get("CHAINMAN_NIX_BIN", "nix"),
+                    tc.nix_command(),
                     "--extra-experimental-features",
                     "nix-command flakes",
                     "eval",
@@ -333,7 +333,7 @@ def perform(
     if runtime != chainman.RUNTIME:
         tc.managed_run(
             [
-                os.environ.get("CHAINMAN_NIX_BIN", "nix"),
+                tc.nix_command(),
                 "--extra-experimental-features",
                 "nix-command flakes",
                 "develop",
@@ -418,7 +418,7 @@ def verify(root: Path, policy: dict, runtime: Path):
     if runtime != chainman.RUNTIME:
         tc.managed_run(
             [
-                os.environ.get("CHAINMAN_NIX_BIN", "nix"),
+                tc.nix_command(),
                 "--extra-experimental-features",
                 "nix-command flakes",
                 "develop",
@@ -439,7 +439,7 @@ def verify(root: Path, policy: dict, runtime: Path):
         )
     tc.managed_run(
         [
-            os.environ.get("CHAINMAN_NIX_BIN", "nix"),
+            tc.nix_command(),
             "--extra-experimental-features",
             "nix-command flakes",
             "develop",

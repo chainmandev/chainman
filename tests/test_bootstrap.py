@@ -31,7 +31,9 @@ class BootstrapTests(unittest.TestCase):
             "forward=os.environ.get('CHAINMAN_TEST_VALUE'), "
             "demo=os.environ.get('DEMO_TEST_VALUE'), container=os.environ.get('TOOLCHAIN_CONTAINER'))\n"
             "record.update(uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
+            "record.update(active_profile=os.environ.get('CHAINMAN_ACTIVE_PROFILE'), active_fingerprint=os.environ.get('CHAINMAN_ACTIVE_FINGERPRINT'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
+            "if pathlib.Path('/proc/self/status').exists(): record['no_new_privs'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('NoNewPrivs:'))\n"
             "if (root / '.git').exists(): record['git_root'] = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()\n"
             "if os.environ.get('DEMO_TEST_ADMIN'):\n"
             " record['parent_admin_visible'] = pathlib.Path(os.environ['DEMO_TEST_ADMIN']).exists()\n"
@@ -145,6 +147,64 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(
             next(self.root.glob("record-*.json")).stat().st_uid, os.getuid()
         )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
+    def test_container_identity_preserves_caller_output_ownership(self):
+        engine = os.environ["CHAINMAN_TEST_CONTAINER"]
+        expected_uid = os.getuid()
+        if engine == "docker":
+            options = subprocess.check_output(
+                [engine, "info", "--format", "{{json .SecurityOptions}}"], text=True
+            )
+            if "name=rootless" in json.loads(options):
+                expected_uid = 0
+        env = dict(
+            self.env, CHAINMAN_MODE="container-nix", CHAINMAN_CONTAINER_ENGINE=engine
+        )
+        self.run_bootstrap("status", env=env)
+        record = self.records()[0]
+        self.assertEqual(record["uid"], expected_uid)
+        self.assertEqual(record["no_new_privs"], "1")
+        self.assertEqual(int(record["cap_eff"], 16), 0)
+        for path in [*self.root.glob("record-*.json"), self.root / ".chainman"]:
+            self.assertEqual(path.stat().st_uid, os.getuid())
+            self.assertEqual(path.stat().st_gid, os.getgid())
+
+    def test_failed_docker_identity_probe_stops_before_container_execution(self):
+        binary = self.root / "mock engine"
+        binary.mkdir()
+        docker = binary / "docker"
+        docker.write_text(
+            '#!/bin/sh\nif [ "$1" = info ]; then exit 17; fi\nprintf "unexpected run"\nexit 98\n'
+        )
+        docker.chmod(0o755)
+        env = dict(
+            self.env,
+            PATH=str(binary) + os.pathsep + self.env["PATH"],
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE="docker",
+        )
+        result = self.run_bootstrap("status", env=env, check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Cannot determine Docker daemon identity mapping", result.stderr)
+        self.assertNotIn("unexpected run", result.stdout)
+        self.assertFalse((self.root / ".chainman").exists())
+
+    def test_core_entry_invalidates_an_inherited_external_profile_token(self):
+        self.run_bootstrap(
+            "status",
+            env=dict(
+                self.env,
+                CHAINMAN_ACTIVE_PROFILE="native",
+                CHAINMAN_ACTIVE_FINGERPRINT="unchanged-project-inputs",
+            ),
+        )
+        record = self.records()[0]
+        self.assertIsNone(record["active_profile"])
+        self.assertIsNone(record["active_fingerprint"])
 
     def test_verified_bundle_dispatch_and_repeated_generation(self):
         self.run_bootstrap("status", "argument with spaces", "", "$(not-a-command)")
