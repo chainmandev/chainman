@@ -595,6 +595,63 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(result["changed"], ["build/tracked.txt"])
         self.assertEqual(updates.snapshot(self.root), before)
 
+    def test_preview_refresh_binds_actual_subprocess_to_disposable_project(self):
+        # Keep the real perform/environment/subprocess/import path. Only the Nix
+        # entry and registry resolver are neutral fixtures; no network is needed.
+        self.write(
+            "toolchain.toml",
+            'schema=1\nmodules=["core"]\n[updates]\noutputs=["deps.txt"]\n[cache]\npreserve_environment=["CHAINMAN_ROOT"]\n',
+        )
+        self.write("dependencies.toml", "[nix]\nenabled=false\n")
+        self.write("preview-fixture-marker", "neutral")
+        self.write("scripts/enter.sh", '#!/bin/sh\nset -eu\nshift\nexec "$@"\n')
+        (self.root / "scripts/enter.sh").chmod(0o755)
+        self.write(
+            "scripts/updates.py",
+            "import runpy\nfrom pathlib import Path\n"
+            + f"root = runpy.run_path({str(updates.RUNTIME / 'scripts/toolchain.py')!r})['ROOT']\n"
+            + "assert (root / 'preview-fixture-marker').read_text() == 'neutral'\n"
+            + "(root / 'deps.txt').write_text('candidate\\n')\n",
+        )
+        self.git("add", ".")
+        self.git("commit", "-m", "neutral refresh boundary fixture")
+        before = updates.snapshot(self.root)
+        head = self.git("rev-parse", "HEAD")
+        index = (self.root / ".git/index").read_bytes()
+        verified = []
+
+        def verify_copy(root, _):
+            self.assertNotEqual(root, self.root)
+            self.assertEqual((root / "deps.txt").read_text(), "candidate\n")
+            verified.append(root)
+
+        with (
+            patch.object(updates, "RUNTIME", self.root),
+            patch.object(updates, "verify", side_effect=verify_copy),
+            patch.dict(
+                os.environ,
+                {
+                    "CHAINMAN_ROOT": str(self.root),
+                    "CHAINMAN_PROJECT_ROOT": str(self.root),
+                },
+            ),
+        ):
+            result = updates.preview(self.root, datetime.now(timezone.utc), [])
+        self.assertEqual(
+            result,
+            {
+                "preview": True,
+                "changed": ["deps.txt"],
+                "commit": None,
+                "verification": "passed",
+            },
+        )
+        self.assertEqual(len(verified), 1)
+        self.assertFalse(verified[0].exists())
+        self.assertEqual(updates.snapshot(self.root), before)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual((self.root / ".git/index").read_bytes(), index)
+
     def test_preview_rejects_verification_mutation_and_mode_changes(self):
         for mutate in (
             lambda path: path.write_text("verifier mutation\n"),

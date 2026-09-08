@@ -339,6 +339,14 @@ def environment(root: Path = ROOT) -> dict[str, str]:
             env[name] = os.environ[name]
             preserved[name] = os.environ[name]
     pnpm_store_environment(env, preserved)
+    # A refreshed subprocess may execute immutable runtime code outside this
+    # project (notably a disposable source preview). Bind its data root explicitly
+    # after inherited cache settings; source location is never project authority.
+    env.update(
+        CHAINMAN_ROOT=str(root.resolve()),
+        CHAINMAN_PROJECT_ROOT=str(root.resolve()),
+        CHAINMAN_RUNTIME=str(RUNTIME),
+    )
     (work / "last-used").touch()
     return env
 
