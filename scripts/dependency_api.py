@@ -356,15 +356,16 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
             bound = request["constraint"]
             if (
                 not isinstance(bound, dict)
-                or not isinstance(bound.get("range"), str)
+                or "range" not in bound
                 or not isinstance(bound.get("reason"), str)
                 or not bound["reason"].strip()
             ):
                 raise ValueError("A query constraint requires a range and reason")
+            restriction = registry.validate_constraint(provider, bound["range"])
             candidates = [
                 candidate
                 for candidate in candidates
-                if registry.compatible(provider, candidate.version, bound["range"])
+                if registry.compatible(provider, candidate.version, restriction)
             ]
         if request.get("mode") == "compatible" and not request.get("constraint"):
             raise ValueError("A compatible query must declare its actual constraint")

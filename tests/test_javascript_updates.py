@@ -98,6 +98,55 @@ class JavaScriptTests(unittest.TestCase):
             pin.alias: version for pin, version in zip(workspace.pins, selected)
         }
 
+    def test_many_peer_alternatives_preserve_the_conjunction_without_expansion(self):
+        bounds = [
+            ">=5.0.0 <6.0.0",
+            "^1.2.1 || ^2.0.0 || ^3.0.0-beta.0 || ^3.0.0 || ^4.0.0 || ^5.0.0-beta.0 || ^5.0.0",
+            "^3.0.0 || ^4.0.0 || ^5.0.0",
+            "^5.0.0",
+            "^5.0.0 || ^6.0.0 || ^7.0.0",
+            "^5.0.0 || ^6.0.0-alpha || ^7.0.0",
+        ]
+        policy = js.scoped_policy({}, "framework", bounds)
+        for value, expected in (
+            ("1.2.1", False),
+            ("3.0.0-beta.0", False),
+            ("4.99.99", False),
+            ("5.0.0-beta.0", False),
+            ("5.0.0", True),
+            ("5.18.2", True),
+            ("5.99.99", True),
+            ("5.18.2+build.7", True),
+            ("6.0.0-alpha", False),
+            ("6.0.0", False),
+            ("7.0.0", False),
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    registry.compatible(
+                        "npm", value, registry.constraint("npm", policy, "framework")
+                    ),
+                    expected,
+                )
+        nested = js.scoped_policy(policy, "framework", ["<5.20.0"])
+        self.assertTrue(
+            registry.compatible(
+                "npm", "5.19.9", registry.constraint("npm", nested, "framework")
+            )
+        )
+        self.assertFalse(
+            registry.compatible(
+                "npm", "5.20.0", registry.constraint("npm", nested, "framework")
+            )
+        )
+        self.assertFalse(
+            registry.compatible(
+                "npm", "6.0.0", registry.constraint("npm", nested, "framework")
+            )
+        )
+        with self.assertRaises(ValueError):
+            js.scoped_policy(policy, "framework", [f">={i}.0.0" for i in range(129)])
+
     def fake_pnpm(self, root, profile, argv, *, cwd, **kwargs):
         self.assertEqual(root, self.root)
         self.assertEqual(profile, "host")

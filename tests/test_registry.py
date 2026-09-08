@@ -23,6 +23,100 @@ def release(version, days):
     return registry.Release(version, NOW - timedelta(days=days))
 
 
+class ConjunctionTests(unittest.TestCase):
+    def test_each_range_retains_its_own_prerelease_boundary(self):
+        bounds = [">=5.0.0 <6.0.0", "^5.0.0-beta.0"]
+        # Independently checked with strict node-semver membership per range.
+        for value, expected in (
+            ("5.0.0-alpha.1", False),
+            ("5.0.0-beta.0", False),
+            ("5.0.0-beta.9", False),
+            ("5.0.0", True),
+            ("5.1.0", True),
+            ("5.1.1-alpha", False),
+            ("5.18.2+build.7", True),
+            ("6.0.0", False),
+        ):
+            for ordered in (bounds, bounds[::-1], bounds + bounds):
+                with self.subTest(value=value, bounds=ordered):
+                    self.assertEqual(
+                        registry.compatible("npm", value, ordered), expected
+                    )
+
+    def test_invalid_members_never_hide_behind_a_false_constraint(self):
+        invalid = (
+            [],
+            ["^1", "not-a-range"],
+            ["not-a-range", "^1"],
+            ["^1", ""],
+            ["^1", None],
+            [["^1"]],
+            ["* "] * 129,
+            [" || ".join("^1" for _ in range(129))],
+            [" " * 65536 + "^1"],
+        )
+        for bounds in invalid:
+            with self.subTest(bounds=str(bounds)[:80]), self.assertRaises(ValueError):
+                registry.compatible("npm", "5.0.0", bounds)
+        for provider in ("pypi", "crates", "pub", "github", "go", "maven"):
+            with self.subTest(provider=provider), self.assertRaises(ValueError):
+                registry.compatible(provider, "5.0.0", ["^5"])
+
+    def test_maturity_and_exception_retirement_use_every_bound(self):
+        bounds = [">=5.0.0 <7.0.0", "<6.0.0"]
+        policy = {
+            "constraints": {"npm:demo": {"range": bounds, "reason": "Supported ABI"}}
+        }
+        self.assertEqual(
+            registry.select(
+                "npm", [release("5.1.0", 31), release("6.0.0", 60)], policy, "demo", NOW
+            ).version,
+            "5.1.0",
+        )
+        policy["exceptions"] = [
+            {
+                "package": "npm:demo",
+                "version": "5.2.0",
+                "minimum_safe": "5.2.0",
+                "reason": "Verified correction",
+                "advisory": "https://example.invalid/advisory",
+                "expires": (NOW + timedelta(days=1)).isoformat(),
+            }
+        ]
+        candidates = [release("5.2.0", 1), release("6.0.0", 60)]
+        self.assertEqual(
+            registry.select("npm", candidates, policy, "demo", NOW).version, "5.2.0"
+        )
+        policy["exceptions"][0]["expires"] = NOW.isoformat()
+        with self.assertRaisesRegex(ValueError, "Expired"):
+            registry.select("npm", candidates, policy, "demo", NOW)
+        candidates.append(release("5.3.0", 30))
+        self.assertEqual(
+            registry.select("npm", candidates, policy, "demo", NOW).version, "5.3.0"
+        )
+        self.assertEqual(
+            registry.active_exceptions("npm", candidates, policy, "demo", NOW), []
+        )
+
+    def test_final_unchanged_artifact_still_obeys_every_bound(self):
+        identity = ("npm", "demo", "6.0.0", "", "sha256:" + "a" * 64)
+        policy = {
+            "constraints": {
+                "npm:demo": {"range": [">=5", "<6"], "reason": "Supported ABI"}
+            }
+        }
+        evidence = registry.Release(
+            "6.0.0",
+            NOW - timedelta(days=90),
+            artifacts=(registry.Artifact("", identity[4], NOW - timedelta(days=90)),),
+        )
+        with (
+            patch.object(registry, "releases", return_value=[evidence]),
+            self.assertRaisesRegex(ValueError, "compatibility"),
+        ):
+            updates.audit_identities(Path("."), {identity}, {identity}, policy, NOW)
+
+
 class RegistryTransportTests(unittest.TestCase):
     def setUp(self):
         registry.fetch.cache_clear()

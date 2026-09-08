@@ -120,7 +120,27 @@ def package_name(provider: str, name: str) -> str:
     return canonicalize_name(name) if provider == "pypi" else name
 
 
-def constraint(provider: str, policy: dict, name: str) -> str:
+def validate_constraint(provider: str, value) -> str | tuple[str, ...]:
+    if isinstance(value, str):
+        return value
+    if (
+        provider != "npm"
+        or not isinstance(value, (list, tuple))
+        or not 1 <= len(value) <= 128
+        or any(not isinstance(bound, str) or not bound.strip() for bound in value)
+        or sum(len(bound) for bound in value) > 65536
+        or sum(len(bound.split("||")) for bound in value) > 128
+    ):
+        raise ValueError(
+            "npm constraint conjunction requires bounded nonempty range strings"
+        )
+    # Validate every member before any membership test can short-circuit.
+    for bound in value:
+        NpmSpec(bound)
+    return tuple(value)
+
+
+def constraint(provider: str, policy: dict, name: str) -> str | tuple[str, ...]:
     rules = [
         rule
         for key, rule in policy.get("constraints", {}).items()
@@ -133,7 +153,7 @@ def constraint(provider: str, policy: dict, name: str) -> str:
     rule = rules[0] if rules else {}
     if rule and not str(rule.get("reason", "")).strip():
         raise ValueError("Compatibility constraints require a reason")
-    return rule.get("range", "")
+    return validate_constraint(provider, rule.get("range", ""))
 
 
 def _fetch(
@@ -215,7 +235,13 @@ def version(provider: str, text: str):
         return None
 
 
-def compatible(provider: str, value: str, constraint: str) -> bool:
+def compatible(
+    provider: str, value: str, constraint: str | tuple[str, ...] | list[str]
+) -> bool:
+    constraint = validate_constraint(provider, constraint)
+    if isinstance(constraint, tuple):
+        candidate = Semver(value.removeprefix("v"))
+        return all(candidate in NpmSpec(bound) for bound in constraint)
     if not constraint:
         return True
     if provider in ("pypi", "maven"):

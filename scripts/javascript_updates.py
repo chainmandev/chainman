@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import itertools
 import json
 import re
 import subprocess
@@ -546,22 +545,14 @@ def compatibility(pin, options):
 
 def scoped_policy(policy, name, ranges):
     common = registry.constraint("npm", policy, name)
-    bounds = [bound for bound in [common, *ranges] if bound]
-    alternatives = [bound.split("||") for bound in bounds]
-    count = 1
-    for choices in alternatives:
-        count *= len(choices)
-    if count > 128:
-        raise ValueError("JavaScript constraint intersection exceeds its bound")
-    combined = (
-        " || ".join(
-            " ".join(part.strip() for part in choice)
-            for choice in itertools.product(*alternatives)
-        )
-        if alternatives
-        else "*"
-    )
-    NpmSpec(combined)
+    inherited = common if isinstance(common, tuple) else ((common,) if common else ())
+    terms = [*inherited, *ranges]
+    if any(not isinstance(bound, str) or not bound.strip() for bound in terms):
+        raise ValueError("JavaScript constraint scopes require nonempty range strings")
+    bounds = list(dict.fromkeys(terms))
+    # Keep each original range's prerelease semantics and avoid distributing AND
+    # over OR. Work is bounded by the input terms, not their Cartesian product.
+    combined = list(registry.validate_constraint("npm", bounds)) if bounds else "*"
     return {
         **policy,
         "constraints": {
@@ -768,7 +759,7 @@ def plan(workspace, policy, now):
         # auditing, and no new young artifact can inherit this allowance.
         if floor and any(i[1:3] == (pin.name, str(floor)) for i in baseline):
             bound = registry.constraint("npm", policy, pin.name)
-            if not bound or floor in NpmSpec(bound):
+            if registry.compatible("npm", str(floor), bound):
                 eligible += [
                     r
                     for r in releases

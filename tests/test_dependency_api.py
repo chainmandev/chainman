@@ -47,6 +47,30 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result["version"], "2.0.0")
         self.assertEqual(result["disposition"], "selected")
 
+    def test_npm_query_conjunction_cannot_drop_an_outer_bound(self):
+        inventory = [
+            registry.Release(value, NOW - timedelta(days=90))
+            for value in ("5.1.0", "6.0.0")
+        ]
+        request = {
+            "schema": 1,
+            "operation": "select",
+            "provider": "npm",
+            "package": "sample",
+            "constraint": {
+                "range": ["^5 || ^6", "<6"],
+                "reason": "Required interface intersection",
+            },
+        }
+        with patch.object(registry, "releases", return_value=inventory):
+            self.assertEqual(api.query(self.root, request, now=NOW)["version"], "5.1.0")
+            request["constraint"]["range"] = ["^5", "^6"]
+            with self.assertRaises(ValueError):
+                api.query(self.root, request, now=NOW)
+            request["constraint"]["range"] = ["^1", "not-a-range"]
+            with self.assertRaises(ValueError):
+                api.query(self.root, request, now=NOW)
+
     def test_retention_is_explicit_and_does_not_claim_baseline_eligibility(self):
         with patch.object(
             registry,

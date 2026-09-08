@@ -196,6 +196,17 @@ manifest payloads after validation so transitive checks do not accumulate every
 historical README, script and development dependency declaration. This does not
 change registry transport limits or eligibility rules.
 
+A common `updates.constraints["npm:name"]` rule's `range` may also be a nonempty
+array of range strings; every member must match. Shared peer scopes use this
+conjunction directly instead
+of expanding combinations of alternatives. Each range keeps its own prerelease
+rules. Arrays are limited to 128 members, 128 total `||` alternatives and 65,536
+characters; malformed members fail even when another member already rejects the
+version. Scalar ranges retain their existing behavior, and other providers require
+scalar ranges. The same conjunction governs selection, artifact audits and security
+exception retirement. The separate `javascript` catalog, package, prefix and
+override policy rules continue to require scalar ranges.
+
 For centrally governed pnpm projects, `reconcile_policy=true` applies
 `javascript.catalog_constraints`, `package_constraints` and `override_constraints`
 before solving. Each rule contains a `range` and `reason`. Default catalog rules
@@ -225,7 +236,8 @@ Native integrations use `scripts/chainman.sh deps-query`: one JSON request on st
 one schema-versioned JSON response on stdout. Schema 1 supports `select`, `metadata`
 and `audit`; providers include npm, PyPI, crates, pub, GitHub, Docker, Go, Swift and
 Maven. Selection accepts `provider`, `package`, optional `current`, and an optional
-`constraint={range,reason}`. A retained current version is labelled `retained` and
+`constraint={range,reason}` (including the npm conjunction array described above).
+A retained current version is labelled `retained` and
 does not acquire eligibility evidence from an older candidate. `metadata` requires
 an exact `version` and returns evidence without claiming eligibility. `audit` takes
 `artifacts`, an array of `[provider,package,version,url,digest]` identities; caller
