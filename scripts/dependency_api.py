@@ -209,7 +209,15 @@ def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
                 if name in adapters:
                     spec, chosen_policy = adapters[name]
                     result = implementation(spec).resolve(
-                        root, spec, chosen_policy, now
+                        root,
+                        spec,
+                        chosen_policy,
+                        now,
+                        **(
+                            {"before": baselines[name]}
+                            if spec["adapter"] == "toolchain"
+                            else {}
+                        ),
                     )
                     if isinstance(result, dict):
                         baselines[name]["resolution"] = result
@@ -259,7 +267,13 @@ def resolve_command(root: Path, args: list[str]):
     engine = implementation(spec)
     now = instant()
     before = engine.snapshot(root, spec)
-    result = engine.resolve(root, spec, selected_policy, now)
+    result = engine.resolve(
+        root,
+        spec,
+        selected_policy,
+        now,
+        **({"before": before} if spec["adapter"] == "toolchain" else {}),
+    )
     if isinstance(result, dict):
         before["resolution"] = result
     engine.audit(root, spec, before, selected_policy, now)

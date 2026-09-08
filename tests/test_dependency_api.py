@@ -282,9 +282,13 @@ class PipelineTests(unittest.TestCase):
                 return {"old": spec["adapter"]}
 
             @staticmethod
-            def resolve(root, spec, policy, now):
+            def resolve(root, spec, policy, now, **kwargs):
                 parent.events.append(("resolve", spec["adapter"]))
                 parent.assertEqual(api.instant(), NOW)
+                if spec["adapter"] == "toolchain":
+                    parent.assertEqual(kwargs, {"before": {"old": "toolchain"}})
+                else:
+                    parent.assertEqual(kwargs, {})
 
             @staticmethod
             def audit(root, spec, before, policy, now):
@@ -319,6 +323,36 @@ class PipelineTests(unittest.TestCase):
                 ("generate", "1"),
                 ("audit", "nix"),
                 ("audit", "rust"),
+            ],
+        )
+
+    def test_sdk_receives_observation_from_before_nix_resolution(self):
+        self.settings["adapters"]["sdk"] = {"adapter": "toolchain"}
+        self.settings["steps"].insert(1, {"resolve": "sdk"})
+        self.run_pipeline()
+        self.assertLess(
+            self.events.index(("snapshot", "toolchain")),
+            self.events.index(("resolve", "nix")),
+        )
+
+    def test_sdk_resolve_command_passes_its_own_pre_update_observation(self):
+        self.settings["adapters"]["sdk"] = {"adapter": "toolchain"}
+        with (
+            patch.dict(
+                os.environ,
+                CHAINMAN_UPDATE_ACTIVE="1",
+                CHAINMAN_UPDATE_AT=NOW.isoformat(),
+            ),
+            patch.object(api, "policy", return_value=self.settings),
+            patch.object(api, "implementation", return_value=self.engine),
+        ):
+            api.resolve_command(self.root, ["sdk"])
+        self.assertEqual(
+            self.events,
+            [
+                ("snapshot", "toolchain"),
+                ("resolve", "toolchain"),
+                ("audit", "toolchain"),
             ],
         )
 

@@ -665,13 +665,13 @@ def nix_tree(root: Path, spec: dict, repository: str, commit: str) -> dict:
     # All inserted values have a restricted literal alphabet; no Nix string
     # interpolation or project expression is accepted by this evidence query.
     expression = (
-        'builtins.fetchTree { type = "github"; owner = "'
+        'let tree = builtins.fetchTree { type = "github"; owner = "'
         + owner
         + '"; repo = "'
         + repo
         + '"; rev = "'
         + commit
-        + '"; }'
+        + '"; }; in { inherit (tree) narHash; }'
     )
     result = chainman.execute(
         root,
@@ -690,7 +690,15 @@ def nix_tree(root: Path, spec: dict, repository: str, commit: str) -> dict:
         text=True,
         stdout=subprocess.PIPE,
     )
-    return json.loads(result.stdout)
+    evidence = json.loads(result.stdout)
+    if (
+        not isinstance(evidence, dict)
+        or set(evidence) != {"narHash"}
+        or not isinstance(evidence["narHash"], str)
+        or not re.fullmatch(r"sha256-[A-Za-z0-9+/]{43}=", evidence["narHash"])
+    ):
+        raise ValueError("Nix source evidence lacks one SHA-256 content hash")
+    return evidence
 
 
 def audit_nix(
@@ -787,7 +795,9 @@ def snapshot(root: Path, spec: dict) -> dict:
     raise ValueError("Unsupported source update adapter")
 
 
-def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve(
+    root: Path, spec: dict, policy: dict, now: datetime, *, before: dict | None = None
+) -> dict:
     cutoff(policy, now)
     adapter = spec.get("adapter")
     if adapter == "actions":
@@ -803,7 +813,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     if adapter == "toolchain":
         import source_toolchain
 
-        return source_toolchain.resolve(root, spec, policy, now)
+        return source_toolchain.resolve(root, spec, policy, now, before=before)
     raise ValueError("Unsupported source update adapter")
 
 

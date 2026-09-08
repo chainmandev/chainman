@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -308,6 +309,37 @@ class OCITests(Fixture):
             self.assertRaisesRegex(ValueError, "conflicting"),
         ):
             sources.oci_candidates("gcr.io/sample/tool", "gcr")
+
+
+class NixEvidenceTests(Fixture):
+    def test_non_object_and_missing_hash_evidence_fail_explicitly(self):
+        for value in ("/nix/store/example", {}, {"narHash": "invalid"}):
+            with (
+                self.subTest(value=value),
+                patch.object(
+                    sources.chainman,
+                    "execute",
+                    return_value=subprocess.CompletedProcess([], 0, json.dumps(value)),
+                ),
+                self.assertRaisesRegex(ValueError, "SHA-256 content hash"),
+            ):
+                sources.nix_tree(self.root, {}, "sample/packages", A)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_NIX_NATIVE") == "1",
+        "explicit real Nix GitHub source-evidence lane",
+    )
+    def test_real_nix_fetch_tree_keeps_hash_instead_of_coercing_to_store_path(self):
+        evidence = sources.nix_tree(
+            self.root,
+            {},
+            "NixOS/nixpkgs",
+            "30f0d59baf33968c9104a7fa2ec87406d63c5fbf",
+        )
+        self.assertEqual(
+            evidence,
+            {"narHash": "sha256-oidxGOnOJ9zUXQut4kXbokyQyd/gonADFo0YwNBE/5k="},
+        )
 
 
 class NixTests(Fixture):
@@ -758,6 +790,159 @@ class ToolchainTests(Fixture):
         )
         self.assertEqual((self.root / ".runtime-version").read_text(), "v22.1.0\n")
         sources.audit(self.root, self.spec, before, {}, NOW)
+
+    def current_pins(self):
+        self.json("package.json", {"engines": {"node": "22.x"}})
+        self.write(".runtime-version", "v22.1.0\n")
+
+    def npm_release(self, *, digest_byte=b"a", published=YOUNG, value="22.1.0"):
+        self.spec["tools"][0].update(provider="npm", name="sample-sdk")
+        return registry.Release(
+            value,
+            OLD,
+            artifacts=(
+                registry.Artifact(
+                    f"https://registry.npmjs.org/sample-sdk/-/sample-sdk-{value}.tgz",
+                    "sha512:" + (digest_byte * 64).hex(),
+                    published,
+                ),
+            ),
+        )
+
+    def test_same_young_sdk_and_all_pins_retain_complete_artifact_evidence(self):
+        self.current_pins()
+        release = self.npm_release()
+        with patch.object(registry, "releases", return_value=[release]):
+            before = sources.snapshot(self.root, self.spec)
+            result = sources.resolve(self.root, self.spec, {}, NOW, before=before)
+            self.assertEqual(result["changed"], [])
+            self.assertEqual(
+                result["tools"][0]["artifacts"][0][1], release.artifacts[0].digest
+            )
+            before["resolution"] = result
+            sources.audit(self.root, self.spec, before, {}, NOW)
+
+    def test_same_version_changed_young_artifact_is_not_grandfathered(self):
+        self.current_pins()
+        with patch.object(registry, "releases", return_value=[self.npm_release()]):
+            before = sources.snapshot(self.root, self.spec)
+        with (
+            patch.object(
+                registry, "releases", return_value=[self.npm_release(digest_byte=b"b")]
+            ),
+            self.assertRaisesRegex(ValueError, "sample-sdk@22.1.0.*eligible"),
+        ):
+            sources.resolve(self.root, self.spec, {}, NOW, before=before)
+
+    def test_mature_artifact_changes_after_resolution_fail_audit(self):
+        self.current_pins()
+        with patch.object(
+            registry, "releases", return_value=[self.npm_release(published=OLD)]
+        ):
+            before = sources.snapshot(self.root, self.spec)
+            before["resolution"] = sources.resolve(
+                self.root, self.spec, {}, NOW, before=before
+            )
+        with (
+            patch.object(
+                registry,
+                "releases",
+                return_value=[self.npm_release(digest_byte=b"b", published=OLD)],
+            ),
+            self.assertRaisesRegex(ValueError, "changed after resolution"),
+        ):
+            sources.audit(self.root, self.spec, before, {}, NOW)
+
+    def test_same_rendered_major_does_not_grandfather_changed_actual_sdk(self):
+        self.current_pins()
+        self.spec["tools"][0]["pins"] = self.spec["tools"][0]["pins"][:1]
+        with patch.object(registry, "releases", return_value=[self.npm_release()]):
+            before = sources.snapshot(self.root, self.spec)
+        with (
+            patch.object(
+                registry, "releases", return_value=[self.npm_release(value="22.2.0")]
+            ),
+            patch.object(source_toolchain, "probe", return_value="22.2.0"),
+            self.assertRaisesRegex(ValueError, "eligible"),
+        ):
+            sources.resolve(self.root, self.spec, {}, NOW, before=before)
+
+    def test_retained_sdk_cannot_bypass_constraints_safe_floor_or_expiry(self):
+        self.current_pins()
+        release = self.npm_release()
+        exception = {
+            "package": "npm:sample-sdk",
+            "version": "23.0.0",
+            "minimum_safe": "23.0.0",
+            "reason": "Required security repair",
+            "advisory": "https://example.invalid/advisory",
+            "expires": (NOW + timedelta(days=1)).isoformat(),
+        }
+        with patch.object(registry, "releases", return_value=[release]):
+            before = sources.snapshot(self.root, self.spec)
+            for policy in (
+                {
+                    "constraints": {
+                        "npm:sample-sdk": {
+                            "range": "<22",
+                            "reason": "Required runtime API",
+                        }
+                    }
+                },
+                {"exceptions": [exception]},
+                {
+                    "exceptions": [
+                        {
+                            **exception,
+                            "version": "22.1.0",
+                            "minimum_safe": "22.1.0",
+                            "expires": NOW.isoformat(),
+                        }
+                    ]
+                },
+            ):
+                with self.subTest(policy=policy), self.assertRaises(ValueError):
+                    sources.resolve(self.root, self.spec, policy, NOW, before=before)
+
+    def test_retained_github_sdk_requires_same_commit(self):
+        self.current_pins()
+        with (
+            patch.object(
+                registry, "releases", return_value=[registry.Release("v22.1.0", YOUNG)]
+            ),
+            patch.object(sources, "commit_time", return_value=YOUNG),
+        ):
+            before = sources.snapshot(self.root, self.spec)
+            self.assertEqual(
+                sources.resolve(self.root, self.spec, {}, NOW, before=before)[
+                    "changed"
+                ],
+                [],
+            )
+            with (
+                patch.object(registry, "github_commit", return_value=C),
+                self.assertRaisesRegex(ValueError, "eligible"),
+            ):
+                sources.resolve(self.root, self.spec, {}, NOW, before=before)
+
+    def test_sdk_baseline_requires_artifacts_and_current_dates(self):
+        self.current_pins()
+        self.npm_release()
+        with (
+            patch.object(
+                registry, "releases", return_value=[registry.Release("22.1.0", OLD)]
+            ),
+            self.assertRaisesRegex(ValueError, "immutable release artifacts"),
+        ):
+            sources.snapshot(self.root, self.spec)
+        with patch.object(
+            registry,
+            "releases",
+            return_value=[self.npm_release(published=NOW + timedelta(days=1))],
+        ):
+            before = sources.snapshot(self.root, self.spec)
+            with self.assertRaisesRegex(ValueError, "Future"):
+                sources.resolve(self.root, self.spec, {}, NOW, before=before)
 
     def test_immature_sdk_is_an_error_not_a_pin_downgrade(self):
         with (

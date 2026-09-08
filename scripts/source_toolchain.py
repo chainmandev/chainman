@@ -67,11 +67,17 @@ def pin_value(root: Path, pin: dict) -> str:
 
 
 def snapshot(root: Path, spec: dict) -> dict:
+    registry.fetch.cache_clear()
+    values = tools(spec)
+    observed = []
+    for tool in values:
+        value = probe(root, spec, tool)
+        chosen, _ = observe(tool, value)
+        observed.append(evidence(tool, chosen, value))
     return {
         "adapter": "toolchain",
-        "pins": [
-            [pin_value(root, pin) for pin in tool["pins"]] for tool in tools(spec)
-        ],
+        "pins": [[pin_value(root, pin) for pin in tool["pins"]] for tool in values],
+        "tools": observed,
     }
 
 
@@ -102,36 +108,97 @@ def probe(root: Path, spec: dict, tool: dict) -> str:
     return matches[0]["version"].removeprefix("v")
 
 
-def eligible_tool(
-    tool: dict, value: str, policy: dict, now: datetime
-) -> registry.Release:
+def observe(tool: dict, value: str) -> tuple[registry.Release, list[registry.Release]]:
+    """Bind one observed SDK version without granting it release-age eligibility."""
     provider, package = tool["provider"], tool["name"]
     releases = registry.releases(provider, package)
     rank = registry.version(provider, value)
-    selected = [
-        r
-        for r in registry.eligible(provider, releases, policy, package, now)
-        if registry.version(provider, r.version) == rank
-    ]
+    selected = [r for r in releases if registry.version(provider, r.version) == rank]
     if not selected:
-        raise ValueError("Selected Nix tool lacks eligible dated registry evidence")
+        raise ValueError(
+            f"Nix tool {provider}:{package}@{value} lacks dated registry evidence"
+        )
     chosen = max(selected, key=lambda r: r.published)
     if provider == "github":
         import source_updates
 
         commit = registry.github_commit(package, chosen.version)
+        source_updates.revision(commit)
         published = max(chosen.published, source_updates.commit_time(package, commit))
-        bound = registry.Release(chosen.version, published, commit)
-        alternatives = [bound if r.version == chosen.version else r for r in releases]
-        if not any(
-            r.version == chosen.version
-            for r in registry.eligible(provider, alternatives, policy, package, now)
-        ):
-            raise ValueError("Selected Nix tool tag points to immature contents")
-        return bound
-    if not chosen.artifacts:
-        raise ValueError("Selected Nix tool lacks immutable release artifacts")
-    return chosen
+        bound = registry.Release(chosen.version, published, commit, chosen.python)
+    else:
+        if not chosen.artifacts:
+            raise ValueError(
+                f"Nix tool {provider}:{package}@{value} lacks immutable release artifacts"
+            )
+        for item in chosen.artifacts:
+            registry.artifact_url(item.url)
+            if provider == "npm":
+                if not isinstance(item.digest, str) or not re.fullmatch(
+                    r"sha1:[a-f0-9]{40}|sha256:[a-f0-9]{64}|sha384:[a-f0-9]{96}|sha512:[a-f0-9]{128}",
+                    item.digest,
+                ):
+                    raise ValueError(
+                        "Nix tool has malformed canonical npm artifact evidence"
+                    )
+            else:
+                registry.digest(item.digest)
+        bound = registry.Release(
+            chosen.version,
+            max(chosen.published, *(a.published for a in chosen.artifacts)),
+            chosen.identity,
+            chosen.python,
+            chosen.artifacts,
+        )
+    registry.timestamp(bound.published.isoformat())
+    return bound, [bound if r.version == chosen.version else r for r in releases]
+
+
+def evidence(tool: dict, release: registry.Release, actual_version: str) -> dict:
+    return {
+        "provider": tool["provider"],
+        "name": tool["name"],
+        "version": actual_version,
+        "release": release.version,
+        "identity": release.identity,
+        "published": release.published.isoformat(),
+        "artifacts": sorted(
+            [[a.url, a.digest, a.published.isoformat()] for a in release.artifacts]
+        ),
+    }
+
+
+def eligible_tool(
+    tool: dict,
+    chosen: registry.Release,
+    releases: list[registry.Release],
+    policy: dict,
+    now: datetime,
+    *,
+    retained: bool,
+) -> None:
+    provider, package = tool["provider"], tool["name"]
+    # Retention waives only age: constraints, known safe floors and malformed or
+    # expired exceptions remain operative even when no newer release is selected.
+    mature = registry.maturity(provider, releases, policy, package, now)
+    exceptions = registry.active_exceptions(provider, releases, policy, package, now)
+    rank = registry.version(provider, chosen.version)
+    safe = registry.minimum_safe(provider, policy, package)
+    if (
+        chosen.python == "unsupported"
+        or not registry.compatible(
+            provider, chosen.version, registry.constraint(provider, policy, package)
+        )
+        or (safe is not None and rank < safe)
+        or chosen.published > now
+    ):
+        raise ValueError(
+            f"Nix tool {provider}:{package}@{chosen.version} violates its active compatibility or security policy"
+        )
+    if not retained and chosen not in mature + exceptions:
+        raise ValueError(
+            f"Nix tool {provider}:{package}@{chosen.version} lacks eligible dated registry evidence (published {chosen.published.isoformat()})"
+        )
 
 
 def render(pin: dict, value: str) -> str:
@@ -150,10 +217,15 @@ def plan(
     values = tools(spec)
     if len(before["pins"]) != len(values):
         raise ValueError("Toolchain declaration changed during resolution")
+    baseline_tools = before.get("tools", [None] * len(values))
+    if len(baseline_tools) != len(values):
+        raise ValueError("Toolchain observation inventory changed during resolution")
+    registry.fetch.cache_clear()
     result = []
     for index, tool in enumerate(values):
         value = probe(root, spec, tool)
-        chosen = eligible_tool(tool, value, policy, now)
+        chosen, releases = observe(tool, value)
+        observed = evidence(tool, chosen, value)
         pins = []
         if len(before["pins"][index]) != len(tool["pins"]):
             raise ValueError("Toolchain output inventory changed during resolution")
@@ -162,19 +234,21 @@ def plan(
             if floor and Version(floor[0]) > Version(value):
                 raise ValueError("Refreshed Nix tool would downgrade an existing pin")
             pins.append(render(pin, value))
+        retained = observed == baseline_tools[index] and pins == before["pins"][index]
+        eligible_tool(tool, chosen, releases, policy, now, retained=retained)
         result.append(
             {
-                "version": value,
-                "identity": chosen.identity,
-                "published": chosen.published.isoformat(),
+                **observed,
                 "pins": pins,
             }
         )
     return result
 
 
-def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
-    before = snapshot(root, spec)
+def resolve(
+    root: Path, spec: dict, policy: dict, now: datetime, *, before: dict | None = None
+) -> dict:
+    before = snapshot(root, spec) if before is None else before
     selected = plan(root, spec, before, policy, now)
     changed = []
     for tool, result in zip(tools(spec), selected, strict=True):
@@ -201,5 +275,8 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
     if "resolution" in before and selected != before["resolution"]["tools"]:
         raise ValueError("Selected Nix tool changed after resolution")
     expected = [item["pins"] for item in selected]
-    if snapshot(root, spec)["pins"] != expected:
+    actual_pins = [
+        [pin_value(root, pin) for pin in tool["pins"]] for tool in tools(spec)
+    ]
+    if actual_pins != expected:
         raise ValueError("Toolchain pins differ from the dated selected tools")

@@ -84,7 +84,13 @@ version catalogs. Each adapter's optional `policy` adds scoped rules to the glob
 policy. A TOML `updates.policy_file` keeps larger policy tables outside the primary
 configuration. Toolchain adapters probe Nix-supplied versions and synchronize
 declared JSON/TOML/YAML pointers or exact regex pins only after dated release evidence
-passes. Application generators and deployment-specific reconciliation remain hooks.
+passes. Before Nix resolution, SDK snapshots record the actual tool version and
+its immutable provider evidence. An unchanged version with identical pins and
+artifact URLs, hashes and dates (or the same GitHub commit) may remain below the
+age window. Changed identities require normal eligibility; constraints, safe
+floors and exception expiry remain enforced. Final SDK audit probes the tools
+again and refreshes registry observations. Application generators and
+deployment-specific reconciliation remain hooks.
 
 Rust, Python and Flutter may adopt an initially missing lockfile, but their final
 audit requires the resolved Cargo, uv or pub lock. A resolver or reconciliation
