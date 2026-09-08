@@ -737,7 +737,12 @@ def audit_identities(
                         candidates += registry.releases(provider, package)
             else:
                 candidates = (
-                    registry.releases(provider, package, include_prerelease=True)
+                    registry.releases(
+                        provider,
+                        package,
+                        include_prerelease=True,
+                        include_deprecated=True,
+                    )
                     if provider == "npm"
                     else registry.releases(provider, package)
                 )
@@ -746,6 +751,12 @@ def audit_identities(
             )
             evidence[key] = (candidates, {r.version for r in exceptions})
         candidates, exceptions = evidence[key]
+        if identity not in before and any(
+            r.version == value and r.deprecated for r in candidates
+        ):
+            raise ValueError(
+                f"A new or changed deprecated artifact requires explicit project migration: {provider}:{package}@{value}"
+            )
         if not registry.compatible(
             provider, value, registry.constraint(provider, policy, package)
         ):

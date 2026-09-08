@@ -156,6 +156,11 @@ Every declared security safe floor also applies to mature and unchanged artifact
 peer constraints cannot force a fallback below it. Existing npm prerelease identities
 may remain only with unchanged registry artifact evidence and valid constraints.
 Stable candidate selection never introduces a prerelease.
+An existing deprecated npm artifact may also remain only with the same locked
+identity and matching current registry hash/URL evidence. Deprecation never admits
+a new or changed artifact, including through a security maturity exception. Its
+metadata remains available to audit unchanged direct and transitive dependencies;
+constraints, safe floors, peer compatibility and exception expiry still apply.
 
 For centrally governed pnpm projects, `reconcile_policy=true` applies
 `javascript.catalog_constraints`, `package_constraints` and `override_constraints`

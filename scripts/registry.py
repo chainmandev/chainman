@@ -39,6 +39,7 @@ class Release:
     identity: str = ""
     python: str = ""
     artifacts: tuple[Artifact, ...] = ()
+    deprecated: bool = False
 
 
 class RegistryHTTPError(ValueError):
@@ -245,6 +246,7 @@ def maturity(
             rank is None
             or (safe is not None and rank < safe)
             or release.python == "unsupported"
+            or release.deprecated
             or not compatible(provider, release.version, bound)
         ):
             continue
@@ -290,6 +292,7 @@ def active_exceptions(
                 release.version == exception["version"]
                 and version(provider, release.version) >= required_safe
                 and release.python != "unsupported"
+                and not release.deprecated
                 and compatible(provider, release.version, bound)
             ):
                 candidates.append(release)
@@ -572,7 +575,11 @@ def docker_releases(repository: str, accepts_tag) -> list[Release]:
 
 
 def releases(
-    provider: str, package: str, *, include_prerelease: bool = False
+    provider: str,
+    package: str,
+    *,
+    include_prerelease: bool = False,
+    include_deprecated: bool = False,
 ) -> list[Release]:
     if provider == "go":
         values = (
@@ -612,7 +619,8 @@ def releases(
                 if include_prerelease
                 else version(provider, value)
             )
-            if parsed is None or info.get("deprecated"):
+            deprecated = bool(info.get("deprecated"))
+            if parsed is None or (deprecated and not include_deprecated):
                 continue
             dist = info.get("dist", {})
             integrity = dist.get("integrity")
@@ -626,7 +634,14 @@ def releases(
                 digest(integrity, npm=True),
                 timestamp(body.get("time", {}).get(value)),
             )
-            result.append(Release(value, artifact.published, artifacts=(artifact,)))
+            result.append(
+                Release(
+                    value,
+                    artifact.published,
+                    artifacts=(artifact,),
+                    deprecated=deprecated,
+                )
+            )
         return result
     if provider == "crates":
         body = data(f"https://crates.io/api/v1/crates/{quote(package, safe='')}")

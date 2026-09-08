@@ -669,6 +669,105 @@ class JavaScriptTests(unittest.TestCase):
             len(registry.releases("npm", "library", include_prerelease=True)), 1
         )
 
+    def test_deprecated_baseline_evidence_is_retained_without_admitting_new_artifacts(
+        self,
+    ):
+        import updates
+
+        self.manifest("package.json", {"library": "1.0.0"})
+        self.release("library", "1.0.0", children={"legacy-child": "1.0.0"})
+        self.release("legacy-child", "1.0.0")
+        self.resolve()
+        before = js.snapshot(self.root, self.spec)
+        for name in ("library", "legacy-child"):
+            self.metadata[name]["versions"]["1.0.0"]["deprecated"] = "Superseded API"
+        self.assertEqual(self.selected()[1]["library"], "1.0.0")
+        self.resolve()
+        identities = set(map(tuple, before["identities"]))
+        updates.audit_identities(
+            self.root, identities, identities, self.policy, self.now
+        )
+        for original in identities:
+            for changed in (
+                original,
+                (*original[:-1], "sha512:" + "0" * 128),
+                (*original[:3], "https://example.org/other.tgz", original[4]),
+            ):
+                with (
+                    self.subTest(changed=changed),
+                    self.assertRaisesRegex(ValueError, "deprecated"),
+                ):
+                    updates.audit_identities(
+                        self.root,
+                        {changed},
+                        set() if changed == original else identities,
+                        self.policy,
+                        self.now,
+                    )
+        # Even a retained tuple needs its current registry's exact hash evidence.
+        self.metadata["library"]["versions"]["1.0.0"]["dist"]["integrity"] = (
+            "sha512-" + base64.b64encode(b"z" * 64).decode()
+        )
+        with self.assertRaisesRegex(ValueError, "absent from registry"):
+            updates.audit_identities(
+                self.root, identities, identities, self.policy, self.now
+            )
+
+    def test_deprecation_cannot_be_waived_by_security_age_exception_or_new_selection(
+        self,
+    ):
+        self.manifest("package.json", {"library": "1.0.0"})
+        self.release("library", "1.0.0")
+        self.metadata["library"]["versions"]["1.0.0"]["deprecated"] = "Superseded API"
+        self.policy["exceptions"] = [
+            {
+                "package": "npm:library",
+                "version": "1.0.0",
+                "minimum_safe": "1.0.0",
+                "reason": "Required fix",
+                "advisory": "https://example.org/advisory",
+                "expires": (self.now + timedelta(days=7)).isoformat(),
+            }
+        ]
+        self.assertEqual(registry.releases("npm", "library"), [])
+        records = registry.releases("npm", "library", include_deprecated=True)
+        self.assertTrue(records[0].deprecated)
+        with self.assertRaisesRegex(ValueError, "eligible"):
+            registry.select("npm", records, self.policy, "library", self.now)
+        with self.assertRaisesRegex(ValueError, "eligible"):
+            self.selected()
+        self.release("library", "2.0.0")
+        self.assertEqual(self.selected()[1]["library"], "2.0.0")
+
+    def test_deprecated_retention_still_obeys_safe_floor_constraints_and_expiry(self):
+        self.manifest("package.json", {"library": "1.0.0"})
+        self.release("library", "1.0.0")
+        self.resolve()
+        self.metadata["library"]["versions"]["1.0.0"]["deprecated"] = "Superseded API"
+        self.policy["constraints"] = {
+            "npm:library": {"range": ">=2", "reason": "Adopted API minimum"}
+        }
+        with self.assertRaisesRegex(ValueError, "eligible"):
+            self.selected()
+        self.policy.pop("constraints")
+        self.policy["exceptions"] = [
+            {
+                "package": "npm:library",
+                "version": "2.0.0",
+                "minimum_safe": "2.0.0",
+                "reason": "Required fix",
+                "advisory": "https://example.org/advisory",
+                "expires": (self.now + timedelta(days=7)).isoformat(),
+            }
+        ]
+        with self.assertRaisesRegex(ValueError, "eligible"):
+            self.selected()
+        self.policy["exceptions"][0].update(
+            version="1.0.0", minimum_safe="1.0.0", expires=self.now.isoformat()
+        )
+        with self.assertRaisesRegex(ValueError, "Expired"):
+            self.selected()
+
     def test_exact_security_exception_retires_when_safe_release_matures(self):
         self.manifest("package.json", {"library": "1.0.0"})
         self.release("library", "1.0.0")

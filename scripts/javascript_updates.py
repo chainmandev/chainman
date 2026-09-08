@@ -445,7 +445,9 @@ class Evidence:
             body = registry.data(f"https://registry.npmjs.org/{quote(name, safe='')}")
             if body.get("name") != name:
                 raise ValueError("Registry package identity disagrees with its request")
-            releases = registry.releases("npm", name, include_prerelease=True)
+            releases = registry.releases(
+                "npm", name, include_prerelease=True, include_deprecated=True
+            )
             versions = body.get("versions", {})
             for release in releases:
                 if release.published > self.now:
@@ -711,7 +713,8 @@ def plan(workspace, policy, now):
         eligible += [
             r
             for r in releases
-            if any(
+            if not r.deprecated
+            and any(
                 e.get("package") == "npm:" + pin.name and e.get("version") == r.version
                 for e in policy.get("exceptions", [])
             )
@@ -719,6 +722,25 @@ def plan(workspace, policy, now):
         baseline_versions = {
             i[2] for i in baseline if i[0] == "npm" and i[1] == pin.name
         }
+        # Deprecation removes releases from new selection, not the evidence for
+        # an already locked artifact. Final audit still binds the exact tuple.
+        eligible += [
+            r
+            for r in releases
+            if r.deprecated
+            and Version(r.version) in NpmSpec(pin.requirement)
+            and registry.compatible(
+                "npm", r.version, registry.constraint("npm", policy, pin.name)
+            )
+            and any(
+                i[:3] == ("npm", pin.name, r.version)
+                and any(
+                    a.digest == i[4] and (not i[3] or a.url == i[3])
+                    for a in r.artifacts
+                )
+                for i in baseline
+            )
+        ]
         eligible += [
             r
             for r in releases
