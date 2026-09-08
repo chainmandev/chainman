@@ -123,12 +123,18 @@ retain their native rules for dependency-free projects that legitimately omit su
 or resolved pins.
 
 During Flutter resolution, selected direct dependencies are temporarily bound to
-their exact eligible releases across all declared workspaces. Public manifest
-ranges, comments and file permissions are restored before the final lock audit.
-This prevents Pub from floating a selected caret range to a younger direct release
-without narrowing a library's published range. Unexpected resolver edits are
-preserved and fail the update. Transitive artifacts still require the same final
-age, constraint and identity evidence; temporary pins grant no audit exemption.
+their exact eligible releases across all declared workspaces. If Pub selects a
+newly ineligible transitive artifact, Chainman tries eligible releases through
+ordinary temporary root dependency constraints, with at most 64 native solver
+states. Parent ranges and declared overrides remain authoritative; the repair
+never adds a dependency override. Conflicts without an eligible native graph fail.
+Public manifest ranges, comments and file permissions are restored after each
+attempt. Unexpected manifest or override edits are preserved and fail the update.
+After a successful repair, offline Pub resolution normalizes dependency roles
+against the restored manifests and must retain the exact selected artifact graph.
+The final lock audit still enforces publication age, constraints, security floors,
+exception expiry and immutable evidence. Verification then uses that frozen graph;
+temporary pins grant no audit exemption.
 
 Gradle resolution additionally visits every resolvable project and buildscript
 configuration, requiring failures to stop the update. A root `dependencies` report

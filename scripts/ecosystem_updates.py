@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import stat
+import subprocess
 import tempfile
 
 from packaging.requirements import Requirement
@@ -401,21 +402,37 @@ def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dic
 
 
 @contextmanager
-def pub_resolution_pins(root: Path, planned: list):
+def pub_resolution_pins(root: Path, planned: list, extra: dict | None = None):
     """Keep public ranges while binding native resolution to the chosen releases."""
     documents = {}
+
+    def document(name):
+        if name not in documents:
+            before = tc.regular_input(root, name)
+            path = tc.contained(root, name)
+            value, render = manifests.document(path, body=before.decode())
+            documents[name] = (before, stat.S_IMODE(path.stat().st_mode), value, render)
+        return documents[name][2]
+
     for pin, chosen in planned:
         if pin["provider"] != "pub" or chosen is None:
             continue
         if "pointer" not in pin:
             raise ValueError("Pub resolution requires structured dependency pointers")
         name = pin["file"]
-        if name not in documents:
-            before = tc.regular_input(root, name)
-            path = tc.contained(root, name)
-            value, render = manifests.document(path, body=before.decode())
-            documents[name] = (before, stat.S_IMODE(path.stat().st_mode), value, render)
-        manifests.assign(documents[name][2], pin["pointer"], chosen.version)
+        manifests.assign(document(name), pin["pointer"], chosen.version)
+    for (name, package), version in (extra or {}).items():
+        value = document(name)
+        if any(
+            package in value.get(section, {})
+            for section in ("dependencies", "dev_dependencies")
+        ):
+            raise ValueError(
+                "Pub transitive constraints cannot replace a declared direct dependency"
+            )
+        # Ordinary constraints participate in Pub's complete native solve. An
+        # override here would bypass a parent's range and is deliberately avoided.
+        value.setdefault("dev_dependencies", {})[package] = version
     written = {}
     try:
         for name, (before, mode, _, render) in documents.items():
@@ -451,6 +468,244 @@ def pub_resolution_pins(root: Path, planned: list):
             )
 
 
+PUB_SOLVER_STATES = 64
+
+
+def pub_resolve(
+    root: Path,
+    spec: dict,
+    specs: dict,
+    planned: list,
+    before: dict,
+    policy: dict,
+    now: datetime,
+) -> None:
+    """Repair newly ineligible transitives with bounded, ordinary Pub constraints."""
+    commands = deepcopy(spec.get("resolve", [["flutter", "pub", "get"]]))
+    if (
+        not isinstance(commands, list)
+        or not commands
+        or any(
+            not isinstance(command, list)
+            or not command
+            or any(not isinstance(argument, str) for argument in command)
+            for command in commands
+        )
+    ):
+        raise ValueError("Native resolution requires explicit argument-array commands")
+    standard = all(
+        isinstance(command, list)
+        and len(command) >= 3
+        and Path(command[0]).name in {"dart", "flutter"}
+        and command[1:3] == ["pub", "get"]
+        for command in commands
+    )
+    watched = set()
+    for member in specs.values():
+        watched.update(
+            str(Path(member["directory"]) / name)
+            for name in ("pubspec.yaml", "pubspec_overrides.yaml")
+        )
+        for name in member["inputs"]:
+            if name.endswith("pubspec.yaml"):
+                watched.update(
+                    (name, str(Path(name).with_name("pubspec_overrides.yaml")))
+                )
+
+    def manifest_state():
+        result = {}
+        for name in watched:
+            path = tc.contained(root, name)
+            result[name] = (
+                (tc.regular_input(root, name), stat.S_IMODE(path.stat().st_mode))
+                if path.exists()
+                else None
+            )
+        return result
+
+    expected = manifest_state()
+
+    def unchanged():
+        try:
+            equal = manifest_state() == expected
+        except (OSError, ValueError):
+            equal = False
+        if not equal:
+            raise ValueError(
+                "Pub manifest or override changed during resolution; preserve and inspect its changes"
+            )
+
+    def identities():
+        return {
+            name: updates.lock_identities(root, [name], specs=specs) for name in specs
+        }
+
+    def run(*, retry=False, offline=False):
+        for member in specs.values():
+            directory = tc.contained(root, member["directory"])
+            for command in commands:
+                argv = (
+                    [*command, "--offline"]
+                    if offline and "--offline" not in command
+                    else command
+                )
+                try:
+                    result = chainman.execute(
+                        root,
+                        spec.get("profile", "flutter"),
+                        argv,
+                        cwd=directory,
+                        env={**tc.environment(root), "TOOLCHAIN_FRESH": "1"},
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                except subprocess.CalledProcessError as error:
+                    output = error.stdout or ""
+                    print(output, end="")
+                    if (
+                        retry
+                        and standard
+                        and error.returncode in {1, 65}
+                        and "version solving failed" in output.lower()
+                    ):
+                        return False
+                    raise
+                if result is not None:
+                    print(result.stdout or "", end="")
+        return True
+
+    baseline = {tuple(item) for item in before["identities"]}
+    inventories = {}
+
+    def inventory(package):
+        if package not in inventories:
+            inventories[package] = registry.releases("pub", package)
+        return inventories[package]
+
+    def issue(graph):
+        for name, current in graph.items():
+            for identity in sorted(current):
+                provider, package, version, url, digest = identity
+                if provider != "pub":
+                    raise ValueError(
+                        "Pub resolution produced another registry identity"
+                    )
+                releases = inventory(package)
+                artifacts = [
+                    a
+                    for r in releases
+                    if r.version == version
+                    for a in r.artifacts
+                    if a.digest == digest and (not url or a.url == url)
+                ]
+                if not artifacts:
+                    raise ValueError(
+                        "Pub artifact identity is absent from registry evidence"
+                    )
+                if max(a.published for a in artifacts) > now:
+                    raise ValueError("Future Pub artifact publication age")
+                allowed = registry.maturity(
+                    "pub", releases, policy, package, now
+                ) + registry.active_exceptions("pub", releases, policy, package, now)
+                bound = registry.constraint("pub", policy, package)
+                safe = registry.minimum_safe("pub", policy, package)
+
+                def retainable(value):
+                    return registry.compatible("pub", value, bound) and (
+                        safe is None or registry.version("pub", value) >= safe
+                    )
+
+                if (identity in baseline and retainable(version)) or version in {
+                    r.version for r in allowed
+                }:
+                    continue
+                # Only exact observed artifacts receive baseline retention. The
+                # final generic audit still checks their floors and constraints.
+                retained = [
+                    r
+                    for r in releases
+                    if any(
+                        old[:3] == ("pub", package, r.version)
+                        and any(
+                            a.digest == old[4] and (not old[3] or a.url == old[3])
+                            for a in r.artifacts
+                        )
+                        for old in baseline
+                    )
+                    and retainable(r.version)
+                ]
+                values = sorted(
+                    {r.version for r in [*allowed, *retained]},
+                    key=lambda value: registry.version("pub", value),
+                    reverse=True,
+                )
+                manifest = str(Path(specs[name]["directory"]) / "pubspec.yaml")
+                return (manifest, package), values
+        return None
+
+    visited = set()
+    frontier = [iter([{}])]
+    last = ""
+
+    def branches(state, target, values):
+        for value in values:
+            yield {**state, target: value}
+
+    while frontier:
+        try:
+            state = next(frontier[-1])
+        except StopIteration:
+            frontier.pop()
+            continue
+        key = tuple(sorted(state.items()))
+        if key in visited:
+            continue
+        if len(visited) >= PUB_SOLVER_STATES:
+            raise ValueError(
+                f"Pub eligibility solver exhausted its {PUB_SOLVER_STATES}-state bound: {last}"
+            )
+        visited.add(key)
+        unchanged()
+        try:
+            with pub_resolution_pins(root, planned, state):
+                if not run(retry=bool(state)):
+                    continue
+                graph = identities()
+                conflict = issue(graph)
+        finally:
+            unchanged()
+        if conflict:
+            target, values = conflict
+            last = f"no eligible native graph for pub:{target[1]} in {target[0]}"
+            if not standard:
+                raise ValueError(
+                    "Pub eligibility repair requires native pub get commands"
+                )
+            if target in state:
+                raise ValueError(
+                    "Pub did not honor an ordinary eligibility constraint; inspect declared overrides"
+                )
+            frontier.append(branches(state, target, values))
+            continue
+        if state:
+            # Removing synthetic direct constraints changes lock dependency roles.
+            # Normalize only during resolution, from the already fetched cache,
+            # and never accept any artifact substitution during that operation.
+            try:
+                run(offline=True)
+            finally:
+                unchanged()
+            if identities() != graph:
+                raise ValueError(
+                    "Pub normalization changed the selected immutable artifact graph"
+                )
+        return
+    raise ValueError(
+        f"No eligible Pub transitive graph satisfies native constraints: {last}"
+    )
+
+
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
@@ -469,14 +724,15 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         if chosen and manifests.replace(pin, chosen, root):
             changed.append(pin["file"])
     manifests.configure_build_dependencies(root, selected, specs=specs)
-    with pub_resolution_pins(root, planned):
+    if spec["adapter"] == "flutter":
+        pub_resolve(root, spec, specs, planned, before, policy, now)
+    if spec["adapter"] != "flutter":
         for member in specs.values():
             directory = tc.contained(root, member["directory"])
             kind = spec["adapter"]
             default = {
                 "rust": [["cargo", "update"]],
                 "python": [["uv", "lock", "--upgrade"]],
-                "flutter": [["flutter", "pub", "get"]],
                 "swift": [["swift", "package", "update"]],
                 "gradle": [
                     [

@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -472,6 +473,426 @@ class NativeTests(unittest.TestCase):
             spec = {"adapter": kind}
             with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "symlink"):
                 native.pins(self.root, spec, native.specifications(self.root, spec))
+
+    def pub_transitive_fixture(self):
+        path = self.put(
+            "pubspec.yaml",
+            "# public contract\nname: root\ndependencies:\n  consumer:\n    path: consumer\n",
+        )
+        path.chmod(0o640)
+        self.put(
+            "consumer/pubspec.yaml",
+            "name: consumer\nversion: 1.0.0\ndependencies:\n  sample: '>=1.0.0 <3.0.0'\n",
+        )
+        releases = [
+            registry.Release(
+                value,
+                NOW - timedelta(days=days),
+                artifacts=(
+                    registry.Artifact(
+                        f"https://pub.dev/api/archives/sample-{value}.tar.gz",
+                        "sha256:" + digit * 64,
+                        NOW - timedelta(days=days),
+                    ),
+                ),
+            )
+            for value, days, digit in [
+                ("1.5.0", 60, "a"),
+                ("2.0.0", 1, "b"),
+                ("3.0.0", 60, "c"),
+            ]
+        ]
+        calls = []
+
+        def write(directory, value, role="transitive", digit=None):
+            item = next(item for item in releases if item.version == value)
+            digest = digit * 64 if digit else item.artifacts[0].digest.split(":")[1]
+            (directory / "pubspec.lock").write_text(
+                f"packages:\n  sample:\n    dependency: '{role}'\n    source: hosted\n    version: '{value}'\n    description:\n      name: sample\n      url: https://pub.dev\n      sha256: '{digest}'\n"
+            )
+
+        def resolver(root, profile, argv, **kwargs):
+            directory = kwargs["cwd"]
+            document = native.manifests.document(directory / "pubspec.yaml")[0]
+            selected = document.get("dev_dependencies", {}).get("sample")
+            calls.append(
+                (str(directory.relative_to(self.root)), selected, "--offline" in argv)
+            )
+            if selected and not native.accepts(
+                "pub",
+                selected,
+                native.manifests.document(self.root / "consumer/pubspec.yaml")[0][
+                    "dependencies"
+                ]["sample"],
+            ):
+                raise subprocess.CalledProcessError(
+                    1,
+                    argv,
+                    output="Because the parent requires <3.0.0, version solving failed.\n",
+                )
+            if selected is None:
+                selected = (
+                    native.manifests.document(directory / "pubspec.lock")[0][
+                        "packages"
+                    ]["sample"]["version"]
+                    if "--offline" in argv
+                    else "2.0.0"
+                )
+            write(
+                directory,
+                selected,
+                "direct dev"
+                if document.get("dev_dependencies", {}).get("sample")
+                else "transitive",
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout="native Pub completed\n")
+
+        return path, releases, calls, write, resolver
+
+    def test_pub_transitive_backtracks_through_native_constraints_and_normalizes(self):
+        path, releases, calls, _, resolver = self.pub_transitive_fixture()
+        before = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual([entry[1] for entry in calls], [None, "3.0.0", "1.5.0", None])
+        self.assertTrue(calls[-1][2])
+        self.assertEqual((path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), before)
+        self.assertIn(
+            "dependency: 'transitive'", (self.root / "pubspec.lock").read_text()
+        )
+        self.assertIn("version: '1.5.0'", (self.root / "pubspec.lock").read_text())
+
+    def test_pub_transitive_constraints_cover_each_workspace(self):
+        path, releases, calls, _, resolver = self.pub_transitive_fixture()
+        second = self.put(
+            "example/pubspec.yaml",
+            "name: example\ndependencies:\n  consumer:\n    path: ../consumer\n",
+        )
+        before = (path.read_bytes(), second.read_bytes())
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+        ):
+            native.resolve(
+                self.root,
+                {"adapter": "flutter", "directories": [".", "example"]},
+                {},
+                NOW,
+            )
+        self.assertEqual((path.read_bytes(), second.read_bytes()), before)
+        for directory in (self.root, self.root / "example"):
+            self.assertIn("version: '1.5.0'", (directory / "pubspec.lock").read_text())
+        self.assertEqual({entry[0] for entry in calls if entry[2]}, {".", "example"})
+
+    def test_pub_transitive_search_has_a_fixed_state_bound(self):
+        path, releases, calls, _, resolver = self.pub_transitive_fixture()
+        before = path.read_bytes()
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            patch.object(native, "PUB_SOLVER_STATES", 2),
+            self.assertRaisesRegex(ValueError, "2-state bound"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pub_transitive_no_eligible_release_never_falls_back_to_young(self):
+        path, releases, calls, _, resolver = self.pub_transitive_fixture()
+        before = path.read_bytes()
+        with (
+            patch.object(registry, "releases", return_value=[releases[1]]),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "No eligible Pub transitive graph"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pub_transitive_all_mature_candidates_incompatible_fail(self):
+        path, releases, calls, _, resolver = self.pub_transitive_fixture()
+        before = path.read_bytes()
+        with (
+            patch.object(registry, "releases", return_value=releases[1:]),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "native constraints"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pub_transitive_unrelated_command_failure_keeps_original_status(self):
+        path, releases, calls, _, resolver = self.pub_transitive_fixture()
+        before = path.read_bytes()
+
+        def fail(*args, **kwargs):
+            if native.manifests.document(path)[0].get("dev_dependencies"):
+                raise subprocess.CalledProcessError(
+                    23,
+                    args[2],
+                    output="unrelated exit23 quoting version solving failed\n",
+                )
+            return resolver(*args, **kwargs)
+
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=fail),
+            self.assertRaises(subprocess.CalledProcessError) as raised,
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(raised.exception.returncode, 23)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pub_transitive_never_repairs_a_hash_mismatch(self):
+        path, releases, calls, write, resolver = self.pub_transitive_fixture()
+
+        def corrupt(*args, **kwargs):
+            result = resolver(*args, **kwargs)
+            write(self.root, "2.0.0", digit="f")
+            return result
+
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=corrupt),
+            self.assertRaisesRegex(ValueError, "identity is absent"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 1)
+
+    def test_pub_normalization_cannot_replace_the_selected_artifact_graph(self):
+        path, releases, _, write, resolver = self.pub_transitive_fixture()
+        before = path.read_bytes()
+
+        def change(*args, **kwargs):
+            result = resolver(*args, **kwargs)
+            if "--offline" in args[2]:
+                write(self.root, "2.0.0")
+            return result
+
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=change),
+            self.assertRaisesRegex(ValueError, "normalization changed"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pub_transitive_preserves_declared_overrides_and_rejects_their_conflict(
+        self,
+    ):
+        path, releases, _, write, resolver = self.pub_transitive_fixture()
+        override = self.put(
+            "pubspec_overrides.yaml", "dependency_overrides:\n  sample: 2.0.0\n"
+        )
+        before = (path.read_bytes(), override.read_bytes())
+
+        def overridden(*args, **kwargs):
+            self.assertEqual(override.read_bytes(), before[1])
+            write(self.root, "2.0.0")
+            return subprocess.CompletedProcess(
+                args[2], 0, stdout="explicit override honored\n"
+            )
+
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=overridden),
+            self.assertRaisesRegex(ValueError, "declared overrides"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual((path.read_bytes(), override.read_bytes()), before)
+
+    def test_pub_transitive_preserves_concurrent_manifest_and_override_edits(self):
+        for target in ("pubspec.yaml", "pubspec_overrides.yaml"):
+            with self.subTest(target=target):
+                path, releases, _, _, resolver = self.pub_transitive_fixture()
+                changed = self.root / target
+
+                def concurrent(*args, **kwargs):
+                    result = resolver(*args, **kwargs)
+                    changed.write_text("concurrent author edit\n")
+                    return result
+
+                with (
+                    patch.object(registry, "releases", return_value=releases),
+                    patch.object(native.chainman, "execute", side_effect=concurrent),
+                    self.assertRaisesRegex(ValueError, "preserve and inspect"),
+                ):
+                    native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+                self.assertEqual(changed.read_text(), "concurrent author edit\n")
+                if target != "pubspec.yaml":
+                    changed.unlink()
+
+    def test_pub_transitive_security_floor_cannot_fall_back_below_it(self):
+        _, releases, calls, _, resolver = self.pub_transitive_fixture()
+        policy = {
+            "exceptions": [
+                {
+                    "package": "pub:sample",
+                    "version": "3.0.0",
+                    "minimum_safe": "2.5.0",
+                    "reason": "fix",
+                    "advisory": "https://example.invalid/fix",
+                    "expires": (NOW + timedelta(days=5)).isoformat(),
+                }
+            ]
+        }
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "No eligible Pub transitive graph"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, policy, NOW)
+        self.assertEqual([entry[1] for entry in calls], [None, "3.0.0"])
+
+    def test_pub_transitive_expired_exception_cannot_authorize_young_release(self):
+        _, releases, _, _, resolver = self.pub_transitive_fixture()
+        policy = {
+            "exceptions": [
+                {
+                    "package": "pub:sample",
+                    "version": "2.0.0",
+                    "minimum_safe": "2.0.0",
+                    "reason": "fix",
+                    "advisory": "https://example.invalid/fix",
+                    "expires": NOW.isoformat(),
+                }
+            ]
+        }
+        with (
+            patch.object(registry, "releases", return_value=releases[:2]),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "Expired"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, policy, NOW)
+
+    def test_pub_transitive_future_artifact_age_is_not_a_retry_candidate(self):
+        _, releases, calls, _, resolver = self.pub_transitive_fixture()
+        young = releases[1]
+        future = registry.Release(
+            young.version,
+            NOW + timedelta(days=1),
+            artifacts=(
+                registry.Artifact(
+                    young.artifacts[0].url,
+                    young.artifacts[0].digest,
+                    NOW + timedelta(days=1),
+                ),
+            ),
+        )
+        with (
+            patch.object(
+                registry, "releases", return_value=[releases[0], future, releases[2]]
+            ),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "Future Pub artifact"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 1)
+
+    def test_pub_transitive_retains_only_the_exact_existing_young_artifact(self):
+        _, releases, calls, write, resolver = self.pub_transitive_fixture()
+        write(self.root, "2.0.0")
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("version: '2.0.0'", (self.root / "pubspec.lock").read_text())
+
+    def test_pub_transitive_preserves_concurrent_override_mode_and_symlink(self):
+        for action in ("mode", "symlink"):
+            with self.subTest(action=action):
+                _, releases, _, _, resolver = self.pub_transitive_fixture()
+                override = self.put(
+                    "pubspec_overrides.yaml", "dependency_overrides: {}\n"
+                )
+                override.chmod(0o640)
+                outside = self.put("author.txt", "author-owned content\n")
+
+                def concurrent(*args, **kwargs):
+                    result = resolver(*args, **kwargs)
+                    if action == "mode":
+                        override.chmod(0o600)
+                    else:
+                        override.unlink()
+                        override.symlink_to(outside)
+                    return result
+
+                with (
+                    patch.object(registry, "releases", return_value=releases),
+                    patch.object(native.chainman, "execute", side_effect=concurrent),
+                    self.assertRaisesRegex(ValueError, "preserve and inspect"),
+                ):
+                    native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+                if action == "mode":
+                    self.assertEqual(stat.S_IMODE(override.stat().st_mode), 0o600)
+                else:
+                    self.assertTrue(override.is_symlink())
+                    self.assertEqual(outside.read_text(), "author-owned content\n")
+                override.unlink()
+
+    def test_pub_transitive_repairs_baseline_below_a_new_security_floor(self):
+        _, releases, calls, write, resolver = self.pub_transitive_fixture()
+        self.put(
+            "consumer/pubspec.yaml",
+            "name: consumer\nversion: 1.0.0\ndependencies:\n  sample: '>=1.0.0 <4.0.0'\n",
+        )
+        write(self.root, "2.0.0")
+        policy = {
+            "exceptions": [
+                {
+                    "package": "pub:sample",
+                    "version": "3.0.0",
+                    "minimum_safe": "2.5.0",
+                    "reason": "fix",
+                    "advisory": "https://example.invalid/fix",
+                    "expires": (NOW + timedelta(days=5)).isoformat(),
+                }
+            ]
+        }
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, policy, NOW)
+        self.assertEqual([entry[1] for entry in calls], [None, "3.0.0", None])
+        self.assertIn("version: '3.0.0'", (self.root / "pubspec.lock").read_text())
+
+    def test_pub_disallowed_baseline_fails_without_a_native_compatible_replacement(
+        self,
+    ):
+        _, releases, calls, write, resolver = self.pub_transitive_fixture()
+        write(self.root, "2.0.0")
+        policy = {
+            "constraints": {
+                "pub:sample": {
+                    "range": ">=3.0.0",
+                    "reason": "Required compatibility floor",
+                }
+            }
+        }
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "No eligible Pub transitive graph"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, policy, NOW)
+        self.assertEqual([entry[1] for entry in calls], [None, "3.0.0"])
+
+    def test_pub_new_hash_cannot_inherit_an_old_young_baseline(self):
+        _, releases, calls, write, resolver = self.pub_transitive_fixture()
+        write(self.root, "2.0.0", digit="f")
+        with (
+            patch.object(registry, "releases", return_value=[releases[1]]),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+            self.assertRaisesRegex(ValueError, "No eligible Pub transitive graph"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == "__main__":
