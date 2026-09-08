@@ -473,7 +473,7 @@ class Evidence:
             self.cache[name] = releases, peer_versions
         return self.cache[name]
 
-    def peers(self, name, version):
+    def peers(self, name, version, *, manifest=None):
         info = self.get(name)[1].get(version)
         if not isinstance(info, Mapping):
             raise ValueError("Selected package lacks registry dependency metadata")
@@ -483,7 +483,12 @@ class Evidence:
         peers = {peer: peer_range(value) for peer, value in peers.items()}
         for peer, value in peers.items():
             package_name(peer)
-            NpmSpec(value)
+            # An exception belongs to one importer edge, never the cached
+            # package. Keep structural validation even for excepted ranges.
+            if manifest is None or not peer_ignored(
+                self.policy.get("javascript", {}), manifest, name, peer
+            ):
+                NpmSpec(value)
         return peers, info.get("peerDependenciesMeta", {})
 
 
@@ -576,7 +581,9 @@ def selected_policy(workspace, pin, selected, evidence, options):
     for manifest in pin.users:
         for index in workspace.refs[manifest].values():
             source = workspace.pins[index]
-            for peer, bound in evidence.peers(source.name, selected[index])[0].items():
+            for peer, bound in evidence.peers(
+                source.name, selected[index], manifest=manifest
+            )[0].items():
                 if peer in (pin.alias, pin.name) and not peer_ignored(
                     options, manifest, source.name, peer
                 ):
@@ -906,7 +913,9 @@ def solve(workspace, evidence, options, initial=None):
             for source in refs.values():
                 pin = workspace.pins[source]
                 try:
-                    peers, peer_metadata = evidence.peers(pin.name, selected[source])
+                    peers, peer_metadata = evidence.peers(
+                        pin.name, selected[source], manifest=manifest
+                    )
                 except ValueError as error:
                     # Reject this release; a valid older source may still solve
                     # the graph. The final selection never skips peer validation.
@@ -1368,7 +1377,7 @@ def audit_peers(workspace, evidence, options):
                                 "Local pnpm dependency violates its manifest range"
                             )
             else:
-                peers, metadata = evidence.peers(actual, version)
+                peers, metadata = evidence.peers(actual, version, manifest=manifest)
             for peer, requirement in peers.items():
                 requirement = peer_range(requirement)
                 if peer_ignored(options, manifest, actual, peer):

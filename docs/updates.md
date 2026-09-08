@@ -105,6 +105,15 @@ floors and exception expiry remain enforced. Final SDK audit probes the tools
 again and refreshes registry observations. Application generators and
 deployment-specific reconciliation remain hooks.
 
+JavaScript `peer_exceptions` require an exact `manifest`, source package `source`,
+`peer` package and nonempty `reason`. They exempt only that owning importer's
+edge from peer-range syntax and membership checks, including transitive copies
+in its final npm or pnpm graph. Peer names, containers and string values remain
+validated; another importer does not inherit the exception. Use explicit package
+constraints and real project verification to bound any replacement compatibility
+contract. These exceptions never waive release age, artifact identity, direct
+dependency constraints or security floors.
+
 Actions release selection orders the complete GitHub Git tag advertisement before
 consulting release metadata. A first-page release batch only saves requests; it
 does not limit the candidate inventory. Remaining candidates use exact release-by-tag

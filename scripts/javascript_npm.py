@@ -210,7 +210,9 @@ def audit(workspace, before, policy, now):
             else:
                 dependencies = item
                 actual = name_at(location, item)
-                peers, metadata = evidence.peers(actual, item["version"])
+                peers, metadata = evidence.peers(
+                    actual, item["version"], manifest=manifest
+                )
                 for rule in options.get("prefix_constraints", []):
                     if (
                         actual.startswith(rule["prefix"])

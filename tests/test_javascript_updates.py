@@ -661,6 +661,166 @@ class JavaScriptTests(unittest.TestCase):
                     self.selected()
                 self.policy.pop("constraints")
 
+    def peer_syntax_exception(self, manifest="package.json"):
+        return {
+            "manifest": manifest,
+            "source": "renderer",
+            "peer": "framework",
+            "reason": "The tested adapter supports the stable framework API; upstream also names a non-semver channel.",
+        }
+
+    def fake_pnpm_peer_syntax(self, *args, **kwargs):
+        # Supply the known installed framework graph. The ordinary fake resolver
+        # parses peers itself; restore the actual malformed registry metadata
+        # before either production audit observes it.
+        release = self.metadata["renderer"]["versions"]["1.0.0"]
+        with patch.dict(release, {"peerDependencies": {"framework": ">=1"}}):
+            return self.fake_pnpm(*args, **kwargs)
+
+    def test_peer_syntax_exception_requires_the_exact_owning_edge(self):
+        self.manifest("package.json", {"renderer": "2.0.0", "framework": "1.0.0"})
+        self.release("renderer", "2.0.0", peers={"framework": ">=1 || nightly"})
+        self.release("framework", "1.0.0")
+        self.policy["constraints"] = {
+            "npm:renderer": {"range": ">=2 <3", "reason": "Adapter API"}
+        }
+        self.policy["javascript"] = {"peer_exceptions": [self.peer_syntax_exception()]}
+        self.assertEqual(self.selected()[1]["renderer"], "2.0.0")
+        for field, wrong in (
+            ("manifest", "packages/app/package.json"),
+            ("source", "another-renderer"),
+            ("peer", "another-framework"),
+        ):
+            with self.subTest(field=field):
+                self.policy["javascript"]["peer_exceptions"] = [
+                    {**self.peer_syntax_exception(), field: wrong}
+                ]
+                with self.assertRaisesRegex(ValueError, "No eligible JavaScript"):
+                    self.selected()
+        self.policy["javascript"]["peer_exceptions"] = []
+        with self.assertRaisesRegex(ValueError, "No eligible JavaScript"):
+            self.selected()
+
+    def test_peer_evidence_cache_does_not_share_importer_exceptions(self):
+        self.release("renderer", "1.0.0", peers={"framework": ">=1 || nightly"})
+        self.policy["javascript"] = {"peer_exceptions": [self.peer_syntax_exception()]}
+        for order in (
+            ("package.json", "packages/app/package.json"),
+            ("packages/app/package.json", "package.json"),
+        ):
+            evidence = js.Evidence(self.policy, self.now)
+            for manifest in order:
+                with self.subTest(order=order, manifest=manifest):
+                    if manifest == "package.json":
+                        self.assertEqual(
+                            evidence.peers("renderer", "1.0.0", manifest=manifest)[0],
+                            {"framework": ">=1 || nightly"},
+                        )
+                    else:
+                        with self.assertRaises(ValueError):
+                            evidence.peers("renderer", "1.0.0", manifest=manifest)
+            with self.assertRaises(ValueError):
+                evidence.peers("renderer", "1.0.0")
+
+    def test_peer_syntax_exception_preserves_structure_and_sibling_validation(self):
+        self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
+        self.release("renderer", "1.0.0")
+        self.release("framework", "1.0.0")
+        self.policy["javascript"] = {"peer_exceptions": [self.peer_syntax_exception()]}
+        for peers in (
+            [],
+            None,
+            {"framework": None},
+            {"framework": []},
+            {"framework": 1},
+            {"invalid name": "^1"},
+            {"framework": ">=1 || nightly", "sibling": ">=1 || invalid"},
+        ):
+            with self.subTest(peers=peers):
+                self.metadata["renderer"]["versions"]["1.0.0"]["peerDependencies"] = (
+                    peers
+                )
+                with self.assertRaises(ValueError):
+                    self.selected()
+
+    def test_peer_syntax_exception_covers_both_audits_without_relaxing_age(self):
+        for manager in ("pnpm", "npm"):
+            with self.subTest(manager=manager):
+                self.spec["manager"] = manager
+                self.manifest(
+                    "package.json", {"renderer": "1.0.0", "framework": "1.0.0"}
+                )
+                self.release(
+                    "renderer",
+                    "1.0.0",
+                    peers={"framework": ">=1 || nightly"},
+                    children={"framework": "1.0.0"},
+                )
+                self.release("framework", "1.0.0")
+                self.policy["javascript"] = {
+                    "peer_exceptions": [self.peer_syntax_exception()]
+                }
+                self.resolve(
+                    self.fake_npm if manager == "npm" else self.fake_pnpm_peer_syntax
+                )
+                before = js.snapshot(self.root, self.spec)
+                js.audit(self.root, self.spec, before, self.policy, self.now)
+                self.policy["javascript"]["peer_exceptions"] = []
+                with self.assertRaises(ValueError):
+                    js.audit(self.root, self.spec, before, self.policy, self.now)
+                self.policy["javascript"]["peer_exceptions"] = [
+                    self.peer_syntax_exception()
+                ]
+                self.release("framework", "1.0.0", days=1)
+                with self.assertRaisesRegex(ValueError, "not mature"):
+                    js.audit(
+                        self.root,
+                        self.spec,
+                        {**before, "identities": []},
+                        self.policy,
+                        self.now,
+                    )
+                self.release("framework", "1.0.0")
+                self.metadata["renderer"]["versions"]["1.0.0"]["dist"]["integrity"] = (
+                    "sha512-" + base64.b64encode(b"changed".ljust(64, b"x")).decode()
+                )
+                with self.assertRaisesRegex(
+                    ValueError, "absent from registry evidence"
+                ):
+                    js.audit(self.root, self.spec, before, self.policy, self.now)
+
+    def test_transitive_peer_syntax_exception_is_audited_for_every_importer(self):
+        for manager in ("pnpm", "npm"):
+            with self.subTest(manager=manager):
+                self.spec["manager"] = manager
+                self.manifest(
+                    "package.json", {"wrapper": "1.0.0"}, workspaces=["packages/*"]
+                )
+                self.manifest("packages/app/package.json", {"wrapper": "1.0.0"})
+                self.release("wrapper", "1.0.0", children={"renderer": "1.0.0"})
+                self.release(
+                    "renderer",
+                    "1.0.0",
+                    peers={"framework": ">=1 || nightly"},
+                    children={"framework": "1.0.0"},
+                )
+                self.release("framework", "1.0.0")
+                self.policy["javascript"] = {
+                    "peer_exceptions": [self.peer_syntax_exception()]
+                }
+                with self.assertRaises(ValueError):
+                    self.resolve(
+                        self.fake_npm
+                        if manager == "npm"
+                        else self.fake_pnpm_peer_syntax
+                    )
+                self.policy["javascript"]["peer_exceptions"].append(
+                    self.peer_syntax_exception("packages/app/package.json")
+                )
+                self.resolve(
+                    self.fake_npm if manager == "npm" else self.fake_pnpm_peer_syntax
+                )
+
     def test_shared_catalog_checks_every_importer_and_scoped_peer_exception(self):
         self.manifest("package.json", {"renderer": "1.0.0", "framework": "catalog:"})
         self.manifest(
