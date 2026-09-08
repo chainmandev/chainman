@@ -554,17 +554,176 @@ class ActionInventoryTests(unittest.TestCase):
         ):
             sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
 
+    def test_post_anchor_release_preserves_older_eligible_selection(self):
+        def metadata(url):
+            if url.endswith("page=1"):
+                return [self.publication("v3", NOW + timedelta(minutes=1))]
+            if url.endswith("tags/v2"):
+                return self.publication("v2", MATURE)
+            raise AssertionError(url)
+
+        def commit_date(repository, commit):
+            self.assertNotEqual(commit, C, "A post-anchor release cannot be bound")
+            return OLD
+
+        for age in (0, 30):
+            with (
+                self.subTest(minimum_age_days=age),
+                patch.object(
+                    registry,
+                    "observation_time",
+                    return_value=NOW + timedelta(minutes=2),
+                ),
+                patch.object(sources, "action_refs", return_value={"v2": B, "v3": C}),
+                patch.object(registry, "data", side_effect=metadata),
+                patch.object(sources, "commit_time", side_effect=commit_date),
+            ):
+                selected = sources.select_action(
+                    "sample/action",
+                    A,
+                    {"kind": "release", "major": 1},
+                    {"minimum_age_days": age},
+                    NOW,
+                )
+            self.assertEqual((selected["revision"], selected["version"]), (B, "2.0.0"))
+
+    def test_post_anchor_alias_excludes_whole_version_even_with_exception(self):
+        for age in (0, 30):
+            for post_anchor_tag in ("v3", "v3.0.0"):
+                for exception in (False, True):
+                    policy = {"minimum_age_days": age}
+                    if exception:
+                        policy["exceptions"] = [
+                            {
+                                "package": "github:sample/action",
+                                "version": "3.0.0",
+                                "minimum_safe": "3.0.0",
+                                "reason": "security fix",
+                                "advisory": "TEST-1",
+                                "expires": (NOW + timedelta(days=1)).isoformat(),
+                            }
+                        ]
+                    looked_up = []
+
+                    def metadata(url):
+                        if url.endswith("page=1"):
+                            return [self.publication("v2", MATURE)]
+                        tag = url.rsplit("/", 1)[1]
+                        self.assertIn(tag, ("v3", "v3.0.0"))
+                        looked_up.append(tag)
+                        date = (
+                            NOW + timedelta(minutes=1)
+                            if tag == post_anchor_tag
+                            else OLD
+                        )
+                        return self.publication(tag, date)
+
+                    def commit_date(repository, commit):
+                        self.assertNotEqual(
+                            commit,
+                            C,
+                            "Every alias of the excluded version is ineligible",
+                        )
+                        return OLD
+
+                    with (
+                        self.subTest(
+                            minimum_age_days=age,
+                            post_anchor_tag=post_anchor_tag,
+                            exception=exception,
+                        ),
+                        patch.object(
+                            registry,
+                            "observation_time",
+                            return_value=NOW + timedelta(minutes=2),
+                        ),
+                        patch.object(
+                            sources,
+                            "action_refs",
+                            return_value={"v2": B, "v3": C, "v3.0.0": C},
+                        ),
+                        patch.object(registry, "data", side_effect=metadata),
+                        patch.object(sources, "commit_time", side_effect=commit_date),
+                    ):
+                        if exception:
+                            with self.assertRaisesRegex(
+                                ValueError, "No eligible stable release"
+                            ):
+                                sources.select_action(
+                                    "sample/action", A, {"kind": "release"}, policy, NOW
+                                )
+                        else:
+                            selected = sources.select_action(
+                                "sample/action",
+                                A,
+                                {"kind": "release", "major": 1},
+                                policy,
+                                NOW,
+                            )
+                            self.assertEqual(selected["revision"], B)
+                    self.assertEqual(looked_up, ["v3", "v3.0.0"])
+
+    def test_post_anchor_alias_does_not_hide_invalid_later_alias_metadata(self):
+        observed = NOW + timedelta(minutes=2)
+        for invalid, error in (
+            (self.publication("v4"), "mismatched GitHub release identity"),
+            (
+                self.publication("v3.0.0", published_at=None),
+                "Missing registry publication age",
+            ),
+            (
+                self.publication("v3.0.0", observed + timedelta(seconds=1)),
+                "Future registry publication time",
+            ),
+        ):
+            looked_up = []
+
+            def metadata(url):
+                if url.endswith("page=1"):
+                    return [self.publication("v3", NOW + timedelta(minutes=1))]
+                self.assertTrue(url.endswith("tags/v3.0.0"))
+                looked_up.append("v3.0.0")
+                return invalid
+
+            with (
+                self.subTest(error=error),
+                patch.object(registry, "observation_time", return_value=observed),
+                patch.object(
+                    sources, "action_refs", return_value={"v3": C, "v3.0.0": C}
+                ),
+                patch.object(registry, "data", side_effect=metadata),
+                patch.object(
+                    sources,
+                    "commit_time",
+                    side_effect=AssertionError(
+                        "Invalid metadata reached commit binding"
+                    ),
+                ),
+                self.assertRaisesRegex(ValueError, error),
+            ):
+                sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
+            self.assertEqual(looked_up, ["v3.0.0"])
+
     def test_future_publication_commit_and_wrong_commit_identity_fail(self):
         future = NOW + timedelta(seconds=1)
-        for publication, commit_date in ((future, OLD), (OLD, future)):
+        for publication, commit_date, observed, error in (
+            (future, OLD, NOW, "Future registry publication time"),
+            (
+                OLD,
+                future,
+                NOW + timedelta(seconds=2),
+                "Actions selected commit has future age evidence",
+            ),
+        ):
             with (
                 self.subTest(publication=publication, commit_date=commit_date),
+                patch.object(registry, "observation_time", return_value=observed),
                 patch.object(sources, "action_refs", return_value={"v2": B}),
                 patch.object(
                     registry, "data", return_value=[self.publication("v2", publication)]
                 ),
                 patch.object(sources, "commit_time", return_value=commit_date),
-                self.assertRaisesRegex(ValueError, "future"),
+                self.assertRaisesRegex(ValueError, error),
             ):
                 sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
         with (

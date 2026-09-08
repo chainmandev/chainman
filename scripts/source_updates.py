@@ -276,10 +276,12 @@ def select_action(
         for tag in sorted(groups[rank]):
             candidate = publication(tag)
             if candidate is not None:
-                if candidate.published > now:
-                    raise ValueError("Actions release has future age evidence")
                 group.append(candidate)
         if not group:
+            continue
+        # Validate every alias before excluding a version published during this
+        # transaction. Neither an older alias nor a security exception can admit it.
+        if max(item.published for item in group) > now:
             continue
         if (
             max(item.published for item in group) > limit
