@@ -792,6 +792,11 @@ def solve(workspace, evidence, options, initial=None):
     initial = initial or tuple(pin.candidates[0] for pin in workspace.pins)
     visited = set()
     metadata_error = None
+    # A baseline is fixed for this solve. Index availability once; the final
+    # artifact audit separately binds every selected URL and digest.
+    baseline_versions = {
+        identity[:3] for identity in getattr(evidence, "baseline", set())
+    }
 
     def revisions(selected, conflict, witness):
         order = tuple(reversed(conflict))
@@ -926,10 +931,7 @@ def solve(workspace, evidence, options, initial=None):
                         eligible += [
                             r
                             for r in releases
-                            if any(
-                                i[:3] == ("npm", peer, r.version)
-                                for i in getattr(evidence, "baseline", set())
-                            )
+                            if ("npm", peer, r.version) in baseline_versions
                         ]
                         if not any(
                             Version(r.version) in NpmSpec(requirement) for r in eligible
@@ -960,9 +962,9 @@ def solve(workspace, evidence, options, initial=None):
                 ) + registry.active_exceptions(
                     "npm", releases, scoped, pin.name, evidence.now
                 )
-                if selected[index] not in {r.version for r in allowed} and not any(
-                    i[:3] == ("npm", pin.name, selected[index])
-                    for i in getattr(evidence, "baseline", set())
+                if (
+                    selected[index] not in {r.version for r in allowed}
+                    and ("npm", pin.name, selected[index]) not in baseline_versions
                 ):
                     conflict = (index,)
                     break

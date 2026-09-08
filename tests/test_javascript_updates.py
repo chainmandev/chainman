@@ -346,6 +346,36 @@ class JavaScriptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "state bound"):
             self.selected()
 
+    def test_missing_peer_queries_bound_baseline_scans_and_keep_provider_identity(self):
+        class CountedBaseline(set):
+            examined = 0
+
+            def __iter__(self):
+                for identity in super().__iter__():
+                    self.examined += 1
+                    yield identity
+
+        self.manifest("package.json", {"first": "1.0.0", "second": "1.0.0"})
+        for name in ("first", "second"):
+            self.release(name, "1.0.0", peers={"runtime": "^1"})
+        for patch_version in range(40):
+            self.release("runtime", f"1.0.{patch_version}", days=1)
+        workspace = js.Workspace(self.root, self.spec)
+        for pin in workspace.pins:
+            pin.candidates = ["1.0.0"]
+        evidence = js.Evidence(self.policy, self.now)
+        baseline = CountedBaseline(
+            ("npm", f"unrelated-{index}", "1.0.0", "", "hash") for index in range(500)
+        )
+        baseline.add(("npm", "runtime", "1.0.0", "", "hash"))
+        baseline.add(("pypi", "runtime", "1.0.1", "", "hash"))
+        evidence.baseline = baseline
+        self.assertEqual(js.solve(workspace, evidence, {}), ("1.0.0", "1.0.0"))
+        self.assertLessEqual(baseline.examined, len(baseline))
+        baseline.remove(("npm", "runtime", "1.0.0", "", "hash"))
+        with self.assertRaisesRegex(ValueError, "peer"):
+            js.solve(workspace, evidence, {})
+
     def test_peer_search_retains_coordinated_endpoint_changes(self):
         self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
         self.release("renderer", "2.0.0", peers={"framework": "^2"})
