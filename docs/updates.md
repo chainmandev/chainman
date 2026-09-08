@@ -116,6 +116,14 @@ hook cannot turn a deleted lock into an empty artifact inventory. Go and Swift
 retain their native rules for dependency-free projects that legitimately omit sums
 or resolved pins.
 
+During Flutter resolution, selected direct dependencies are temporarily bound to
+their exact eligible releases across all declared workspaces. Public manifest
+ranges, comments and file permissions are restored before the final lock audit.
+This prevents Pub from floating a selected caret range to a younger direct release
+without narrowing a library's published range. Unexpected resolver edits are
+preserved and fail the update. Transitive artifacts still require the same final
+age, constraint and identity evidence; temporary pins grant no audit exemption.
+
 Gradle resolution additionally visits every resolvable project and buildscript
 configuration, requiring failures to stop the update. A root `dependencies` report
 alone does not cover child projects. Exact `local_projects` coordinate-to-directory

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 import json
 from pathlib import Path
 import re
+import stat
 import tempfile
 
 from packaging.requirements import Requirement
@@ -398,6 +400,57 @@ def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dic
         return lock_adapters.validate_gradle_projects(root, spec, values)
 
 
+@contextmanager
+def pub_resolution_pins(root: Path, planned: list):
+    """Keep public ranges while binding native resolution to the chosen releases."""
+    documents = {}
+    for pin, chosen in planned:
+        if pin["provider"] != "pub" or chosen is None:
+            continue
+        if "pointer" not in pin:
+            raise ValueError("Pub resolution requires structured dependency pointers")
+        name = pin["file"]
+        if name not in documents:
+            before = tc.regular_input(root, name)
+            path = tc.contained(root, name)
+            value, render = manifests.document(path, body=before.decode())
+            documents[name] = (before, stat.S_IMODE(path.stat().st_mode), value, render)
+        manifests.assign(documents[name][2], pin["pointer"], chosen.version)
+    written = {}
+    try:
+        for name, (before, mode, _, render) in documents.items():
+            path = tc.contained(root, name)
+            if (
+                tc.regular_input(root, name) != before
+                or stat.S_IMODE(path.stat().st_mode) != mode
+            ):
+                raise ValueError(
+                    "Pub manifest changed before temporary resolution pins"
+                )
+            expected = render().encode()
+            path.write_bytes(expected)
+            written[name] = (before, mode, expected)
+        yield
+    finally:
+        drift = []
+        for name, (before, mode, expected) in written.items():
+            try:
+                path = tc.contained(root, name)
+                if (
+                    tc.regular_input(root, name) != expected
+                    or stat.S_IMODE(path.stat().st_mode) != mode
+                ):
+                    drift.append(name)
+                    continue
+                path.write_bytes(before)
+            except (OSError, ValueError):
+                drift.append(name)
+        if drift:
+            raise ValueError(
+                "Pub resolver changed a temporarily pinned manifest; preserve and inspect its changes"
+            )
+
+
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
@@ -416,56 +469,57 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         if chosen and manifests.replace(pin, chosen, root):
             changed.append(pin["file"])
     manifests.configure_build_dependencies(root, selected, specs=specs)
-    for member in specs.values():
-        directory = tc.contained(root, member["directory"])
-        kind = spec["adapter"]
-        default = {
-            "rust": [["cargo", "update"]],
-            "python": [["uv", "lock", "--upgrade"]],
-            "flutter": [["flutter", "pub", "get"]],
-            "swift": [["swift", "package", "update"]],
-            "gradle": [
-                [
-                    "gradle",
-                    "--no-daemon",
-                    "dependencies",
-                    "--write-locks",
-                    "--write-verification-metadata",
-                    "sha256",
-                ]
-            ],
-        }[kind]
-        commands = deepcopy(spec.get("resolve", default))
-        if not isinstance(commands, list) or not commands:
-            raise ValueError(
-                "Native resolution requires explicit argument-array commands"
-            )
-        if kind == "python":
-            options = updates.uv_resolution_options(policy, now)
-            if any(argv[:2] != ["uv", "lock"] for argv in commands):
+    with pub_resolution_pins(root, planned):
+        for member in specs.values():
+            directory = tc.contained(root, member["directory"])
+            kind = spec["adapter"]
+            default = {
+                "rust": [["cargo", "update"]],
+                "python": [["uv", "lock", "--upgrade"]],
+                "flutter": [["flutter", "pub", "get"]],
+                "swift": [["swift", "package", "update"]],
+                "gradle": [
+                    [
+                        "gradle",
+                        "--no-daemon",
+                        "dependencies",
+                        "--write-locks",
+                        "--write-verification-metadata",
+                        "sha256",
+                    ]
+                ],
+            }[kind]
+            commands = deepcopy(spec.get("resolve", default))
+            if not isinstance(commands, list) or not commands:
                 raise ValueError(
-                    "Python resolution must use uv lock for artifact-age policy"
+                    "Native resolution requires explicit argument-array commands"
                 )
-            manifest = directory / "pyproject.toml"
-            lock = directory / "uv.lock"
-            old_manifest, old_lock = (
-                manifest.read_text(),
-                lock.read_text() if lock.exists() else None,
-            )
-            configured = updates.configure_uv(root, member, options)
-            commands = [argv + options for argv in commands]
-        env = tc.environment(root)
-        env["TOOLCHAIN_FRESH"] = "1"
-        for command in commands:
-            chainman.execute(
-                root, spec.get("profile", kind), command, cwd=directory, env=env
-            )
-        if kind == "gradle":
-            # The ordinary dependencies task visits only one project. Traverse all
-            # resolvable project and buildscript configurations before final audit.
-            project_graphs.append(gradle_graph(root, spec, directory, write=True))
-        if kind == "python":
-            updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)
+            if kind == "python":
+                options = updates.uv_resolution_options(policy, now)
+                if any(argv[:2] != ["uv", "lock"] for argv in commands):
+                    raise ValueError(
+                        "Python resolution must use uv lock for artifact-age policy"
+                    )
+                manifest = directory / "pyproject.toml"
+                lock = directory / "uv.lock"
+                old_manifest, old_lock = (
+                    manifest.read_text(),
+                    lock.read_text() if lock.exists() else None,
+                )
+                configured = updates.configure_uv(root, member, options)
+                commands = [argv + options for argv in commands]
+            env = tc.environment(root)
+            env["TOOLCHAIN_FRESH"] = "1"
+            for command in commands:
+                chainman.execute(
+                    root, spec.get("profile", kind), command, cwd=directory, env=env
+                )
+            if kind == "gradle":
+                # The ordinary dependencies task visits only one project. Traverse all
+                # resolvable project and buildscript configurations before final audit.
+                project_graphs.append(gradle_graph(root, spec, directory, write=True))
+            if kind == "python":
+                updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)
     audit(root, spec, before, policy, now)
     return {
         "changed_manifests": sorted(set(changed)),

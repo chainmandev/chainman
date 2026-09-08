@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import stat
 import sys
 import tempfile
 import unittest
@@ -61,6 +62,117 @@ class NativeTests(unittest.TestCase):
                 ).version,
                 "1.2.0",
             )
+
+    def pub_plan(self):
+        paths = [
+            self.put(
+                "pubspec.yaml",
+                "# public range\nname: root\ndependencies:\n  sample: '^1.0.0'\n",
+            ),
+            self.put(
+                "example/pubspec.yaml",
+                "name: example\ndev_dependencies:\n  sample: ^1.0.0\n",
+            ),
+        ]
+        paths[0].chmod(0o640)
+        spec = {"adapter": "flutter", "directories": [".", "example"]}
+        pins = native.pins(self.root, spec, native.specifications(self.root, spec))
+        return paths, [(pin, registry.Release("1.2.0", NOW)) for pin in pins]
+
+    def test_pub_resolution_binds_all_workspaces_and_restores_bytes_and_modes(self):
+        paths, planned = self.pub_plan()
+        before = [(p.read_bytes(), stat.S_IMODE(p.stat().st_mode)) for p in paths]
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                try:
+                    with native.pub_resolution_pins(self.root, planned):
+                        for pin, _ in planned:
+                            self.assertEqual(
+                                native.old_requirement(self.root, pin), "1.2.0"
+                            )
+                        if failed:
+                            raise RuntimeError("resolver exit 23")
+                except RuntimeError as error:
+                    self.assertEqual(str(error), "resolver exit 23")
+                self.assertEqual(
+                    [(p.read_bytes(), stat.S_IMODE(p.stat().st_mode)) for p in paths],
+                    before,
+                )
+
+    def test_pub_resolution_preserves_unexpected_bytes_modes_and_symlinks(self):
+        for change in ("bytes", "mode", "symlink"):
+            with self.subTest(change=change):
+                paths, planned = self.pub_plan()
+                before_second = paths[1].read_bytes()
+                outside = self.put("outside.txt", "outside retained\n")
+                with self.assertRaisesRegex(ValueError, "preserve and inspect"):
+                    with native.pub_resolution_pins(self.root, planned):
+                        if change == "bytes":
+                            paths[0].write_text("concurrent edit\n")
+                        elif change == "mode":
+                            paths[0].chmod(0o600)
+                        else:
+                            paths[0].unlink()
+                            paths[0].symlink_to(outside)
+                self.assertEqual(paths[1].read_bytes(), before_second)
+                if change == "bytes":
+                    self.assertEqual(paths[0].read_text(), "concurrent edit\n")
+                elif change == "mode":
+                    self.assertEqual(stat.S_IMODE(paths[0].stat().st_mode), 0o600)
+                else:
+                    self.assertTrue(paths[0].is_symlink())
+                    self.assertEqual(outside.read_text(), "outside retained\n")
+                    paths[0].unlink()
+
+    def test_pub_native_resolution_cannot_float_a_chosen_direct_pin_to_young_release(
+        self,
+    ):
+        path = self.put("pubspec.yaml", "name: root\ndependencies:\n  sample: ^1.0.0\n")
+        spec = {"adapter": "flutter"}
+        inventories = [
+            registry.Release(
+                value,
+                NOW - timedelta(days=age),
+                artifacts=(
+                    registry.Artifact(
+                        f"https://pub.dev/api/archives/sample-{value}.tar.gz",
+                        "sha256:" + digit * 64,
+                        NOW - timedelta(days=age),
+                    ),
+                ),
+            )
+            for value, age, digit in (
+                ("1.2.0", 60, "a"),
+                ("2.0.0", 40, "b"),
+                ("2.1.0", 1, "c"),
+            )
+        ]
+
+        def resolver(*args, **kwargs):
+            requirement = native.manifests.document(path)[0]["dependencies"]["sample"]
+            # Model Pub choosing the newest version its manifest permits.
+            selected = max(
+                (
+                    item
+                    for item in inventories
+                    if native.accepts("pub", item.version, requirement)
+                ),
+                key=lambda item: registry.version("pub", item.version),
+            )
+            self.put(
+                "pubspec.lock",
+                f"packages:\n  sample:\n    source: hosted\n    version: '{selected.version}'\n    description:\n      name: sample\n      url: https://pub.dev\n      sha256: '{selected.artifacts[0].digest.split(':')[1]}'\n",
+            )
+
+        with (
+            patch.object(registry, "releases", return_value=inventories),
+            patch.object(native.chainman, "execute", side_effect=resolver),
+        ):
+            native.resolve(self.root, spec, {}, NOW)
+        self.assertEqual(
+            native.manifests.document(path)[0]["dependencies"]["sample"], "^2.0.0"
+        )
+        self.assertIn("version: '2.0.0'", (self.root / "pubspec.lock").read_text())
 
     def test_compatible_policy_never_falls_back_to_unrestricted_latest(self):
         self.put("Cargo.toml", '[dependencies]\nsample="^4.0"\n')
