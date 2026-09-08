@@ -459,7 +459,21 @@ class Evidence:
                 info = versions[release.version]
                 if info.get("name") != name or info.get("version") != release.version:
                     raise ValueError("Registry version manifest identity mismatch")
-            self.cache[name] = releases, versions
+            # Baseline maturity checks visit every transitive package. Keep the
+            # complete version inventory and peer evidence, not each release's
+            # unrelated README, scripts and development dependency payloads.
+            # Dates and immutable artifact identities remain in releases above.
+            peer_versions = {
+                value: {
+                    key: info[key]
+                    for key in ("peerDependencies", "peerDependenciesMeta")
+                    if key in info
+                }
+                if isinstance(info, Mapping)
+                else info
+                for value, info in versions.items()
+            }
+            self.cache[name] = releases, peer_versions
         return self.cache[name]
 
     def peers(self, name, version):

@@ -1,6 +1,7 @@
 """Independent workspace, solver and immutable-lock contracts for JS updates."""
 
 import base64
+import gc
 import hashlib
 import io
 import json
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import tarfile
 import unittest
+import weakref
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -375,6 +377,58 @@ class JavaScriptTests(unittest.TestCase):
         baseline.remove(("npm", "runtime", "1.0.0", "", "hash"))
         with self.assertRaisesRegex(ValueError, "peer"):
             js.solve(workspace, evidence, {})
+
+    def test_evidence_releases_unrelated_manifest_payloads_but_keeps_peer_oracles(self):
+        class Payload(dict):
+            pass
+
+        payloads = []
+
+        def metadata(url):
+            name = unquote(url.removeprefix("https://registry.npmjs.org/"))
+            body = {"name": name, "versions": {}, "time": {}}
+            for index in range(32):
+                value = f"1.0.{index}"
+                payload = Payload(text="x" * (256 * 1024))
+                payloads.append(weakref.ref(payload))
+                body["versions"][value] = {
+                    "name": name,
+                    "version": value,
+                    "readme": payload,
+                    "dependencies": {"unrelated": "^4"},
+                    "peerDependencies": {"runtime": "^2"},
+                    "peerDependenciesMeta": {"runtime": {"optional": True}},
+                    "dist": {
+                        "tarball": f"https://registry.npmjs.org/{name}/-/{value}.tgz",
+                        "integrity": "sha512-" + base64.b64encode(b"x" * 64).decode(),
+                    },
+                }
+                body["time"][value] = (self.now - timedelta(days=60)).isoformat()
+            return body
+
+        evidence = js.Evidence(self.policy, self.now)
+        with patch.object(registry, "data", side_effect=metadata) as fetch:
+            for index in range(4):
+                name = f"neutral-{index}"
+                releases, versions = evidence.get(name)
+                self.assertEqual(len(releases), 32)
+                self.assertEqual(set(versions), {f"1.0.{i}" for i in range(32)})
+                self.assertEqual(
+                    evidence.peers(name, "1.0.31"),
+                    ({"runtime": "^2"}, {"runtime": {"optional": True}}),
+                )
+                chosen = registry.select("npm", releases, self.policy, name, self.now)
+                self.assertEqual(chosen.version, "1.0.31")
+                self.assertEqual(
+                    chosen.artifacts[0].digest, "sha512:" + (b"x" * 64).hex()
+                )
+                self.assertEqual(chosen.published, self.now - timedelta(days=60))
+            requests = fetch.call_count
+            evidence.get("neutral-0")
+            self.assertEqual(fetch.call_count, requests)
+        gc.collect()
+        self.assertTrue(payloads)
+        self.assertFalse(any(reference() is not None for reference in payloads))
 
     def test_peer_search_retains_coordinated_endpoint_changes(self):
         self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})

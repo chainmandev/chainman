@@ -183,6 +183,11 @@ identity and matching current registry hash/URL evidence. Deprecation never admi
 a new or changed artifact, including through a security maturity exception. Its
 metadata remains available to audit unchanged direct and transitive dependencies;
 constraints, safe floors, peer compatibility and exception expiry still apply.
+The JavaScript evidence cache retains the complete version inventory, publication
+dates, artifact identities and peer metadata. It discards unrelated parsed release
+manifest payloads after validation so transitive checks do not accumulate every
+historical README, script and development dependency declaration. This does not
+change registry transport limits or eligibility rules.
 
 For centrally governed pnpm projects, `reconcile_policy=true` applies
 `javascript.catalog_constraints`, `package_constraints` and `override_constraints`
