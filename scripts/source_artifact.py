@@ -9,16 +9,103 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+import socket
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from http.client import HTTPSConnection
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse, urlunparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 import registry
 
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_DECLARED_BYTES = 16 * MAX_BYTES
+
+
+def public_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    address = ipaddress.ip_address(value)
+    if (
+        not address.is_global
+        or address.is_multicast
+        or address.is_reserved
+        or getattr(address, "is_site_local", False)
+        or "%" in value
+    ):
+        raise ValueError("Artifact evidence requires a public network address")
+    # Transition addresses must not conceal a private IPv4 destination.
+    embedded = (
+        [address.sixtofour]
+        if isinstance(address, ipaddress.IPv6Address) and address.sixtofour
+        else []
+    )
+    if isinstance(address, ipaddress.IPv6Address) and address.teredo:
+        embedded.extend(address.teredo)
+    for child in embedded:
+        public_address(str(child))
+    return address
+
+
+def public_connection(
+    address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None
+):
+    """Resolve once, validate the entire answer, then dial only those numeric IPs."""
+    host, port = address
+    if port != 443 or source_address is not None:
+        raise ValueError("Artifact evidence requires direct public HTTPS")
+    resolved = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP
+    )
+    endpoints = []
+    for family, kind, protocol, _, target in resolved:
+        ip = public_address(target[0])
+        if (
+            family not in (socket.AF_INET, socket.AF_INET6)
+            or kind != socket.SOCK_STREAM
+            or protocol != socket.IPPROTO_TCP
+            or target[1] != 443
+            or (family == socket.AF_INET) != (ip.version == 4)
+            or (family == socket.AF_INET6 and target[3] != 0)
+        ):
+            raise ValueError("Artifact DNS lacks a public HTTPS endpoint")
+        # Reconstruct a canonical numeric sockaddr; connect performs no new lookup.
+        target = (str(ip), 443) if ip.version == 4 else (str(ip), 443, 0, 0)
+        endpoints.append((family, kind, protocol, target))
+    if not endpoints:
+        raise ValueError("Artifact DNS lacks a public HTTPS endpoint")
+    for family, kind, protocol, target in endpoints:
+        connected = socket.socket(family, kind, protocol)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                connected.settimeout(timeout)
+            connected.connect(target)
+            return connected
+        except OSError:
+            connected.close()
+    raise OSError("Public artifact origin is unavailable")
+
+
+class PublicHTTPSConnection(HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = public_connection
+
+    def connect(self):
+        if self._tunnel_host:
+            raise ValueError("Artifact evidence does not permit proxy tunnels")
+        # Keep the standard verified TLS handshake and original hostname/SNI.
+        super().connect()
+
+
+class PublicHTTPSHandler(HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(PublicHTTPSConnection, request, context=self._context)
 
 
 def artifact_url(value: str, *, signed_github_cdn: bool = False) -> str:
@@ -50,8 +137,7 @@ def artifact_url(value: str, *, signed_github_cdn: bool = False) -> str:
     except ValueError:
         pass
     else:
-        if not address.is_global:
-            raise ValueError("Artifact evidence cannot use a private network address")
+        public_address(str(address))
     return value
 
 
@@ -93,7 +179,9 @@ def inspect(
     )
     try:
         redirects = PublicRedirects(url)
-        with build_opener(redirects).open(request, timeout=60) as response:
+        with build_opener(ProxyHandler({}), PublicHTTPSHandler(), redirects).open(
+            request, timeout=60
+        ) as response:
             final_url = artifact_url(
                 response.geturl(), signed_github_cdn=redirects.github_release
             )

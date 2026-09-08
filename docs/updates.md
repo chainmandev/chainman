@@ -155,6 +155,10 @@ an exact `version` and returns evidence without claiming eligibility. `audit` ta
 baseline claims never bypass maturity. `artifact-metadata` and `artifact-audit`
 accept an exact HTTPS `url` and `sha256:...` digest, download and hash the bytes, and
 label their age basis as origin artifact modification time, not release publication.
+Artifact evidence uses direct HTTPS with verified host certificates. Every DNS
+answer and redirect must resolve only to public addresses; the connection uses
+those checked addresses without a second lookup. Ambient HTTP proxies are ignored
+for these requests, so a proxy-only network cannot qualify this lane.
 Missing, future or inconsistent evidence fails. `deps-resolve NAME` exposes a
 configured adapter inside an active update transaction. Consumer code must not
 import runtime Python modules.
