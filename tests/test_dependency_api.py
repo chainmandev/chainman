@@ -71,6 +71,90 @@ class QueryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 api.query(self.root, request, now=NOW)
 
+    def test_retention_requires_request_and_configured_compatibility(self):
+        inventory = [
+            registry.Release(value, NOW - timedelta(days=90))
+            for value in ("5.1.0", "6.0.0")
+        ]
+        request = {
+            "schema": 1,
+            "operation": "select",
+            "provider": "npm",
+            "package": "sample",
+            "current": "6.0.0",
+        }
+        for bound in ("<6", ["^5 || ^6", "<6"]):
+            for source in ("request", "configured"):
+                with self.subTest(bound=bound, source=source):
+                    settings = {"minimum_age_days": 30}
+                    scoped = dict(request)
+                    rule = {"range": bound, "reason": "Supported application ABI"}
+                    if source == "request":
+                        scoped["constraint"] = rule
+                    else:
+                        settings["constraints"] = {"npm:sample": rule}
+                    with (
+                        patch.object(api, "policy", return_value=settings),
+                        patch.object(registry, "releases", return_value=inventory),
+                        self.assertRaisesRegex(ValueError, "Retained.*compatibility"),
+                    ):
+                        api.query(self.root, scoped, now=NOW)
+
+    def test_retention_checks_both_present_bounds_independently(self):
+        for request_range, configured_range in (
+            ("^5 || ^6", [">=5", "<6"]),
+            ([">=5", "<6"], "^5 || ^6"),
+        ):
+            with self.subTest(request=request_range, configured=configured_range):
+                request = {
+                    "schema": 1,
+                    "operation": "select",
+                    "provider": "npm",
+                    "package": "sample",
+                    "current": "6.0.0",
+                    "constraint": {"range": request_range, "reason": "Request ABI"},
+                }
+                settings = {
+                    "constraints": {
+                        "npm:sample": {
+                            "range": configured_range,
+                            "reason": "Project ABI",
+                        }
+                    }
+                }
+                with (
+                    patch.object(api, "policy", return_value=settings),
+                    patch.object(
+                        registry,
+                        "releases",
+                        return_value=[
+                            registry.Release("5.1.0", NOW - timedelta(days=90))
+                        ],
+                    ),
+                    self.assertRaisesRegex(ValueError, "Retained.*compatibility"),
+                ):
+                    api.query(self.root, request, now=NOW)
+
+    def test_compatible_retention_does_not_invent_age_evidence_or_downgrade(self):
+        request = {
+            "schema": 1,
+            "operation": "select",
+            "provider": "npm",
+            "package": "sample",
+            "current": "5.2.0",
+            "constraint": {"range": ["^5 || ^6", "<6"], "reason": "Supported ABI"},
+        }
+        inventory = [
+            registry.Release("5.1.0", NOW - timedelta(days=90)),
+            registry.Release("5.2.0", NOW - timedelta(days=1)),
+        ]
+        with patch.object(registry, "releases", return_value=inventory):
+            result = api.query(self.root, request, now=NOW)
+        self.assertEqual(result["disposition"], "retained")
+        self.assertEqual(result["version"], "5.2.0")
+        self.assertEqual(result["eligible_candidate"]["version"], "5.1.0")
+        self.assertNotIn("published", result)
+
     def test_retention_is_explicit_and_does_not_claim_baseline_eligibility(self):
         with patch.object(
             registry,

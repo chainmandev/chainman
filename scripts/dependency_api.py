@@ -352,6 +352,7 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
             candidates = lock_adapters.go_candidates(root, package)
         else:
             candidates = registry.releases(provider, package)
+        restriction = ""
         if operation == "select" and request.get("constraint"):
             bound = request["constraint"]
             if (
@@ -427,6 +428,14 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
         current = request.get("current")
         rank = registry.version(provider, current) if isinstance(current, str) else None
         if rank is not None and registry.version(provider, chosen.version) <= rank:
+            for source, bound in (
+                ("request", restriction),
+                ("configured", registry.constraint(provider, settings, package)),
+            ):
+                if not registry.compatible(provider, current, bound):
+                    raise ValueError(
+                        f"Retained current version violates {source} compatibility constraint; reconcile the current version explicitly"
+                    )
             return {
                 "schema": 1,
                 "disposition": "retained",

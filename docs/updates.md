@@ -238,7 +238,10 @@ and `audit`; providers include npm, PyPI, crates, pub, GitHub, Docker, Go, Swift
 Maven. Selection accepts `provider`, `package`, optional `current`, and an optional
 `constraint={range,reason}` (including the npm conjunction array described above).
 A retained current version is labelled `retained` and
-does not acquire eligibility evidence from an older candidate. `metadata` requires
+does not acquire eligibility evidence from an older candidate. Retention still
+requires both the request's compatibility bound and the effective configured
+package bound. A conflicting current version fails for explicit reconciliation;
+the query never silently downgrades it. `metadata` requires
 an exact `version` and returns evidence without claiming eligibility. `audit` takes
 `artifacts`, an array of `[provider,package,version,url,digest]` identities; caller
 baseline claims never bypass maturity. `artifact-metadata` and `artifact-audit`
