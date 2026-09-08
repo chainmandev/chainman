@@ -140,13 +140,15 @@ def resolve(root: Path, selected: list[str], policy: dict, now: datetime):
             path.write_text(image + "\n")
             bootstrap = root / "bootstrap/chainman.sh"
             body, count = re.subn(
-                r"(?m)^image=\S+$", lambda _: "image=" + image, bootstrap.read_text()
+                r"(?m)^image=\S+$",
+                lambda _: "image=" + image,
+                bootstrap.read_bytes().decode(),
             )
             if count != 1:
                 raise ValueError(
                     "Bootstrap image declaration changed during resolution"
                 )
-            bootstrap.write_text(body)
+            bootstrap.write_bytes(body.encode())
         # All module reconciliation is complete before any final identity audit.
         for name, spec in configured.items():
             dependency_api.implementation(spec).audit(

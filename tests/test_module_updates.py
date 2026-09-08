@@ -126,6 +126,38 @@ class ModuleTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "disagree"):
             modules.image_snapshot(self.root, {})
 
+    def test_image_update_preserves_bootstrap_control_bytes_and_mode(self):
+        (self.root / "nix").mkdir()
+        (self.root / "bootstrap").mkdir()
+        image = "docker.io/nixos/nix:2.0.0@sha256:" + "a" * 64
+        expected = "docker.io/nixos/nix:3.0.0@sha256:" + "b" * 64
+        (self.root / "nix/container-image.txt").write_text(image + "\n")
+        bootstrap = self.root / "bootstrap/chainman.sh"
+        original = (
+            b"#!/bin/sh\ncase \"$1\" in *'\r'* | *'\n'*) exit 23;; esac\nimage="
+            + image.encode()
+            + b"\n"
+        )
+        bootstrap.write_bytes(original)
+        bootstrap.chmod(0o751)
+        chosen = {
+            "repository": "nixos/nix",
+            "tag": "3.0.0",
+            "digest": "sha256:" + "b" * 64,
+            "versionSource": "dockerHub",
+        }
+        with (
+            patch.object(modules.sdk_versions, "synchronize"),
+            patch.object(modules.source_updates, "select_oci", return_value=chosen),
+        ):
+            modules.resolve(
+                self.root, [], {}, datetime(2026, 9, 7, tzinfo=timezone.utc)
+            )
+        self.assertEqual(
+            bootstrap.read_bytes(), original.replace(image.encode(), expected.encode())
+        )
+        self.assertEqual(bootstrap.stat().st_mode & 0o777, 0o751)
+
 
 if __name__ == "__main__":
     unittest.main()
