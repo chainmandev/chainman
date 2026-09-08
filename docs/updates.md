@@ -29,6 +29,10 @@ security maturity exceptions need a narrowly scoped advisory, minimum safe versi
 and expiry. Nix branch pins use commit age; container image pins use the registry
 update time bound to the manifest digest. Baseline artifacts do not retrospectively
 become release-age-qualified. Newly selected artifacts require eligibility evidence.
+Docker Hub discovery retains dated legacy tags whose digest is absent. An unselected
+legacy tag cannot block a newer eligible image; a selected tag without a digest fails
+instead of falling back. Missing dates and malformed nonempty digests remain errors.
+Public Docker queries require a digest for the exact selected or requested record.
 Toolchain changes force fresh environment entry before resolution and verification.
 The runtime image is updated together with Chainman; consumer Nix inputs and workflow
 revision pins remain project-owned update targets.

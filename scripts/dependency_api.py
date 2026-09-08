@@ -412,6 +412,10 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
                 provider, [chosen], settings, package, now
             ):
                 raise ValueError("Selected release tag now points to immature contents")
+        elif provider == "docker":
+            # Discovery may retain legacy tags with no digest, but public evidence
+            # (including metadata and retained eligible_candidate) must bind one.
+            registry.digest(chosen.identity)
         if operation == "metadata":
             return {
                 "schema": 1,

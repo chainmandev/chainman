@@ -117,6 +117,76 @@ class QueryTests(unittest.TestCase):
                 now=NOW,
             )
 
+    def test_docker_public_queries_bind_selected_manifest_not_unselected_history(self):
+        identity = "sha256:" + "b" * 64
+        inventory = [
+            {
+                "name": "1.0.0",
+                "last_updated": (NOW - timedelta(days=90)).isoformat(),
+                "digest": None,
+            },
+            {
+                "name": "2.0.0",
+                "last_updated": (NOW - timedelta(days=30)).isoformat(),
+                "digest": identity,
+            },
+            {
+                "name": "3.0.0",
+                "last_updated": (NOW - timedelta(days=29)).isoformat(),
+                "digest": None,
+            },
+        ]
+        request = {
+            "schema": 1,
+            "operation": "select",
+            "provider": "docker",
+            "package": "sample/tool",
+        }
+        with patch.object(registry, "data", return_value={"results": inventory}):
+            result = api.query(self.root, request, now=NOW)
+            self.assertEqual(
+                (result["version"], result["identity"]), ("2.0.0", identity)
+            )
+            for version in ("1.0.0", "3.0.0"):
+                with (
+                    self.subTest(version=version),
+                    self.assertRaisesRegex(ValueError, "digest"),
+                ):
+                    api.query(
+                        self.root,
+                        {**request, "operation": "metadata", "version": version},
+                        now=NOW,
+                    )
+        inventory[1]["digest"] = None
+        with patch.object(registry, "data", return_value={"results": inventory}):
+            for current in ("1.0.0", "4.0.0"):
+                with (
+                    self.subTest(current=current),
+                    self.assertRaisesRegex(ValueError, "digest"),
+                ):
+                    api.query(self.root, {**request, "current": current}, now=NOW)
+
+    def test_docker_public_discovery_rejects_cross_repository_and_cyclic_pagination(
+        self,
+    ):
+        prefix = "https://hub.docker.com/v2/repositories/sample/tool/tags?page_size=100"
+        for target in (
+            prefix,
+            "https://hub.docker.com/v2/repositories/other/tool/tags?page=2",
+            [prefix],
+            [],
+            False,
+            "",
+        ):
+            with (
+                self.subTest(target=target),
+                patch.object(
+                    registry, "data", return_value={"results": [], "next": target}
+                ),
+                self.assertRaisesRegex(ValueError, "pagination"),
+            ):
+                registry.releases("docker", "sample/tool")
+
     def test_schema_and_path_validation_precede_work(self):
         for request in (
             {},

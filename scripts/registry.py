@@ -530,6 +530,47 @@ def maven_releases(package: str, repository: str = "central") -> list[Release]:
     return result
 
 
+def docker_releases(repository: str, accepts_tag) -> list[Release]:
+    """Discover dated tags; callers must validate the selected manifest identity."""
+    if isinstance(repository, str):
+        repository = repository.removeprefix("docker.io/")
+    if not isinstance(repository, str) or not re.fullmatch(
+        r"[a-z0-9_.-]+/[a-z0-9_.-]+", repository
+    ):
+        raise ValueError("Docker Hub requires an explicit namespace/repository")
+    prefix = f"https://hub.docker.com/v2/repositories/{repository}/tags"
+    url = prefix + "?page_size=100"
+    result, visited = [], set()
+    for _ in range(100):
+        if url in visited or not url.startswith((prefix + "?", prefix + "/?")):
+            raise ValueError("Unexpected Docker Hub pagination target")
+        visited.add(url)
+        body = data(url)
+        if not isinstance(body, dict) or not isinstance(body.get("results"), list):
+            raise ValueError("Malformed Docker Hub tag inventory")
+        for entry in body["results"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("name"), str):
+                raise ValueError("Malformed Docker Hub tag entry")
+            if not accepts_tag(entry["name"]):
+                continue
+            # Legacy inventory can lack a digest. Keep the candidate visible to
+            # ranking so missing evidence cannot silently select an older tag.
+            identity = entry.get("digest")
+            result.append(
+                Release(
+                    entry["name"],
+                    timestamp(entry.get("last_updated")),
+                    "" if identity is None else digest(identity),
+                )
+            )
+        url = body.get("next")
+        if url is None:
+            return result
+        if not isinstance(url, str) or not url:
+            raise ValueError("Unexpected Docker Hub pagination target")
+    raise ValueError("Docker Hub pagination exceeded its bound")
+
+
 def releases(
     provider: str, package: str, *, include_prerelease: bool = False
 ) -> list[Release]:
@@ -653,31 +694,7 @@ def releases(
     if provider == "github":
         return github_releases(package)
     if provider == "docker":
-        if not re.fullmatch(r"[a-z0-9_.-]+/[a-z0-9_.-]+", package):
-            raise ValueError(
-                "Docker adapter supports explicit Docker Hub namespace/repository"
-            )
-        url = f"https://hub.docker.com/v2/repositories/{package}/tags?page_size=100"
-        result = []
-        for _ in range(100):
-            body = data(url)
-            for item in body["results"]:
-                if version(provider, item["name"]) is None:
-                    continue
-                manifest_digest = item.get("digest", "")
-                if not re.fullmatch(r"sha256:[a-f0-9]{64}", manifest_digest):
-                    raise ValueError("Docker tag lacks an immutable manifest identity")
-                result.append(
-                    Release(
-                        item["name"], timestamp(item["last_updated"]), manifest_digest
-                    )
-                )
-            url = body.get("next")
-            if not url:
-                return result
-            if not url.startswith("https://hub.docker.com/v2/repositories/"):
-                raise ValueError("Unexpected Docker pagination origin")
-        raise ValueError("Docker pagination ceiling reached")
+        return docker_releases(package, lambda tag: version(provider, tag) is not None)
     if provider == "maven":
         return maven_releases(package)
     raise ValueError(f"Unsupported registry provider: {provider}")

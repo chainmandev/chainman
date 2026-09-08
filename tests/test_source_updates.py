@@ -310,6 +310,91 @@ class OCITests(Fixture):
         ):
             sources.oci_candidates("gcr.io/sample/tool", "gcr")
 
+    def test_dated_digestless_inventory_does_not_hide_selected_evidence_gaps(self):
+        old = {"name": "1.0.0-alpine", "last_updated": OLD.isoformat(), "digest": None}
+        valid = {
+            "name": "2.0.0-alpine",
+            "last_updated": MATURE.isoformat(),
+            "digest": DB,
+        }
+        young = {
+            "name": "3.0.0-alpine",
+            "last_updated": YOUNG.isoformat(),
+            "digest": None,
+        }
+        with patch.object(
+            registry, "data", return_value={"results": [old, valid, young]}
+        ):
+            selected = sources.select_oci(self.entry, self.spec, {}, NOW)
+            self.assertEqual((selected["tag"], selected["digest"]), (valid["name"], DB))
+        # The latest eligible tag cannot disappear from ranking for lack of a hash.
+        with (
+            patch.object(
+                registry,
+                "data",
+                return_value={
+                    "results": [
+                        old,
+                        valid,
+                        {**young, "last_updated": MATURE.isoformat()},
+                    ]
+                },
+            ),
+            self.assertRaisesRegex(ValueError, "digest"),
+        ):
+            sources.resolve(self.root, self.spec, {}, NOW)
+        self.assertEqual(
+            json.loads(self.file.read_text())["images"]["tool"], self.entry
+        )
+
+    def test_docker_missing_dates_and_malformed_digest_are_never_ignored(self):
+        valid = {
+            "name": "2.0.0-alpine",
+            "last_updated": MATURE.isoformat(),
+            "digest": DB,
+        }
+        for invalid in (
+            {"name": "1.0.0-alpine", "digest": None},
+            {"name": "1.0.0-alpine", "last_updated": OLD.isoformat(), "digest": ""},
+            {
+                "name": "1.0.0-alpine",
+                "last_updated": OLD.isoformat(),
+                "digest": "latest",
+            },
+        ):
+            with (
+                self.subTest(invalid=invalid),
+                patch.object(
+                    registry, "data", return_value={"results": [invalid, valid]}
+                ),
+                self.assertRaises(ValueError),
+            ):
+                sources.select_oci(self.entry, self.spec, {}, NOW)
+
+    def test_security_age_exception_does_not_exempt_selected_manifest_digest(self):
+        policy = {
+            "exceptions": [
+                {
+                    "package": "docker:sample/tool",
+                    "version": "2.0.0",
+                    "minimum_safe": "2.0.0",
+                    "reason": "Required fix",
+                    "advisory": "https://example.org/advisories/fix",
+                    "expires": (NOW + timedelta(days=7)).isoformat(),
+                }
+            ]
+        }
+        self.candidates([registry.Release("2.0.0-alpine", YOUNG, "")])
+        with self.assertRaisesRegex(ValueError, "digest"):
+            sources.select_oci(self.entry, self.spec, policy, NOW)
+
+    def test_newer_current_image_retention_does_not_claim_older_digest_evidence(self):
+        self.candidates([registry.Release("1.0.0-alpine", OLD, "")])
+        selected = sources.select_oci(self.entry, self.spec, {}, NOW)
+        self.assertEqual(
+            selected, {**self.entry, "reason": "retained newer immutable image"}
+        )
+
 
 class NixEvidenceTests(Fixture):
     def test_non_object_and_missing_hash_evidence_fail_explicitly(self):

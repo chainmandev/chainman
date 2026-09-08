@@ -391,36 +391,9 @@ def oci_tag(tag: str):
 def oci_candidates(repository: str, source: str) -> list[registry.Release]:
     result = []
     if source == "dockerHub":
-        if isinstance(repository, str):
-            repository = repository.removeprefix("docker.io/")
-        if not isinstance(repository, str) or not re.fullmatch(
-            r"[a-z0-9_.-]+/[a-z0-9_.-]+", repository
-        ):
-            raise ValueError("Docker Hub requires an explicit namespace/repository")
-        prefix = f"https://hub.docker.com/v2/repositories/{repository}/tags"
-        url = prefix + "?page_size=100"
-        visited = set()
-        for _ in range(100):
-            if url in visited or not (url.startswith((prefix + "?", prefix + "/?"))):
-                raise ValueError("Unexpected Docker Hub pagination target")
-            visited.add(url)
-            body = registry.data(url)
-            if not isinstance(body.get("results"), list):
-                raise ValueError("Malformed Docker Hub tag inventory")  # noqa: TRY004 - decoded external data
-            for entry in body["results"]:
-                if oci_tag(entry.get("name")) is None:
-                    continue
-                result.append(
-                    registry.Release(
-                        entry["name"],
-                        registry.timestamp(entry.get("last_updated")),
-                        registry.digest(entry.get("digest")),
-                    )
-                )
-            url = body.get("next")
-            if not url:
-                return result
-        raise ValueError("Docker Hub pagination exceeded its bound")
+        return registry.docker_releases(
+            repository, lambda tag: oci_tag(tag) is not None
+        )
     if source == "gcr":
         if (
             not isinstance(repository, str)
@@ -510,7 +483,7 @@ def select_oci(current: dict, spec: dict, policy: dict, now: datetime) -> dict:
     return {
         **current,
         "tag": tag,
-        "digest": digest,
+        "digest": registry.digest(digest),
         "published": chosen.published.isoformat(),
         "reason": "eligible manifest-bound image",
     }
