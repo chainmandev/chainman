@@ -430,6 +430,106 @@ class JavaScriptTests(unittest.TestCase):
         self.assertTrue(payloads)
         self.assertFalse(any(reference() is not None for reference in payloads))
 
+    def test_post_anchor_metadata_keeps_frozen_selection_and_cached_peers(self):
+        self.release("library", "1.0.0")
+        for version in ("2.0.0", "3.0.0-beta.1"):
+            self.release("library", version, peers={"runtime": "^1"})
+            self.metadata["library"]["time"][version] = (
+                self.now + timedelta(minutes=1)
+            ).isoformat()
+        evidence = js.Evidence(self.policy, self.now)
+        with (
+            patch.object(
+                registry,
+                "observation_time",
+                return_value=self.now + timedelta(minutes=2),
+                create=True,
+            ) as clock,
+            patch.object(registry, "data", side_effect=self.fetch) as fetch,
+        ):
+            cached = evidence.get("library")
+            releases, versions = cached
+            self.assertEqual(set(versions), {"1.0.0", "2.0.0", "3.0.0-beta.1"})
+            self.assertEqual(
+                evidence.peers("library", "3.0.0-beta.1"), ({"runtime": "^1"}, {})
+            )
+            original = [(r.version, r.published, r.artifacts) for r in releases]
+            observed_calls, requests = clock.call_count, fetch.call_count
+            clock.return_value += timedelta(days=90)
+            self.assertIs(evidence.get("library"), cached)
+            self.assertEqual(clock.call_count, observed_calls)
+            self.assertEqual(fetch.call_count, requests)
+            self.assertEqual(
+                [(r.version, r.published, r.artifacts) for r in releases], original
+            )
+            self.assertEqual(evidence.now, self.now)
+            for days in (0, 30):
+                self.assertEqual(
+                    registry.select(
+                        "npm", releases, {"minimum_age_days": days}, "library", self.now
+                    ).version,
+                    "1.0.0",
+                )
+
+    def test_post_anchor_metadata_still_requires_dates_identity_and_digests(self):
+        self.release("library", "1.0.0")
+        self.release("library", "2.0.0")
+        self.metadata["library"]["time"]["2.0.0"] = (
+            self.now + timedelta(minutes=1)
+        ).isoformat()
+        original = json.dumps(self.metadata["library"])
+        cases = (
+            ("missing_date", "Missing|age"),
+            ("naive_date", "timezone"),
+            ("wrong_package", "identity"),
+            ("wrong_version", "identity"),
+            ("missing_digest", "digest"),
+            ("malformed_digest", "digest"),
+        )
+        with patch.object(
+            registry,
+            "observation_time",
+            return_value=self.now + timedelta(minutes=2),
+            create=True,
+        ):
+            for case, error in cases:
+                with self.subTest(case=case):
+                    body = self.metadata["library"] = json.loads(original)
+                    info = body["versions"]["2.0.0"]
+                    if case == "missing_date":
+                        body["time"].pop("2.0.0")
+                    elif case == "naive_date":
+                        body["time"]["2.0.0"] = "2026-09-07T00:01:00"
+                    elif case == "wrong_package":
+                        info["name"] = "another-package"
+                    elif case == "wrong_version":
+                        info["version"] = "2.0.1"
+                    elif case == "missing_digest":
+                        info["dist"].pop("integrity")
+                    else:
+                        info["dist"]["integrity"] = "sha512-invalid"
+                    with self.assertRaisesRegex(ValueError, error):
+                        js.Evidence(self.policy, self.now).get("library")
+
+    def test_actual_future_stable_and_prerelease_metadata_is_not_cached(self):
+        for version in ("2.0.0", "3.0.0-beta.1"):
+            with self.subTest(version=version):
+                self.metadata = {}
+                self.release("library", version)
+                observed = self.now + timedelta(minutes=2)
+                self.metadata["library"]["time"][version] = (
+                    observed + timedelta(seconds=1)
+                ).isoformat()
+                evidence = js.Evidence(self.policy, self.now)
+                with (
+                    patch.object(
+                        registry, "observation_time", return_value=observed, create=True
+                    ),
+                    self.assertRaisesRegex(ValueError, "Future"),
+                ):
+                    evidence.get("library")
+                self.assertNotIn("library", evidence.cache)
+
     def test_peer_search_retains_coordinated_endpoint_changes(self):
         self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
         self.release("renderer", "2.0.0", peers={"framework": "^2"})

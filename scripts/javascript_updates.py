@@ -450,8 +450,6 @@ class Evidence:
             )
             versions = body.get("versions", {})
             for release in releases:
-                if release.published > self.now:
-                    raise ValueError("Future JavaScript registry publication time")
                 if release.version not in versions:
                     raise ValueError(
                         "Registry release metadata disagrees with its manifest"

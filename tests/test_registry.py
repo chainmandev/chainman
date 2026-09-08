@@ -77,6 +77,116 @@ class RegistryTransportTests(unittest.TestCase):
                     read.assert_called_once_with(limit + 1)
 
 
+class PublicationObservationTests(unittest.TestCase):
+    def setUp(self):
+        self.anchor = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
+        self.observed = self.anchor + timedelta(minutes=2)
+        clock = patch.object(
+            registry, "observation_time", return_value=self.observed, create=True
+        )
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+
+    def exception(self, version="2.0.0", expiry=None):
+        return {
+            "package": "npm:demo",
+            "version": version,
+            "minimum_safe": version,
+            "reason": "verified fix for the declared advisory",
+            "advisory": "https://example.invalid/advisory/clock",
+            "expires": (expiry or self.anchor + timedelta(days=1)).isoformat(),
+        }
+
+    def test_observed_post_anchor_releases_do_not_abort_or_become_eligible(self):
+        old = registry.Release("1.0.0", self.anchor - timedelta(days=60))
+        during = registry.Release("2.0.0", self.anchor + timedelta(minutes=1))
+        prerelease = registry.Release("3.0.0-beta.1", during.published)
+        for provider in (
+            "npm",
+            "pypi",
+            "crates",
+            "pub",
+            "go",
+            "swift",
+            "maven",
+            "github",
+            "docker",
+        ):
+            for days in (0, 30):
+                with self.subTest(provider=provider, minimum_age_days=days):
+                    selected = registry.select(
+                        provider,
+                        [old, during, prerelease],
+                        {"minimum_age_days": days},
+                        "demo",
+                        self.anchor,
+                    )
+                    self.assertIs(selected, old)
+
+    def test_observation_cannot_advance_frozen_age_boundary(self):
+        old = registry.Release("1.0.0", self.anchor - timedelta(days=60))
+        boundary = registry.Release(
+            "2.0.0", self.anchor - timedelta(days=30) + timedelta(minutes=1)
+        )
+        for observed in (self.observed, self.observed + timedelta(days=90)):
+            self.clock.return_value = observed
+            self.assertIs(
+                registry.select("npm", [old, boundary], {}, "demo", self.anchor), old
+            )
+
+    def test_exact_security_exception_cannot_admit_post_anchor_release(self):
+        during = registry.Release("2.0.0", self.anchor + timedelta(minutes=1))
+        policy = {"minimum_age_days": 0, "exceptions": [self.exception()]}
+        self.assertEqual(
+            registry.active_exceptions("npm", [during], policy, "demo", self.anchor), []
+        )
+        with self.assertRaisesRegex(ValueError, "eligible"):
+            registry.select("npm", [during], policy, "demo", self.anchor)
+
+    def test_duplicate_publication_cannot_hide_post_anchor_identity(self):
+        releases = [
+            registry.Release("2.0.0", self.anchor - timedelta(days=60)),
+            registry.Release("2.0.0", self.anchor + timedelta(minutes=1)),
+        ]
+        policy = {"exceptions": [self.exception()]}
+        self.assertEqual(
+            registry.active_exceptions("npm", releases, policy, "demo", self.anchor), []
+        )
+
+    def test_exception_expiry_uses_the_same_frozen_anchor(self):
+        young = registry.Release("2.0.0", self.anchor - timedelta(days=1))
+        policy = {
+            "exceptions": [self.exception(expiry=self.anchor + timedelta(minutes=1))]
+        }
+        self.assertEqual(
+            registry.active_exceptions("npm", [young], policy, "demo", self.anchor),
+            [young],
+        )
+        self.clock.return_value += timedelta(days=90)
+        self.assertIs(
+            registry.select("npm", [young], policy, "demo", self.anchor), young
+        )
+        policy["exceptions"][0]["expires"] = self.anchor.isoformat()
+        with self.assertRaisesRegex(ValueError, "Expired"):
+            registry.select("npm", [young], policy, "demo", self.anchor)
+
+    def test_invalid_observed_publication_never_constructs_immutable_evidence(self):
+        for published in (
+            None,
+            self.anchor.replace(tzinfo=None),
+            self.observed + timedelta(seconds=1),
+        ):
+            for constructor in (
+                lambda value: registry.Release("1.0.0", value),
+                lambda value: registry.Artifact(
+                    "https://example.invalid/archive", "sha256:" + "a" * 64, value
+                ),
+            ):
+                with self.subTest(published=published, constructor=constructor):
+                    with self.assertRaises(ValueError):
+                        constructor(published)
+
+
 class PolicyTests(unittest.TestCase):
     def test_latest_mature_major_and_boundary(self):
         chosen = registry.select(

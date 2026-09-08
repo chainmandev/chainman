@@ -25,11 +25,26 @@ from semantic_version import NpmSpec, Version as Semver
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 
 
+def observation_time() -> datetime:
+    """Host UTC when metadata becomes immutable evidence, not the update cutoff."""
+    return datetime.now(timezone.utc)
+
+
+def validate_publication(published: datetime) -> None:
+    if not isinstance(published, datetime) or published.utcoffset() is None:
+        raise ValueError("Registry publication time requires a timezone")
+    if published > observation_time():
+        raise ValueError("Future registry publication time")
+
+
 @dataclass(frozen=True)
 class Artifact:
     url: str
     digest: str
     published: datetime
+
+    def __post_init__(self):
+        validate_publication(self.published)
 
 
 @dataclass(frozen=True)
@@ -40,6 +55,9 @@ class Release:
     python: str = ""
     artifacts: tuple[Artifact, ...] = ()
     deprecated: bool = False
+
+    def __post_init__(self):
+        validate_publication(self.published)
 
 
 class RegistryHTTPError(ValueError):
@@ -246,6 +264,15 @@ def minimum_safe(provider: str, policy: dict, name: str):
     return max(floors) if floors else None
 
 
+def latest_publications(releases: list[Release]) -> dict[str, datetime]:
+    dates = {}
+    for release in releases:
+        dates[release.version] = max(
+            dates.get(release.version, release.published), release.published
+        )
+    return dates
+
+
 def maturity(
     provider: str, releases: list[Release], policy: dict, name: str, now: datetime
 ) -> list[Release]:
@@ -253,11 +280,7 @@ def maturity(
     safe = minimum_safe(provider, policy, name)
     cutoff = now - timedelta(days=minimum_age(policy))
     candidates = []
-    dates = {}
-    for release in releases:
-        dates[release.version] = max(
-            dates.get(release.version, release.published), release.published
-        )
+    dates = latest_publications(releases)
     for release in releases:
         rank = version(provider, release.version)
         if (
@@ -268,8 +291,6 @@ def maturity(
             or not compatible(provider, release.version, bound)
         ):
             continue
-        if dates[release.version] > now:
-            raise ValueError(f"Future registry timestamp for {name}")
         if dates[release.version] <= cutoff:
             candidates.append(release)
     return candidates
@@ -282,6 +303,7 @@ def active_exceptions(
     bound = constraint(provider, policy, name)
     required_safe = minimum_safe(provider, policy, name)
     candidates = []
+    dates = latest_publications(releases)
     # An exception admits one exact version only while a mature safe version is absent.
     for exception in policy.get("exceptions", []):
         scope, _, package = exception.get("package", "").partition(":")
@@ -308,6 +330,7 @@ def active_exceptions(
         for release in releases:
             if (
                 release.version == exception["version"]
+                and dates[release.version] <= now
                 and version(provider, release.version) >= required_safe
                 and release.python != "unsupported"
                 and not release.deprecated

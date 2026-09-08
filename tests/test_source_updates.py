@@ -1572,14 +1572,43 @@ class ToolchainTests(Fixture):
             self.assertRaisesRegex(ValueError, "immutable release artifacts"),
         ):
             sources.snapshot(self.root, self.spec)
-        with patch.object(
-            registry,
-            "releases",
-            return_value=[self.npm_release(published=NOW + timedelta(days=1))],
+        with (
+            patch.object(registry, "observation_time", return_value=NOW),
+            patch.object(
+                registry,
+                "releases",
+                side_effect=lambda *args, **kwargs: [
+                    self.npm_release(published=NOW + timedelta(days=1))
+                ],
+            ),
+            self.assertRaisesRegex(ValueError, "Future"),
         ):
-            before = sources.snapshot(self.root, self.spec)
-            with self.assertRaisesRegex(ValueError, "Future"):
-                sources.resolve(self.root, self.spec, {}, NOW, before=before)
+            sources.snapshot(self.root, self.spec)
+
+    def test_observed_post_anchor_sdk_remains_policy_ineligible(self):
+        self.current_pins()
+        with patch.object(
+            registry, "observation_time", return_value=NOW + timedelta(days=2)
+        ):
+            release = self.npm_release(published=NOW + timedelta(days=1))
+            with patch.object(registry, "releases", return_value=[release]):
+                before = sources.snapshot(self.root, self.spec)
+                for age in (0, 30):
+                    with (
+                        self.subTest(minimum_age_days=age),
+                        self.assertRaisesRegex(
+                            ValueError,
+                            "violates its active compatibility or security policy",
+                        ),
+                    ):
+                        sources.resolve(
+                            self.root,
+                            self.spec,
+                            {"minimum_age_days": age},
+                            NOW,
+                            before=before,
+                        )
+        self.assertEqual((self.root / ".runtime-version").read_text(), "v22.1.0\n")
 
     def test_immature_sdk_is_an_error_not_a_pin_downgrade(self):
         with (

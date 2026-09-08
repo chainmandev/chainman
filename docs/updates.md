@@ -76,6 +76,13 @@ command step. An adapter with `explicit_only = true` is excluded from default an
 SDK source refreshes that require additional upstream evidence. Hooks receive JSON `CHAINMAN_UPDATE_TARGETS` and
 `CHAINMAN_UPDATE_POLICIES`, plus the frozen `CHAINMAN_UPDATE_AT` timestamp.
 
+Publication times are validated against host UTC when immutable artifact and release
+evidence is constructed. This metadata-observation clock is separate from both HTTP
+receipt time and the frozen update timestamp. Releases published after the update
+timestamp remain ineligible, including with a zero-day age window or an exact security
+exception. Later observations and cached evidence never advance the release-age cutoff
+or the timestamp used to check exception expiry.
+
 Adapters snapshot their original identities before any mutation. Nix steps precede
 toolchain synchronization, which precedes package resolution. Each command enters
 the current Nix profile afresh. Reconciliation finishes before all selected adapters
