@@ -14,6 +14,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import chainman
@@ -392,6 +393,190 @@ class SelfUpdateTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 subject.fetch_runtime(lock, output.getvalue())
         self.assertEqual(self.managed(), self.before)
+
+
+class FreshReleaseTagTests(unittest.TestCase):
+    """Exercise the real registry cache; replace only the HTTP transport."""
+
+    def setUp(self):
+        registry.fetch.cache_clear()
+        self.addCleanup(registry.fetch.cache_clear)
+        temporary = tempfile.TemporaryDirectory(prefix="fresh tag control ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / "scripts").mkdir()
+        self.lock = self.root / "chainman.lock"
+        self.lock.write_text('{"schema":1,"version":"1.0.0"}\n')
+        self.before = self.lock.read_bytes()
+        self.api = "https://api.github.com/repos/chainmandev/chainman"
+        self.ref = self.api + "/git/ref/tags/v2.0.0"
+        self.original = "a" * 40
+        self.changed = "b" * 40
+        self.date = "2026-01-01T00:00:00Z"
+        self.selected = registry.Release("v2.0.0", registry.timestamp(self.date))
+        self.now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+        self.archive = b"exact dated fixture asset; never execute"
+        self.metadata = json.dumps(
+            {
+                "schema": 1,
+                "version": "2.0.0",
+                "revision": self.original,
+                "url": "https://github.com/chainmandev/chainman/releases/download/v2.0.0/chainman-2.0.0.tar.gz",
+                "narHash": "sha256-" + "A" * 43 + "=",
+                "archive_sha256": hashlib.sha256(self.archive).hexdigest(),
+            }
+        ).encode()
+        self.release = {
+            "tag_name": "v2.0.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": self.date,
+            "assets": [
+                {
+                    "id": number,
+                    "name": name,
+                    "state": "uploaded",
+                    "size": len(body),
+                    "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                    "created_at": self.date,
+                    "updated_at": self.date,
+                }
+                for number, name, body in (
+                    (1, "chainman-release.json", self.metadata),
+                    (2, "chainman-2.0.0.tar.gz", self.archive),
+                )
+            ],
+        }
+        self.requests = []
+        self.downloaded = False
+        self.annotated = False
+        self.move = False
+        self.failure = None
+
+    def transport(self, request, timeout):
+        self.assertEqual(timeout, 30)
+        url = request.full_url
+        self.requests.append((url, request.get_header("Cache-control")))
+        moved = self.move and self.downloaded
+        if url == self.ref:
+            if self.downloaded and self.failure == "http":
+                error = HTTPError(url, 403, "denied", {}, io.BytesIO(b"denied"))
+                self.addCleanup(error.close)
+                raise error
+            if self.downloaded and self.failure == "transport":
+                raise URLError("unavailable")
+            value = {
+                "object": {
+                    "type": "tag" if self.annotated else "commit",
+                    "sha": ("e" if moved else "c") * 40
+                    if self.annotated
+                    else self.changed
+                    if moved
+                    else self.original,
+                }
+            }
+        elif url in {self.api + "/git/tags/" + digit * 40 for digit in "ce"}:
+            value = {
+                "object": {
+                    "type": "tag",
+                    "sha": ("f" if url.endswith("e" * 40) else "d") * 40,
+                }
+            }
+        elif url in {self.api + "/git/tags/" + digit * 40 for digit in "df"}:
+            value = {
+                "object": {
+                    "type": "commit",
+                    "sha": self.changed if url.endswith("f" * 40) else self.original,
+                }
+            }
+        elif url == self.api + "/releases/tags/v2.0.0":
+            value = self.release
+        elif url == self.api + "/commits/" + self.original:
+            value = {
+                "sha": self.original,
+                "commit": {"committer": {"date": self.date}},
+            }
+        elif url == self.api + "/releases/assets/1":
+            value = self.metadata
+        elif url == self.api + "/releases/assets/2":
+            value = self.archive
+            self.downloaded = True
+        else:
+            self.fail(f"Unexpected HTTP request: {url}")
+        response = io.BytesIO(
+            value if isinstance(value, bytes) else json.dumps(value).encode()
+        )
+        response.headers = {"Content-Type": "application/json"}
+        return response
+
+    def test_unchanged_lightweight_tag_is_read_again_without_losing_snapshot_cache(
+        self,
+    ):
+        with patch.object(registry, "urlopen", side_effect=self.transport):
+            result = subject.release_assets(self.selected, {}, self.now)
+            self.assertEqual(result[2], self.original)
+            self.assertEqual(
+                [header for url, header in self.requests if url == self.ref],
+                [None, "no-cache"],
+            )
+            count = len(self.requests)
+            self.assertEqual(
+                registry.github_commit("chainmandev/chainman", "v2.0.0"),
+                self.original,
+            )
+            self.assertEqual(len(self.requests), count)
+            registry.github_commit("chainmandev/chainman", "v2.0.0", fresh=True)
+            self.assertEqual(len(self.requests), count + 1)
+
+    def test_unchanged_annotated_tag_refreshes_every_hop(self):
+        self.annotated = True
+        with patch.object(registry, "urlopen", side_effect=self.transport):
+            result = subject.release_assets(self.selected, {}, self.now)
+        self.assertEqual(result[2], self.original)
+        for url in [
+            self.ref,
+            *(self.api + "/git/tags/" + digit * 40 for digit in "cd"),
+        ]:
+            self.assertEqual(
+                [header for requested, header in self.requests if requested == url],
+                [None, "no-cache"],
+            )
+
+    def assert_stops_before_evaluation(self, expected, message):
+        with (
+            patch.object(registry, "urlopen", side_effect=self.transport),
+            patch.object(registry, "github_releases", return_value=[self.selected]),
+            patch.object(subject, "fetch_runtime") as evaluate,
+            patch.object(registry.time, "sleep"),
+            self.assertRaisesRegex(expected, message),
+        ):
+            try:
+                subject.runtime_candidate(self.root, {}, self.now)
+            finally:
+                evaluate.assert_not_called()
+                self.assertEqual(self.lock.read_bytes(), self.before)
+
+    def test_moving_lightweight_tag_stops_before_candidate_evaluation(self):
+        self.move = True
+        self.assert_stops_before_evaluation(ValueError, "tag changed")
+        self.assertEqual(sum(url == self.ref for url, _ in self.requests), 2)
+
+    def test_moving_annotated_tag_stops_before_candidate_evaluation(self):
+        self.annotated = self.move = True
+        self.assert_stops_before_evaluation(ValueError, "tag changed")
+        for digit in "ef":
+            self.assertIn(
+                (self.api + "/git/tags/" + digit * 40, "no-cache"), self.requests
+            )
+
+    def test_fresh_http_error_is_not_hidden_by_the_cached_tag(self):
+        self.failure = "http"
+        self.assert_stops_before_evaluation(registry.RegistryHTTPError, "HTTP 403")
+
+    def test_fresh_transport_error_preserves_the_bounded_failure(self):
+        self.failure = "transport"
+        self.assert_stops_before_evaluation(ValueError, "Registry unavailable")
+        self.assertEqual(sum(url == self.ref for url, _ in self.requests), 4)
 
 
 if __name__ == "__main__":

@@ -219,7 +219,7 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
         ):
             raise ValueError("Runtime asset bytes differ from dated release identity")
         bodies.append(body)
-    if registry.github_commit(repository, selected.version) != revision:
+    if registry.github_commit(repository, selected.version, fresh=True) != revision:
         raise ValueError("Runtime release tag changed during download")
     return json.loads(bodies[0]), bodies[1], revision
 

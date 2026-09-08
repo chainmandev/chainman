@@ -118,9 +118,12 @@ def constraint(provider: str, policy: dict, name: str) -> str:
     return rule.get("range", "")
 
 
-@lru_cache(maxsize=2048)
-def fetch(
-    url: str, accept: str = "application/json", method: str = "GET"
+def _fetch(
+    url: str,
+    accept: str = "application/json",
+    method: str = "GET",
+    *,
+    fresh: bool = False,
 ) -> tuple[bytes, dict]:
     parsed = urlparse(url)
     if (
@@ -134,7 +137,11 @@ def fetch(
         try:
             request = Request(
                 url,
-                headers={"User-Agent": "nix-just-toolchain", "Accept": accept},
+                headers={
+                    "User-Agent": "nix-just-toolchain",
+                    "Accept": accept,
+                    **({"Cache-Control": "no-cache"} if fresh else {}),
+                },
                 method=method,
             )
             with urlopen(request, timeout=30) as response:
@@ -154,8 +161,19 @@ def fetch(
     raise AssertionError("unreachable")
 
 
+@lru_cache(maxsize=2048)
+def fetch(
+    url: str, accept: str = "application/json", method: str = "GET"
+) -> tuple[bytes, dict]:
+    return _fetch(url, accept, method)
+
+
 def data(url: str):
     return json.loads(fetch(url)[0])
+
+
+def _fresh_data(url: str):
+    return json.loads(_fetch(url, fresh=True)[0])
 
 
 def version(provider: str, text: str):
@@ -347,8 +365,10 @@ def github_releases(repository: str) -> list[Release]:
     )
 
 
-def github_commit(repository: str, tag: str) -> str:
-    item = data(
+def github_commit(repository: str, tag: str, *, fresh: bool = False) -> str:
+    """Resolve a tag, optionally refreshing every hop outside the snapshot cache."""
+    read = _fresh_data if fresh else data
+    item = read(
         f"https://api.github.com/repos/{repository}/git/ref/tags/{quote(tag, safe='')}"
     )["object"]
     for _ in range(10):
@@ -356,7 +376,7 @@ def github_commit(repository: str, tag: str) -> str:
             return item["sha"]
         if item["type"] != "tag":
             break
-        item = data(
+        item = read(
             f"https://api.github.com/repos/{repository}/git/tags/{item['sha']}"
         )["object"]
     raise ValueError("Release tag does not resolve to a bounded commit identity")
