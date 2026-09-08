@@ -92,6 +92,24 @@ floors and exception expiry remain enforced. Final SDK audit probes the tools
 again and refreshes registry observations. Application generators and
 deployment-specific reconciliation remain hooks.
 
+An npm tool may instead declare `source_pin = { file = "nix/sources.json",
+pointer = ["packageManager"] }`. That pointer holds exactly `version`, `url` and
+`hash` strings. JSON, TOML and YAML are supported; the URL must be that release's
+canonical npm tarball and the hash its registry SHA-256, SHA-384 or SHA-512 SRI.
+The project's Nix derivation must consume these fields. Chainman selects the latest
+eligible stable source, writes the complete record, refreshes Nix, and only then
+probes the binary and renders its normal `pins`. The default permits major updates;
+the selected Nix derivation must support the release or verification fails.
+`mode = "compatible"` bounds source candidates to the existing version's semver
+caret range, before maturity and security-exception retirement are evaluated.
+An unchanged source may retain its existing age only with identical pre-update
+binary, mirrors and immutable registry evidence. New hashes require normal age
+eligibility even at the same version. Final audit binds the exact selected source
+record as well as the actual binary and registry evidence. Source documents must
+be regular files inside the project; writes preserve unrelated fields and file
+permissions and reject observed concurrent changes. Disable package-manager
+self-switching so the declared Nix source remains the runtime authority.
+
 Rust, Python and Flutter may adopt an initially missing lockfile, but their final
 audit requires the resolved Cargo, uv or pub lock. A resolver or reconciliation
 hook cannot turn a deleted lock into an empty artifact inventory. Go and Swift

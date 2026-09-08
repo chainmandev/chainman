@@ -109,6 +109,7 @@
     "scripts/source_github.py",
     "scripts/source_go.py",
     "scripts/source_toolchain.py",
+    "scripts/source_toolchain_pin.py",
     "scripts/source_updates.py",
     "scripts/toolchain.py",
     "scripts/toolchain_build.py",
@@ -136,6 +137,7 @@
     "tests/test_self_update.py",
     "tests/test_source_artifact.py",
     "tests/test_source_github.py",
+    "tests/test_source_toolchain_pin.py",
     "tests/test_source_updates.py",
     "tests/test_updates.py",
     "toolchain.toml"

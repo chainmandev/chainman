@@ -12,6 +12,7 @@ from pathlib import Path
 import chainman
 import manifests
 import registry
+import source_toolchain_pin as source_pin
 import toolchain as tc
 from packaging.version import Version
 
@@ -21,6 +22,7 @@ def tools(spec: dict) -> list[dict]:
     if not isinstance(values, list) or not values:
         raise ValueError("Toolchain synchronization requires declared tools")
     seen = set()
+    source_paths = []
     for tool in values:
         if tool.get("provider") not in {"npm", "pypi", "crates", "github"}:
             raise ValueError("Unsupported toolchain registry evidence provider")
@@ -38,6 +40,9 @@ def tools(spec: dict) -> list[dict]:
         pattern = re.compile(tool["version_pattern"], re.MULTILINE)
         if "version" not in pattern.groupindex:
             raise ValueError("Toolchain probe pattern requires a named version group")
+        source = source_pin.declaration(tool)
+        if source is not None:
+            source_paths.append((source["file"], source["pointer"]))
         for pin in tool["pins"]:
             if set(pin) - {"file", "pointer", "format", "pattern", "value"}:
                 raise ValueError(
@@ -47,6 +52,19 @@ def tools(spec: dict) -> list[dict]:
             if key in seen:
                 raise ValueError("A toolchain pin has multiple owners")
             seen.add(key)
+    for index, (file, pointer) in enumerate(source_paths):
+        others = source_paths[index + 1 :] + [
+            (pin["file"], pin.get("pointer", []))
+            for tool in values
+            for pin in tool["pins"]
+        ]
+        if any(
+            file == other_file
+            and pointer[: min(len(pointer), len(other))]
+            == other[: min(len(pointer), len(other))]
+            for other_file, other in others
+        ):
+            raise ValueError("SDK source pin overlaps another source or output pin")
     return values
 
 
@@ -70,14 +88,23 @@ def snapshot(root: Path, spec: dict) -> dict:
     registry.fetch.cache_clear()
     values = tools(spec)
     observed = []
+    sources = []
     for tool in values:
         value = probe(root, spec, tool)
         chosen, _ = observe(tool, value)
+        source = source_pin.read(root, tool)
+        if source is not None and source != source_pin.record(tool, chosen):
+            raise ValueError(
+                "Nix SDK source pin differs from its observed registry artifact"
+            )
+        sources.append(source)
         observed.append(evidence(tool, chosen, value))
     return {
         "adapter": "toolchain",
         "pins": [[pin_value(root, pin) for pin in tool["pins"]] for tool in values],
         "tools": observed,
+        "sources": sources,
+        "source_files": source_pin.files(root, values),
     }
 
 
@@ -225,6 +252,17 @@ def plan(
     for index, tool in enumerate(values):
         value = probe(root, spec, tool)
         chosen, releases = observe(tool, value)
+        source = source_pin.read(root, tool)
+        if source is not None and source != source_pin.record(tool, chosen):
+            raise ValueError(
+                "Nix SDK source pin differs from its observed registry artifact"
+            )
+        if source is not None:
+            releases = source_pin.inventory(
+                releases,
+                before["sources"][index]["version"],
+                spec.get("mode", "aggressive"),
+            )
         observed = evidence(tool, chosen, value)
         pins = []
         if len(before["pins"][index]) != len(tool["pins"]):
@@ -234,12 +272,17 @@ def plan(
             if floor and Version(floor[0]) > Version(value):
                 raise ValueError("Refreshed Nix tool would downgrade an existing pin")
             pins.append(render(pin, value))
-        retained = observed == baseline_tools[index] and pins == before["pins"][index]
+        retained = (
+            observed == baseline_tools[index]
+            and pins == before["pins"][index]
+            and source == before.get("sources", [None] * len(values))[index]
+        )
         eligible_tool(tool, chosen, releases, policy, now, retained=retained)
         result.append(
             {
                 **observed,
                 "pins": pins,
+                **({"source": source} if source is not None else {}),
             }
         )
     return result
@@ -249,9 +292,30 @@ def resolve(
     root: Path, spec: dict, policy: dict, now: datetime, *, before: dict | None = None
 ) -> dict:
     before = snapshot(root, spec) if before is None else before
-    selected = plan(root, spec, before, policy, now)
+    values = tools(spec)
     changed = []
-    for tool, result in zip(tools(spec), selected, strict=True):
+    if source_pin.files(root, values) != before.get("source_files", {}):
+        raise ValueError("SDK source files changed concurrently before resolution")
+    registry.fetch.cache_clear()
+    # Write all selected source records before entering the newly evaluated Nix
+    # profile. Its actual binary version must then agree with these identities.
+    for index, tool in enumerate(values):
+        if source_pin.declaration(tool) is None:
+            continue
+        expected = before["sources"][index]
+        selected_source = source_pin.select(
+            tool,
+            before["tools"][index],
+            expected,
+            before["pins"][index],
+            policy,
+            now,
+            mode=spec.get("mode", "aggressive"),
+        )
+        if source_pin.write(root, tool, expected, selected_source):
+            changed.append(tool["source_pin"]["file"])
+    selected = plan(root, spec, before, policy, now)
+    for tool, result in zip(values, selected, strict=True):
         for pin, value in zip(tool["pins"], result["pins"], strict=True):
             if pin_value(root, pin) == value:
                 continue
@@ -272,6 +336,13 @@ def resolve(
 
 def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> None:
     selected = plan(root, spec, before, policy, now)
+    if "resolution" not in before and any(
+        item.get("source") != old
+        for item, old in zip(
+            selected, before.get("sources", [None] * len(selected)), strict=True
+        )
+    ):
+        raise ValueError("SDK source changed without a recorded selection")
     if "resolution" in before and selected != before["resolution"]["tools"]:
         raise ValueError("Selected Nix tool changed after resolution")
     expected = [item["pins"] for item in selected]
