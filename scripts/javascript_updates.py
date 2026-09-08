@@ -86,10 +86,11 @@ def parse_requirement(alias, value):
         )
     if value == "latest":
         value = "*"
-    NpmSpec(value)
+    requirement = peer_range(value)
+    NpmSpec(requirement)
     simple = re.fullmatch(r"([~^]?)([0-9]+\.[0-9]+\.[0-9]+)", value)
     # Complex declared ranges are contracts, not templates to rewrite loosely.
-    return actual, prefix, value, simple.group(1) if simple else None
+    return actual, prefix, requirement, simple.group(1) if simple else None
 
 
 def document(path, body):
@@ -464,10 +465,21 @@ class Evidence:
         if not isinstance(info, Mapping):
             raise ValueError("Selected package lacks registry dependency metadata")
         peers = info.get("peerDependencies", {})
+        if not isinstance(peers, Mapping):
+            raise ValueError("Peer dependencies must be an object of named ranges")
+        peers = {peer: peer_range(value) for peer, value in peers.items()}
         for peer, value in peers.items():
             package_name(peer)
             NpmSpec(value)
         return peers, info.get("peerDependenciesMeta", {})
+
+
+def peer_range(value):
+    # npm permits whitespace after comparators; semantic_version does not.
+    # Preserve token boundaries and leave all other syntax to its strict parser.
+    if not isinstance(value, str):
+        raise ValueError("Peer dependency requirements must be strings")
+    return re.sub(r"(?<=[<>=~^])\s+(?=[v0-9xX*])", "", value)
 
 
 def peer_ignored(options, manifest, source, peer):
@@ -756,17 +768,100 @@ def plan(workspace, policy, now):
 def solve(workspace, evidence, options, initial=None):
     ceiling = bounded(options, "solver_states", 256, 4096)
     initial = initial or tuple(pin.candidates[0] for pin in workspace.pins)
-    queue, visited, scheduled = [tuple(initial)], set(), {tuple(initial)}
-    truncated = False
-    while queue:
-        selected = queue.pop(0)
+    visited = set()
+    metadata_error = None
+
+    def revisions(selected, conflict, witness):
+        order = tuple(reversed(conflict))
+        if witness:
+            _, source, target, peer, requirement = witness
+            incoming = []
+            for manifest, refs in workspace.refs.items():
+                for other in refs.values():
+                    pin = workspace.pins[other]
+                    info = evidence.get(pin.name)[1].get(selected[other])
+                    peers = (
+                        info.get("peerDependencies", {})
+                        if isinstance(info, Mapping)
+                        else {}
+                    )
+                    if not isinstance(peers, Mapping):
+                        continue
+                    for name, bound in peers.items():
+                        if refs.get(name) == target and not peer_ignored(
+                            options, manifest, pin.name, name
+                        ):
+                            try:
+                                incoming.append(NpmSpec(peer_range(bound)))
+                            except (TypeError, ValueError):
+                                pass
+            # Conflicting current sources cannot be repaired by a target-only
+            # change. Prefer a source repair before revisiting target versions.
+            if not any(
+                all(Version(value) in bound for bound in incoming)
+                for value in workspace.pins[target].candidates
+            ):
+                order = source, target
+            del incoming
+        # Prefer changes that repair this exact witness. Keep other participant
+        # changes as fallbacks: some solutions need both endpoints to change.
+        for direct in (True, False) if witness else (False,):
+            for index in order:
+                for candidate in workspace.pins[index].candidates:
+                    if candidate == selected[index]:
+                        continue
+                    revised = list(selected)
+                    revised[index] = candidate
+                    revised = tuple(revised)
+                    if revised in visited:
+                        continue
+                    if direct:
+                        if index == target:
+                            if Version(candidate) not in NpmSpec(requirement):
+                                continue
+                        else:
+                            # This is ordering evidence only. Validate all peer
+                            # metadata when the candidate is actually visited;
+                            # unused ancient releases cannot poison the search.
+                            info = evidence.get(workspace.pins[index].name)[1].get(
+                                candidate
+                            )
+                            peers = (
+                                info.get("peerDependencies", {})
+                                if isinstance(info, Mapping)
+                                else None
+                            )
+                            if not isinstance(peers, Mapping):
+                                continue
+                            bound = peers.get(peer)
+                            if bound is not None:
+                                try:
+                                    if Version(selected[target]) not in NpmSpec(
+                                        peer_range(bound)
+                                    ):
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
+                    yield revised
+
+    # Lazy depth-first expansion spends the bound on visited states, never on
+    # hundreds of queued siblings that prevent a promising repair from advancing.
+    frontier = [iter([tuple(initial)])]
+    while frontier:
+        try:
+            selected = next(frontier[-1])
+        except StopIteration:
+            frontier.pop()
+            continue
         if selected in visited:
             continue
-        visited.add(selected)
-        if len(visited) > ceiling:
+        if len(visited) >= ceiling:
             raise ValueError(
                 "JavaScript peer solver exhausted its explicit state bound"
+                + (f": {metadata_error}" if metadata_error else "")
             )
+        visited.add(selected)
+        witness = None
         conflict = next(
             (
                 pair
@@ -780,7 +875,17 @@ def solve(workspace, evidence, options, initial=None):
                 break
             for source in refs.values():
                 pin = workspace.pins[source]
-                peers, peer_metadata = evidence.peers(pin.name, selected[source])
+                try:
+                    peers, peer_metadata = evidence.peers(pin.name, selected[source])
+                except ValueError as error:
+                    # Reject this release; a valid older source may still solve
+                    # the graph. The final selection never skips peer validation.
+                    if metadata_error is None:
+                        metadata_error = (
+                            f"Invalid peers for {pin.name}@{selected[source]}: {error}"
+                        )
+                    conflict = (source,)
+                    break
                 for peer, requirement in peers.items():
                     if peer_ignored(options, manifest, pin.name, peer):
                         continue
@@ -813,6 +918,7 @@ def solve(workspace, evidence, options, initial=None):
                     target = refs[peer]
                     if Version(selected[target]) not in NpmSpec(requirement):
                         conflict = source, target
+                        witness = manifest, source, target, peer, requirement
                         break
                 if conflict:
                     break
@@ -840,25 +946,12 @@ def solve(workspace, evidence, options, initial=None):
                     break
             if conflict is None:
                 return selected
-        # Change only a participant in the witnessed conflict. Never weaken a
-        # compatibility/age rule to make the package manager return success.
-        for index in reversed(conflict):
-            for candidate in workspace.pins[index].candidates:
-                if candidate == selected[index]:
-                    continue
-                revised = list(selected)
-                revised[index] = candidate
-                revised = tuple(revised)
-                if revised not in scheduled:
-                    if len(scheduled) >= ceiling:
-                        truncated = True
-                    else:
-                        scheduled.add(revised)
-                        queue.append(revised)
-    if truncated:
-        raise ValueError("JavaScript peer solver exhausted its explicit state bound")
+        # Full compatibility, maturity and exception checks above remain the
+        # acceptance oracle; revision ordering cannot authorize a selection.
+        frontier.append(revisions(selected, conflict, witness))
     raise ValueError(
         "No eligible JavaScript versions satisfy the scoped peer constraints"
+        + (f": {metadata_error}" if metadata_error else "")
     )
 
 
@@ -1250,6 +1343,7 @@ def audit_peers(workspace, evidence, options):
             else:
                 peers, metadata = evidence.peers(actual, version)
             for peer, requirement in peers.items():
+                requirement = peer_range(requirement)
                 if peer_ignored(options, manifest, actual, peer):
                     continue
                 target = children.get(peer)

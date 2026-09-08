@@ -322,6 +322,112 @@ class JavaScriptTests(unittest.TestCase):
         _, selected = self.selected()
         self.assertEqual(selected, {"renderer": "1.0.0", "framework": "1.0.0"})
 
+    def test_large_peer_domain_advances_repairs_within_the_original_state_bound(self):
+        self.manifest(
+            "package.json",
+            {"held": "1.0.0", "renderer": "1.0.0", "framework": "1.0.0"},
+        )
+        self.release("held", "1.0.0", peers={"framework": "^1"})
+        self.release("renderer", "3.0.0", peers={"framework": "^3"})
+        self.release("renderer", "2.0.0", peers={"framework": "^2"})
+        self.release("renderer", "1.0.0", peers={"framework": "^1"})
+        # Never selected: search ordering must not eagerly validate its peers.
+        self.release("renderer", "0.1.0", peers={"unused": "not-a-range"})
+        self.release("framework", "3.0.0")
+        for patch_version in range(300):
+            self.release("framework", f"1.0.{patch_version}")
+        self.assertEqual(
+            self.selected()[1],
+            {"held": "1.0.0", "renderer": "1.0.0", "framework": "1.0.299"},
+        )
+        self.policy["javascript"] = {"solver_states": 3}
+        self.assertEqual(self.selected()[1]["framework"], "1.0.299")
+        self.policy["javascript"] = {"solver_states": 2}
+        with self.assertRaisesRegex(ValueError, "state bound"):
+            self.selected()
+
+    def test_peer_search_retains_coordinated_endpoint_changes(self):
+        self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
+        self.release("renderer", "2.0.0", peers={"framework": "^2"})
+        self.release("renderer", "1.0.0", peers={"framework": "^3"})
+        self.release("framework", "1.0.0")
+        self.release("framework", "3.0.0")
+        workspace = js.Workspace(self.root, self.spec)
+        evidence, _ = js.plan(workspace, self.policy, self.now)
+        # Neither endpoint alone can repair this state; both must change.
+        initial = tuple(
+            "2.0.0" if pin.name == "renderer" else "1.0.0" for pin in workspace.pins
+        )
+        selected = js.solve(workspace, evidence, {}, initial)
+        self.assertEqual(
+            {pin.name: value for pin, value in zip(workspace.pins, selected)},
+            {"renderer": "1.0.0", "framework": "3.0.0"},
+        )
+
+    def test_npm_peer_comparator_whitespace_preserves_membership(self):
+        self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
+        for version in ("1.0.0", "1.5.0", "2.0.0"):
+            self.release("framework", version)
+        for bound, expected in (
+            (">= 1.0.0 < 2.0.0", "1.5.0"),
+            ("^ 1.0.0", "1.5.0"),
+            ("~ 1.0.0", "1.0.0"),
+            ("> 1.5.0", "2.0.0"),
+        ):
+            with self.subTest(bound=bound):
+                self.release("renderer", "1.0.0", peers={"framework": bound})
+                self.assertEqual(self.selected()[1]["framework"], expected)
+        self.release("renderer", "1.0.0", peers={"framework": "> = 1.0.0"})
+        with self.assertRaisesRegex(ValueError, "Invalid NPM"):
+            self.selected()
+
+    def test_malformed_latest_peer_metadata_retargets_to_a_valid_release(self):
+        self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
+        self.release("framework", "1.0.0")
+        self.release("renderer", "1.0.0", peers={"framework": "^1"})
+        self.release("renderer", "2.0.0", peers={"framework": "^1 || insiders"})
+        self.assertEqual(self.selected()[1]["renderer"], "1.0.0")
+        self.policy["constraints"] = {
+            "npm:renderer": {"range": "2.0.0", "reason": "Exact held release"}
+        }
+        with self.assertRaisesRegex(ValueError, r"renderer@2\.0\.0.*insiders"):
+            self.selected()
+        self.policy.pop("constraints")
+        self.release("renderer", "1.0.0", peers={"framework": "not-a-range"})
+        with self.assertRaisesRegex(ValueError, r"renderer@2\.0\.0.*insiders"):
+            self.selected()
+
+    def test_selected_malformed_peers_still_fail_validation(self):
+        self.manifest("package.json", {"renderer": "1.0.0"})
+        self.release("renderer", "1.0.0", peers={"framework": "not-a-range"})
+        with self.assertRaisesRegex(ValueError, "Invalid NPM"):
+            self.selected()
+
+    def test_malformed_peer_shapes_reject_candidates_with_actionable_errors(self):
+        self.manifest("package.json", {"renderer": "1.0.0", "framework": "1.0.0"})
+        self.release("framework", "1.0.0")
+        self.release("renderer", "1.0.0", peers={"framework": "^1"})
+        self.release("renderer", "2.0.0")
+        for malformed in (
+            [],
+            "bad",
+            {"framework": None},
+            {"framework": []},
+            {"framework": {}},
+            {"framework": 1},
+        ):
+            with self.subTest(malformed=malformed):
+                self.metadata["renderer"]["versions"]["2.0.0"]["peerDependencies"] = (
+                    malformed
+                )
+                self.assertEqual(self.selected()[1]["renderer"], "1.0.0")
+                self.policy["constraints"] = {
+                    "npm:renderer": {"range": "2.0.0", "reason": "Exact held release"}
+                }
+                with self.assertRaisesRegex(ValueError, r"renderer@2\.0\.0.*must be"):
+                    self.selected()
+                self.policy.pop("constraints")
+
     def test_shared_catalog_checks_every_importer_and_scoped_peer_exception(self):
         self.manifest("package.json", {"renderer": "1.0.0", "framework": "catalog:"})
         self.manifest(
@@ -969,6 +1075,42 @@ class JavaScriptTests(unittest.TestCase):
         self.write("pnpm-lock.yaml", json.dumps(lock))
         with self.assertRaisesRegex(ValueError, "graph differs"):
             js.audit(self.root, self.spec, before, self.policy, self.now)
+
+    def test_local_peer_whitespace_survives_scoped_artifact_audit(self):
+        lock = self.local_directory_fixture()
+        bound = ">= 1.0.0 < 2.0.0"
+        path = self.manifest(
+            "packages/provider/package.json",
+            {},
+            name="local-provider",
+            version="1.0.0",
+            peerDependencies={"framework": bound},
+        )
+        original = path.read_bytes()
+        self.release("framework", "1.5.0")
+        lock["importers"]["packages/provider"] = {
+            "peerDependencies": {"framework": {"specifier": bound, "version": "1.5.0"}}
+        }
+        lock["packages"]["framework@1.5.0"] = {
+            "resolution": {
+                "integrity": self.metadata["framework"]["versions"]["1.5.0"]["dist"][
+                    "integrity"
+                ]
+            }
+        }
+        lock["snapshots"]["framework@1.5.0"] = {}
+        lock["snapshots"]["local-provider@file:packages/provider"] = {
+            "dependencies": {"framework": "1.5.0"}
+        }
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        before = js.snapshot(self.root, self.spec)
+        before["identities"] = []
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+        workspace = js.Workspace(self.root, self.spec)
+        self.assertEqual(
+            workspace.render(("1.5.0",))["packages/provider/package.json"], original
+        )
+        self.assertEqual(path.read_bytes(), original)
 
     def retained_fixture(self, *, days=60, dependencies=None, integrity=True):
         import javascript_sources as sources
