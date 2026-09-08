@@ -256,7 +256,12 @@ A retained current version is labelled `retained` and
 does not acquire eligibility evidence from an older candidate. Retention still
 requires both the request's compatibility bound and the effective configured
 package bound. A conflicting current version fails for explicit reconciliation;
-the query never silently downgrades it. `metadata` requires
+the query never silently downgrades it. Go selection first applies the native
+unretracted inventory, configured constraints and any compatibility bound, then
+checks release metadata in descending version order until it proves the highest
+mature safe candidate. Missing evidence for a potentially winning version fails;
+irrelevant lower versions do not block selection. Exact metadata and added artifact
+audits still require their own age and immutable identity evidence. `metadata` requires
 an exact `version` and returns evidence without claiming eligibility. `audit` takes
 `artifacts`, an array of `[provider,package,version,url,digest]` identities; caller
 baseline claims never bypass maturity. `artifact-metadata` and `artifact-audit`

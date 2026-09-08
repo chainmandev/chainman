@@ -79,14 +79,13 @@ def go_query(root: Path, package: str, value: str) -> dict:
     return item
 
 
-def go_candidates(root: Path, package: str) -> list[registry.Release]:
-    candidates = registry.releases("go", package)
+def go_candidates(root: Path, package: str, **selection) -> list[registry.Release]:
     # Go itself interprets the latest module's retract directives; never parse
     # Go syntax or infer retraction status from the public proxy's version list.
     available = go_query(root, package, "latest").get("Versions")
     if not isinstance(available, list):
         raise ValueError("Go did not return its unretracted version inventory")
-    return [r for r in candidates if r.version in available]
+    return registry.go_releases(package, available, **selection)
 
 
 def swift_repository(url: str) -> str:

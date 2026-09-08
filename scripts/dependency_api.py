@@ -342,16 +342,6 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
         tag_pattern = request.get("tag_pattern")
         if tag_pattern is not None and provider != "github":
             raise ValueError("Tag patterns are supported only for GitHub releases")
-        if tag_pattern is not None:
-            import source_github
-
-            candidates = source_github.releases(package, tag_pattern)
-        elif provider == "go":
-            import lock_adapters
-
-            candidates = lock_adapters.go_candidates(root, package)
-        else:
-            candidates = registry.releases(provider, package)
         restriction = ""
         if operation == "select" and request.get("constraint"):
             bound = request["constraint"]
@@ -363,15 +353,37 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
             ):
                 raise ValueError("A query constraint requires a range and reason")
             restriction = registry.validate_constraint(provider, bound["range"])
+        if request.get("mode") == "compatible" and not request.get("constraint"):
+            raise ValueError("A compatible query must declare its actual constraint")
+        if request.get("mode", "aggressive") not in {"aggressive", "compatible"}:
+            raise ValueError("Query mode must be aggressive or compatible")
+        if tag_pattern is not None:
+            import source_github
+
+            candidates = source_github.releases(package, tag_pattern)
+        elif provider == "go":
+            import lock_adapters
+
+            if operation == "metadata" and not registry.go_version(
+                request.get("version")
+            ):
+                raise ValueError("Exact Go metadata requires a canonical version")
+            candidates = lock_adapters.go_candidates(
+                root,
+                package,
+                policy=settings if operation == "select" else None,
+                now=now,
+                bounds=(restriction,) if restriction else (),
+                exact=request.get("version") if operation == "metadata" else None,
+            )
+        else:
+            candidates = registry.releases(provider, package)
+        if restriction:
             candidates = [
                 candidate
                 for candidate in candidates
                 if registry.compatible(provider, candidate.version, restriction)
             ]
-        if request.get("mode") == "compatible" and not request.get("constraint"):
-            raise ValueError("A compatible query must declare its actual constraint")
-        if request.get("mode", "aggressive") not in {"aggressive", "compatible"}:
-            raise ValueError("Query mode must be aggressive or compatible")
         if operation == "metadata":
             matches = [
                 candidate

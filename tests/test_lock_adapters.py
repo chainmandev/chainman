@@ -288,7 +288,14 @@ class NativeLockTests(unittest.TestCase):
             registry.Release(v, NOW - timedelta(days=40)) for v in ("v1.0.0", "v1.1.0")
         ]
         with (
-            patch.object(registry, "releases", return_value=releases),
+            patch.object(registry, "fetch", return_value=(b"v1.0.0\nv1.1.0\n", {})),
+            patch.object(
+                registry,
+                "go_info",
+                side_effect=lambda package, value: next(
+                    item for item in releases if item.version == value
+                ),
+            ) as metadata,
             patch.object(
                 lock_adapters, "go_query", return_value={"Versions": ["v1.0.0"]}
             ),
@@ -297,6 +304,7 @@ class NativeLockTests(unittest.TestCase):
                 [r.version for r in lock_adapters.go_candidates(self.root, GO)],
                 ["v1.0.0"],
             )
+            metadata.assert_called_once_with(GO, "v1.0.0")
 
     def test_missing_go_and_swift_locks_fail_when_manifest_requires_them(self):
         for kind, filename in (

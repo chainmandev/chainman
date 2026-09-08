@@ -75,12 +75,13 @@ def query(root: Path, spec: dict, package: str, version: str) -> dict:
     return result
 
 
-def go_candidates(root: Path, spec: dict, package: str) -> list[registry.Release]:
-    releases = registry.releases("go", package)
+def go_candidates(
+    root: Path, spec: dict, package: str, **selection
+) -> list[registry.Release]:
     available = query(root, spec, package, "latest").get("Versions")
     if not isinstance(available, list):
         raise ValueError("Go did not return its unretracted release inventory")  # noqa: TRY004 - decoded external data
-    return [release for release in releases if release.version in available]
+    return registry.go_releases(package, available, **selection)
 
 
 def local_directory(root: Path, base: Path, value: str) -> Path:
@@ -251,7 +252,10 @@ def select(
     mode = spec.get("mode", "aggressive")
     if mode not in ("aggressive", "compatible"):
         raise ValueError("Go mode must be aggressive or compatible")
-    candidates = go_candidates(root, spec, package)
+    bounds = (compatible_bound(current),) if mode == "compatible" else ()
+    candidates = go_candidates(
+        root, spec, package, policy=policy, now=now, bounds=bounds
+    )
     if mode == "compatible":
         bound = compatible_bound(current)
         candidates = [
@@ -368,6 +372,18 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
     public_packages = {item[0] for item in identities} | {
         item["Path"] for item in public_requirements
     }
+
+    def selection_bounds(package):
+        return (
+            tuple(
+                compatible_bound(previous)
+                for previous in old_versions.get(package, ())
+                if registry.version("go", previous) is not None
+            )
+            if spec.get("mode", "aggressive") == "compatible"
+            else ()
+        )
+
     for package in sorted(public_packages):
         registry.minimum_safe("go", policy, package)
         if not any(
@@ -375,7 +391,14 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
             for item in policy.get("exceptions", [])
         ):
             continue
-        candidates = go_candidates(root, spec, package)
+        candidates = go_candidates(
+            root,
+            spec,
+            package,
+            policy=policy,
+            now=now,
+            bounds=selection_bounds(package),
+        )
         if spec.get("mode", "aggressive") == "compatible":
             for previous in old_versions.get(package, ()):
                 if registry.version("go", previous) is not None:
@@ -455,7 +478,18 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
                 raise ValueError("Go artifact has future age evidence")
             if artifact.published > limit:
                 allowed = registry.active_exceptions(
-                    "go", go_candidates(root, spec, package), policy, package, now
+                    "go",
+                    go_candidates(
+                        root,
+                        spec,
+                        package,
+                        policy=policy,
+                        now=now,
+                        bounds=selection_bounds(package),
+                    ),
+                    policy,
+                    package,
+                    now,
                 )
                 if value not in {r.version for r in allowed}:
                     raise ValueError("New Go checksum identity lacks mature evidence")

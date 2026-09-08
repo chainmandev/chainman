@@ -729,7 +729,9 @@ def audit_identities(
                     for e in policy.get("exceptions", [])
                 ):
                     if provider == "go":
-                        candidates += lock_adapters.go_candidates(root, package)
+                        candidates += lock_adapters.go_candidates(
+                            root, package, policy=policy, now=now
+                        )
                     elif provider == "maven":
                         source = lock_adapters.maven_source(next(iter(items))[3])
                         candidates += registry.maven_releases(package, source)

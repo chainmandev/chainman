@@ -466,6 +466,68 @@ def go_info(package: str, value: str) -> Release:
     return Release(value, timestamp(item.get("Time")))
 
 
+def go_releases(
+    package: str,
+    available: list[str] | None = None,
+    *,
+    policy: dict | None = None,
+    now: datetime | None = None,
+    bounds: tuple[str, ...] = (),
+    exact: str | None = None,
+) -> list[Release]:
+    """Load only metadata needed to prove the highest mature permitted release."""
+    if available is not None and (
+        not isinstance(available, list)
+        or any(
+            not isinstance(value, str) or not go_version(value) for value in available
+        )
+    ):
+        raise ValueError("Go did not return a canonical unretracted version inventory")
+    restrictions = [validate_constraint("go", bound) for bound in bounds]
+    safe = None
+    if policy is not None:
+        if now is None:
+            raise ValueError("Go ranked selection requires a frozen eligibility time")
+        restrictions.append(constraint("go", policy, package))
+        safe = minimum_safe("go", policy, package)
+        minimum_age(policy)
+    values = (
+        fetch(f"https://proxy.golang.org/{go_path(package)}/@v/list", "text/plain")[0]
+        .decode()
+        .splitlines()
+    )
+    values = sorted(
+        {
+            value
+            for value in values
+            if go_version(value)
+            and version("go", value) is not None
+            and (available is None or value in available)
+            and (exact is None or value == exact)
+            and (safe is None or version("go", value) >= safe)
+            and all(compatible("go", value, bound) for bound in restrictions)
+        },
+        key=lambda value: (version("go", value).precedence_key[:3], value),
+        reverse=True,
+    )
+    result = []
+    winner = None
+    for value in values:
+        # Canonical +incompatible metadata does not change SemVer precedence.
+        # Read every tied candidate before ruling out lower versions.
+        rank = version("go", value).precedence_key[:3]
+        if winner is not None and rank < winner:
+            break
+        # Errors for any potentially winning version remain fatal. Once the
+        # highest mature safe release is proved, lower metadata cannot change
+        # selection or the retirement of a security age exception.
+        release = go_info(package, value)
+        result.append(release)
+        if policy is not None and maturity("go", [release], policy, package, now):
+            winner = rank
+    return result
+
+
 def go_digest(value: str) -> str:
     try:
         raw = base64.b64decode(value.removeprefix("h1:"), validate=True)
@@ -651,18 +713,7 @@ def releases(
     include_deprecated: bool = False,
 ) -> list[Release]:
     if provider == "go":
-        values = (
-            fetch(f"https://proxy.golang.org/{go_path(package)}/@v/list", "text/plain")[
-                0
-            ]
-            .decode()
-            .splitlines()
-        )
-        return [
-            go_info(package, value)
-            for value in values
-            if version("go", value) is not None and go_version(value)
-        ]
+        return go_releases(package)
     if provider == "swift":
         import source_updates
 
