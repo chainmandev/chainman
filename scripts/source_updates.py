@@ -8,12 +8,14 @@ import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import chainman
 import registry
 import toolchain as tc
 import yaml
+
+ACTION_REF_LIMIT = 100_000
 
 
 def object_pairs(pairs):
@@ -86,25 +88,134 @@ def action_version(tag: str):
     return parts + (0,) * (3 - len(parts))
 
 
-def action_releases(repository: str) -> list[registry.Release]:
+def action_refs(repository: str) -> dict[str, str]:
+    """Read the complete v0 Git advertisement, including peeled tag identities."""
     repository_name(repository)
-    result = []
-    for page in range(1, 101):
-        entries = registry.data(
-            f"https://api.github.com/repos/{repository}/releases?per_page=100&page={page}"
+    media = "application/x-git-upload-pack-advertisement"
+    body, headers = registry.fetch(
+        f"https://github.com/{repository}.git/info/refs?service=git-upload-pack",
+        media,
+    )
+    headers = {key.lower(): value for key, value in headers.items()}
+    if (
+        len(body) > registry.MAX_RESPONSE_BYTES
+        or headers.get("content-type", "").split(";", 1)[0] != media
+    ):
+        raise ValueError("GitHub ref advertisement exceeds its bound or media type")
+    position = 0
+
+    def packet():
+        nonlocal position
+        size = body[position : position + 4]
+        if not re.fullmatch(rb"[0-9a-f]{4}", size):
+            raise ValueError("Incomplete GitHub ref advertisement framing")
+        count = int(size, 16)
+        if count == 0:
+            position += 4
+            return None
+        if count < 4 or count > 65520 or position + count > len(body):
+            raise ValueError("Invalid GitHub ref advertisement packet bound")
+        value = body[position + 4 : position + count]
+        position += count
+        return value
+
+    if packet() != b"# service=git-upload-pack\n" or packet() is not None:
+        raise ValueError("Unsupported GitHub ref advertisement protocol")
+    refs = {}
+    previous = None
+    while (value := packet()) is not None:
+        if len(refs) >= ACTION_REF_LIMIT:
+            raise ValueError("GitHub ref inventory exceeds its bound")
+        value = value.removesuffix(b"\n")
+        if previous is None:
+            value, separator, capabilities = value.partition(b"\0")
+            if (
+                not separator
+                or not re.fullmatch(rb"[\x21-\x7e]+(?: [\x21-\x7e]+)*", capabilities)
+                or any(
+                    item.startswith(b"object-format=") and item != b"object-format=sha1"
+                    for item in capabilities.split()
+                )
+            ):
+                raise ValueError("Unsupported GitHub ref identity capabilities")
+        match = re.fullmatch(rb"([a-f0-9]{40}) (HEAD|refs/[^\x00-\x20\x7f]+)", value)
+        if not match or match[1] == b"0" * 40:
+            raise ValueError("Malformed GitHub advertised ref identity")
+        commit, ref = (item.decode("utf-8") for item in match.groups())
+        if ref in refs:
+            raise ValueError("Duplicate GitHub advertised ref identity")
+        if ref.endswith("^{}") and (
+            previous != ref[:-3]
+            or not previous.startswith("refs/tags/")
+            or previous.endswith("^{}")
+        ):
+            raise ValueError("GitHub peeled tag lacks its exact adjacent ref")
+        refs[ref] = commit
+        previous = ref
+    if position != len(body) or previous is None:
+        raise ValueError("Incomplete or trailing GitHub ref advertisement")
+    result = {}
+    for ref, commit in refs.items():
+        if not ref.startswith("refs/tags/"):
+            continue
+        tag = ref.removeprefix("refs/tags/")
+        if not re.fullmatch(r"v?\d+(?:\.\d+){0,2}", tag):
+            continue
+        if len(tag) > 128:
+            raise ValueError("GitHub release tag exceeds its bounded identity")
+        result[tag] = refs.get(ref + "^{}", commit)
+    return result
+
+
+def action_release(item, expected: str | None = None) -> registry.Release | None:
+    if not isinstance(item, dict):
+        raise ValueError("Malformed GitHub release metadata")  # noqa: TRY004
+    tag = item.get("tag_name")
+    if (
+        not isinstance(tag, str)
+        or len(tag) > 128
+        or (expected is not None and tag != expected)
+        or type(item.get("draft")) is not bool
+        or type(item.get("prerelease")) is not bool
+    ):
+        raise ValueError("Malformed or mismatched GitHub release identity")
+    rank = action_version(tag)
+    if item["draft"] or item["prerelease"] or rank is None:
+        return None
+    return registry.Release(
+        ".".join(map(str, rank)), registry.timestamp(item.get("published_at")), tag
+    )
+
+
+def action_release_batch(repository: str) -> dict[str, registry.Release | None]:
+    # A batch saves requests for young releases. It is never the candidate inventory:
+    # GitHub caps this API at 1,000 results, regardless of pagination parameters.
+    entries = registry.data(
+        f"https://api.github.com/repos/{repository}/releases?per_page=100&page=1"
+    )
+    if not isinstance(entries, list) or len(entries) > 100:
+        raise ValueError("Malformed GitHub release metadata batch")
+    result = {}
+    for item in entries:
+        release = action_release(item)
+        tag = item["tag_name"]
+        if tag in result:
+            raise ValueError("Duplicate GitHub release metadata identity")
+        result[tag] = release
+    return result
+
+
+def action_release_by_tag(repository: str, tag: str) -> registry.Release | None:
+    try:
+        item = registry.data(
+            f"https://api.github.com/repos/{repository}/releases/tags/{quote(tag, safe='')}"
         )
-        if not isinstance(entries, list):
-            raise ValueError("Malformed GitHub release inventory")  # noqa: TRY004 - decoded external data
-        for item in entries:
-            rank = action_version(item.get("tag_name"))
-            if item["draft"] or item["prerelease"] or rank is None:
-                continue
-            at = registry.timestamp(item.get("published_at"))
-            tag = item["tag_name"]
-            result.append(registry.Release(".".join(map(str, rank)), at, tag))
-        if len(entries) < 100:
-            return result
-    raise ValueError("GitHub release inventory exceeded its pagination bound")
+    except registry.RegistryHTTPError as exc:
+        if exc.status != 404:
+            raise
+        # An advertised Git tag without a published GitHub release is not a release.
+        return None
+    return action_release(item, tag)
 
 
 def select_action(
@@ -129,37 +240,81 @@ def select_action(
         return {**selected, "reason": "mature channel revision"}
     if tracking["kind"] != "release":
         raise ValueError("Unknown Actions tracking policy")
-    releases = action_releases(repository)
     major = tracking.get("major")
-    if not advance_major and major is not None:
-        releases = [
-            item for item in releases if action_version(item.version)[0] == major
+    bound = registry.constraint("github", policy, repository)
+    safe = registry.minimum_safe("github", policy, repository)
+    limit = cutoff(policy, now)
+    exception_versions = {
+        item["version"]
+        for item in policy.get("exceptions", [])
+        if item.get("package") == f"github:{repository}"
+    }
+    refs = action_refs(repository)
+    groups = {}
+    for tag in refs:
+        rank = action_version(tag)
+        version = ".".join(map(str, rank))
+        if (
+            (not advance_major and major is not None and rank[0] != major)
+            or (safe is not None and registry.version("github", version) < safe)
+            or not registry.compatible("github", version, bound)
+        ):
+            continue
+        groups.setdefault(rank, []).append(tag)
+    batch = action_release_batch(repository)
+    if any(item is not None and tag not in refs for tag, item in batch.items()):
+        raise ValueError("Published Actions release lacks its advertised immutable tag")
+
+    def publication(tag):
+        if tag not in batch:
+            batch[tag] = action_release_by_tag(repository, tag)
+        return batch[tag]
+
+    releases = []
+    for rank in sorted(groups, reverse=True):
+        group = []
+        for tag in sorted(groups[rank]):
+            candidate = publication(tag)
+            if candidate is not None:
+                if candidate.published > now:
+                    raise ValueError("Actions release has future age evidence")
+                group.append(candidate)
+        if not group:
+            continue
+        if (
+            max(item.published for item in group) > limit
+            and group[0].version not in exception_versions
+        ):
+            continue
+        # Bind every alias of this version before maturity or exception retirement.
+        # A young publication cannot mature by consulting its older commit.
+        published = max(
+            max(item.published, commit_time(repository, refs[item.identity]))
+            for item in group
+        )
+        group = [
+            registry.Release(
+                item.version,
+                published,
+                item.identity,
+            )
+            for item in group
         ]
-    candidates = sorted(
+        if any(item.published > now for item in group):
+            raise ValueError("Actions selected commit has future age evidence")
+        releases.extend(group)
+        if registry.maturity("github", group, policy, repository, now):
+            # Lower versions cannot outrank this mature group or affect retirement.
+            break
+    chosen = max(
         registry.eligible("github", releases, policy, repository, now),
         key=lambda item: action_version(item.version),
-        reverse=True,
     )
-    exceptions = {
-        item.version
-        for item in registry.active_exceptions(
-            "github", releases, policy, repository, now
-        )
-    }
-    for candidate in candidates:
-        tag = candidate.identity
-        commit = registry.github_commit(repository, tag)
-        published = max(candidate.published, commit_time(repository, commit))
-        if published > now:
-            raise ValueError("Actions selected commit has future age evidence")
-        if published <= cutoff(policy, now) or candidate.version in exceptions:
-            chosen = registry.Release(candidate.version, published, tag)
-            break
-    else:
-        raise ValueError("No eligible Actions release with mature immutable contents")
+    commit = refs[chosen.identity]
+    tag = chosen.identity
     rank = action_version(chosen.version)
     old_rank = tracking.get("version")
-    if (
+    retain = (
         (major is not None and rank[0] < major)
         or (old_rank is not None and rank < tuple(old_rank))
         or (
@@ -167,7 +322,39 @@ def select_action(
             and commit != current
             and commit_time(repository, current) >= commit_time(repository, commit)
         )
-    ):
+    )
+    major_hold = not advance_major and major is not None
+    if retain and (bound or safe is not None or major_hold):
+        # Baseline age may be retained, but dates and annotations cannot waive an
+        # operative version limit. Use the highest published identity of this SHA;
+        # a lower alias must not hide a current major/floor violation.
+        current_groups = {}
+        for name, ref_commit in refs.items():
+            if ref_commit == current:
+                current_groups.setdefault(action_version(name), []).append(name)
+        current_version = None
+        for current_rank in sorted(current_groups, reverse=True):
+            values = [publication(name) for name in current_groups[current_rank]]
+            values = [item for item in values if item is not None]
+            if values:
+                if (
+                    max(
+                        commit_time(repository, current),
+                        *(item.published for item in values),
+                    )
+                    > now
+                ):
+                    raise ValueError("Actions current release has future age evidence")
+                current_version = values[0].version
+                break
+        if current_version is None:
+            raise ValueError("Actions current immutable version evidence is missing")
+        retain = (
+            (safe is None or registry.version("github", current_version) >= safe)
+            and registry.compatible("github", current_version, bound)
+            and (not major_hold or action_version(current_version)[0] == major)
+        )
+    if retain:
         return {"revision": current, "reason": "retained newer current release"}
     return {
         "revision": commit,

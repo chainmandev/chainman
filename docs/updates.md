@@ -98,6 +98,22 @@ floors and exception expiry remain enforced. Final SDK audit probes the tools
 again and refreshes registry observations. Application generators and
 deployment-specific reconciliation remain hooks.
 
+Actions release selection orders the complete GitHub Git tag advertisement before
+consulting release metadata. A first-page release batch only saves requests; it
+does not limit the candidate inventory. Remaining candidates use exact release-by-tag
+metadata. An advertised tag with no published release (HTTP 404) is not selectable;
+missing dates, contradictory positive release evidence, other HTTP errors, malformed
+or incomplete ref framing, and the explicit response/ref bounds fail the update.
+All released aliases of one version use the latest release/immutable-commit date
+before maturity or security-exception retirement. Metadata for lower versions need
+not be fetched after a higher compatible, safe, mature version is established.
+When a configured version constraint, security floor or major hold is operative,
+retaining a newer current SHA also requires its highest positively published version
+identity to satisfy that limit. A proven incompatible current release yields to the
+already qualified candidate; an unknown current version fails explicitly. A tracking
+comment alone is not version evidence. Compatible unchanged baseline revisions keep
+the existing age exemption.
+
 An npm tool may instead declare `source_pin = { file = "nix/sources.json",
 pointer = ["packageManager"] }`. That pointer holds exactly `version`, `url` and
 `hash` strings. JSON, TOML and YAML are supported; the URL must be that release's

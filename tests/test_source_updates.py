@@ -54,19 +54,23 @@ class ActionTests(Fixture):
         )
         release_patch = patch.object(
             sources,
-            "action_releases",
-            return_value=[
-                registry.Release("1.1.0", OLD, "v1.1.0"),
-                registry.Release("2.0.0", MATURE, "v2"),
-                registry.Release("3.0.0", YOUNG, "v3"),
-            ],
+            "action_refs",
+            return_value={"v1.1.0": A, "v2": B, "v3": C},
         )
         release_patch.start()
         self.addCleanup(release_patch.stop)
         commits = patch.object(
             registry,
-            "github_commit",
-            side_effect=lambda repo, tag: {"v1.1.0": A, "v2": B, "v3": C}[tag],
+            "data",
+            return_value=[
+                {
+                    "tag_name": tag,
+                    "draft": False,
+                    "prerelease": False,
+                    "published_at": at.isoformat(),
+                }
+                for tag, at in (("v1.1.0", OLD), ("v2", MATURE), ("v3", YOUNG))
+            ],
         )
         commits.start()
         self.addCleanup(commits.stop)
@@ -117,7 +121,7 @@ class ActionTests(Fixture):
             f"steps:\n  - uses: sample/action@{A} # deps-update: pin\n"
         )
         with patch.object(
-            sources, "action_releases", side_effect=AssertionError("fixed pin queried")
+            sources, "action_refs", side_effect=AssertionError("fixed pin queried")
         ):
             before = sources.snapshot(self.root, self.spec)
             self.assertEqual(
@@ -185,17 +189,13 @@ class EvidenceTests(unittest.TestCase):
                 "published_at": OLD.isoformat(),
             }
         ]
+        with patch.object(registry, "data", return_value=entries):
+            releases = sources.action_release_batch("sample/action")
+        self.assertEqual(releases["v2"].version, "2.0.0")
+        self.assertEqual(releases["v2"].published, OLD)
         with (
-            patch.object(registry, "data", return_value=entries),
-            patch.object(registry, "github_commit", return_value=B),
-            patch.object(sources, "commit_time", return_value=YOUNG),
-        ):
-            releases = sources.action_releases("sample/action")
-        self.assertEqual(releases[0].version, "2.0.0")
-        self.assertEqual(releases[0].published, OLD)
-        with (
-            patch.object(sources, "action_releases", return_value=releases),
-            patch.object(registry, "github_commit", return_value=B),
+            patch.object(sources, "action_refs", return_value={"v2": B}),
+            patch.object(sources, "action_release_batch", return_value=releases),
             patch.object(sources, "commit_time", return_value=YOUNG),
             self.assertRaisesRegex(ValueError, "eligible"),
         ):
@@ -207,7 +207,7 @@ class EvidenceTests(unittest.TestCase):
             patch.object(registry, "data", return_value=[item]),
             self.assertRaisesRegex(ValueError, "publication"),
         ):
-            sources.action_releases("sample/action")
+            sources.action_release_batch("sample/action")
 
     def test_branch_selection_checks_the_returned_identity_age(self):
         with (
@@ -216,6 +216,453 @@ class EvidenceTests(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "younger"),
         ):
             sources.nix_candidate("sample/tool", "main", {}, NOW)
+
+
+class ActionRetentionTests(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.spec = {"adapter": "actions", "files": ["workflow.yml"]}
+
+    def metadata(self, refs, dates):
+        records = [
+            {
+                "tag_name": tag,
+                "published_at": (YOUNG if commit == A else OLD).isoformat(),
+                "draft": False,
+                "prerelease": False,
+            }
+            for tag, commit in refs.items()
+        ]
+        for mocked in (
+            patch.object(sources, "action_refs", return_value=refs),
+            patch.object(registry, "data", return_value=records),
+            patch.object(sources, "commit_time", side_effect=lambda r, c: dates[c]),
+        ):
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def assert_resolved_and_final_audit_bound(self, annotation, policy):
+        file = self.write(
+            "workflow.yml", f"steps:\n  - uses: sample/action@{A} # {annotation}\n"
+        )
+        original = file.read_text()
+        before = sources.snapshot(self.root, self.spec)
+        sources.resolve(self.root, self.spec, policy, NOW)
+        self.assertIn(B, file.read_text())
+        sources.audit(self.root, self.spec, before, policy, NOW)
+        file.write_text(original)
+        with self.assertRaisesRegex(ValueError, "identity|tracking"):
+            sources.audit(self.root, self.spec, before, policy, NOW)
+
+    def test_newer_current_cannot_escape_explicit_version_constraint(self):
+        self.metadata({"v2.1.0": B, "v3.0.0": A}, {A: YOUNG, B: OLD})
+        policy = {
+            "constraints": {
+                "github:sample/action": {"range": "<3", "reason": "API contract"}
+            }
+        }
+        self.assert_resolved_and_final_audit_bound(
+            "deps-update: release-major=v3", policy
+        )
+
+    def test_newer_current_cannot_escape_security_safe_floor(self):
+        self.metadata({"v2.0.0": A, "v2.1.0": B}, {A: YOUNG, B: OLD})
+        policy = {
+            "exceptions": [
+                {
+                    "package": "github:sample/action",
+                    "version": "2.1.0",
+                    "minimum_safe": "2.1.0",
+                    "reason": "security fix",
+                    "advisory": "TEST-2",
+                    "expires": OLD.isoformat(),
+                }
+            ]
+        }
+        self.assert_resolved_and_final_audit_bound("v2.0.0", policy)
+
+    def test_unknown_current_version_cannot_be_inferred_from_major_comment(self):
+        self.metadata({"v2.1.0": B}, {A: YOUNG, B: OLD})
+        for policy, advance in (
+            (
+                {
+                    "constraints": {
+                        "github:sample/action": {"range": "<3", "reason": "API"}
+                    }
+                },
+                True,
+            ),
+            ({}, False),
+        ):
+            with (
+                self.subTest(policy=policy, advance=advance),
+                self.assertRaisesRegex(ValueError, "current.*version evidence"),
+            ):
+                sources.select_action(
+                    "sample/action",
+                    A,
+                    {"kind": "release", "major": 2},
+                    policy,
+                    NOW,
+                    advance_major=advance,
+                )
+
+    def test_compatible_current_keeps_its_baseline_age_and_no_downgrade(self):
+        self.metadata({"v2.2.0": A, "v2.1.0": B}, {A: YOUNG, B: OLD})
+        policy = {
+            "constraints": {"github:sample/action": {"range": "<3", "reason": "API"}}
+        }
+        selected = sources.select_action(
+            "sample/action", A, {"kind": "release", "major": 2}, policy, NOW
+        )
+        self.assertEqual(
+            selected, {"revision": A, "reason": "retained newer current release"}
+        )
+
+    def test_current_version_uses_highest_published_identity_not_lower_alias(self):
+        self.metadata({"v2": A, "v2.1.0": B, "v3.0.0": A}, {A: YOUNG, B: OLD})
+        policy = {
+            "constraints": {"github:sample/action": {"range": "<3", "reason": "API"}}
+        }
+        selected = sources.select_action(
+            "sample/action", A, {"kind": "release", "major": 2}, policy, NOW
+        )
+        self.assertEqual(selected["revision"], B)
+
+    def test_known_current_outside_major_hold_yields_the_eligible_candidate(self):
+        self.metadata({"v2.1.0": B, "v3.0.0": A}, {A: YOUNG, B: OLD})
+        selected = sources.select_action(
+            "sample/action",
+            A,
+            {"kind": "release", "major": 2},
+            {},
+            NOW,
+            advance_major=False,
+        )
+        self.assertEqual(selected["revision"], B)
+
+
+class ActionInventoryTests(unittest.TestCase):
+    @staticmethod
+    def publication(tag, at=OLD, **extra):
+        return {
+            "tag_name": tag,
+            "published_at": at.isoformat(),
+            "draft": False,
+            "prerelease": False,
+            **extra,
+        }
+
+    @staticmethod
+    def advertisement(refs):
+        values = [b"# service=git-upload-pack\n", None]
+        values.append(f"{A} HEAD\0object-format=sha1\n".encode())
+        values.extend(f"{oid} {name}\n".encode() for name, oid in refs)
+        values.append(None)
+        return b"".join(
+            b"0000" if value is None else f"{len(value) + 4:04x}".encode() + value
+            for value in values
+        )
+
+    def fetched_refs(self, body):
+        return patch.object(
+            registry,
+            "fetch",
+            return_value=(
+                body,
+                {"Content-Type": "application/x-git-upload-pack-advertisement"},
+            ),
+        )
+
+    def test_complete_inventory_beyond_1000_and_lazy_exact_release_lookup(self):
+        refs = [(f"refs/tags/v1.0.{i}", B) for i in range(1500)]
+        body = self.advertisement(refs)
+        urls = []
+
+        def metadata(url):
+            urls.append(url)
+            if url.endswith("releases?per_page=100&page=1"):
+                # A full, deliberately unrelated page cannot establish completeness.
+                return [self.publication(f"tool-{i}") for i in range(100)]
+            if url.endswith("releases/tags/v1.0.1499"):
+                return self.publication("v1.0.1499", MATURE)
+            raise AssertionError(url)
+
+        with (
+            self.fetched_refs(body),
+            patch.object(registry, "data", side_effect=metadata),
+            patch.object(sources, "commit_time", side_effect=lambda r, c: OLD),
+        ):
+            self.assertEqual(len(sources.action_refs("sample/action")), 1500)
+            selected = sources.select_action(
+                "sample/action", A, {"kind": "release", "major": 0}, {}, NOW
+            )
+        self.assertEqual((selected["revision"], selected["tag"]), (B, "v1.0.1499"))
+        self.assertEqual(selected["published"], MATURE.isoformat())
+        self.assertEqual(len(urls), 2)
+
+    def test_peeling_and_alias_dates_are_bound_before_selection(self):
+        body = self.advertisement(
+            [("refs/tags/v2", C), ("refs/tags/v2^{}", B), ("refs/tags/v2.0.0", A)]
+        )
+        with self.fetched_refs(body):
+            refs = sources.action_refs("sample/action")
+        self.assertEqual(refs, {"v2": B, "v2.0.0": A})
+        with (
+            patch.object(sources, "action_refs", return_value=refs),
+            patch.object(
+                registry, "data", return_value=[self.publication(tag) for tag in refs]
+            ),
+            patch.object(
+                sources,
+                "commit_time",
+                side_effect=lambda r, c: YOUNG if c == B else OLD,
+            ),
+            self.assertRaisesRegex(ValueError, "eligible"),
+        ):
+            sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
+
+    def test_truncated_conflicting_or_unbounded_refs_fail_before_selection(self):
+        valid = self.advertisement([("refs/tags/v2", B)])
+        invalid = (
+            valid[:-4],
+            valid[:-8] + b"0000",
+            valid + b"0000",
+            valid.replace(b"001e", b"0003", 1),
+            valid.replace(b"001e", b"ffff", 1),
+            valid.replace(b"service=git-upload-pack", b"service=git-receive-pack"),
+            self.advertisement([("refs/tags/v2", A), ("refs/tags/v2", B)]),
+            self.advertisement([("refs/tags/v2^{}", B)]),
+            self.advertisement([("refs/tags/v" + "1" * 129, B)]),
+            valid.replace(b"object-format=sha1", b"object-format=sha256"),
+        )
+        for body in invalid:
+            with (
+                self.subTest(body=body[-90:]),
+                self.fetched_refs(body),
+                self.assertRaises(ValueError),
+            ):
+                sources.action_refs("sample/action")
+        with (
+            self.fetched_refs(valid),
+            patch.object(registry, "MAX_RESPONSE_BYTES", len(valid) - 1),
+            self.assertRaisesRegex(ValueError, "bound"),
+        ):
+            sources.action_refs("sample/action")
+        with (
+            self.fetched_refs(valid),
+            patch.object(sources, "ACTION_REF_LIMIT", 1),
+            self.assertRaisesRegex(ValueError, "bound"),
+        ):
+            sources.action_refs("sample/action")
+        with (
+            patch.object(
+                registry, "fetch", return_value=(valid, {"Content-Type": "text/plain"})
+            ),
+            self.assertRaisesRegex(ValueError, "media type"),
+        ):
+            sources.action_refs("sample/action")
+
+    def test_batch_is_bounded_and_conflicting_identities_fail(self):
+        item = self.publication("v2")
+        for values in (
+            None,
+            [item] * 101,
+            [item, {**item, "published_at": YOUNG.isoformat()}],
+        ):
+            with (
+                self.subTest(values=values),
+                patch.object(registry, "data", return_value=values),
+                self.assertRaises(ValueError),
+            ):
+                sources.action_release_batch("sample/action")
+
+    def test_unpublished_tags_are_excluded_but_missing_or_wrong_evidence_fails(self):
+        with patch.object(
+            registry,
+            "data",
+            side_effect=registry.RegistryHTTPError(404, "api.github.com"),
+        ):
+            self.assertIsNone(sources.action_release_by_tag("sample/action", "v2"))
+        for value in (
+            self.publication("v3"),
+            self.publication("v2", draft=None),
+            self.publication("v2", prerelease="false"),
+            self.publication("v2", published_at=None),
+        ):
+            with (
+                patch.object(registry, "data", return_value=value),
+                self.assertRaises(ValueError),
+            ):
+                sources.action_release_by_tag("sample/action", "v2")
+        for status in (403, 422, 500):
+            with (
+                patch.object(
+                    registry,
+                    "data",
+                    side_effect=registry.RegistryHTTPError(status, "api.github.com"),
+                ),
+                self.assertRaises(registry.RegistryHTTPError),
+            ):
+                sources.action_release_by_tag("sample/action", "v2")
+
+    def test_young_batch_tag_does_not_hide_an_older_eligible_release(self):
+        def metadata(url):
+            if url.endswith("page=1"):
+                return [self.publication("v3", YOUNG)]
+            if url.endswith("tags/v2"):
+                return self.publication("v2", MATURE)
+            raise AssertionError(url)
+
+        def commit_date(repository, commit):
+            self.assertNotEqual(
+                commit, C, "An already young release needs no commit query"
+            )
+            return OLD
+
+        with (
+            patch.object(sources, "action_refs", return_value={"v2": B, "v3": C}),
+            patch.object(registry, "data", side_effect=metadata),
+            patch.object(sources, "commit_time", side_effect=commit_date),
+        ):
+            selected = sources.select_action(
+                "sample/action", A, {"kind": "release", "major": 1}, {}, NOW
+            )
+        self.assertEqual(selected["revision"], B)
+
+    def test_positive_batch_evidence_is_never_discarded_by_an_exact_query(self):
+        with (
+            patch.object(sources, "action_refs", return_value={"v2": B}),
+            patch.object(
+                registry, "data", return_value=[self.publication("v2", MATURE)]
+            ),
+            patch.object(
+                sources,
+                "action_release_by_tag",
+                side_effect=AssertionError("Published batch release was reclassified"),
+            ),
+            patch.object(sources, "commit_time", return_value=OLD),
+        ):
+            selected = sources.select_action(
+                "sample/action", A, {"kind": "release", "major": 1}, {}, NOW
+            )
+        self.assertEqual(selected["revision"], B)
+        with (
+            patch.object(sources, "action_refs", return_value={"v2": B}),
+            patch.object(registry, "data", return_value=[self.publication("v3")]),
+            self.assertRaisesRegex(ValueError, "lacks its advertised immutable tag"),
+        ):
+            sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
+
+    def test_future_publication_commit_and_wrong_commit_identity_fail(self):
+        future = NOW + timedelta(seconds=1)
+        for publication, commit_date in ((future, OLD), (OLD, future)):
+            with (
+                self.subTest(publication=publication, commit_date=commit_date),
+                patch.object(sources, "action_refs", return_value={"v2": B}),
+                patch.object(
+                    registry, "data", return_value=[self.publication("v2", publication)]
+                ),
+                patch.object(sources, "commit_time", return_value=commit_date),
+                self.assertRaisesRegex(ValueError, "future"),
+            ):
+                sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
+        with (
+            patch.object(sources, "action_refs", return_value={"v2": B}),
+            patch.object(
+                registry, "data", side_effect=[[self.publication("v2")], {"sha": C}]
+            ),
+            self.assertRaisesRegex(ValueError, "different commit identity"),
+        ):
+            sources.select_action("sample/action", A, {"kind": "release"}, {}, NOW)
+
+    def test_newer_current_release_is_retained(self):
+        with (
+            patch.object(sources, "action_refs", return_value={"v2": B}),
+            patch.object(
+                registry, "data", return_value=[self.publication("v2", MATURE)]
+            ),
+            patch.object(
+                sources,
+                "commit_time",
+                side_effect=lambda r, c: YOUNG if c == C else OLD,
+            ),
+        ):
+            selected = sources.select_action(
+                "sample/action", C, {"kind": "release", "major": 2}, {}, NOW
+            )
+        self.assertEqual(
+            selected, {"revision": C, "reason": "retained newer current release"}
+        )
+
+    def test_exceptions_retire_only_after_a_compatible_mature_commit_exists(self):
+        policy = {
+            "exceptions": [
+                {
+                    "package": "github:sample/action",
+                    "version": "3.0.0",
+                    "minimum_safe": "2.0.0",
+                    "reason": "security fix",
+                    "advisory": "TEST-1",
+                    "expires": (NOW - timedelta(days=1)).isoformat(),
+                }
+            ]
+        }
+        batch = [self.publication("v3", YOUNG), self.publication("v2", OLD)]
+        with (
+            patch.object(sources, "action_refs", return_value={"v2": B, "v3": C}),
+            patch.object(registry, "data", return_value=batch),
+        ):
+            for mature, expected in ((YOUNG, "Expired"), (MATURE, None)):
+                with patch.object(
+                    sources,
+                    "commit_time",
+                    side_effect=lambda r, c, at=mature: {A: OLD, B: at, C: YOUNG}[c],
+                ):
+                    if expected:
+                        with self.assertRaisesRegex(ValueError, expected):
+                            sources.select_action(
+                                "sample/action",
+                                A,
+                                {"kind": "release", "major": 1},
+                                policy,
+                                NOW,
+                            )
+                    else:
+                        selected = sources.select_action(
+                            "sample/action",
+                            A,
+                            {"kind": "release", "major": 1},
+                            policy,
+                            NOW,
+                        )
+                        self.assertEqual(selected["revision"], B)
+            constrained = {
+                **policy,
+                "constraints": {
+                    "github:sample/action": {"range": ">=3", "reason": "API"}
+                },
+            }
+            with (
+                patch.object(sources, "commit_time", return_value=YOUNG),
+                self.assertRaisesRegex(ValueError, "Expired"),
+            ):
+                sources.select_action(
+                    "sample/action", A, {"kind": "release"}, constrained, NOW
+                )
+            active = copy.deepcopy(policy)
+            active["exceptions"][0]["expires"] = (NOW + timedelta(days=1)).isoformat()
+            with patch.object(sources, "commit_time", return_value=YOUNG):
+                selected = sources.select_action(
+                    "sample/action", A, {"kind": "release", "major": 1}, active, NOW
+                )
+            self.assertEqual(selected["revision"], C)
+            malformed = copy.deepcopy(policy)
+            malformed["exceptions"][0]["expires"] = "missing"
+            with self.assertRaises(ValueError):
+                sources.select_action(
+                    "sample/action", A, {"kind": "release"}, malformed, NOW
+                )
 
 
 class OCITests(Fixture):
