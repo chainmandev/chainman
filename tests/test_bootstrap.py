@@ -33,6 +33,9 @@ class BootstrapTests(unittest.TestCase):
             "record.update(uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
             "if (root / '.git').exists(): record['git_root'] = subprocess.check_output(['git', 'rev-parse', '--show-toplevel'], text=True).strip()\n"
+            "if os.environ.get('DEMO_TEST_ADMIN'):\n"
+            " record['parent_admin_visible'] = pathlib.Path(os.environ['DEMO_TEST_ADMIN']).exists()\n"
+            " record['git_name'] = subprocess.run(['git', 'config', '--get', 'user.name'], text=True, capture_output=True).stdout.strip()\n"
             "if os.environ.get('DEMO_TEST_FD'): os.fstat(int(os.environ['DEMO_TEST_FD']))\n"
             "if os.environ.get('DEMO_TEST_CACHE'):\n"
             " cache = pathlib.Path(os.environ['TOOLCHAIN_DOWNLOAD_CACHE']) / os.environ['DEMO_TEST_CACHE']\n"
@@ -462,6 +465,43 @@ class BootstrapTests(unittest.TestCase):
             ),
             2,
         )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
+    )
+    def test_nested_consumer_does_not_mount_or_inherit_enclosing_repository(self):
+        subprocess.run(["git", "init", "-q", str(self.root)], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.root), "config", "user.name", "Enclosing policy"],
+            check=True,
+        )
+        global_config = self.root / "global-config"
+        global_config.write_text("[user]\nname = Global policy\n")
+        nested = self.root / "nested example"
+        nested.mkdir()
+        for path in (
+            self.root / "scripts",
+            self.root / "bundle.tar.gz",
+            self.root / "chainman.lock",
+        ):
+            if path.is_dir():
+                shutil.copytree(path, nested / path.name)
+            else:
+                shutil.copy2(path, nested / path.name)
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            CHAINMAN_PROJECT_ROOT=str(nested),
+            CHAINMAN_FORWARD_ENV="DEMO_*",
+            DEMO_TEST_ADMIN=str(self.root / ".git"),
+            GIT_CONFIG_GLOBAL=str(global_config),
+        )
+        self.run_bootstrap("status", env=env)
+        record = json.loads(next(nested.glob("record-*.json")).read_text())
+        self.assertFalse(record["parent_admin_visible"])
+        self.assertEqual(record["git_name"], "Global policy")
 
 
 if __name__ == "__main__":

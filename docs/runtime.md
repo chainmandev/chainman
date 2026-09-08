@@ -31,6 +31,9 @@ root; this does not require adding container capabilities. A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.
+Git administrative mounts belong only to a repository whose root is the selected
+project, including linked worktrees. Nested unadopted examples receive global/system
+Git identity and signing policy without mounting or inheriting their enclosing repository.
 Package managers own locking in shared downloads. Rust compiler cache servers run
 in the foreground and retain the project operation lock until they exit. Cold Nix
 environment realization completes before the cache-server readiness deadline starts.

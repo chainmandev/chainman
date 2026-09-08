@@ -293,7 +293,11 @@ done < "$temporary/patterns"
 count=0
 policy_unavailable=0
 if command -v git > /dev/null 2>&1; then
-    if git -C "$root" rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    git_owner=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) || git_owner=
+    if [ -n "$git_owner" ]; then
+        git_owner=$(CDPATH='' cd -- "$git_owner" && pwd -P)
+    fi
+    if [ "$git_owner" = "$root" ]; then
         admin=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir)
         case "$admin" in "$root"/*) ;; *)
             single_line "$admin"
@@ -311,7 +315,12 @@ if command -v git > /dev/null 2>&1; then
     fi
     for key in user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
         status=0
-        value=$(git -C "$root" config --get "$key" 2> /dev/null) || status=$?
+        if [ "$git_owner" = "$root" ]; then
+            value=$(git -C "$root" config --get "$key" 2> /dev/null) || status=$?
+        else
+            # Preserve system/global policy without borrowing enclosing repo config.
+            value=$(git -C "$root" --git-dir=/dev/null config --get "$key" 2> /dev/null) || status=$?
+        fi
         case "$status" in
             0)
                 set -- --env "GIT_CONFIG_KEY_$count=$key" --env "GIT_CONFIG_VALUE_$count=$value" "$@"
