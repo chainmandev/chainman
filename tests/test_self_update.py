@@ -75,12 +75,15 @@ class SelfUpdateTests(unittest.TestCase):
         }
         self.now = datetime(2026, 9, 7, tzinfo=timezone.utc)
         release = registry.Release("v2.0.0", datetime(2026, 1, 1, tzinfo=timezone.utc))
+        self.release_date = "2026-01-01T00:00:00Z"
+        self.asset_changes = {}
         for target, kwargs in (
             ("chainman.RUNTIME", {"new": self.previous}),
             ("registry.github_releases", {"return_value": [release]}),
             ("registry.github_commit", {"return_value": "b" * 40}),
-            ("registry.data", {"return_value": self.metadata}),
-            ("registry.fetch", {"return_value": (self.body, {})}),
+            ("source_updates.commit_time", {"return_value": release.published}),
+            ("registry.data", {"side_effect": self.release_response}),
+            ("registry.fetch", {"side_effect": self.fetch_asset}),
         ):
             context = patch(target, **kwargs)
             context.start()
@@ -89,6 +92,88 @@ class SelfUpdateTests(unittest.TestCase):
             extra=[], only_chainman=True, skip_chainman=False, no_commit=True
         )
         self.before = self.managed()
+
+    def release_response(self, url):
+        self.assertEqual(
+            url,
+            "https://api.github.com/repos/chainmandev/chainman/releases/tags/v2.0.0",
+        )
+        assets = []
+        for number, name, body in (
+            (1, "chainman-release.json", json.dumps(self.metadata).encode()),
+            (2, "chainman-2.0.0.tar.gz", self.body),
+        ):
+            assets.append(
+                {
+                    "id": number,
+                    "name": name,
+                    "state": "uploaded",
+                    "size": len(body),
+                    "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
+                    "created_at": self.release_date,
+                    "updated_at": self.release_date,
+                    **self.asset_changes.get(number, {}),
+                }
+            )
+        return {
+            "tag_name": "v2.0.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": self.release_date,
+            "assets": assets,
+        }
+
+    def fetch_asset(self, url, **kwargs):
+        self.assertEqual(kwargs, {"accept": "application/octet-stream"})
+        if url.endswith("/releases/assets/1"):
+            return json.dumps(self.metadata).encode(), {}
+        self.assertTrue(url.endswith("/releases/assets/2"))
+        return self.body, {}
+
+    def test_old_release_cannot_admit_young_or_undated_replacement_assets(self):
+        for number in (1, 2):
+            for changes in (
+                {"updated_at": "2026-09-06T00:00:00Z"},
+                {"created_at": "2026-09-06T00:00:00Z"},
+                {"updated_at": None},
+                {"digest": None},
+                {"digest": "sha256:" + "0" * 64},
+                {"size": 1},
+            ):
+                with self.subTest(asset=number, changes=changes):
+                    self.asset_changes = {number: changes}
+                    with (
+                        patch.object(
+                            subject,
+                            "fetch_runtime",
+                            side_effect=AssertionError("candidate evaluated"),
+                        ) as evaluate,
+                        patch.object(
+                            subject.updates, "transaction", side_effect=self.transaction
+                        ),
+                        patch.object(
+                            subject,
+                            "verify",
+                            side_effect=AssertionError("candidate executed"),
+                        ),
+                    ):
+                        with self.assertRaises(ValueError):
+                            subject.apply(self.root, self.opts, self.now)
+                        evaluate.assert_not_called()
+                    self.assertEqual(self.managed(), self.before)
+
+    def test_old_release_cannot_admit_young_commit_or_moving_tag(self):
+        with patch("source_updates.commit_time", return_value=self.now):
+            with self.assertRaisesRegex(ValueError, "No eligible"):
+                self.run_apply(lambda *_: self.fail("candidate executed"))
+        with patch("registry.github_commit", side_effect=["b" * 40, "c" * 40]):
+            with self.assertRaisesRegex(ValueError, "tag changed"):
+                self.run_apply(lambda *_: self.fail("candidate executed"))
+        self.assertEqual(self.managed(), self.before)
+
+    def test_release_asset_age_boundary_is_inclusive(self):
+        self.asset_changes = {2: {"updated_at": "2026-08-08T00:00:00Z"}}
+        self.assertEqual(self.run_apply(lambda *_: None), {"verification": "passed"})
 
     def managed(self):
         return {

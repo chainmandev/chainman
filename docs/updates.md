@@ -208,7 +208,11 @@ filters. It uses the existing development host and shared caches, so it is not a
 sandbox for hostile update scripts. Linked submodules require their own transactions.
 
 Self-updates validate release metadata, source revision, SHA-256 identities, source
-tree types and version before running a candidate. Locally edited bootstrap files
+tree types and version before running a candidate. The maturity window applies to
+the commit and both required release assets' creation/modification dates, as well
+as release publication. Downloads use asset IDs and must match GitHub's recorded
+SHA-256 and size; missing evidence and a tag moving during download fail before
+candidate evaluation. Locally edited bootstrap files
 must be reconciled explicitly. Candidate runtime tests and full project verification
 run from refreshed environments. If verification fails, the previous managed pin,
 bootstrap and bundled archive are restored only where their current bytes still

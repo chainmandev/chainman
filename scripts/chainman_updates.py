@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import sys
@@ -17,6 +18,7 @@ from urllib.parse import quote
 
 import chainman
 import registry
+import source_updates
 import toolchain as tc
 import updates
 
@@ -153,6 +155,75 @@ def validate_runtime(runtime: Path, version: str):
         raise ValueError("Candidate VERSION does not match release metadata")
 
 
+def release_assets(selected: registry.Release, policy: dict, now: datetime):
+    """Bind release maturity to the exact server-dated assets before execution."""
+    repository = "chainmandev/chainman"
+    api = f"https://api.github.com/repos/{repository}"
+    release = registry.data(f"{api}/releases/tags/{quote(selected.version, safe='')}")
+    if (
+        not isinstance(release, dict)
+        or release.get("tag_name") != selected.version
+        or release.get("draft") is not False
+        or release.get("prerelease") is not False
+        or registry.timestamp(release.get("published_at")) != selected.published
+        or not isinstance(release.get("assets"), list)
+    ):
+        raise ValueError("Runtime release changed or lacks publication evidence")
+    revision = registry.github_commit(repository, selected.version)
+    published = max(
+        selected.published, source_updates.commit_time(repository, revision)
+    )
+    names = ("chainman-release.json", f"chainman-{selected.version.lstrip('v')}.tar.gz")
+    assets = {}
+    for name in names:
+        matches = [
+            item
+            for item in release["assets"]
+            if isinstance(item, dict) and item.get("name") == name
+        ]
+        if len(matches) != 1:
+            raise ValueError("Runtime release lacks one exact required asset")
+        item = matches[0]
+        if (
+            type(item.get("id")) is not int
+            or item["id"] <= 0
+            or item.get("state") != "uploaded"
+            or type(item.get("size")) is not int
+            or item["size"] <= 0
+            or not isinstance(item.get("digest"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["digest"])
+        ):
+            raise ValueError("Runtime asset lacks immutable checksum evidence")
+        published = max(
+            published,
+            registry.timestamp(item.get("created_at")),
+            registry.timestamp(item.get("updated_at")),
+        )
+        assets[name] = item
+    registry.eligible(
+        "github",
+        [registry.Release(selected.version, published)],
+        policy,
+        repository,
+        now,
+    )
+    bodies = []
+    for name in names:
+        item = assets[name]
+        body = registry.fetch(
+            f"{api}/releases/assets/{item['id']}", accept="application/octet-stream"
+        )[0]
+        if (
+            len(body) != item["size"]
+            or "sha256:" + hashlib.sha256(body).hexdigest() != item["digest"]
+        ):
+            raise ValueError("Runtime asset bytes differ from dated release identity")
+        bodies.append(body)
+    if registry.github_commit(repository, selected.version) != revision:
+        raise ValueError("Runtime release tag changed during download")
+    return json.loads(bodies[0]), bodies[1], revision
+
+
 def runtime_candidate(
     root: Path, policy: dict, now: datetime, managed: ManagedFiles | None = None
 ) -> Path:
@@ -181,11 +252,7 @@ def runtime_candidate(
         "github", old["version"]
     ):
         return chainman.RUNTIME
-    metadata = registry.data(
-        "https://github.com/chainmandev/chainman/releases/download/"
-        + quote(selected.version, safe="")
-        + "/chainman-release.json"
-    )
+    metadata, body, expected = release_assets(selected, policy, now)
     if (
         not isinstance(metadata, dict)
         or metadata.get("schema") != 1
@@ -198,11 +265,9 @@ def runtime_candidate(
         raise ValueError("Runtime release metadata lacks required identity fields")
     required = {key: metadata[key] for key in keys}
     registry.artifact_url(required["url"])
-    expected = registry.github_commit("chainmandev/chainman", selected.version)
     if required["revision"] != expected:
         raise ValueError("Runtime archive provenance differs from release tag")
     candidate = {"schema": 1, **required}
-    body = registry.fetch(required["url"], accept="application/octet-stream")[0]
     if (
         old.get("bundled_archive") or metadata.get("archive_sha256") is not None
     ) and hashlib.sha256(body).hexdigest() != metadata.get("archive_sha256"):
