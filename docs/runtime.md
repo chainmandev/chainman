@@ -29,7 +29,14 @@ The container maps project commands to the calling user's ownership: rootful Doc
 uses the caller's UID/GID, rootless Docker uses its mapped `0:0`, and Podman uses
 `keep-id`. A failed Docker identity probe stops before execution. Nix runs without a
 build-users group inside the container, with all capabilities dropped and
-`no-new-privileges` set. A short preparatory
+`no-new-privileges` set. Before Nix evaluates or runs project commands, mapped UID 0
+makes the container root directory mode `0555`. Other users already lack root-directory
+write access. This keeps tools from accidentally creating Nix's nonexistent build
+HOME, `/homeless-shelter`, and breaking later derivations. `/tmp` remains disk-backed
+and writable, as do the declared project, HOME, Nix and download mounts. This is a
+build-purity invariant for trusted workflows, not a sandbox against project code;
+the container's root owner can change its own directory permissions.
+A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.

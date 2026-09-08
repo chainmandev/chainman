@@ -24,7 +24,7 @@ class BootstrapTests(unittest.TestCase):
         (cls.tree / "scripts").mkdir(parents=True)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
-            "import json, os, pathlib, subprocess, sys, time\n"
+            "import json, os, pathlib, subprocess, sys, tempfile, time\n"
             "root = pathlib.Path(sys.argv[2])\n"
             "record = dict(argv=sys.argv[1:], runtime=os.environ['CHAINMAN_RUNTIME'], "
             "root=os.environ['CHAINMAN_ROOT'], cwd=os.getcwd(), "
@@ -39,6 +39,21 @@ class BootstrapTests(unittest.TestCase):
             " record['parent_admin_visible'] = pathlib.Path(os.environ['DEMO_TEST_ADMIN']).exists()\n"
             " record['git_name'] = subprocess.run(['git', 'config', '--get', 'user.name'], text=True, capture_output=True).stdout.strip()\n"
             "if os.environ.get('DEMO_TEST_FD'): os.fstat(int(os.environ['DEMO_TEST_FD']))\n"
+            "if '--home-purity' in sys.argv:\n"
+            " assert os.environ.get('TOOLCHAIN_CONTAINER') == '1'\n"
+            " assert not pathlib.Path('/homeless-shelter').exists()\n"
+            " try: pathlib.Path('/homeless-shelter').mkdir()\n"
+            " except PermissionError: record['nix_home_blocked'] = True\n"
+            " else:\n"
+            "  pathlib.Path('/homeless-shelter').rmdir()\n"
+            "  raise AssertionError('Nix build HOME could be created')\n"
+            " record['root_mode'] = pathlib.Path('/').stat().st_mode & 0o7777\n"
+            " record['root_writable'] = os.access('/', os.W_OK)\n"
+            " record['tmp_mode'] = pathlib.Path('/tmp').stat().st_mode & 0o7777\n"
+            " for label, directory in [('project', root), ('home', pathlib.Path.home()), ('tmp', pathlib.Path('/tmp')), ('nix', pathlib.Path('/nix/var')), ('downloads', pathlib.Path(os.environ['TOOLCHAIN_DOWNLOAD_CACHE']))]:\n"
+            "  with tempfile.TemporaryFile(dir=directory) as handle:\n"
+            "   handle.write(b'owned neutral fixture'); handle.flush()\n"
+            "  record[label + '_writable'] = True\n"
             "if os.environ.get('DEMO_TEST_CACHE'):\n"
             " cache = pathlib.Path(os.environ['TOOLCHAIN_DOWNLOAD_CACHE']) / os.environ['DEMO_TEST_CACHE']\n"
             " record['cache_hits'] = int(cache.read_text()) + 1 if cache.exists() else 1\n"
@@ -124,6 +139,27 @@ class BootstrapTests(unittest.TestCase):
         self.run_bootstrap("status", env=env)
         self.assertEqual(self.records()[0]["tmpdir"], str(private))
 
+    def test_carriage_return_in_project_path_is_rejected_before_nix(self):
+        directory = self.root / "project\rwith carriage return"
+        scripts = directory / "scripts"
+        scripts.mkdir(parents=True)
+        launcher = scripts / "chainman.sh"
+        shutil.copy2(SOURCE / "bootstrap/chainman.sh", launcher)
+        shutil.copy2(SOURCE / "bootstrap/fetch.nix", scripts / "chainman-fetch.nix")
+        result = subprocess.run(
+            [str(launcher), "status"],
+            check=False,
+            cwd="/",
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Newlines are not supported", result.stderr)
+        self.assertNotIn("Missing regular chainman.lock", result.stderr)
+        self.assertFalse((directory / ".chainman").exists())
+
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") and os.getuid() == 0,
         "requires a real container engine inside the isolated root user namespace",
@@ -192,6 +228,28 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn("Cannot determine Docker daemon identity mapping", result.stderr)
         self.assertNotIn("unexpected run", result.stdout)
         self.assertFalse((self.root / ".chainman").exists())
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
+    def test_container_preserves_nonexistent_nix_home_and_writable_mounts(self):
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        self.run_bootstrap("--home-purity", env=env)
+        record = self.records()[0]
+        self.assertTrue(record["nix_home_blocked"])
+        self.assertFalse(record["root_writable"])
+        self.assertEqual(record["tmp_mode"], 0o1777)
+        if record["uid"] == 0:
+            self.assertEqual(record["root_mode"], 0o555)
+        self.assertEqual(record["no_new_privs"], "1")
+        self.assertEqual(int(record["cap_eff"], 16), 0)
+        for label in ("project", "home", "tmp", "nix", "downloads"):
+            self.assertTrue(record[label + "_writable"], label)
 
     def test_core_entry_invalidates_an_inherited_external_profile_token(self):
         self.run_bootstrap(
@@ -424,6 +482,7 @@ class BootstrapTests(unittest.TestCase):
             CHAINMAN_CONTAINER_OPTIONS_FILE=str(options),
         )
         for contents, message in (
+            ("--label\nprobe=value\r\n", "Newlines are not supported"),
             ("--privileged\ntrue\n", "Unsupported container option"),
             ("--env-pattern\nHOME\n", "Unsupported container option"),
             ("--network\ncontainer:other\n", "network must be host or bridge"),

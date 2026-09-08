@@ -196,6 +196,13 @@ run() {
     if [ -n "$platform" ]; then set -- --platform "$platform" "$@"; fi
     if [ "$engine" = podman ]; then "$engine" run --userns=keep-id "$@"; else "$engine" run "$@"; fi
 }
+# Capability-free UID 0 still owns /. Keep Nix's nonexistent build HOME from
+# being created accidentally, without changing writable mounts or disk-backed /tmp.
+container_init='
+    if [ "$(id -u)" = 0 ]; then chmod 0555 /; fi
+    mkdir -p "$HOME"
+    exec "$@"
+'
 # Only the named Nix store is prepared as root. No host directory is mounted here.
 run --rm --user 0:0 --mount "type=volume,src=$volume,dst=/nix" --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" "$image" sh -eu -c '
     mkdir -p /nix/store /nix/var
@@ -210,8 +217,8 @@ run --rm --user "$container_uid:$container_gid" --security-opt no-new-privileges
     --env 'NIX_CONFIG=build-users-group =' \
     --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
-    "$image" sh -eu -c 'mkdir -p "$HOME"; exec nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1"' \
-    sh "$expression" > "$temporary/options"
+    "$image" sh -eu -c "$container_init" \
+    sh nix --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression" > "$temporary/options"
 
 # A selected name is passed to the engine without its value in the argument list.
 env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' > "$temporary/names"
@@ -226,7 +233,7 @@ if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
         printf '%s\n%s\n' "$option" "$value" >> "$temporary/options"
     done < "$temporary/extra"
 fi
-set -- "$image" sh -eu -c 'mkdir -p "$HOME"; exec "$@"' sh "$self" "$@"
+set -- "$image" sh -eu -c "$container_init" sh "$self" "$@"
 while IFS= read -r option; do
     [ -n "$option" ] || continue
     IFS= read -r value || fail 'Container option lacks a value.'
