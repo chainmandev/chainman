@@ -125,6 +125,7 @@
     "template/modules/core.toml",
     "template/scripts/demo.py",
     "tests/test_bootstrap.py",
+    "tests/test_cargo_resolution.py",
     "tests/test_chainman.py",
     "tests/test_ci_cleanup.py",
     "tests/test_dependency_api.py",

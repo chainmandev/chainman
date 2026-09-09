@@ -166,6 +166,35 @@ retraction or publication-age lookups; new checksum identities retain the full
 retraction, age and hash audit. The legacy generic lock audit remains stricter
 over existing checksum identities.
 
+For the ordinary Rust `cargo update` command, selected direct dependency fields
+are temporarily narrowed to their exact planned releases. Cargo still enforces
+all parent ranges, features and target constraints. Chainman then repairs newly
+ineligible registry artifacts through conservative, source-qualified Cargo
+`update --precise` attempts, trying eligible releases in descending order with a
+maximum of 64 attempts. Native version conflicts may cause bounded backtracking;
+unrelated native failures, missing evidence and unexpected input edits stop the
+update. This is a bounded eligible-graph search, not a complete solver or a proof
+of a globally newest dependency graph. Custom resolver commands keep their literal
+behavior and the existing fail-closed audit; they receive no invented repair flags.
+
+Temporary direct constraints change only existing selected fields, never add
+synthetic transitive dependencies or source overrides. Public post-planning
+manifest bytes and permissions are restored on completion and caught failures.
+Only still-identical owned lock postimages may be rolled back; unexpected edits
+are preserved and reported. Uncatchable termination has no restoration guarantee
+and is never a successful or automatically committed update. Git transactions
+retain the whole visible-project input guard. Non-Git public resolution guards
+reachable local Cargo manifests, ancestor Cargo configuration, local `src`,
+`build.rs` and explicitly declared target paths; this is not complete build-input
+discovery. Source symlinks are recorded without following them; mutable manifests,
+resolution configuration and owned lock paths must remain regular and contained.
+The resolver does not run application build scripts.
+
+Final audits retain the original exact-baseline, age, compatibility, security-floor,
+exception and checksum rules. Later project hooks must preserve the selected Cargo
+artifact graph in each declared workspace. Restoring public ranges does not rerun
+Cargo update, and verification cannot repair or regenerate the frozen lock graph.
+
 During Flutter resolution, selected direct dependencies are temporarily bound to
 their exact eligible releases across all declared workspaces. If Pub selects a
 newly ineligible transitive artifact, Chainman tries eligible releases through

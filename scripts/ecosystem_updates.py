@@ -7,10 +7,12 @@ from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 
 from packaging.requirements import Requirement
@@ -706,6 +708,472 @@ def pub_resolve(
     )
 
 
+CARGO_SOLVER_STATES = 64
+
+
+def cargo_file_state(root: Path, name: str):
+    path = tc.contained(root, name)
+    try:
+        mode = stat.S_IMODE(path.lstat().st_mode)
+    except FileNotFoundError:
+        return None
+    return tc.regular_input(root, name), mode
+
+
+def cargo_restore(root: Path, before: dict, expected: dict, original=None):
+    """Restore only known owned postimages; try independent paths after errors."""
+    failures = []
+    for name, previous in before.items():
+        try:
+            current = cargo_file_state(root, name)
+            if current == previous:
+                expected[name] = previous
+                continue
+            if current != expected[name]:
+                raise ValueError("unexpected postimage")
+            path = tc.contained(root, name)
+            if previous is None:
+                path.unlink()
+            else:
+                tc.atomic_bytes(path, previous[0], previous[1])
+            expected[name] = previous
+        except (OSError, ValueError) as error:
+            failures.append(f"{name}: {error}")
+    if failures:
+        message = "Cargo restoration failed; changes preserved: " + "; ".join(failures)
+        if original is not None:
+            print(message, file=sys.stderr)
+            original.add_note(message)
+        else:
+            raise ValueError(message)
+
+
+@contextmanager
+def cargo_resolution_pins(root: Path, planned: list):
+    """Narrow existing direct fields, letting Cargo enforce their exact identity."""
+    documents = {}
+    for pin, chosen in planned:
+        if pin["provider"] != "crates" or chosen is None:
+            continue
+        if "pointer" not in pin or pin.get("format") == "regex":
+            raise ValueError(
+                "Cargo resolution requires existing structured direct pins"
+            )
+        name = pin["file"]
+        if name not in documents:
+            before = cargo_file_state(root, name)
+            if before is None:
+                raise ValueError("Missing Cargo direct manifest")
+            value, render = manifests.document(
+                tc.contained(root, name), body=before[0].decode()
+            )
+            documents[name] = (before, value, render)
+        value = documents[name][1]
+        if not isinstance(manifests.lookup(value, pin["pointer"]), str):
+            raise ValueError("Cargo direct pin does not name an existing version field")
+        manifests.assign(value, pin["pointer"], "=" + chosen.version)
+    before = {name: entry[0] for name, entry in documents.items()}
+    expected = {}
+    original = None
+    try:
+        for name, (previous, _, render) in documents.items():
+            if cargo_file_state(root, name) != previous:
+                raise ValueError(
+                    "Cargo manifest changed before temporary direct pinning"
+                )
+            expected[name] = (render().encode(), previous[1])
+            tc.atomic_bytes(tc.contained(root, name), *expected[name])
+        yield
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        cargo_restore(root, {n: before[n] for n in expected}, expected, original)
+
+
+def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
+    """Cargo input closure; Git projects additionally guard all visible sources."""
+    names = set()
+    pending = []
+    for member in specs.values():
+        pending.append(str(Path(member["directory"]) / "Cargo.toml"))
+        for pattern in member["inputs"]:
+            tc.contained(root, pattern)
+            pending.extend(str(p.relative_to(root)) for p in root.glob(pattern))
+    seen = set()
+
+    sources = {}
+
+    def add_tree(path):
+        relative = str(path.relative_to(root))
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            sources[relative] = None
+            return
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISLNK(metadata.st_mode):
+            sources[relative] = ("symlink", os.fsencode(path.readlink()), mode)
+        elif stat.S_ISDIR(metadata.st_mode):
+            sources[relative] = ("directory", mode)
+            for child in sorted(path.iterdir()):
+                add_tree(child)
+        elif stat.S_ISREG(metadata.st_mode):
+            sources[relative] = ("file", tc.regular_input(root, relative), mode)
+        else:
+            sources[relative] = ("special", metadata.st_mode)
+
+    def add_source(directory, relative):
+        if not isinstance(relative, str) or Path(relative).is_absolute():
+            raise ValueError("Cargo source paths must be project-relative")
+        current = directory
+        for part in Path(relative).parts:
+            if part == "..":
+                if current == root:
+                    raise ValueError("Cargo source path escapes the project")
+                current = current.parent
+            else:
+                if part == ".git":
+                    raise ValueError("Cargo source path enters Git administration")
+                current = current / part
+            if current.is_symlink():
+                add_tree(current)
+                return
+        add_tree(current)
+
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        path = tc.contained(root, name)
+        state = cargo_file_state(root, name)
+        if state is None:
+            raise ValueError(f"Missing Cargo input manifest: {name}")
+        names.add(name)
+        document = manifests.document(path, body=state[0].decode())[0]
+        directory = path.parent
+        parent = directory
+        while True:
+            names.update(
+                str((parent / ".cargo" / filename).relative_to(root))
+                for filename in ("config", "config.toml")
+            )
+            if parent == root:
+                break
+            parent = parent.parent
+        if "package" in document:
+            add_source(directory, "src")
+            add_source(directory, "build.rs")
+            build = document["package"].get("build")
+            if isinstance(build, str):
+                add_source(directory, build)
+            for section in ("lib", "bin", "example", "test", "bench"):
+                entries = document.get(section, [])
+                for target in [entries] if isinstance(entries, Mapping) else entries:
+                    if "path" in target:
+                        add_source(directory, target["path"])
+
+        def visit(table):
+            for key, value in table.items():
+                if key in (
+                    "dependencies",
+                    "dev-dependencies",
+                    "build-dependencies",
+                    "patch",
+                    "replace",
+                ) and isinstance(value, Mapping):
+
+                    def paths(values):
+                        for entry in values.values():
+                            if isinstance(entry, Mapping):
+                                if "path" in entry:
+                                    local = tc.local_source(
+                                        root, directory, entry["path"]
+                                    )
+                                    pending.append(
+                                        str((local / "Cargo.toml").relative_to(root))
+                                    )
+                                else:
+                                    paths(entry)
+
+                    paths(value)
+                elif isinstance(value, Mapping):
+                    visit(value)
+
+        visit(document)
+    states = {name: cargo_file_state(root, name) for name in sorted(names - lock_names)}
+    states["cargo-sources"] = sources
+    # A non-Git public deps-resolve keeps the explicit Cargo closure above. Do
+    # not invent ignore rules or require Git merely to use that public API.
+    top = updates.git(root, "rev-parse", "--show-toplevel", check=False)
+    if top and Path(top).resolve() == root.resolve():
+        states["git-visible"] = {
+            n: value
+            for n, value in updates.snapshot(root).items()
+            if n not in lock_names
+        }
+    return states
+
+
+def cargo_resolve(
+    root: Path,
+    spec: dict,
+    specs: dict,
+    planned: list,
+    before: dict,
+    policy: dict,
+    now: datetime,
+) -> dict:
+    """Bounded native lock repair, with exact selected direct manifest constraints."""
+    command = spec.get("resolve", [["cargo", "update"]])[0]
+    lock_names = {
+        name: str(Path(member["directory"]) / "Cargo.lock")
+        for name, member in specs.items()
+    }
+    initial = {path: cargo_file_state(root, path) for path in lock_names.values()}
+    expected = dict(initial)
+    public_inputs = cargo_input_state(root, specs, set(initial))
+    baseline = {tuple(item) for item in before["identities"]}
+    inventories = {}
+    attempts = 0
+    visited = set()
+    last = ""
+
+    def graph():
+        for path in lock_names.values():
+            if cargo_file_state(root, path) is None:
+                raise ValueError("Missing resolved dependency lock: Cargo.lock")
+        return {
+            name: updates.lock_identities(root, [name], specs=specs) for name in specs
+        }
+
+    def inspect(current):
+        issues = []
+        # Validate every identity before proposing a repair, even when an age
+        # issue sorts before a different package's bad checksum or future date.
+        for name, identities in current.items():
+            for identity in sorted(identities):
+                provider, package, value, url, digest = identity
+                if provider != "crates":
+                    raise ValueError("Cargo produced an unsupported registry identity")
+                if package not in inventories:
+                    inventories[package] = registry.releases(provider, package)
+                releases = inventories[package]
+                artifacts = [
+                    a
+                    for r in releases
+                    if r.version == value
+                    for a in r.artifacts
+                    if a.digest == digest and (not url or a.url == url)
+                ]
+                if not artifacts:
+                    raise ValueError(
+                        f"Cargo artifact identity is absent from registry evidence: {package}@{value}"
+                    )
+                if max(a.published for a in artifacts) > now:
+                    raise ValueError("Future Cargo artifact publication age")
+                allowed = registry.maturity(
+                    provider, releases, policy, package, now
+                ) + registry.active_exceptions(provider, releases, policy, package, now)
+                bound = registry.constraint(provider, policy, package)
+                safe = registry.minimum_safe(provider, policy, package)
+
+                def retainable(version):
+                    return registry.compatible(provider, version, bound) and (
+                        safe is None or registry.version(provider, version) >= safe
+                    )
+
+                if (identity in baseline and retainable(value)) or any(
+                    r.version == value for r in allowed
+                ):
+                    continue
+                retained = [
+                    r
+                    for r in releases
+                    if retainable(r.version)
+                    and any(
+                        old[:3] == (provider, package, r.version)
+                        and any(
+                            a.digest == old[4] and (not old[3] or a.url == old[3])
+                            for a in r.artifacts
+                        )
+                        for old in baseline
+                    )
+                ]
+                values = sorted(
+                    {r.version for r in [*allowed, *retained]},
+                    key=lambda v: registry.version(provider, v),
+                    reverse=True,
+                )
+                issues.append((name, identity, values))
+        return issues
+
+    def check_inputs():
+        if cargo_input_state(root, specs, set(initial)) != pinned_inputs:
+            raise ValueError(
+                "Cargo resolution changed non-lock inputs; preserve and inspect"
+            )
+
+    def restore(checkpoint):
+        check_inputs()
+        cargo_restore(root, checkpoint, expected)
+
+    def run(name, argv, *, retry=False):
+        check_inputs()
+        old = dict(expected)
+        for path, state in old.items():
+            if cargo_file_state(root, path) != state:
+                raise ValueError(
+                    "Cargo lock changed before native resolution; preserve and inspect"
+                )
+        failure = None
+        try:
+            result = chainman.execute(
+                root,
+                spec.get("profile", "rust"),
+                argv,
+                cwd=tc.contained(root, specs[name]["directory"]),
+                env={**tc.environment(root), "TOOLCHAIN_FRESH": "1"},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            if result is not None:
+                print(result.stdout or "", end="")
+        except subprocess.CalledProcessError as error:
+            print(error.stdout or "", end="")
+            failure = error
+        try:
+            check_inputs()
+            current = {path: cargo_file_state(root, path) for path in initial}
+            for path, state in current.items():
+                if path != lock_names[name] and state != old[path]:
+                    raise ValueError(
+                        "Cargo changed another workspace lock; preserve and inspect"
+                    )
+                if old[path] is not None and state is None:
+                    raise ValueError("Cargo lock disappeared; preserve and inspect")
+                if (
+                    old[path] is not None
+                    and state is not None
+                    and old[path][1] != state[1]
+                ):
+                    raise ValueError("Cargo lock mode changed; preserve and inspect")
+            if failure is not None:
+                if current != old:
+                    raise ValueError(
+                        "Failed Cargo command changed lock; preserve and inspect"
+                    )
+            else:
+                expected.update(current)
+        except (OSError, ValueError) as error:
+            if failure is None:
+                raise
+            print(str(error), file=sys.stderr)
+            failure.add_note(str(error))
+            raise failure
+        if failure is not None:
+            first = next(
+                (
+                    line
+                    for line in (failure.stdout or "").splitlines()
+                    if line.startswith("error:")
+                ),
+                "",
+            )
+            if (
+                retry
+                and failure.returncode == 101
+                and re.match(
+                    r"error: failed to select a version for (?:the requirement )?`",
+                    first,
+                )
+            ):
+                return False
+            raise failure
+        return True
+
+    def search(current, choices):
+        nonlocal attempts, last
+        issues = inspect(current)
+        if any(identity not in current[name] for name, identity in choices):
+            return False
+        if not issues:
+            return True
+        key = (
+            tuple((name, tuple(sorted(values))) for name, values in current.items()),
+            tuple(choices),
+        )
+        if key in visited:
+            last = "repeated Cargo artifact graph and repair choices"
+            return False
+        visited.add(key)
+        name, identity, values = issues[0]
+        package, observed = identity[1:3]
+        checkpoint = dict(expected)
+        for value in values:
+            if attempts >= CARGO_SOLVER_STATES:
+                raise ValueError(
+                    f"Cargo eligibility solver exhausted its {CARGO_SOLVER_STATES}-state bound: {last}"
+                )
+            attempts += 1
+            last = f"{name}: {package}@{observed} -> {value}"
+            restore(checkpoint)
+            argv = [
+                command[0],
+                "update",
+                "-p",
+                f"registry+https://github.com/rust-lang/crates.io-index#{package}@{observed}",
+                "--precise",
+                value,
+            ]
+            if not run(name, argv, retry=True):
+                continue
+            candidate = graph()
+            inspect(candidate)
+            chosen = [
+                item
+                for item in candidate[name]
+                if item[:3] == ("crates", package, value)
+            ]
+            if len(chosen) != 1:
+                raise ValueError(
+                    "Cargo did not materialize the requested precise registry identity"
+                )
+            if search(candidate, [*choices, (name, chosen[0])]):
+                return True
+        restore(checkpoint)
+        return False
+
+    original = None
+    try:
+        with cargo_resolution_pins(root, planned):
+            pinned_inputs = cargo_input_state(root, specs, set(initial))
+            for name in specs:
+                run(name, command)
+            if not search(graph(), []):
+                raise ValueError(
+                    f"No eligible Cargo graph satisfies native constraints: {last}"
+                )
+            result = graph()
+        if cargo_input_state(root, specs, set(initial)) != public_inputs:
+            raise ValueError(
+                "Cargo public inputs changed after temporary pin restoration"
+            )
+        updates.audit_locks(root, list(specs), baseline, policy, now, specs=specs)
+        return {
+            name: [list(item) for item in sorted(values)]
+            for name, values in result.items()
+        }
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        if original is not None:
+            cargo_restore(root, initial, expected, original)
+
+
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
@@ -726,7 +1194,23 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     manifests.configure_build_dependencies(root, selected, specs=specs)
     if spec["adapter"] == "flutter":
         pub_resolve(root, spec, specs, planned, before, policy, now)
-    if spec["adapter"] != "flutter":
+    cargo_commands = spec.get("resolve", [["cargo", "update"]])
+    repair_cargo = (
+        spec["adapter"] == "rust"
+        and isinstance(cargo_commands, list)
+        and len(cargo_commands) == 1
+        and isinstance(cargo_commands[0], list)
+        and len(cargo_commands[0]) == 2
+        and all(isinstance(a, str) for a in cargo_commands[0])
+        and Path(cargo_commands[0][0]).name == "cargo"
+        and cargo_commands[0][1] == "update"
+    )
+    cargo_identities = (
+        cargo_resolve(root, spec, specs, planned, before, policy, now)
+        if repair_cargo
+        else None
+    )
+    if spec["adapter"] != "flutter" and not repair_cargo:
         for member in specs.values():
             directory = tc.contained(root, member["directory"])
             kind = spec["adapter"]
@@ -778,6 +1262,11 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                 updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)
     audit(root, spec, before, policy, now)
     return {
+        **(
+            {"cargo_identities": cargo_identities}
+            if cargo_identities is not None
+            else {}
+        ),
         "changed_manifests": sorted(set(changed)),
         "project_graphs": project_graphs,
         "pins": [
@@ -799,6 +1288,13 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     for item in before.get("resolution", {}).get("pins", []):
         if old_requirement(root, item["pin"]) != item["value"]:
             raise ValueError("A project hook changed a selected dependency pin")
+    for name, expected in (
+        before.get("resolution", {}).get("cargo_identities", {}).items()
+    ):
+        if name not in specs or updates.lock_identities(root, [name], specs=specs) != {
+            tuple(item) for item in expected
+        }:
+            raise ValueError("A project hook changed the selected Cargo artifact graph")
     if spec.get("mode", "aggressive") == "compatible":
         for provider, package, value, _, _ in updates.lock_identities(
             root, list(specs), specs=specs
