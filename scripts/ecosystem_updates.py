@@ -1272,11 +1272,21 @@ def cargo_resolve(
                 for item in candidate[name]
                 if item[:3] == ("crates", package, value)
             ]
-            if len(chosen) != 1:
-                raise ValueError(
-                    "Cargo did not materialize the requested precise registry identity"
-                )
-            if search(candidate, [*choices, (name, chosen[0])]):
+            if len(chosen) == 1:
+                following = [*choices, (name, chosen[0])]
+            else:
+                survivors = {
+                    item for item in candidate[name] if item[:2] == identity[:2]
+                }
+                previous = {item for item in current[name] if item[:2] == identity[:2]}
+                if chosen or not survivors or not survivors <= previous - {identity}:
+                    raise ValueError(
+                        "Cargo did not materialize the requested precise registry identity"
+                    )
+                # Cargo can merge the target into an already present identity.
+                # Keep prior choices, but let ineligible survivors be repaired.
+                following = choices
+            if search(candidate, following):
                 return True
         restore(checkpoint)
         return False

@@ -190,7 +190,14 @@ Other versions and independent workspaces retain their own search choices.
 Unrelated packages, local paths and other registries are excluded. Cargo receives
 the requested target first, followed by the peers in deterministic order. This
 uses Cargo's current same-registry precise-hint behavior; the resulting target
-must match exactly, and every resulting artifact still receives the normal audit.
+must match exactly. Cargo can also consolidate duplicate versions without
+materializing the requested version. Chainman accepts that outcome only when the
+old target disappears and the remaining identities for that package form a
+nonempty subset of those already present in the same workspace, with identical
+versions, sources and checksums. Complete package disappearance and new substitute
+identities are rejected. A merge preserves earlier repair choices without freezing
+other surviving versions; ineligible survivors must still be repaired. Every
+resulting artifact receives the normal audit.
 If Cargo nevertheless moves an earlier choice, that branch is still rejected.
 Both individual and coordinated attempts count toward the same configured limit.
 Native version conflicts may cause bounded backtracking;

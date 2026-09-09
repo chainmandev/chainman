@@ -1086,6 +1086,486 @@ class CargoResolutionTests(unittest.TestCase):
             before, {n: native.cargo_file_state(self.root, n) for n in before}
         )
 
+    def duplicate_resolver(
+        self, transition, *, survivors=("1.0.0",), prior=False, peer=False
+    ):
+        # Synthetic native-output fixtures exercise the public resolution boundary.
+        # Actual Cargo consolidation is qualified separately with native controls.
+        self.releases["merged"] = [
+            self.release("merged", version, days)
+            for version, days in [
+                ("1.0.0", 90),
+                ("1.1.0", 1),
+                ("1.5.0", 60),
+                ("2.0.0", 60),
+                ("2.1.0", 1),
+            ]
+        ]
+        for name in ("a-chosen", "peer"):
+            self.releases[name] = [
+                self.release(name, "1.0.0", 60),
+                self.release(name, "1.1.0", 1),
+            ]
+        source = "registry+https://github.com/rust-lang/crates.io-index"
+        self.merge_calls = []
+
+        def execute(root, profile, argv, **kwargs):
+            self.assertEqual(root, self.root)
+            self.assertEqual(profile, "native")
+            self.assertEqual(kwargs["env"]["TOOLCHAIN_FRESH"], "1")
+            directory = kwargs["cwd"]
+            document = native.manifests.document(directory / "Cargo.toml")[0]
+            self.assertEqual(document["dependencies"]["alias"]["version"], "=1.2.0")
+            if len(argv) == 2:
+                rows = [
+                    {"name": "parent", "version": "1.2.0"},
+                    {"name": "leaf", "version": "1.5.0"},
+                    {"name": "merged", "version": "2.1.0"},
+                    *({"name": "merged", "version": value} for value in survivors),
+                ]
+                if prior:
+                    rows.append({"name": "a-chosen", "version": "1.1.0"})
+                if peer:
+                    rows.append({"name": "peer", "version": "1.0.0"})
+            else:
+                self.assertEqual(argv[:2], ["cargo", "update"])
+                self.assertEqual(argv[-2], "--precise")
+                self.assertTrue(argv[3].startswith(source + "#"))
+                self.merge_calls.append(list(argv))
+                rows = native.tomllib.loads((directory / "Cargo.lock").read_text())[
+                    "package"
+                ]
+                rows = transition(argv, rows)
+            # Recompute edges after the modeled native change. Version-qualified
+            # references keep duplicate package identities distinct.
+            identities = {(row["name"], row["version"]) for row in rows}
+            body = "version=4\n"
+            for row in rows:
+                name, version = row["name"], row["version"]
+                release = next(r for r in self.releases[name] if r.version == version)
+                digest = row.get("checksum", release.artifacts[0].digest.split(":")[1])
+                origin = row.get("source", source)
+                dependencies = []
+                if name == "parent":
+                    dependencies = [
+                        f"{other['name']} {other['version']}"
+                        for other in rows
+                        if other["name"] != "parent"
+                    ]
+                elif name in {"a-chosen", "peer"} or (name, version) in {
+                    ("merged", "2.1.0"),
+                    ("merged", "1.1.0"),
+                }:
+                    dependencies = ["leaf 1.5.0"]
+                    if (name, version) == ("merged", "2.1.0") and (
+                        "merged",
+                        "1.1.0",
+                    ) in identities:
+                        dependencies.append("merged 1.1.0")
+                body += (
+                    f'[[package]]\nname="{name}"\nversion="{version}"\n'
+                    f'source="{origin}"\nchecksum="{digest}"\n'
+                    f"dependencies={dependencies!r}\n"
+                )
+            (directory / "Cargo.lock").write_text(body)
+            return subprocess.CompletedProcess(argv, 0, stdout="duplicate fixture\n")
+
+        return execute
+
+    def collapse_duplicate(self, argv, rows):
+        name, old = argv[3].split("#", 1)[1].rsplit("@", 1)
+        if (name, old) == ("merged", "2.1.0"):
+            return [row for row in rows if (row["name"], row["version"]) != (name, old)]
+        return [
+            {"name": name, "version": argv[-1]}
+            if (row["name"], row["version"]) == (name, old)
+            else row
+            for row in rows
+        ]
+
+    def test_duplicate_merge_retains_only_preexisting_exact_subset(self):
+        for survivors, retained in [
+            (("1.0.0",), ("1.0.0",)),
+            (("1.0.0", "1.5.0"), ("1.0.0",)),
+            (("1.0.0", "1.5.0"), ("1.0.0", "1.5.0")),
+        ]:
+            with self.subTest(survivors=survivors, retained=retained):
+
+                def collapse(argv, rows):
+                    self.assertEqual(argv[-1], "2.0.0")
+                    return [
+                        row
+                        for row in self.collapse_duplicate(argv, rows)
+                        if row["name"] != "merged" or row["version"] in retained
+                    ]
+
+                result = self.resolve(
+                    resolver=self.duplicate_resolver(collapse, survivors=survivors)
+                )
+                expected = [
+                    [
+                        "crates",
+                        "merged",
+                        release.version,
+                        "",  # Cargo.lock identifies the canonical registry, not a URL.
+                        release.artifacts[0].digest,
+                    ]
+                    for release in self.releases["merged"]
+                    if release.version in retained
+                ]
+                self.assertEqual(
+                    [
+                        row
+                        for row in result["cargo_identities"]["rust-0"]
+                        if row[1] == "merged"
+                    ],
+                    expected,
+                )
+                self.assertEqual(len(self.merge_calls), 1)
+                self.assertEqual(
+                    stat.S_IMODE((self.root / "Cargo.lock").stat().st_mode), 0o640
+                )
+                self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
+                self.assertIn('version="1.2.0"', self.manifest.read_text())
+                self.assertNotIn('version="=1.2.0"', self.manifest.read_text())
+
+    def test_duplicate_graph_still_accepts_requested_exact_version(self):
+        def exact(argv, rows):
+            return [
+                {"name": "merged", "version": argv[-1]}
+                if (row["name"], row["version"]) == ("merged", "2.1.0")
+                else row
+                for row in rows
+            ]
+
+        result = self.resolve(resolver=self.duplicate_resolver(exact))
+        self.assertEqual(
+            {
+                row[2]
+                for row in result["cargo_identities"]["rust-0"]
+                if row[1] == "merged"
+            },
+            {"1.0.0", "2.0.0"},
+        )
+        self.assertEqual(len(self.merge_calls), 1)
+
+    def test_duplicate_merge_rejects_wrong_identity_absence_and_old_target(self):
+        for defect in [
+            "new-version",
+            "checksum",
+            "registry-url",
+            "git-source",
+            "old-target",
+            "absent",
+            "no-op",
+        ]:
+            with self.subTest(defect=defect):
+
+                def corrupt(argv, rows):
+                    if defect == "no-op":
+                        return rows
+                    merged = self.collapse_duplicate(argv, rows)
+                    if defect == "absent":
+                        return [row for row in merged if row["name"] != "merged"]
+                    if defect == "old-target":
+                        return [
+                            row
+                            for row in rows
+                            if (row["name"], row["version"]) != ("merged", "1.0.0")
+                        ]
+                    for row in merged:
+                        if row["name"] != "merged":
+                            continue
+                        if defect == "new-version":
+                            row = {"name": "merged", "version": "1.5.0"}
+                        else:
+                            row = dict(row)
+                            row.update(
+                                {
+                                    "checksum": {"checksum": "0" * 64},
+                                    "registry-url": {
+                                        "source": "registry+https://example.invalid/index"
+                                    },
+                                    "git-source": {
+                                        "source": "git+https://example.invalid/merged#"
+                                        + "1" * 40
+                                    },
+                                }[defect]
+                            )
+                        return [
+                            other if other["name"] != "merged" else row
+                            for other in merged
+                        ]
+                    self.fail("missing survivor in negative fixture")
+
+                with self.assertRaises(ValueError):
+                    self.resolve(resolver=self.duplicate_resolver(corrupt))
+                self.assertEqual(len(self.merge_calls), 1)
+                self.assertEqual(
+                    native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+                )
+
+    def test_duplicate_merge_cannot_borrow_survivor_from_another_workspace(self):
+        second = self.put("second/Cargo.toml", self.manifest.read_text()).parent
+        self.put("second/src/lib.rs", "// independent workspace\n")
+        second_initial = []
+
+        def borrow(argv, rows):
+            self.assertEqual(len(second_initial), 1)
+            self.assertEqual(
+                native.cargo_file_state(self.root, "second/Cargo.lock"),
+                second_initial[0],
+            )
+            other = native.tomllib.loads((second / "Cargo.lock").read_text())["package"]
+            self.assertEqual(
+                [(row["name"], row["version"]) for row in other],
+                [("parent", "1.2.0"), ("merged", "1.0.0")],
+            )
+            self.assertNotIn(
+                ("merged", "1.0.0"),
+                {(row["name"], row["version"]) for row in rows},
+            )
+            return self.collapse_duplicate(argv, rows) + [
+                {"name": "merged", "version": "1.0.0"}
+            ]
+
+        resolver = self.duplicate_resolver(borrow, survivors=())
+        self.write_lock(second, {"parent": "1.0.0", "merged": "1.0.0"})
+        (second / "Cargo.lock").chmod(0o600)
+        original_second = native.cargo_file_state(self.root, "second/Cargo.lock")
+
+        def separate(root, profile, argv, **kwargs):
+            if kwargs["cwd"] != second:
+                return resolver(root, profile, argv, **kwargs)
+            self.assertEqual(argv, ["cargo", "update"])
+            document = native.manifests.document(second / "Cargo.toml")[0]
+            self.assertEqual(document["dependencies"]["alias"]["version"], "=1.2.0")
+            self.write_lock(second, {"parent": "1.2.0", "merged": "1.0.0"})
+            second_initial.append(
+                native.cargo_file_state(self.root, "second/Cargo.lock")
+            )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="other workspace retained\n"
+            )
+
+        with self.assertRaisesRegex(ValueError, "requested precise registry identity"):
+            self.resolve(
+                resolver=separate,
+                spec={**self.spec, "directories": [".", "second"]},
+            )
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+        self.assertEqual(
+            native.cargo_file_state(self.root, "second/Cargo.lock"), original_second
+        )
+        self.assertEqual(len(self.merge_calls), 1)
+
+    def test_duplicate_merge_repairs_young_survivor_without_a_fictitious_choice(self):
+        result = self.resolve(
+            resolver=self.duplicate_resolver(
+                self.collapse_duplicate, survivors=("1.1.0",)
+            )
+        )
+        self.assertEqual(
+            [(argv[3].split("#")[1], argv[-1]) for argv in self.merge_calls],
+            [("merged@2.1.0", "2.0.0"), ("merged@1.1.0", "2.0.0")],
+        )
+        self.assertEqual(
+            {
+                row[2]
+                for row in result["cargo_identities"]["rust-0"]
+                if row[1] == "merged"
+            },
+            {"2.0.0"},
+        )
+
+    def test_duplicate_merge_does_not_waive_unresolved_young_survivor(self):
+        def conflict(argv, rows):
+            if "#merged@1.1.0" in argv[3]:
+                raise subprocess.CalledProcessError(
+                    101, argv, output="error: failed to select a version for `merged`\n"
+                )
+            return self.collapse_duplicate(argv, rows)
+
+        with self.assertRaisesRegex(ValueError, "No eligible Cargo graph"):
+            self.resolve(
+                resolver=self.duplicate_resolver(conflict, survivors=("1.1.0",))
+            )
+        self.assertGreater(len(self.merge_calls), 1)
+        self.assertTrue(
+            any("#merged@1.1.0" in argv[3] for argv in self.merge_calls[1:])
+        )
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+
+    def test_duplicate_merge_keeps_prior_exact_choices(self):
+        result = self.resolve(
+            resolver=self.duplicate_resolver(self.collapse_duplicate, prior=True)
+        )
+        self.assertEqual(
+            [argv[3].split("#")[1] for argv in self.merge_calls],
+            ["a-chosen@1.1.0", "merged@2.1.0"],
+        )
+        self.assertTrue(
+            any(
+                row[:3] == ["crates", "a-chosen", "1.0.0"]
+                for row in result["cargo_identities"]["rust-0"]
+            )
+        )
+
+    def test_duplicate_merge_cannot_remove_or_change_prior_exact_choice(self):
+        for defect in ["remove", "version", "checksum"]:
+            with self.subTest(defect=defect):
+
+                def move(argv, rows):
+                    merged = self.collapse_duplicate(argv, rows)
+                    if "#merged@" not in argv[3]:
+                        return merged
+                    if defect == "remove":
+                        return [row for row in merged if row["name"] != "a-chosen"]
+                    return [
+                        {"name": "a-chosen", "version": "1.1.0"}
+                        if row["name"] == "a-chosen" and defect == "version"
+                        else {**row, "checksum": "0" * 64}
+                        if row["name"] == "a-chosen"
+                        else row
+                        for row in merged
+                    ]
+
+                with self.assertRaises(ValueError):
+                    self.resolve(resolver=self.duplicate_resolver(move, prior=True))
+                self.assertEqual(
+                    native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+                )
+
+    def test_duplicate_merge_budget_counts_both_native_attempt_forms(self):
+        for absent in [False, True]:
+            for limit in [1, 2]:
+                with self.subTest(absent=absent, limit=limit):
+                    if absent:
+                        (self.root / "Cargo.lock").unlink(missing_ok=True)
+                    else:
+                        (self.root / "Cargo.lock").write_bytes(self.original_lock[0])
+                        (self.root / "Cargo.lock").chmod(self.original_lock[1])
+
+                    def coordinated(argv, rows):
+                        if len(argv) == 6:
+                            raise subprocess.CalledProcessError(
+                                101,
+                                argv,
+                                output="error: failed to select a version for `leaf`\n",
+                            )
+                        # Both parent and peer directly share leaf with merged.
+                        self.assertEqual(
+                            argv[4:-2],
+                            [
+                                "-p",
+                                "registry+https://github.com/rust-lang/crates.io-index#parent@1.2.0",
+                                "-p",
+                                "registry+https://github.com/rust-lang/crates.io-index#peer@1.0.0",
+                            ],
+                        )
+                        return self.collapse_duplicate(argv, rows)
+
+                    resolver = self.duplicate_resolver(coordinated, peer=True)
+                    spec = {**self.spec, "cargo_max_attempts": limit}
+                    if limit == 1:
+                        with self.assertRaisesRegex(ValueError, "1-state bound"):
+                            self.resolve(resolver=resolver, spec=spec)
+                        self.assertEqual(
+                            native.cargo_file_state(self.root, "Cargo.lock"),
+                            None if absent else self.original_lock,
+                        )
+                    else:
+                        self.resolve(resolver=resolver, spec=spec)
+                    self.assertEqual(len(self.merge_calls), limit)
+                    self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
+
+    def test_duplicate_merge_requires_native_success_and_preserves_status(self):
+        for status in [41, 101, -15]:
+            with self.subTest(status=status):
+                resolver = self.duplicate_resolver(self.collapse_duplicate)
+
+                def fail(root, profile, argv, **kwargs):
+                    if len(argv) > 2:
+                        self.merge_calls.append(list(argv))
+                        raise subprocess.CalledProcessError(
+                            status, argv, output="error: download failed\n"
+                        )
+                    return resolver(root, profile, argv, **kwargs)
+
+                with self.assertRaises(subprocess.CalledProcessError) as caught:
+                    self.resolve(resolver=fail)
+                self.assertEqual(caught.exception.returncode, status)
+                self.assertEqual(len(self.merge_calls), 1)
+                self.assertEqual(
+                    native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+                )
+
+    def test_failed_duplicate_merge_preserves_changed_lock_and_native_diagnostic(self):
+        resolver = self.duplicate_resolver(self.collapse_duplicate)
+        changed = []
+
+        def fail_after_write(root, profile, argv, **kwargs):
+            result = resolver(root, profile, argv, **kwargs)
+            if len(argv) > 2:
+                changed.append(native.cargo_file_state(self.root, "Cargo.lock"))
+                raise subprocess.CalledProcessError(
+                    41, argv, output="error: download failed after lock write\n"
+                )
+            return result
+
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.resolve(resolver=fail_after_write)
+        self.assertEqual(caught.exception.returncode, 41)
+        self.assertEqual(
+            caught.exception.output, "error: download failed after lock write\n"
+        )
+        self.assertEqual(len(self.merge_calls), 1)
+        self.assertEqual(len(changed), 1)
+        self.assertNotEqual(changed[0], self.original_lock)
+        self.assertEqual(native.cargo_file_state(self.root, "Cargo.lock"), changed[0])
+        self.assertEqual(changed[0][1], self.original_lock[1])
+        self.assertTrue(
+            any(
+                "Failed Cargo command changed lock; preserve and inspect" in note
+                for note in getattr(caught.exception, "__notes__", ())
+            )
+        )
+        self.assertTrue(
+            any(
+                "Cargo restoration failed; changes preserved" in note
+                for note in getattr(caught.exception, "__notes__", ())
+            )
+        )
+
+    def test_duplicate_merge_preserves_unexpected_source_and_lock_mode_drift(self):
+        for defect in ["source", "lock-mode"]:
+            with self.subTest(defect=defect):
+                source_before = self.source.read_bytes()
+
+                def drift(argv, rows):
+                    if defect == "source":
+                        self.source.write_text("// concurrent merge-time change\n")
+                    else:
+                        (self.root / "Cargo.lock").chmod(0o600)
+                    return self.collapse_duplicate(argv, rows)
+
+                with self.assertRaises(ValueError):
+                    self.resolve(resolver=self.duplicate_resolver(drift))
+                self.assertEqual(len(self.merge_calls), 1)
+                if defect == "source":
+                    self.assertEqual(
+                        self.source.read_text(), "// concurrent merge-time change\n"
+                    )
+                    self.source.write_bytes(source_before)
+                else:
+                    self.assertEqual(
+                        stat.S_IMODE((self.root / "Cargo.lock").stat().st_mode), 0o600
+                    )
+
 
 class CargoRepairGraphTests(unittest.TestCase):
     SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
