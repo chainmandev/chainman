@@ -1349,6 +1349,7 @@ class GoTests(Fixture):
             with (
                 self.subTest(published=published),
                 patch.object(source_go, "snapshot", return_value=self.before),
+                patch.object(source_go, "query", return_value={}),
                 patch.object(
                     source_go,
                     "go_candidates",
@@ -1390,6 +1391,180 @@ class GoTests(Fixture):
                 self.before,
                 {"exceptions": [{**exception, "expires": "invalid"}]},
                 NOW,
+            )
+
+    def current_state(self, value="v1.2.0"):
+        state = copy.deepcopy(self.before)
+        state["members"]["module"]["Require"][0]["Version"] = value
+        state["identities"] = [
+            [
+                "example.test/library",
+                value,
+                f"https://proxy.golang.org/example.test/library/@v/{value}.zip",
+                "h1:" + base64.b64encode(b"x" * 32).decode(),
+            ]
+        ]
+        return state
+
+    def check_current_audit(self, state, response, *, before=None, policy=None):
+        def native(root, spec, argv, **kwargs):
+            self.assertEqual(argv[:5], ["go", "list", "-m", "-json", "-retracted"])
+            package, value = argv[5].rsplit("@", 1)
+            result = response(package, value)
+            return {"Path": package, "Version": value, **result}
+
+        with (
+            patch.object(source_go, "snapshot", return_value=state),
+            patch.object(source_go, "native_json", side_effect=native) as queries,
+            patch.object(source_go, "execute") as execution,
+            patch.object(
+                registry,
+                "go_info",
+                side_effect=AssertionError("Unchanged release age was fetched"),
+            ),
+            patch.object(
+                registry,
+                "go_artifacts",
+                side_effect=AssertionError("Unchanged artifact evidence was fetched"),
+            ),
+        ):
+            sources.audit(
+                self.root,
+                self.spec,
+                state if before is None else before,
+                policy or {},
+                NOW,
+            )
+        return [call.args[2][5] for call in queries.call_args_list], execution
+
+    def test_retained_direct_and_indirect_retractions_are_rejected(self):
+        for indirect in (False, True):
+            state = self.current_state()
+            state["members"]["module"]["Require"][0]["Indirect"] = indirect
+            with (
+                self.subTest(indirect=indirect),
+                self.assertRaisesRegex(ValueError, "retracted"),
+            ):
+                self.check_current_audit(
+                    state, lambda *_: {"Retracted": ["Withdrawn release"]}
+                )
+
+    def test_unchanged_requirement_keeps_age_exemption_and_native_verification(self):
+        queries, execution = self.check_current_audit(
+            self.current_state(), lambda *_: {}
+        )
+        self.assertEqual(queries, ["example.test/library@v1.2.0"])
+        self.assertEqual(
+            [call.args[2] for call in execution.call_args_list],
+            [["go", "mod", "download"], ["go", "mod", "verify"]],
+        )
+
+    def test_unchanged_historical_checksum_is_not_a_current_requirement(self):
+        state = self.current_state()
+        state["identities"].extend(self.current_state("v1.1.0")["identities"])
+
+        def current_only(package, value):
+            self.assertEqual((package, value), ("example.test/library", "v1.2.0"))
+            return {}
+
+        queries, _ = self.check_current_audit(state, current_only)
+        self.assertEqual(queries, ["example.test/library@v1.2.0"])
+
+    def test_current_local_member_exclusion_does_not_exclude_public_requirement(self):
+        state = self.current_state()
+        self.write("local/go.mod", "module local_lib\n\ngo 1.20\n")
+        state["members"]["local"] = {"Module": {"Path": "local_lib"}}
+        state["members"]["module"]["Require"].append(
+            {"Path": "local_lib", "Version": "v0.0.0"}
+        )
+        queries, _ = self.check_current_audit(state, lambda *_: {})
+        self.assertEqual(queries, ["example.test/library@v1.2.0"])
+
+    def test_retained_pseudoversion_still_requires_native_retraction_check(self):
+        value = "v1.2.1-0.20260101000000-aaaaaaaaaaaa"
+        state = self.current_state(value)
+        queries, _ = self.check_current_audit(state, lambda *_: {})
+        self.assertEqual(queries, ["example.test/library@" + value])
+        with self.assertRaisesRegex(ValueError, "retracted"):
+            self.check_current_audit(
+                state, lambda *_: {"Retracted": ["Withdrawn commit"]}
+            )
+
+    def test_workspace_current_versions_are_distinct_and_deduplicated(self):
+        state = self.current_state()
+        self.write("second/go.mod", "module example.test/second\n\ngo 1.20\n")
+        state["members"]["second"] = {
+            "Module": {"Path": "example.test/second"},
+            "Require": [
+                {"Path": "example.test/library", "Version": "v1.2.0"},
+                {"Path": "example.test/other", "Version": "v1.1.0"},
+            ],
+        }
+        state["members"]["module"]["Require"].append(
+            {"Path": "example.test/other", "Version": "v1.2.0"}
+        )
+        queries, _ = self.check_current_audit(state, lambda *_: {})
+        self.assertCountEqual(
+            queries,
+            [
+                "example.test/library@v1.2.0",
+                "example.test/other@v1.1.0",
+                "example.test/other@v1.2.0",
+            ],
+        )
+
+    def test_retained_native_identity_errors_are_not_ignored(self):
+        for invalid in (
+            {"Path": "example.test/wrong"},
+            {"Version": "v1.2.1"},
+            {"Error": "Metadata unavailable"},
+        ):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaisesRegex(ValueError, "unexpected module identity"),
+            ):
+                self.check_current_audit(self.current_state(), lambda *_: invalid)
+
+        def unavailable(*_):
+            raise ValueError("Native metadata unavailable")
+
+        with self.assertRaisesRegex(ValueError, "Native metadata unavailable"):
+            self.check_current_audit(self.current_state(), unavailable)
+
+    def test_new_checksum_only_retraction_remains_rejected(self):
+        before = self.current_state()
+        after = copy.deepcopy(before)
+        after["identities"].extend(self.current_state("v1.2.1")["identities"])
+        with self.assertRaisesRegex(ValueError, "retracted"):
+            self.check_current_audit(
+                after,
+                lambda _, value: (
+                    {"Retracted": ["Withdrawn transitive"]} if value == "v1.2.1" else {}
+                ),
+                before=before,
+            )
+
+    def test_security_age_exception_cannot_admit_current_retraction(self):
+        exception = {
+            "package": "go:example.test/library",
+            "version": "v1.2.0",
+            "minimum_safe": "v1.2.0",
+            "reason": "Required security repair",
+            "advisory": "https://example.invalid/advisory",
+            "expires": (NOW + timedelta(days=1)).isoformat(),
+        }
+        with (
+            patch.object(
+                source_go,
+                "go_candidates",
+                return_value=[registry.Release("v1.2.0", YOUNG)],
+            ),
+            self.assertRaisesRegex(ValueError, "retracted"),
+        ):
+            self.check_current_audit(
+                self.current_state(),
+                lambda *_: {"Retracted": ["Withdrawn security repair"]},
+                policy={"exceptions": [exception]},
             )
 
     def test_new_transitive_and_reused_checksum_require_age_audit(self):

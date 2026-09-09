@@ -159,6 +159,10 @@ audit requires the resolved Cargo, uv or pub lock. A resolver or reconciliation
 hook cannot turn a deleted lock into an empty artifact inventory. Go and Swift
 retain their native rules for dependency-free projects that legitimately omit sums
 or resolved pins.
+Go audits reject retracted public requirements, including unchanged direct and
+indirect requirements. Declared local modules are excluded. Unchanged historical
+checksum entries alone do not trigger retraction or publication-age lookups;
+new checksum identities retain the full retraction, age and hash audit.
 
 During Flutter resolution, selected direct dependencies are temporarily bound to
 their exact eligible releases across all declared workspaces. If Pub selects a

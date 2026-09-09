@@ -434,11 +434,19 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
             )
             if old is not None and new is not None and new < old:
                 raise ValueError("Go resolution downgraded a declared requirement")
+    required_versions = {
+        (item["Path"], item["Version"]) for item in public_requirements
+    }
+    for package, value in sorted(required_versions):
+        if query(root, spec, package, value).get("Retracted"):
+            raise ValueError("Required Go module version is retracted")
     for package in sorted({item[0] for item in added}):
         items = [item for item in added if item[0] == package]
         releases = []
         for value in sorted({item[1] for item in items}):
-            if query(root, spec, package, value).get("Retracted"):
+            if (package, value) not in required_versions and query(
+                root, spec, package, value
+            ).get("Retracted"):
                 raise ValueError(
                     "New Go checksum identity refers to a retracted release"
                 )
