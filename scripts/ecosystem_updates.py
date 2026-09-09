@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 from packaging.requirements import Requirement
 from packaging.version import Version
@@ -916,6 +917,96 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
     return states
 
 
+def cargo_repair_order(issues: list, locks: dict[str, bytes]) -> list:
+    """Try ineligible locked dependents before the prerequisites they constrain."""
+    ancestors = [set() for _ in issues]
+    for workspace in dict.fromkeys(issue[0] for issue in issues):
+        entries = tomllib.loads(locks[workspace].decode()).get("package", [])
+        if not isinstance(entries, list):
+            raise ValueError("Invalid Cargo lock package graph")
+        nodes = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError("Invalid Cargo lock package graph")
+            key = (entry.get("name"), entry.get("version"), entry.get("source", ""))
+            if (
+                not all(isinstance(part, str) for part in key)
+                or not key[0]
+                or not key[1]
+                or key in nodes
+            ):
+                raise ValueError("Invalid or duplicate Cargo lock package identity")
+            nodes[key] = entry
+        edges = {}
+        for key, entry in nodes.items():
+            dependencies = entry.get("dependencies", [])
+            if not isinstance(dependencies, list):
+                raise ValueError("Invalid Cargo lock dependency graph")
+            edges[key] = set()
+            for dependency in dependencies:
+                match = (
+                    re.fullmatch(
+                        r"([^\s()]+)(?: ([^\s()]+)(?: \(([^()\s]+)\))?)?",
+                        dependency,
+                    )
+                    if isinstance(dependency, str)
+                    else None
+                )
+                if match is None:
+                    raise ValueError("Invalid Cargo lock dependency identity")
+                name, version, source = match.groups()
+                targets = [
+                    node
+                    for node in nodes
+                    if node[0] == name
+                    and (version is None or node[1] == version)
+                    and (source is None or node[2] == source)
+                ]
+                if version is None and len({node[1] for node in targets}) != 1:
+                    raise ValueError(
+                        "Missing or ambiguous Cargo lock dependency version"
+                    )
+                if source is None:
+                    local = [node for node in targets if not node[2]]
+                    if local:
+                        targets = local
+                if len(targets) != 1:
+                    raise ValueError(
+                        "Missing or ambiguous Cargo lock dependency source"
+                    )
+                edges[key].add(targets[0])
+        problems = {}
+        for index, (name, identity, _) in enumerate(issues):
+            if name != workspace:
+                continue
+            key = (
+                identity[1],
+                identity[2],
+                "registry+https://github.com/rust-lang/crates.io-index",
+            )
+            if key not in nodes:
+                raise ValueError("Cargo repair identity is absent from the lock graph")
+            problems[key] = index
+        for origin, index in problems.items():
+            seen = {origin}
+            pending = list(edges[origin])
+            while pending:
+                target = pending.pop()
+                if target in seen:
+                    continue
+                seen.add(target)
+                if target in problems:
+                    ancestors[problems[target]].add(index)
+                pending.extend(edges[target] - seen)
+    # Ancestor sets strictly grow downstream between strongly connected groups.
+    # Members of a cycle tie, preserving the original deterministic order. The
+    # graph is only a search heuristic: native constraints and audits still rule.
+    return [
+        issues[index]
+        for index in sorted(range(len(issues)), key=lambda index: len(ancestors[index]))
+    ]
+
+
 def cargo_resolve(
     root: Path,
     spec: dict,
@@ -1109,7 +1200,9 @@ def cargo_resolve(
             last = "repeated Cargo artifact graph and repair choices"
             return False
         visited.add(key)
-        name, identity, values = issues[0]
+        name, identity, values = cargo_repair_order(
+            issues, {name: expected[path][0] for name, path in lock_names.items()}
+        )[0]
         package, observed = identity[1:3]
         checkpoint = dict(expected)
         for value in values:

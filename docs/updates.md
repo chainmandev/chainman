@@ -171,7 +171,11 @@ are temporarily narrowed to their exact planned releases. Cargo still enforces
 all parent ranges, features and target constraints. Chainman then repairs newly
 ineligible registry artifacts through conservative, source-qualified Cargo
 `update --precise` attempts, trying eligible releases in descending order with a
-maximum of 64 attempts. Native version conflicts may cause bounded backtracking;
+maximum of 64 attempts. Recorded lockfile dependency edges prioritize ineligible
+parents before the ineligible children they constrain, including paths through
+eligible intermediates. Cyclic groups retain deterministic ordering and the same
+bound; graph ordering never changes the eligible release set or native constraints.
+Native version conflicts may cause bounded backtracking;
 unrelated native failures, missing evidence and unexpected input edits stop the
 update. This is a bounded eligible-graph search, not a complete solver or a proof
 of a globally newest dependency graph. Custom resolver commands keep their literal

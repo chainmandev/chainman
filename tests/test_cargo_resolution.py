@@ -71,7 +71,7 @@ class CargoResolutionTests(unittest.TestCase):
             ),
         )
 
-    def write_lock(self, directory, versions, *, wrong=None):
+    def write_lock(self, directory, versions, *, wrong=None, dependencies=None):
         body = "version=4\n"
         for name, version in versions.items():
             item = next(r for r in self.releases[name] if r.version == version)
@@ -79,6 +79,8 @@ class CargoResolutionTests(unittest.TestCase):
                 "0" * 64 if name == wrong else item.artifacts[0].digest.split(":")[1]
             )
             body += f'[[package]]\nname="{name}"\nversion="{version}"\nsource="registry+https://github.com/rust-lang/crates.io-index"\nchecksum="{digest}"\n'
+            if dependencies and name in dependencies:
+                body += f"dependencies={dependencies[name]!r}\n"
         (directory / "Cargo.lock").write_text(body)
 
     def resolver(self, root, profile, argv, **kwargs):
@@ -129,6 +131,57 @@ class CargoResolutionTests(unittest.TestCase):
             ),
         ):
             return native.resolve(self.root, spec or self.spec, policy or {}, NOW)
+
+    def test_coupled_parent_is_repaired_before_blocked_child(self):
+        self.releases["z-parent"] = [
+            self.release("z-parent", "1.0.0", 60),
+            self.release("z-parent", "1.1.0", 1),
+        ]
+        attempts = []
+
+        def coupled(root, profile, argv, **kwargs):
+            document = native.manifests.document(self.manifest)[0]
+            self.assertEqual(document["dependencies"]["alias"]["version"], "=1.2.0")
+            self.assertEqual(native.CARGO_SOLVER_STATES, 64)
+            if len(argv) == 2:
+                versions = {"parent": "1.2.0", "leaf": "1.6.0", "z-parent": "1.1.0"}
+            else:
+                versions = {
+                    item["name"]: item["version"]
+                    for item in native.tomllib.loads(
+                        (self.root / "Cargo.lock").read_text()
+                    )["package"]
+                }
+                package = argv[3].split("#")[1].split("@")[0]
+                attempts.append((package, argv[-1]))
+                if package == "leaf" and (
+                    versions["z-parent"] == "1.1.0" or argv[-1] == "2.0.0"
+                ):
+                    raise subprocess.CalledProcessError(
+                        101,
+                        argv,
+                        output="error: failed to select a version for the requirement `leaf`\n",
+                    )
+                versions[package] = argv[-1]
+            self.write_lock(
+                self.root,
+                versions,
+                dependencies={"parent": ["z-parent"], "z-parent": ["leaf"]},
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout="coupled fixture\n")
+
+        result = self.resolve(resolver=coupled)
+        self.assertEqual(
+            attempts, [("z-parent", "1.0.0"), ("leaf", "2.0.0"), ("leaf", "1.5.0")]
+        )
+        self.assertTrue(
+            any(
+                item[:3] == ["crates", "leaf", "1.5.0"]
+                for item in result["cargo_identities"]["rust-0"]
+            )
+        )
+        self.assertIn('version="1.2.0"', self.manifest.read_text())
+        self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
 
     def test_latest_eligible_fallback_and_direct_exact_public_restoration(self):
         result = self.resolve()
@@ -514,6 +567,146 @@ class CargoResolutionTests(unittest.TestCase):
         self.assertEqual(
             before, {n: native.cargo_file_state(self.root, n) for n in before}
         )
+
+
+class CargoRepairGraphTests(unittest.TestCase):
+    SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+
+    def lock(self, rows):
+        body = "version=4\n"
+        for name, version, source, dependencies in rows:
+            body += f"[[package]]\nname={name!r}\nversion={version!r}\n"
+            if source:
+                body += f"source={source!r}\n"
+            body += f"dependencies={dependencies!r}\n"
+        return body.encode()
+
+    def issue(self, name, version="1.0.0", workspace="one"):
+        return (
+            workspace,
+            ("crates", name, version, "", "sha256:" + "1" * 64),
+            ["0.9.0"],
+        )
+
+    def test_indirect_dependency_order_through_eligible_local_package(self):
+        issues = [self.issue("a-child"), self.issue("z-parent")]
+        lock = self.lock(
+            [
+                ("a-child", "1.0.0", self.SOURCE, []),
+                ("middle", "0.1.0", "", ["a-child"]),
+                ("z-parent", "1.0.0", self.SOURCE, ["middle"]),
+            ]
+        )
+        self.assertEqual(native.cargo_repair_order(issues, {"one": lock}), issues[::-1])
+
+    def test_version_and_source_qualified_edges_do_not_conflate_packages(self):
+        issues = [
+            self.issue("a-child", "2.0.0"),
+            self.issue("z-parent"),
+            self.issue("a-child"),
+        ]
+        lock = self.lock(
+            [
+                ("a-child", "1.0.0", self.SOURCE, []),
+                ("a-child", "1.0.0", "", []),
+                ("a-child", "2.0.0", self.SOURCE, []),
+                ("z-parent", "1.0.0", self.SOURCE, [f"a-child 1.0.0 ({self.SOURCE})"]),
+            ]
+        )
+        self.assertEqual(native.cargo_repair_order(issues, {"one": lock}), issues)
+
+    def test_omitted_source_prefers_local_after_resolving_unique_version(self):
+        issues = [self.issue("a-child"), self.issue("z-parent")]
+        for dependency in ["bridge", "bridge 1.0.0"]:
+            with self.subTest(dependency=dependency):
+                lock = self.lock(
+                    [
+                        ("a-child", "1.0.0", self.SOURCE, []),
+                        ("bridge", "1.0.0", "", ["a-child"]),
+                        ("bridge", "1.0.0", self.SOURCE, []),
+                        ("z-parent", "1.0.0", self.SOURCE, [dependency]),
+                    ]
+                )
+                self.assertEqual(
+                    native.cargo_repair_order(issues, {"one": lock}), issues[::-1]
+                )
+        lock = self.lock(
+            [
+                ("a-child", "1.0.0", self.SOURCE, []),
+                ("bridge", "1.0.0", "", ["a-child"]),
+                ("bridge", "2.0.0", self.SOURCE, []),
+                ("z-parent", "1.0.0", self.SOURCE, ["bridge"]),
+            ]
+        )
+        with self.assertRaisesRegex(
+            ValueError, "ambiguous Cargo lock dependency version"
+        ):
+            native.cargo_repair_order(issues, {"one": lock})
+
+    def test_version_only_edge_is_supported(self):
+        issues = [self.issue("child"), self.issue("parent")]
+        lock = self.lock(
+            [
+                ("child", "1.0.0", self.SOURCE, []),
+                ("child", "2.0.0", self.SOURCE, []),
+                ("parent", "1.0.0", self.SOURCE, ["child 1.0.0"]),
+            ]
+        )
+        self.assertEqual(native.cargo_repair_order(issues, {"one": lock}), issues[::-1])
+
+    def test_cycles_have_stable_order_and_precede_downstream_nodes(self):
+        issues = [self.issue("child"), self.issue("a"), self.issue("b")]
+        lock = self.lock(
+            [
+                ("child", "1.0.0", self.SOURCE, []),
+                ("a", "1.0.0", self.SOURCE, ["b"]),
+                ("b", "1.0.0", self.SOURCE, ["a", "child"]),
+            ]
+        )
+        self.assertEqual(
+            native.cargo_repair_order(issues, {"one": lock}),
+            [issues[1], issues[2], issues[0]],
+        )
+
+    def test_workspace_graphs_do_not_leak_dependency_order(self):
+        issues = [self.issue("child"), self.issue("parent", workspace="two")]
+        lock = self.lock(
+            [
+                ("child", "1.0.0", self.SOURCE, []),
+                ("parent", "1.0.0", self.SOURCE, ["child"]),
+            ]
+        )
+        self.assertEqual(
+            native.cargo_repair_order(issues, {"one": lock, "two": lock}), issues
+        )
+
+    def test_ambiguous_missing_and_invalid_dependencies_fail_closed(self):
+        issues = [self.issue("parent")]
+        for dependency in [
+            "child",
+            "absent",
+            "child 1.0.0 trailing garbage",
+            f"child ({self.SOURCE})",
+            42,
+        ]:
+            with self.subTest(dependency=dependency):
+                lock = self.lock(
+                    [
+                        ("child", "1.0.0", self.SOURCE, []),
+                        ("child", "2.0.0", self.SOURCE, []),
+                        ("parent", "1.0.0", self.SOURCE, [dependency]),
+                    ]
+                )
+                with self.assertRaisesRegex(ValueError, "Cargo lock dependency"):
+                    native.cargo_repair_order(issues, {"one": lock})
+
+    def test_duplicate_identity_and_absent_repair_identity_fail_closed(self):
+        row = ("parent", "1.0.0", self.SOURCE, [])
+        for rows in [[row, row], []]:
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                native.cargo_repair_order(
+                    [self.issue("parent")], {"one": self.lock(rows)}
+                )
 
 
 if __name__ == "__main__":
