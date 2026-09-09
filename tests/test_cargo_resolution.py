@@ -193,6 +193,205 @@ class CargoResolutionTests(unittest.TestCase):
         self.assertIn('version="1.5.0"', (self.root / "Cargo.lock").read_text())
         self.assertEqual(set(result["cargo_identities"]), {"rust-0"})
 
+    def coordinated_resolver(
+        self, *, wrong_target=False, young_peer=False, mutate=None
+    ):
+        for name in ("target", "peer"):
+            self.releases[name] = [
+                self.release(name, value, days)
+                for value, days in [("0.9.0", 90), ("1.0.0", 60), ("1.1.0", 1)]
+            ]
+        source = "registry+https://github.com/rust-lang/crates.io-index"
+        self.coordinated_calls = []
+
+        def resolver(root, profile, argv, **kwargs):
+            self.assertEqual(kwargs["cwd"], self.root)
+            if len(argv) == 2:
+                versions = {
+                    "parent": "1.2.0",
+                    "target": "1.1.0",
+                    "peer": "1.0.0",
+                    "leaf": "1.5.0",
+                }
+            else:
+                self.coordinated_calls.append(list(argv))
+                versions = {
+                    item["name"]: item["version"]
+                    for item in native.tomllib.loads(
+                        (self.root / "Cargo.lock").read_text()
+                    )["package"]
+                }
+                if argv[3] == f"{source}#peer@1.1.0":
+                    self.assertEqual(
+                        argv,
+                        [
+                            "cargo",
+                            "update",
+                            "-p",
+                            f"{source}#peer@1.1.0",
+                            "--precise",
+                            "1.0.0",
+                        ],
+                    )
+                    versions["peer"] = "1.0.0"
+                elif len(argv) == 6:
+                    raise subprocess.CalledProcessError(
+                        101,
+                        argv,
+                        output="error: failed to select a version for `leaf`\n",
+                    )
+                else:
+                    self.assertEqual(
+                        argv,
+                        [
+                            "cargo",
+                            "update",
+                            "-p",
+                            f"{source}#target@1.1.0",
+                            "-p",
+                            f"{source}#peer@1.0.0",
+                            "--precise",
+                            "1.0.0",
+                        ],
+                    )
+                    if mutate is not None:
+                        mutate()
+                    versions["target"] = "0.9.0" if wrong_target else "1.0.0"
+                    if young_peer:
+                        versions["peer"] = "1.1.0"
+            self.write_lock(
+                self.root,
+                versions,
+                dependencies={
+                    "parent": ["target", "peer"],
+                    "target": ["leaf"],
+                    "peer": ["leaf"],
+                },
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout="coordinated fixture\n")
+
+        return resolver
+
+    def test_coordinated_retry_includes_eligible_exact_peer(self):
+        result = self.resolve(resolver=self.coordinated_resolver())
+        self.assertEqual(len(self.coordinated_calls), 2)
+        self.assertTrue(
+            any(
+                item[:3] == ["crates", "target", "1.0.0"]
+                for item in result["cargo_identities"]["rust-0"]
+            )
+        )
+        self.assertEqual(stat.S_IMODE((self.root / "Cargo.lock").stat().st_mode), 0o640)
+        self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
+
+    def test_coordinated_success_with_wrong_eligible_target_fails_closed(self):
+        with self.assertRaisesRegex(ValueError, "requested precise registry identity"):
+            self.resolve(resolver=self.coordinated_resolver(wrong_target=True))
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+
+    def test_coordinated_peer_is_not_exempt_from_maturity(self):
+        result = self.resolve(resolver=self.coordinated_resolver(young_peer=True))
+        self.assertEqual(len(self.coordinated_calls), 3)
+        self.assertTrue(
+            any(
+                item[:3] == ["crates", "peer", "1.0.0"]
+                for item in result["cargo_identities"]["rust-0"]
+            )
+        )
+
+    def test_coordinated_retry_uses_the_same_attempt_budget(self):
+        resolver = self.coordinated_resolver()
+        with patch.object(native, "CARGO_SOLVER_STATES", 1):
+            with self.assertRaisesRegex(ValueError, "1-state bound"):
+                self.resolve(resolver=resolver)
+        self.assertEqual(len(self.coordinated_calls), 1)
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+        resolver = self.coordinated_resolver()
+        with patch.object(native, "CARGO_SOLVER_STATES", 2):
+            self.resolve(resolver=resolver)
+        self.assertEqual(len(self.coordinated_calls), 2)
+
+    def test_coordinated_retry_preserves_unexpected_source_change(self):
+        with self.assertRaisesRegex(ValueError, "changed non-lock inputs"):
+            self.resolve(
+                resolver=self.coordinated_resolver(
+                    mutate=lambda: self.source.write_text("// concurrent change\n"),
+                )
+            )
+        self.assertEqual(self.source.read_text(), "// concurrent change\n")
+
+    def test_coordinated_retry_retains_original_native_failure(self):
+        resolver = self.coordinated_resolver()
+
+        def fail(root, profile, argv, **kwargs):
+            if len(argv) > 6:
+                raise subprocess.CalledProcessError(
+                    41, argv, output="error: download failed\n"
+                )
+            return resolver(root, profile, argv, **kwargs)
+
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.resolve(resolver=fail)
+        self.assertEqual(caught.exception.returncode, 41)
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+
+    def test_coordinated_search_never_runs_attempt_65(self):
+        resolver = self.coordinated_resolver()
+        self.releases["target"] = [self.release("target", "1.1.0", 1)] + [
+            self.release("target", f"2.{index}.0", 60) for index in range(33)
+        ]
+        calls = []
+
+        def fail(root, profile, argv, **kwargs):
+            if len(argv) == 2:
+                return resolver(root, profile, argv, **kwargs)
+            calls.append(argv)
+            raise subprocess.CalledProcessError(
+                101, argv, output="error: failed to select a version for `leaf`\n"
+            )
+
+        with self.assertRaisesRegex(ValueError, "64-state bound"):
+            self.resolve(resolver=fail)
+        self.assertEqual(len(calls), 64)
+        self.assertEqual([len(argv) for argv in calls], [6, 8] * 32)
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+
+    def test_individual_success_with_peer_does_not_retry(self):
+        resolver = self.coordinated_resolver()
+        calls = []
+
+        def succeed(root, profile, argv, **kwargs):
+            if len(argv) == 2:
+                return resolver(root, profile, argv, **kwargs)
+            calls.append(argv)
+            self.assertEqual(len(argv), 6)
+            self.write_lock(
+                self.root,
+                {
+                    "parent": "1.2.0",
+                    "target": "1.0.0",
+                    "peer": "1.0.0",
+                    "leaf": "1.5.0",
+                },
+                dependencies={
+                    "parent": ["target", "peer"],
+                    "target": ["leaf"],
+                    "peer": ["leaf"],
+                },
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout="individual success\n")
+
+        self.resolve(resolver=succeed)
+        self.assertEqual(len(calls), 1)
+
     def test_no_eligible_graph_restores_owned_lock(self):
         self.releases["leaf"] = [
             r for r in self.releases["leaf"] if r.version != "1.5.0"
@@ -707,6 +906,60 @@ class CargoRepairGraphTests(unittest.TestCase):
                 native.cargo_repair_order(
                     [self.issue("parent")], {"one": self.lock(rows)}
                 )
+
+    def test_peer_cohort_uses_exact_shared_children_and_registry(self):
+        other_source = "registry+https://example.invalid/index"
+        lock = self.lock(
+            [
+                ("target", "2.0.0", self.SOURCE, ["child 3.0.0", "second"]),
+                ("a-peer", "1.0.0", self.SOURCE, ["child 3.0.0", "second"]),
+                ("a-peer", "2.0.0", self.SOURCE, ["child 2.0.0"]),
+                ("a-peer", "1.0.0", "", ["child 3.0.0"]),
+                ("a-peer", "1.0.0", other_source, ["child 3.0.0"]),
+                ("z-peer", "1.0.0", self.SOURCE, ["second"]),
+                ("unrelated", "1.0.0", self.SOURCE, []),
+                ("child", "2.0.0", self.SOURCE, []),
+                ("child", "3.0.0", self.SOURCE, []),
+                ("second", "1.0.0", self.SOURCE, []),
+            ]
+        )
+        self.assertEqual(
+            native.cargo_repair_peers(self.issue("target", "2.0.0")[1], lock),
+            [
+                ("a-peer", "1.0.0", self.SOURCE),
+                ("z-peer", "1.0.0", self.SOURCE),
+            ],
+        )
+
+    def test_peer_cohort_excludes_indirect_and_other_workspace_edges(self):
+        one = self.lock(
+            [
+                ("target", "1.0.0", self.SOURCE, ["middle"]),
+                ("middle", "1.0.0", self.SOURCE, ["child"]),
+                ("peer", "1.0.0", self.SOURCE, ["child"]),
+                ("child", "1.0.0", self.SOURCE, []),
+            ]
+        )
+        two = self.lock(
+            [
+                ("target", "1.0.0", self.SOURCE, ["child"]),
+                ("peer", "1.0.0", self.SOURCE, ["child"]),
+                ("child", "1.0.0", self.SOURCE, []),
+            ]
+        )
+        identity = self.issue("target")[1]
+        self.assertEqual(native.cargo_repair_peers(identity, one), [])
+        self.assertEqual(
+            native.cargo_repair_peers(identity, two), [("peer", "1.0.0", self.SOURCE)]
+        )
+
+    def test_peer_cohort_rejects_absent_and_malformed_graph(self):
+        for lock in [
+            self.lock([]),
+            self.lock([("target", "1.0.0", self.SOURCE, ["missing"])]),
+        ]:
+            with self.subTest(lock=lock), self.assertRaises(ValueError):
+                native.cargo_repair_peers(self.issue("target")[1], lock)
 
 
 if __name__ == "__main__":

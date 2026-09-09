@@ -175,6 +175,14 @@ maximum of 64 attempts. Recorded lockfile dependency edges prioritize ineligible
 parents before the ineligible children they constrain, including paths through
 eligible intermediates. Cyclic groups retain deterministic ordering and the same
 bound; graph ordering never changes the eligible release set or native constraints.
+If one precise attempt encounters a native version conflict, Chainman can retry
+that same version while also unlocking registry packages that share an exact
+direct dependency with it in the same workspace. Eligible peers are included;
+unrelated packages, local paths and other registries are excluded. Cargo receives
+the requested target first, followed by the peers in deterministic order. This
+uses Cargo's current same-registry precise-hint behavior; the resulting target
+must match exactly, and every resulting artifact still receives the normal audit.
+Both individual and coordinated attempts count toward the same 64-attempt limit.
 Native version conflicts may cause bounded backtracking;
 unrelated native failures, missing evidence and unexpected input edits stop the
 update. This is a bounded eligible-graph search, not a complete solver or a proof

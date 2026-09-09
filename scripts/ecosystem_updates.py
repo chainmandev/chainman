@@ -917,64 +917,66 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
     return states
 
 
+def cargo_lock_graph(body: bytes) -> dict:
+    """Resolve exact native lock edges, including version and source collisions."""
+    entries = tomllib.loads(body.decode()).get("package", [])
+    if not isinstance(entries, list):
+        raise ValueError("Invalid Cargo lock package graph")
+    nodes = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Invalid Cargo lock package graph")
+        key = (entry.get("name"), entry.get("version"), entry.get("source", ""))
+        if (
+            not all(isinstance(part, str) for part in key)
+            or not key[0]
+            or not key[1]
+            or key in nodes
+        ):
+            raise ValueError("Invalid or duplicate Cargo lock package identity")
+        nodes[key] = entry
+    edges = {}
+    for key, entry in nodes.items():
+        dependencies = entry.get("dependencies", [])
+        if not isinstance(dependencies, list):
+            raise ValueError("Invalid Cargo lock dependency graph")
+        edges[key] = set()
+        for dependency in dependencies:
+            match = (
+                re.fullmatch(
+                    r"([^\s()]+)(?: ([^\s()]+)(?: \(([^()\s]+)\))?)?",
+                    dependency,
+                )
+                if isinstance(dependency, str)
+                else None
+            )
+            if match is None:
+                raise ValueError("Invalid Cargo lock dependency identity")
+            name, version, source = match.groups()
+            targets = [
+                node
+                for node in nodes
+                if node[0] == name
+                and (version is None or node[1] == version)
+                and (source is None or node[2] == source)
+            ]
+            if version is None and len({node[1] for node in targets}) != 1:
+                raise ValueError("Missing or ambiguous Cargo lock dependency version")
+            if source is None:
+                local = [node for node in targets if not node[2]]
+                if local:
+                    targets = local
+            if len(targets) != 1:
+                raise ValueError("Missing or ambiguous Cargo lock dependency source")
+            edges[key].add(targets[0])
+    return edges
+
+
 def cargo_repair_order(issues: list, locks: dict[str, bytes]) -> list:
     """Try ineligible locked dependents before the prerequisites they constrain."""
     ancestors = [set() for _ in issues]
     for workspace in dict.fromkeys(issue[0] for issue in issues):
-        entries = tomllib.loads(locks[workspace].decode()).get("package", [])
-        if not isinstance(entries, list):
-            raise ValueError("Invalid Cargo lock package graph")
-        nodes = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                raise ValueError("Invalid Cargo lock package graph")
-            key = (entry.get("name"), entry.get("version"), entry.get("source", ""))
-            if (
-                not all(isinstance(part, str) for part in key)
-                or not key[0]
-                or not key[1]
-                or key in nodes
-            ):
-                raise ValueError("Invalid or duplicate Cargo lock package identity")
-            nodes[key] = entry
-        edges = {}
-        for key, entry in nodes.items():
-            dependencies = entry.get("dependencies", [])
-            if not isinstance(dependencies, list):
-                raise ValueError("Invalid Cargo lock dependency graph")
-            edges[key] = set()
-            for dependency in dependencies:
-                match = (
-                    re.fullmatch(
-                        r"([^\s()]+)(?: ([^\s()]+)(?: \(([^()\s]+)\))?)?",
-                        dependency,
-                    )
-                    if isinstance(dependency, str)
-                    else None
-                )
-                if match is None:
-                    raise ValueError("Invalid Cargo lock dependency identity")
-                name, version, source = match.groups()
-                targets = [
-                    node
-                    for node in nodes
-                    if node[0] == name
-                    and (version is None or node[1] == version)
-                    and (source is None or node[2] == source)
-                ]
-                if version is None and len({node[1] for node in targets}) != 1:
-                    raise ValueError(
-                        "Missing or ambiguous Cargo lock dependency version"
-                    )
-                if source is None:
-                    local = [node for node in targets if not node[2]]
-                    if local:
-                        targets = local
-                if len(targets) != 1:
-                    raise ValueError(
-                        "Missing or ambiguous Cargo lock dependency source"
-                    )
-                edges[key].add(targets[0])
+        edges = cargo_lock_graph(locks[workspace])
         problems = {}
         for index, (name, identity, _) in enumerate(issues):
             if name != workspace:
@@ -984,7 +986,7 @@ def cargo_repair_order(issues: list, locks: dict[str, bytes]) -> list:
                 identity[2],
                 "registry+https://github.com/rust-lang/crates.io-index",
             )
-            if key not in nodes:
+            if key not in edges:
                 raise ValueError("Cargo repair identity is absent from the lock graph")
             problems[key] = index
         for origin, index in problems.items():
@@ -1005,6 +1007,23 @@ def cargo_repair_order(issues: list, locks: dict[str, bytes]) -> list:
         issues[index]
         for index in sorted(range(len(issues)), key=lambda index: len(ancestors[index]))
     ]
+
+
+def cargo_repair_peers(identity: tuple, body: bytes) -> list:
+    """Same-registry parents sharing an exact direct child of this target."""
+    edges = cargo_lock_graph(body)
+    target = (
+        identity[1],
+        identity[2],
+        "registry+https://github.com/rust-lang/crates.io-index",
+    )
+    if target not in edges:
+        raise ValueError("Cargo repair identity is absent from the lock graph")
+    return sorted(
+        node
+        for node, children in edges.items()
+        if node != target and node[2] == target[2] and children & edges[target]
+    )
 
 
 def cargo_resolve(
@@ -1185,8 +1204,17 @@ def cargo_resolve(
             raise failure
         return True
 
+    def trial(name, argv):
+        nonlocal attempts
+        if attempts >= CARGO_SOLVER_STATES:
+            raise ValueError(
+                f"Cargo eligibility solver exhausted its {CARGO_SOLVER_STATES}-state bound: {last}"
+            )
+        attempts += 1
+        return run(name, argv, retry=True)
+
     def search(current, choices):
-        nonlocal attempts, last
+        nonlocal last
         issues = inspect(current)
         if any(identity not in current[name] for name, identity in choices):
             return False
@@ -1205,12 +1233,8 @@ def cargo_resolve(
         )[0]
         package, observed = identity[1:3]
         checkpoint = dict(expected)
+        peers = cargo_repair_peers(identity, checkpoint[lock_names[name]][0])
         for value in values:
-            if attempts >= CARGO_SOLVER_STATES:
-                raise ValueError(
-                    f"Cargo eligibility solver exhausted its {CARGO_SOLVER_STATES}-state bound: {last}"
-                )
-            attempts += 1
             last = f"{name}: {package}@{observed} -> {value}"
             restore(checkpoint)
             argv = [
@@ -1221,8 +1245,20 @@ def cargo_resolve(
                 "--precise",
                 value,
             ]
-            if not run(name, argv, retry=True):
-                continue
+            if not trial(name, argv):
+                if not peers:
+                    continue
+                restore(checkpoint)
+                # Cargo keeps one precise hint per registry source. Put the
+                # requested target first; peers are unlocked, not individually
+                # pinned. Verify the actual precise identity below even on exit0.
+                cohort = [
+                    argument
+                    for peer, version, source in peers
+                    for argument in ("-p", f"{source}#{peer}@{version}")
+                ]
+                if not trial(name, [*argv[:-2], *cohort, *argv[-2:]]):
+                    continue
             candidate = graph()
             inspect(candidate)
             chosen = [
@@ -1247,7 +1283,7 @@ def cargo_resolve(
                 run(name, command)
             if not search(graph(), []):
                 raise ValueError(
-                    f"No eligible Cargo graph satisfies native constraints: {last}"
+                    f"No eligible Cargo graph found within native repair search: {last}"
                 )
             result = graph()
         if cargo_input_state(root, specs, set(initial)) != public_inputs:
