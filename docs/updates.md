@@ -178,10 +178,13 @@ bound; graph ordering never changes the eligible release set or native constrain
 If one precise attempt encounters a native version conflict, Chainman can retry
 that same version while also unlocking registry packages that share an exact
 direct dependency with it in the same workspace. Eligible peers are included;
-unrelated packages, local paths and other registries are excluded. Cargo receives
+exact versions already chosen by earlier repairs in that workspace stay locked.
+Other versions and independent workspaces retain their own search choices.
+Unrelated packages, local paths and other registries are excluded. Cargo receives
 the requested target first, followed by the peers in deterministic order. This
 uses Cargo's current same-registry precise-hint behavior; the resulting target
 must match exactly, and every resulting artifact still receives the normal audit.
+If Cargo nevertheless moves an earlier choice, that branch is still rejected.
 Both individual and coordinated attempts count toward the same 64-attempt limit.
 Native version conflicts may cause bounded backtracking;
 unrelated native failures, missing evidence and unexpected input edits stop the

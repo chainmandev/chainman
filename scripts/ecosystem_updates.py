@@ -1233,7 +1233,12 @@ def cargo_resolve(
         )[0]
         package, observed = identity[1:3]
         checkpoint = dict(expected)
-        peers = cargo_repair_peers(identity, checkpoint[lock_names[name]][0])
+        kept = {chosen[1:3] for workspace, chosen in choices if workspace == name}
+        peers = [
+            peer
+            for peer in cargo_repair_peers(identity, checkpoint[lock_names[name]][0])
+            if peer[:2] not in kept
+        ]
         for value in values:
             last = f"{name}: {package}@{observed} -> {value}"
             restore(checkpoint)

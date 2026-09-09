@@ -284,6 +284,92 @@ class CargoResolutionTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE((self.root / "Cargo.lock").stat().st_mode), 0o640)
         self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
 
+    def prior_choice_resolver(self, *, move_kept=False):
+        for name in ("a-chosen", "target", "peer"):
+            self.releases[name] = [
+                self.release(name, "1.0.0", 60),
+                self.release(name, "1.1.0", 1),
+            ]
+        source = "registry+https://github.com/rust-lang/crates.io-index"
+        self.choice_calls = []
+        dependencies = {
+            "parent": ["a-chosen", "target", "peer"],
+            "a-chosen": ["leaf"],
+            "target": ["leaf"],
+            "peer": ["leaf"],
+        }
+
+        def resolver(root, profile, argv, **kwargs):
+            directory = kwargs["cwd"]
+            if len(argv) == 2:
+                versions = {
+                    "parent": "1.2.0",
+                    "a-chosen": "1.1.0" if directory == self.root else "1.0.0",
+                    "target": "1.1.0",
+                    "peer": "1.0.0",
+                    "leaf": "1.5.0",
+                }
+            else:
+                versions = {
+                    item["name"]: item["version"]
+                    for item in native.tomllib.loads(
+                        (directory / "Cargo.lock").read_text()
+                    )["package"]
+                }
+                selectors = [argv[i + 1] for i, arg in enumerate(argv) if arg == "-p"]
+                self.choice_calls.append((directory, selectors))
+                package = selectors[0].split("#")[1].split("@")[0]
+                if package == "target" and len(selectors) == 1:
+                    raise subprocess.CalledProcessError(
+                        101,
+                        argv,
+                        output="error: failed to select a version for `leaf`\n",
+                    )
+                versions[package] = argv[-1]
+                if package == "target":
+                    self.assertIn(f"{source}#peer@1.0.0", selectors)
+                    if directory == self.root and (
+                        move_kept or f"{source}#a-chosen@1.0.0" in selectors
+                    ):
+                        versions["a-chosen"] = "1.1.0"
+            self.write_lock(directory, versions, dependencies=dependencies)
+            return subprocess.CompletedProcess(argv, 0, stdout="prior choice fixture\n")
+
+        return resolver
+
+    def test_coordinated_retry_keeps_previous_exact_choice_locked(self):
+        result = self.resolve(resolver=self.prior_choice_resolver())
+        selected = self.choice_calls[-1][1]
+        self.assertEqual(len(self.choice_calls), 3)
+        self.assertEqual(len(selected), 2)
+        self.assertFalse(any("#a-chosen@" in item for item in selected))
+        self.assertTrue(
+            any(
+                item[:3] == ["crates", "a-chosen", "1.0.0"]
+                for item in result["cargo_identities"]["rust-0"]
+            )
+        )
+
+    def test_previous_choice_does_not_lock_same_identity_in_other_workspace(self):
+        second = self.put("second/Cargo.toml", self.manifest.read_text()).parent
+        self.put("second/src/lib.rs", "// independent workspace\n")
+        self.write_lock(second, {"parent": "1.0.0", "leaf": "1.0.0"})
+        self.resolve(
+            resolver=self.prior_choice_resolver(),
+            spec={**self.spec, "directories": [".", "second"]},
+        )
+        cohorts = {directory: selectors for directory, selectors in self.choice_calls}
+        self.assertEqual(len(cohorts[self.root]), 2)
+        self.assertEqual(len(cohorts[second]), 3)
+        self.assertTrue(any("#a-chosen@1.0.0" in item for item in cohorts[second]))
+
+    def test_native_movement_of_kept_choice_still_rejects_candidate(self):
+        with self.assertRaisesRegex(ValueError, "No eligible Cargo graph"):
+            self.resolve(resolver=self.prior_choice_resolver(move_kept=True))
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
+
     def test_coordinated_success_with_wrong_eligible_target_fails_closed(self):
         with self.assertRaisesRegex(ValueError, "requested precise registry identity"):
             self.resolve(resolver=self.coordinated_resolver(wrong_target=True))
