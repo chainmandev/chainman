@@ -98,6 +98,10 @@ def configured(root: Path, name: str, settings: dict | None = None):
     result.setdefault(
         "profile", tc.config(root).get("project", {}).get("default_profile", "default")
     )
+    if "cargo_max_attempts" in result:
+        import ecosystem_updates
+
+        ecosystem_updates.cargo_resolution_settings(result)
     implementation(result)
     return result
 

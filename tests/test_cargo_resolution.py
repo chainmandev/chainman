@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import ecosystem_updates as native
+import dependency_api as api
 import registry
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
@@ -131,6 +132,238 @@ class CargoResolutionTests(unittest.TestCase):
             ),
         ):
             return native.resolve(self.root, spec or self.spec, policy or {}, NOW)
+
+    def test_invalid_budget_rejects_before_planning_or_native_work(self):
+        original = self.manifest.read_bytes()
+        for value in [0, -1, 513, True, False, 1.0, "64", None, [], {}]:
+            with (
+                self.subTest(value=value),
+                patch.object(native, "specifications") as planning,
+                patch.object(registry, "releases") as releases,
+                patch.object(native.chainman, "execute") as execute,
+                self.assertRaisesRegex(ValueError, "cargo_max_attempts"),
+            ):
+                native.resolve(
+                    self.root, {**self.spec, "cargo_max_attempts": value}, {}, NOW
+                )
+            planning.assert_not_called()
+            releases.assert_not_called()
+            execute.assert_not_called()
+            self.assertEqual(self.manifest.read_bytes(), original)
+            self.assertEqual(
+                native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+            )
+
+    def test_budget_rejects_inapplicable_adapters_and_custom_commands_early(self):
+        specs = [
+            {"adapter": kind} for kind in ["python", "flutter", "go", "swift", "gradle"]
+        ]
+        specs += [
+            {**self.spec, "resolve": command}
+            for command in [
+                [],
+                [["cargo", "update", "--workspace"]],
+                [["wrapper", "cargo", "update"]],
+                [["cargo", "update"], ["cargo", "update"]],
+            ]
+        ]
+        for spec in specs:
+            with (
+                self.subTest(spec=spec),
+                patch.object(native, "specifications") as planning,
+                patch.object(registry, "releases") as releases,
+                patch.object(native.chainman, "execute") as execute,
+                self.assertRaisesRegex(ValueError, "cargo_max_attempts"),
+            ):
+                native.resolve(self.root, {**spec, "cargo_max_attempts": 256}, {}, NOW)
+            planning.assert_not_called()
+            releases.assert_not_called()
+            execute.assert_not_called()
+
+    def test_budget_endpoints_and_explicit_cargo_path_are_supported(self):
+        self.releases["leaf"] = [
+            r for r in self.releases["leaf"] if r.version != "2.0.0"
+        ]
+        for limit in [1, 512]:
+            for command in [None, ["cargo", "update"], ["/tools/cargo", "update"]]:
+                with self.subTest(limit=limit, command=command):
+                    spec = {**self.spec, "cargo_max_attempts": limit}
+                    if command is not None:
+                        spec["resolve"] = [command]
+                    actual = []
+
+                    def execute(root, profile, argv, **kwargs):
+                        actual.append(argv)
+                        return self.resolver(
+                            root, profile, ["cargo", *argv[1:]], **kwargs
+                        )
+
+                    self.resolve(spec=spec, resolver=execute)
+                    self.assertEqual(len(actual), 2)
+                    self.assertTrue(
+                        all(a[0] == (command or ["cargo"])[0] for a in actual)
+                    )
+
+    def test_public_adapter_configuration_rejects_budget_before_dispatch(self):
+        specs = [
+            {"adapter": kind, "cargo_max_attempts": 256}
+            for kind in [
+                "javascript",
+                "actions",
+                "oci",
+                "nix",
+                "go",
+                "toolchain",
+                "artifact",
+                "python",
+                "flutter",
+                "swift",
+                "gradle",
+            ]
+        ]
+        specs += [
+            {**self.spec, "cargo_max_attempts": value} for value in [0, True, None, 513]
+        ]
+        specs.append(
+            {
+                **self.spec,
+                "cargo_max_attempts": 256,
+                "resolve": [["cargo", "update", "--workspace"]],
+            }
+        )
+        for spec in specs:
+            with (
+                self.subTest(spec=spec),
+                patch.object(api, "implementation") as dispatch,
+            ):
+                with self.assertRaisesRegex(ValueError, "cargo_max_attempts"):
+                    api.configured(self.root, "deps", {"adapters": {"deps": spec}})
+                dispatch.assert_not_called()
+        expected = {**self.spec, "cargo_max_attempts": 256}
+        self.assertEqual(
+            api.configured(self.root, "deps", {"adapters": {"deps": expected}}),
+            expected,
+        )
+
+    def test_explicit_budget_exhaustion_preserves_missing_and_existing_locks(self):
+        for absent in [False, True]:
+            with self.subTest(absent=absent):
+                if absent:
+                    (self.root / "Cargo.lock").unlink()
+                self.calls.clear()
+                with self.assertRaisesRegex(ValueError, "1-state bound"):
+                    self.resolve(spec={**self.spec, "cargo_max_attempts": 1})
+                self.assertEqual(len(self.calls), 2)
+                self.assertEqual(
+                    native.cargo_file_state(self.root, "Cargo.lock"),
+                    None if absent else self.original_lock,
+                )
+                self.assertEqual(stat.S_IMODE(self.manifest.stat().st_mode), 0o640)
+                self.assertIn('version="1.2.0"', self.manifest.read_text())
+
+    def test_configured_budget_counts_individual_and_coordinated_trials(self):
+        for limit in [1, 2]:
+            with self.subTest(limit=limit):
+                resolver = self.coordinated_resolver()
+                spec = {**self.spec, "cargo_max_attempts": limit}
+                if limit == 1:
+                    with self.assertRaisesRegex(ValueError, "1-state bound"):
+                        self.resolve(spec=spec, resolver=resolver)
+                else:
+                    self.resolve(spec=spec, resolver=resolver)
+                self.assertEqual(len(self.coordinated_calls), limit)
+
+    def test_configured_budget_is_shared_across_workspaces(self):
+        second = self.put("second/Cargo.toml", self.manifest.read_text())
+        self.put("second/src/lib.rs", "// independent workspace\n")
+        self.write_lock(second.parent, {"parent": "1.0.0", "leaf": "1.0.0"})
+        initial = {
+            name: native.cargo_file_state(self.root, name)
+            for name in ["Cargo.lock", "second/Cargo.lock"]
+        }
+        for limit in [3, 4]:
+            with self.subTest(limit=limit):
+                self.calls.clear()
+                spec = {
+                    **self.spec,
+                    "directories": [".", "second"],
+                    "cargo_max_attempts": limit,
+                }
+                if limit == 3:
+                    with self.assertRaisesRegex(ValueError, "3-state bound"):
+                        self.resolve(spec=spec)
+                    self.assertEqual(
+                        {
+                            name: native.cargo_file_state(self.root, name)
+                            for name in initial
+                        },
+                        initial,
+                    )
+                else:
+                    self.resolve(spec=spec)
+                self.assertEqual(
+                    len([a for _, a, _ in self.calls if len(a) > 2]), limit
+                )
+
+    def test_graph_needing_65_repairs_requires_explicit_larger_budget(self):
+        # Independent leaf updates each require one native repair. No conflicts
+        # or peer heuristic can compress this fixture's 65 necessary transitions.
+        names = [f"leaf{index:03}" for index in range(65)]
+        for name in names:
+            self.releases[name] = [
+                self.release(name, "1.0.0", 90),
+                self.release(name, "1.1.0", 1),
+            ]
+        self.write_lock(self.root, {"parent": "1.0.0", **dict.fromkeys(names, "1.0.0")})
+        original = native.cargo_file_state(self.root, "Cargo.lock")
+        for limit in [None, 64, 65]:
+            with self.subTest(limit=limit):
+                (self.root / "Cargo.lock").write_bytes(original[0])
+                (self.root / "Cargo.lock").chmod(original[1])
+                versions = {"parent": "1.2.0", **dict.fromkeys(names, "1.1.0")}
+                repaired = []
+
+                def execute(root, profile, argv, **kwargs):
+                    if len(argv) > 2:
+                        name = argv[3].split("#", 1)[1].split("@", 1)[0]
+                        self.assertEqual(argv[-1], "1.0.0")
+                        self.assertNotIn(name, repaired)
+                        repaired.append(name)
+                        versions[name] = "1.0.0"
+                    self.write_lock(root, versions)
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout="independent leaf repair\n"
+                    )
+
+                spec = {
+                    **self.spec,
+                    **({"cargo_max_attempts": limit} if limit is not None else {}),
+                }
+                if limit != 65:
+                    with self.assertRaisesRegex(ValueError, "64-state bound"):
+                        self.resolve(spec=spec, resolver=execute)
+                    self.assertEqual(
+                        native.cargo_file_state(self.root, "Cargo.lock"), original
+                    )
+                    self.assertEqual(len(repaired), 64)
+                else:
+                    self.resolve(spec=spec, resolver=execute)
+                    self.assertEqual(set(repaired), set(names))
+
+    def test_larger_budget_still_rejects_bad_identity_without_retry(self):
+        def execute(root, profile, argv, **kwargs):
+            result = self.resolver(root, profile, argv, **kwargs)
+            self.write_lock(root, {"parent": "1.2.0", "leaf": "1.6.0"}, wrong="leaf")
+            return result
+
+        with self.assertRaisesRegex(ValueError, "absent from registry"):
+            self.resolve(
+                spec={**self.spec, "cargo_max_attempts": 256}, resolver=execute
+            )
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(
+            native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
+        )
 
     def test_coupled_parent_is_repaired_before_blocked_child(self):
         self.releases["z-parent"] = [

@@ -171,7 +171,14 @@ are temporarily narrowed to their exact planned releases. Cargo still enforces
 all parent ranges, features and target constraints. Chainman then repairs newly
 ineligible registry artifacts through conservative, source-qualified Cargo
 `update --precise` attempts, trying eligible releases in descending order with a
-maximum of 64 attempts. Recorded lockfile dependency edges prioritize ineligible
+default maximum of 64 repair attempts. A Rust adapter can explicitly set
+`cargo_max_attempts` to an integer from 1 through 512 for a larger graph or a
+smaller effort allowance. This setting is rejected for other adapters and custom
+resolver commands, and invalid values fail before dependency selection or edits.
+The budget counts native repair calls across every directory and search branch
+in that adapter; initial ordinary `cargo update` calls do not consume it.
+It is a finite effort bound, not a wall-clock deadline.
+Recorded lockfile dependency edges prioritize ineligible
 parents before the ineligible children they constrain, including paths through
 eligible intermediates. Cyclic groups retain deterministic ordering and the same
 bound; graph ordering never changes the eligible release set or native constraints.
@@ -185,7 +192,7 @@ the requested target first, followed by the peers in deterministic order. This
 uses Cargo's current same-registry precise-hint behavior; the resulting target
 must match exactly, and every resulting artifact still receives the normal audit.
 If Cargo nevertheless moves an earlier choice, that branch is still rejected.
-Both individual and coordinated attempts count toward the same 64-attempt limit.
+Both individual and coordinated attempts count toward the same configured limit.
 Native version conflicts may cause bounded backtracking;
 unrelated native failures, missing evidence and unexpected input edits stop the
 update. This is a bounded eligible-graph search, not a complete solver or a proof

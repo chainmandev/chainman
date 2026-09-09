@@ -1034,6 +1034,7 @@ def cargo_resolve(
     before: dict,
     policy: dict,
     now: datetime,
+    max_attempts: int,
 ) -> dict:
     """Bounded native lock repair, with exact selected direct manifest constraints."""
     command = spec.get("resolve", [["cargo", "update"]])[0]
@@ -1206,9 +1207,9 @@ def cargo_resolve(
 
     def trial(name, argv):
         nonlocal attempts
-        if attempts >= CARGO_SOLVER_STATES:
+        if attempts >= max_attempts:
             raise ValueError(
-                f"Cargo eligibility solver exhausted its {CARGO_SOLVER_STATES}-state bound: {last}"
+                f"Cargo eligibility solver exhausted its {max_attempts}-state bound: {last}"
             )
         attempts += 1
         return run(name, argv, retry=True)
@@ -1308,9 +1309,33 @@ def cargo_resolve(
             cargo_restore(root, initial, expected, original)
 
 
+def cargo_resolution_settings(spec: dict) -> tuple[bool, int]:
+    """Validate repair effort before any adapter planning or registry work."""
+    cargo_commands = spec.get("resolve", [["cargo", "update"]])
+    repair_cargo = (
+        spec["adapter"] == "rust"
+        and isinstance(cargo_commands, list)
+        and len(cargo_commands) == 1
+        and isinstance(cargo_commands[0], list)
+        and len(cargo_commands[0]) == 2
+        and all(isinstance(a, str) for a in cargo_commands[0])
+        and Path(cargo_commands[0][0]).name == "cargo"
+        and cargo_commands[0][1] == "update"
+    )
+    cargo_max_attempts = spec.get("cargo_max_attempts", CARGO_SOLVER_STATES)
+    if "cargo_max_attempts" in spec and not repair_cargo:
+        raise ValueError("cargo_max_attempts requires ordinary Rust cargo update")
+    if repair_cargo and (
+        type(cargo_max_attempts) is not int or not 1 <= cargo_max_attempts <= 512
+    ):
+        raise ValueError("cargo_max_attempts must be an integer from 1 to 512")
+    return repair_cargo, cargo_max_attempts
+
+
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
+    repair_cargo, cargo_max_attempts = cargo_resolution_settings(spec)
     specs = specifications(root, spec)
     selected = list(specs)
     before = snapshot(root, spec)
@@ -1328,19 +1353,10 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     manifests.configure_build_dependencies(root, selected, specs=specs)
     if spec["adapter"] == "flutter":
         pub_resolve(root, spec, specs, planned, before, policy, now)
-    cargo_commands = spec.get("resolve", [["cargo", "update"]])
-    repair_cargo = (
-        spec["adapter"] == "rust"
-        and isinstance(cargo_commands, list)
-        and len(cargo_commands) == 1
-        and isinstance(cargo_commands[0], list)
-        and len(cargo_commands[0]) == 2
-        and all(isinstance(a, str) for a in cargo_commands[0])
-        and Path(cargo_commands[0][0]).name == "cargo"
-        and cargo_commands[0][1] == "update"
-    )
     cargo_identities = (
-        cargo_resolve(root, spec, specs, planned, before, policy, now)
+        cargo_resolve(
+            root, spec, specs, planned, before, policy, now, cargo_max_attempts
+        )
         if repair_cargo
         else None
     )
