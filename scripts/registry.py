@@ -11,12 +11,14 @@ from email.utils import parsedate_to_datetime
 from functools import lru_cache
 import json
 import hashlib
+import os
+from http.client import HTTPException
 import re
 import time
 from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 import xml.etree.ElementTree as ET
 
 from packaging.specifiers import SpecifierSet
@@ -28,6 +30,9 @@ MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_RETRY_WAIT_SECONDS = 60
 _crates_request_lock = Lock()
 _crates_last_request = None
+_github_context_unset = object()
+_github_context = _github_context_unset
+_github_context_lock = Lock()
 
 
 @contextmanager
@@ -215,6 +220,36 @@ def constraint(provider: str, policy: dict, name: str) -> str | tuple[str, ...]:
     return validate_constraint(provider, rule.get("range", ""))
 
 
+def github_token() -> str:
+    """One explicit credential context per command, including cached/fresh reads."""
+    global _github_context
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if token and (
+        len(token) > 4096 or re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token) is None
+    ):
+        raise ValueError("Invalid GITHUB_TOKEN header value") from None
+    with _github_context_lock:
+        if _github_context is _github_context_unset:
+            _github_context = token
+        elif token != _github_context:
+            raise ValueError(
+                "GITHUB_TOKEN changed during this command; start a new command"
+            ) from None
+        return _github_context
+
+
+class GitHubNoRedirect(HTTPRedirectHandler):
+    """Reject before urllib parses Location or constructs a successor request."""
+
+    def http_error_302(self, request, response, code, message, headers):
+        try:
+            response.close()
+        finally:
+            raise RegistryHTTPError(code, "api.github.com") from None
+
+    http_error_301 = http_error_303 = http_error_307 = http_error_308 = http_error_302
+
+
 def _fetch(
     url: str,
     accept: str = "application/json",
@@ -222,6 +257,7 @@ def _fetch(
     *,
     fresh: bool = False,
 ) -> tuple[bytes, dict]:
+    token = github_token()
     parsed = urlparse(url)
     if (
         parsed.scheme != "https"
@@ -230,6 +266,15 @@ def _fetch(
         or not parsed.hostname
     ):
         raise ValueError("Registry requests require credential-free HTTPS URLs")
+    try:
+        authenticated = bool(token) and (
+            parsed.hostname == "api.github.com"
+            and parsed.username is None
+            and parsed.password is None
+            and parsed.port in (None, 443)
+        )
+    except ValueError:
+        raise ValueError("Registry URL has an invalid port") from None
     for attempt in range(3):
         delay = 2**attempt
         try:
@@ -242,9 +287,13 @@ def _fetch(
                 },
                 method=method,
             )
+            open_request = urlopen
+            if authenticated:
+                request.add_unredirected_header("Authorization", "Bearer " + token)
+                open_request = build_opener(GitHubNoRedirect()).open
             with (
                 request_window(parsed.hostname),
-                urlopen(request, timeout=30) as response,
+                open_request(request, timeout=30) as response,
             ):
                 body = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(body) > MAX_RESPONSE_BYTES:
@@ -267,15 +316,38 @@ def _fetch(
         except (URLError, TimeoutError):
             if attempt == 2:
                 raise ValueError(f"Registry unavailable: {parsed.hostname}") from None
+        except RegistryHTTPError:
+            raise
+        except (OSError, HTTPException):
+            if not authenticated:
+                raise
+            if attempt == 2:
+                raise ValueError("Registry unavailable: api.github.com") from None
+        except (ValueError, UnicodeError):
+            if not authenticated:
+                raise
+            raise ValueError("Registry request failed: api.github.com") from None
         time.sleep(delay)
     raise AssertionError("unreachable")
 
 
 @lru_cache(maxsize=2048)
-def fetch(
+def _cached_fetch(
     url: str, accept: str = "application/json", method: str = "GET"
 ) -> tuple[bytes, dict]:
     return _fetch(url, accept, method)
+
+
+def fetch(
+    url: str, accept: str = "application/json", method: str = "GET"
+) -> tuple[bytes, dict]:
+    github_token()  # Check before a cache hit can return the command's evidence.
+    return _cached_fetch(url, accept, method)
+
+
+# Clearing metadata never resets the command's credential context.
+fetch.cache_clear = _cached_fetch.cache_clear
+fetch.cache_info = _cached_fetch.cache_info
 
 
 def data(url: str):

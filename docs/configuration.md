@@ -36,6 +36,30 @@ resolves tag and commit-time evidence only for that version, including a matchin
 commit publication time; metadata does not claim eligibility. Full version
 selection and final artifact audits still require their complete evidence.
 
+GitHub registry metadata can use an explicitly supplied `GITHUB_TOKEN` environment
+variable. Absent or empty keeps anonymous requests. Supply it through the caller's
+secret environment, never a token literal in project configuration, URLs or command
+arguments. Chainman does not discover credentials from `gh`, `.netrc`, Git helpers
+or credential files. Tokens must be at most 4096 ASCII bearer-token characters
+(letters, digits, `-._~+/`, with optional trailing `=`); malformed values fail
+without being echoed.
+
+The first registry request fixes the credential context for that command. Changing
+`GITHUB_TOKEN` afterward fails before either cached evidence or another request can
+be used, including after clearing the response cache. Start a new command to change
+credentials. Authorization is attached only to `https://api.github.com`, with no
+userinfo and the default HTTPS port. Every authenticated redirect is rejected before
+it can dispatch a successor request. Other origins retain anonymous transport;
+authentication errors never fall back to anonymous requests. Existing request,
+retry, maturity and immutable-source audit bounds remain in force. Authentication
+does not guarantee quota availability.
+
+Host mode inherits the explicitly supplied variable. Container callers can select
+`environment.pass = ["GITHUB_TOKEN"]`; the existing forwarding passes its name,
+without putting its value in arguments. This option covers Chainman's Python
+registry metadata requests. Native Git, Swift and Nix downloads keep their own
+credential behavior; this does not qualify general private-repository support.
+
 The optional-module example uses `modules = ["core", "rust"]` and individual files
 under `modules/`. Each declares directory, input globs, readiness artifacts, commands
 and update outputs. A project may keep its own modules and flake; runtime updates

@@ -5,7 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 import base64
 import copy
 import io
+import importlib.util
 import json
+import os
+import ssl
+import traceback
 from pathlib import Path
 import sys
 import tempfile
@@ -14,6 +18,9 @@ import tomllib
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+from urllib.request import HTTPHandler, HTTPSHandler, ProxyHandler, build_opener
+from urllib.response import addinfourl
+from email.message import Message
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import registry
@@ -432,6 +439,399 @@ class RegistryTransportTests(unittest.TestCase):
         self.assertEqual(registry.fetch(url)[0], b"later")
         self.assertEqual([t for t, _ in sent], [100, 101])
         self.assertEqual(waits, [1])
+
+
+class GitHubAuthTests(unittest.TestCase):
+    token = "sentinel_test_credential_OnlyFixture123"
+    url = "https://api.github.com/repos/example/demo/releases?private=query-secret"
+
+    def setUp(self):
+        self.enterContext(patch.dict(os.environ, {}, clear=True))
+        self.registry = self.module()
+
+    def module(self):
+        # A separate module represents a new command, without resetting its context.
+        spec = importlib.util.spec_from_file_location(
+            "registry_auth_fixture", Path(registry.__file__)
+        )
+        module = importlib.util.module_from_spec(spec)
+        self.enterContext(patch.dict(sys.modules, {spec.name: module}))
+        spec.loader.exec_module(module)
+        return module
+
+    def transport(self, outcomes):
+        sent, closed, waits = [], [], []
+        test = self
+
+        def send(request):
+            sent.append(request)
+            test.assertEqual(request.timeout, 30)
+            value = outcomes.pop(0)
+            if isinstance(value, BaseException):
+                raise value
+            status, headers, body = value
+            message = Message()
+            for key, text in headers.items():
+                message[key] = text
+            stream = io.BytesIO(body)
+            closed.append(stream)
+            response = addinfourl(stream, message, request.full_url, status)
+            response.msg = "fixture status"
+            return response
+
+        class FixtureHTTPS(HTTPSHandler):
+            def https_open(self, request):
+                return send(request)
+
+        class FixtureHTTP(HTTPHandler):
+            def http_open(self, request):
+                return send(request)
+
+        # Run the real opener/error processor/redirect chain; replace only wire I/O.
+        def opener(*handlers):
+            return build_opener(
+                *handlers, FixtureHTTPS(), FixtureHTTP(), ProxyHandler({})
+            )
+
+        self.enterContext(
+            patch.object(self.registry, "build_opener", side_effect=opener)
+        )
+        self.enterContext(
+            patch.object(
+                self.registry,
+                "urlopen",
+                side_effect=lambda request, timeout: opener().open(
+                    request, timeout=timeout
+                ),
+            )
+        )
+        self.enterContext(
+            patch.object(self.registry.time, "sleep", side_effect=waits.append)
+        )
+        return sent, closed, waits
+
+    def assert_redacted(self, error):
+        rendered = "".join(traceback.format_exception(error))
+        for secret in (
+            self.token,
+            "query-secret",
+            "location-secret",
+            "body-secret",
+            "Authorization",
+        ):
+            self.assertNotIn(secret, rendered)
+
+    def test_only_exact_github_api_origin_gets_the_explicit_token(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        sent, _, _ = self.transport([(200, {}, b"ok")] * 3)
+        anonymous = []
+
+        def send(request, timeout):
+            anonymous.append(request)
+            self.assertEqual(timeout, 30)
+            self.assertIsNone(request.get_header("Authorization"))
+            response = io.BytesIO(b"anonymous")
+            response.headers = {}
+            return response
+
+        with patch.object(self.registry, "urlopen", side_effect=send):
+            for url in (
+                self.url,
+                "https://API.GITHUB.COM/data",
+                "https://api.github.com:443/data",
+            ):
+                self.assertEqual(self.registry._fetch(url)[0], b"ok")
+            for url in (
+                "https://github.com/data",
+                "https://api.github.com.example.invalid/data",
+                "https://api.github.com./data",
+                "https://api.github.com:444/data",
+                "https://raw.githubusercontent.com/data",
+                "https://codeload.github.com/data",
+                "https://registry.npmjs.org/data",
+                "https://crates.io.example.invalid/data",
+            ):
+                self.assertEqual(self.registry._fetch(url)[0], b"anonymous")
+            for url in (
+                "http://api.github.com/data",
+                "https://user@api.github.com/data",
+                "https://user:password@api.github.com/data",
+            ):
+                with self.assertRaises(ValueError):
+                    self.registry._fetch(url)
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(len(anonymous), 8)
+        self.assertTrue(
+            all(r.get_header("Authorization") == "Bearer " + self.token for r in sent)
+        )
+
+    def test_absent_empty_token_and_unrelated_environment_keep_anonymous_transport(
+        self,
+    ):
+        os.environ["GH_TOKEN"] = "not_selected"
+        with patch.object(self.registry, "build_opener") as authenticated:
+            for supplied in (None, ""):
+                if supplied is not None:
+                    os.environ["GITHUB_TOKEN"] = supplied
+                response = io.BytesIO(b"public")
+                response.headers = {}
+                with patch.object(
+                    self.registry, "urlopen", return_value=response
+                ) as send:
+                    self.assertEqual(self.registry._fetch(self.url)[0], b"public")
+                self.assertIsNone(send.call_args.args[0].get_header("Authorization"))
+            authenticated.assert_not_called()
+
+    def test_malformed_token_is_rejected_before_any_transport(self):
+        with (
+            patch.object(self.registry, "urlopen") as anonymous,
+            patch.object(self.registry, "build_opener") as authenticated,
+        ):
+            for value in (
+                " ",
+                "bad token",
+                "a\rb",
+                "a\nb",
+                "a\tb",
+                "a\x00b",
+                "a\x7fb",
+                "nonascii-é",
+                "Bearer token",
+                "a" * 4097,
+            ):
+                # The real OS rejects NUL before the product can inspect it.
+                with (
+                    self.subTest(value=repr(value)),
+                    patch.object(self.registry.os, "environ", {"GITHUB_TOKEN": value}),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError, "Invalid GITHUB_TOKEN"
+                    ) as caught:
+                        self.registry.fetch(self.url)
+                    self.assertEqual(
+                        str(caught.exception), "Invalid GITHUB_TOKEN header value"
+                    )
+            anonymous.assert_not_called()
+            authenticated.assert_not_called()
+
+    def test_real_urllib_redirect_processing_never_dispatches_a_successor(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        for status in (301, 302, 303, 307, 308):
+            for location in (
+                "/same?location-secret",
+                self.url,
+                "//other.invalid/location-secret",
+                "https://api.github.com:444/location-secret",
+                "http://api.github.com/location-secret",
+                "https://user@api.github.com/location-secret",
+                "https://other.invalid/location-secret",
+                "file:///location-secret",
+                "https://[malformed/location-secret",
+            ):
+                with self.subTest(status=status, location=location):
+                    sent, closed, waits = self.transport(
+                        [(status, {"Location": location}, b"body-secret")]
+                    )
+                    with self.assertRaises(ValueError) as caught:
+                        self.registry._fetch(self.url)
+                    self.assert_redacted(caught.exception)
+                    self.assertEqual(len(sent), 1)
+                    self.assertEqual(sent[0].full_url, self.url)
+                    self.assertEqual(waits, [])
+                    self.assertTrue(all(stream.closed for stream in closed))
+
+    def test_permanent_http_errors_are_sanitized_closed_and_never_fall_back(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        for status in (401, 403, 404):
+            sent, closed, waits = self.transport(
+                [(status, {"Location": "location-secret"}, b"body-secret")]
+            )
+            with patch.object(self.registry, "urlopen") as anonymous:
+                with self.assertRaises(self.registry.RegistryHTTPError) as caught:
+                    self.registry.fetch(self.url)
+                anonymous.assert_not_called()
+            self.assertEqual(caught.exception.status, status)
+            self.assert_redacted(caught.exception)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(waits, [])
+            self.assertTrue(all(stream.closed for stream in closed))
+
+    def test_authenticated_retries_keep_credentials_bounds_and_uncached_failures(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        sent, closed, waits = self.transport(
+            [
+                (429, {"Retry-After": "3"}, b"body-secret"),
+                (503, {}, b"body-secret"),
+                (502, {}, b"body-secret"),
+                (200, {}, b"later"),
+            ]
+        )
+        with patch.object(self.registry, "urlopen") as anonymous:
+            with self.assertRaises(self.registry.RegistryHTTPError) as caught:
+                self.registry.fetch(self.url)
+            self.assertEqual(caught.exception.status, 502)
+            self.assert_redacted(caught.exception)
+            self.assertEqual(self.registry.fetch(self.url)[0], b"later")
+            self.assertEqual(self.registry.fetch(self.url)[0], b"later")
+            anonymous.assert_not_called()
+        self.assertEqual(len(sent), 4)
+        self.assertEqual(waits, [3, 2])
+        self.assertTrue(
+            all(r.get_header("Authorization") == "Bearer " + self.token for r in sent)
+        )
+        self.assertTrue(all(stream.closed for stream in closed))
+        sent, closed, waits = self.transport(
+            [(429, {"Retry-After": "61"}, b"body-secret")]
+        )
+        with self.assertRaises(self.registry.RegistryHTTPError) as caught:
+            self.registry._fetch(self.url, fresh=True)
+        self.assert_redacted(caught.exception)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(waits, [])
+        self.assertTrue(all(stream.closed for stream in closed))
+
+    def test_authenticated_transport_and_header_errors_are_sanitized(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        for error in (
+            URLError(self.token),
+            TimeoutError(self.token),
+            ssl.SSLError(self.token),
+        ):
+            sent, _, waits = self.transport([error, error, error])
+            with self.assertRaisesRegex(ValueError, "Registry unavailable") as caught:
+                self.registry._fetch(self.url)
+            self.assert_redacted(caught.exception)
+            self.assertEqual(len(sent), 3)
+            self.assertEqual(waits, [1, 2])
+        sent, _, waits = self.transport([ValueError("Authorization " + self.token)])
+        with self.assertRaisesRegex(ValueError, "Registry request failed") as caught:
+            self.registry._fetch(self.url)
+        self.assert_redacted(caught.exception)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(waits, [])
+
+    def test_authenticated_body_limit_closes_response_without_retry(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        sent, closed, waits = self.transport([(200, {}, b"body-secret")])
+        with patch.object(self.registry, "MAX_RESPONSE_BYTES", 4):
+            with self.assertRaises(ValueError) as caught:
+                self.registry._fetch(self.url)
+        self.assert_redacted(caught.exception)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(waits, [])
+        self.assertTrue(all(stream.closed for stream in closed))
+
+    def test_context_change_cannot_return_cached_privileged_data_or_switch_identity(
+        self,
+    ):
+        for initial, changed in (
+            (self.token, "other_token"),
+            (self.token, ""),
+            ("", self.token),
+        ):
+            for entry in ("cached", "fresh", "cache-cleared", "other-origin"):
+                with self.subTest(initial=bool(initial), entry=entry):
+                    self.registry = self.module()
+                    os.environ["GITHUB_TOKEN"] = initial
+                    sent, _, _ = self.transport([(200, {}, b"privileged")])
+                    response = io.BytesIO(b"anonymous")
+                    response.headers = {}
+                    with patch.object(
+                        self.registry, "urlopen", return_value=response
+                    ) as anonymous:
+                        self.registry.fetch(self.url)
+                        os.environ["GITHUB_TOKEN"] = changed
+                        if entry == "cache-cleared":
+                            self.registry.fetch.cache_clear()
+                        with self.assertRaisesRegex(
+                            ValueError, "GITHUB_TOKEN changed"
+                        ) as caught:
+                            if entry == "fresh":
+                                self.registry._fetch(self.url, fresh=True)
+                            else:
+                                self.registry.fetch(
+                                    self.url
+                                    if entry != "other-origin"
+                                    else "https://example.invalid/data"
+                                )
+                        self.assert_redacted(caught.exception)
+                        self.assertEqual(len(sent), int(bool(initial)))
+                        self.assertEqual(anonymous.call_count, int(not initial))
+
+    def test_anonymous_redirects_keep_the_existing_urllib_behavior(self):
+        sent, closed, waits = self.transport(
+            [
+                (302, {"Location": "https://example.invalid/next"}, b"redirect"),
+                (200, {}, b"public"),
+            ]
+        )
+        self.assertEqual(self.registry._fetch(self.url)[0], b"public")
+        self.assertEqual(
+            [r.full_url for r in sent], [self.url, "https://example.invalid/next"]
+        )
+        self.assertTrue(all(r.get_header("Authorization") is None for r in sent))
+        self.assertTrue(all(stream.closed for stream in closed))
+        self.assertEqual(waits, [])
+
+    def test_authenticated_fresh_head_preserves_headers_and_interrupt_propagation(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        sent, closed, waits = self.transport([(200, {}, b""), KeyboardInterrupt()])
+        self.registry._fetch(self.url, "text/plain", "HEAD", fresh=True)
+        request = sent[0]
+        self.assertEqual(request.get_method(), "HEAD")
+        self.assertEqual(request.get_header("Accept"), "text/plain")
+        self.assertEqual(request.get_header("Cache-control"), "no-cache")
+        self.assertIn("chainman", request.get_header("User-agent"))
+        with self.assertRaises(KeyboardInterrupt):
+            self.registry._fetch(self.url)
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(all(stream.closed for stream in closed))
+        self.assertEqual(waits, [])
+
+    def test_authentication_does_not_change_maturity_or_immutable_revision_checks(self):
+        import source_updates
+
+        results = []
+        for token in ("", self.token):
+            self.registry = self.module()
+            os.environ["GITHUB_TOKEN"] = token
+            self.transport(
+                [
+                    (
+                        200,
+                        {},
+                        b'{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","commit":{"committer":{"date":"2026-07-02T00:00:00Z"}}}',
+                    ),
+                    (
+                        200,
+                        {},
+                        b'{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commit":{"committer":{"date":"2026-07-02T00:00:00Z"}}}',
+                    ),
+                ]
+            )
+            with patch.object(source_updates, "registry", self.registry):
+                published = source_updates.commit_time("example/demo", "a" * 40)
+                evidence = self.registry.Release("1.0.0", published, identity="a" * 40)
+                selected = self.registry.select(
+                    "swift", [evidence], {}, "example/demo", NOW
+                )
+                results.append(
+                    (selected.version, selected.published, selected.identity)
+                )
+                with self.assertRaises(ValueError):
+                    self.registry.select(
+                        "swift",
+                        [evidence],
+                        {},
+                        "example/demo",
+                        NOW - timedelta(seconds=1),
+                    )
+                with self.assertRaises(ValueError):
+                    source_updates.commit_time("example/demo", "c" * 40)
+        self.assertEqual(
+            results,
+            [("1.0.0", datetime(2026, 7, 2, tzinfo=timezone.utc), "a" * 40)] * 2,
+        )
 
 
 class SwiftExactMetadataTests(unittest.TestCase):
