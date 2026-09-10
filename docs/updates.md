@@ -9,6 +9,18 @@ Until the first public Chainman release is published, use `--skip-chainman` expl
 A missing release source or eligibility date is an error, never an implicit exemption.
 Registry metadata responses are bounded to 64 MiB, including complete package
 histories; a larger response fails explicitly rather than dropping release evidence.
+Crates.io API requests are serialized within each process with a conservative
+one-second gap after each response, including retries and fresh reads, following its
+[data-access policy](https://crates.io/data-access). This preserves spacing even if a
+thread pauses just before sending; response time adds to the interval between requests.
+Cached reads and separate sparse-index/CDN hosts do not incur that delay. This is
+process-local pacing, not an aggregate limit across projects or machines sharing an
+IP address; run large API update lanes serially when they share that allowance.
+Registry requests retain three attempts and a 30-second network timeout per attempt.
+Retryable HTTP failures honor valid `Retry-After` seconds or HTTP dates using current
+UTC, with a maximum 60-second wait. Longer valid waits fail explicitly rather than
+retrying early. Missing or malformed hints use the existing one-/two-second backoff.
+Interrupted waits propagate; exhausted requests fail without cached substitute evidence.
 `--message TEXT` supplies the verified commit's message. Native callers can use
 `--json` for exactly one schema-1 JSON result on stdout, with command output on
 stderr. The result includes `changed` (an array of project-relative paths), `commit`

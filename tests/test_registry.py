@@ -1,6 +1,7 @@
 """Policy oracles apply equally to requested releases and resolver-selected locks."""
 
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
 import base64
 import copy
 import io
@@ -8,9 +9,11 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from threading import Event
 import tomllib
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import registry
@@ -169,6 +172,266 @@ class RegistryTransportTests(unittest.TestCase):
                             "Registry response exceeds 64 MiB from registry.example.invalid",
                         )
                     read.assert_called_once_with(limit + 1)
+
+    def transport(self, outcomes, *, elapsed=0, dispatch_delays=()):
+        """Record real transport entry times under an independently advanced clock."""
+        clock = [100.0]
+        delays = iter(dispatch_delays)
+        sent, waits, errors = [], [], []
+
+        def sleep(seconds):
+            self.assertGreaterEqual(seconds, 0)
+            for error in errors:
+                if isinstance(error, HTTPError):
+                    self.assertTrue(error.fp.closed)
+            waits.append(seconds)
+            clock[0] += seconds
+
+        def send(request, timeout):
+            self.assertEqual(timeout, 30)
+            clock[0] += next(delays, 0)
+            sent.append((clock[0], request))
+            clock[0] += elapsed
+            outcome = outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                errors.append(outcome)
+                raise outcome
+            response = io.BytesIO(outcome)
+            response.headers = {"Content-Type": "application/json"}
+            return response
+
+        self.enterContext(
+            patch.object(registry.time, "monotonic", side_effect=lambda: clock[0])
+        )
+        self.enterContext(patch.object(registry.time, "sleep", side_effect=sleep))
+        self.enterContext(patch.object(registry, "urlopen", side_effect=send))
+        self.enterContext(
+            patch.object(registry, "_crates_last_request", None, create=True)
+        )
+        return sent, waits, errors
+
+    def http_error(self, code, retry=None):
+        headers = {} if retry is None else {"Retry-After": retry}
+        return HTTPError(
+            "https://crates.io/private?secret=hidden",
+            code,
+            "secret server text",
+            headers,
+            io.BytesIO(b"secret body"),
+        )
+
+    def test_crates_api_paces_cache_misses_fresh_reads_and_retries(self):
+        error = self.http_error(429)
+        sent, waits, _ = self.transport([b"one", b"two", error, b"three"])
+        first = "https://crates.io/api/v1/crates/one"
+        self.assertEqual(registry.fetch(first)[0], b"one")
+        self.assertEqual(registry.fetch(first)[0], b"one")
+        self.assertEqual(registry._fetch(first, fresh=True)[0], b"two")
+        self.assertEqual(
+            registry.fetch("https://crates.io/api/v1/crates/two")[0], b"three"
+        )
+        self.assertEqual([row[0] for row in sent], [100, 101, 102, 103])
+        self.assertEqual(waits, [1, 1, 1])
+        self.assertEqual(sent[1][1].get_header("Cache-control"), "no-cache")
+        self.assertIn("chainman", sent[0][1].get_header("User-agent").lower())
+        self.assertTrue(error.fp.closed)
+
+    def test_slow_crates_responses_keep_a_conservative_completion_gap(self):
+        sent, waits, _ = self.transport([b"a", b"b"], elapsed=1.5)
+        registry._fetch("https://crates.io/api/v1/crates/a")
+        registry._fetch("https://crates.io/api/v1/crates/b")
+        self.assertEqual([row[0] for row in sent], [100, 102.5])
+        self.assertEqual(waits, [1])
+
+    def test_delayed_opener_cannot_leave_a_stale_dispatch_timestamp(self):
+        sent, waits, _ = self.transport([b"a", b"b"], dispatch_delays=(2, 0))
+        registry._fetch("https://crates.io/api/v1/crates/a")
+        registry._fetch("https://crates.io/api/v1/crates/b")
+        self.assertEqual([t for t, _ in sent], [102, 103])
+        self.assertEqual(waits, [1])
+
+    def test_concurrent_crates_requests_do_not_reserve_then_bunch_dispatches(self):
+        sent, waits, _ = self.transport([b"first", b"second"])
+        first_entered, release_first, second_waiting, second_entered = (
+            Event() for _ in range(4)
+        )
+        send = registry.urlopen.side_effect
+
+        def blocked_send(request, timeout):
+            if request.full_url.endswith("/first"):
+                first_entered.set()
+                self.assertTrue(release_first.wait(3))
+            else:
+                second_entered.set()
+            return send(request, timeout)
+
+        def second_request():
+            second_waiting.set()
+            return registry._fetch("https://crates.io/api/v1/crates/second")[0]
+
+        with (
+            patch.object(registry, "urlopen", side_effect=blocked_send),
+            ThreadPoolExecutor(2) as pool,
+        ):
+            first = pool.submit(
+                registry._fetch, "https://crates.io/api/v1/crates/first"
+            )
+            try:
+                self.assertTrue(first_entered.wait(3))
+                second = pool.submit(second_request)
+                self.assertTrue(second_waiting.wait(3))
+                self.assertFalse(second_entered.wait(0.02))
+            finally:
+                release_first.set()
+            self.assertEqual(first.result(timeout=3)[0], b"first")
+            self.assertEqual(second.result(timeout=3), b"second")
+        self.assertEqual([t for t, _ in sent], [100, 101])
+        self.assertEqual(waits, [1])
+
+    def test_other_hosts_including_sparse_index_and_cdn_are_not_paced(self):
+        sent, waits, _ = self.transport([b"a"] * 5)
+        for host in (
+            "index.crates.io",
+            "static.crates.io",
+            "registry.npmjs.org",
+            "crates.io.example.invalid",
+            "example.invalid",
+        ):
+            registry._fetch(f"https://{host}/entry", "text/plain", "HEAD")
+        self.assertEqual([row[0] for row in sent], [100] * 5)
+        self.assertEqual(waits, [])
+        self.assertTrue(
+            all(
+                r.get_method() == "HEAD" and r.get_header("Accept") == "text/plain"
+                for _, r in sent
+            )
+        )
+
+    def test_retry_after_seconds_and_dates_use_actual_receipt_clock(self):
+        cases = (
+            (429, "7", 7),
+            (503, "Thu, 10 Sep 2026 00:00:09 GMT", 9),
+            (503, "Thursday, 10-Sep-26 00:00:09 GMT", 9),
+            (503, "Thu Sep 10 00:00:09 2026", 9),
+            (500, "Thu, 10 Sep 2026 01:00:06 +0100", 6),
+            (502, "Wed, 09 Sep 2026 23:00:00 GMT", 1),
+            (504, "60", 60),
+        )
+        self.enterContext(
+            patch.object(
+                registry,
+                "observation_time",
+                return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+            )
+        )
+        for code, header, delay in cases:
+            with self.subTest(code=code, header=header):
+                error = self.http_error(code, header)
+                sent, waits, _ = self.transport([error, b"ok"])
+                self.assertEqual(
+                    registry._fetch("https://example.invalid/data")[0], b"ok"
+                )
+                self.assertEqual(waits, [delay])
+                self.assertEqual([t for t, _ in sent], [100, 100 + delay])
+                self.assertTrue(error.fp.closed)
+
+    def test_missing_or_malformed_retry_after_retains_bounded_backoff(self):
+        for header in (
+            None,
+            "",
+            "garbage",
+            "-1",
+            "1.5",
+            "NaN",
+            "1, 2",
+            "Thu, 10 Sep 2026 00:00:09",
+            "x" * 129,
+        ):
+            with self.subTest(header=header):
+                errors = [self.http_error(429, header), self.http_error(503, header)]
+                sent, waits, _ = self.transport([*errors, b"ok"])
+                self.assertEqual(
+                    registry._fetch("https://example.invalid/data")[0], b"ok"
+                )
+                self.assertEqual(waits, [1, 2])
+                self.assertEqual(len(sent), 3)
+                self.assertTrue(all(e.fp.closed for e in errors))
+
+    def test_excessive_valid_retry_after_fails_without_an_early_retry(self):
+        self.enterContext(
+            patch.object(
+                registry,
+                "observation_time",
+                return_value=datetime(2026, 9, 10, tzinfo=timezone.utc),
+            )
+        )
+        for header in ("61", "9" * 128, "9" * 5000, "Fri, 11 Sep 2026 00:00:00 GMT"):
+            with self.subTest(header=header):
+                error = self.http_error(429, header)
+                sent, waits, _ = self.transport([error, b"must not request"])
+                with self.assertRaisesRegex(
+                    registry.RegistryHTTPError, "Retry-After"
+                ) as caught:
+                    registry._fetch("https://example.invalid/private?secret=hidden")
+                self.assertEqual(caught.exception.status, 429)
+                self.assertNotIn("secret", str(caught.exception))
+                self.assertNotIn("hidden", str(caught.exception))
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(waits, [])
+                self.assertTrue(error.fp.closed)
+
+    def test_http_exhaustion_preserves_final_status_without_final_sleep_or_cache(self):
+        errors = [self.http_error(c) for c in (429, 503, 502)]
+        sent, waits, _ = self.transport([*errors, b"later"])
+        url = "https://example.invalid/private?secret=hidden"
+        with self.assertRaises(registry.RegistryHTTPError) as caught:
+            registry.fetch(url)
+        self.assertEqual(caught.exception.status, 502)
+        self.assertEqual(
+            str(caught.exception), "Registry HTTP 502 from example.invalid"
+        )
+        self.assertEqual(waits, [1, 2])
+        self.assertTrue(all(e.fp.closed for e in errors))
+        self.assertEqual(registry.fetch(url)[0], b"later")
+        self.assertEqual(len(sent), 4)
+
+    def test_permanent_status_and_interrupt_are_not_retried(self):
+        for error in (self.http_error(404, "60"), KeyboardInterrupt()):
+            sent, waits, _ = self.transport([error])
+            expected = (
+                registry.RegistryHTTPError
+                if isinstance(error, HTTPError)
+                else KeyboardInterrupt
+            )
+            with self.assertRaises(expected):
+                registry._fetch("https://crates.io/api/v1/crates/a")
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(waits, [])
+            if isinstance(error, HTTPError):
+                self.assertTrue(error.fp.closed)
+
+    def test_transport_exhaustion_keeps_existing_bounded_unavailable_error(self):
+        sent, waits, _ = self.transport(
+            [URLError("private"), TimeoutError(), URLError("hidden")]
+        )
+        with self.assertRaisesRegex(
+            ValueError, "^Registry unavailable: example.invalid$"
+        ):
+            registry._fetch("https://example.invalid/private?secret=hidden")
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(waits, [1, 2])
+
+    def test_interrupted_pacing_releases_lock_without_dispatch_or_cached_success(self):
+        sent, waits, _ = self.transport([b"first", b"later"])
+        registry.fetch("https://crates.io/api/v1/crates/first")
+        url = "https://crates.io/api/v1/crates/later"
+        with patch.object(registry.time, "sleep", side_effect=KeyboardInterrupt()):
+            with self.assertRaises(KeyboardInterrupt):
+                registry.fetch(url)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(registry.fetch(url)[0], b"later")
+        self.assertEqual([t for t, _ in sent], [100, 101])
+        self.assertEqual(waits, [1])
 
 
 class PublicationObservationTests(unittest.TestCase):

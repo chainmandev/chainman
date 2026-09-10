@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 import base64
 import binascii
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ import json
 import hashlib
 import re
 import time
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
@@ -23,6 +25,31 @@ from packaging.utils import canonicalize_name
 from semantic_version import NpmSpec, Version as Semver
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+MAX_RETRY_WAIT_SECONDS = 60
+_crates_request_lock = Lock()
+_crates_last_request = None
+
+
+@contextmanager
+def request_window(host: str):
+    """Leave one second after each crates.io response before the next request."""
+    global _crates_last_request
+    if host != "crates.io":
+        yield
+        return
+    # Timestamp completion under the lock. A thread delayed between timestamp
+    # reservation and actual dispatch must not leave a stale gate for its peer.
+    # Cache hits never enter; sparse-index and CDN hosts are separate services.
+    with _crates_request_lock:
+        if _crates_last_request is not None:
+            remaining = _crates_last_request + 1 - time.monotonic()
+            while remaining > 0:
+                time.sleep(remaining)
+                remaining = _crates_last_request + 1 - time.monotonic()
+        try:
+            yield
+        finally:
+            _crates_last_request = time.monotonic()
 
 
 def observation_time() -> datetime:
@@ -61,9 +88,41 @@ class Release:
 
 
 class RegistryHTTPError(ValueError):
-    def __init__(self, status: int, host: str):
+    def __init__(self, status: int, host: str, *, excessive_wait: bool = False):
         self.status = status
-        super().__init__(f"Registry HTTP {status} from {host}")
+        suffix = (
+            f"; Retry-After exceeds {MAX_RETRY_WAIT_SECONDS}-second wait limit"
+            if excessive_wait
+            else ""
+        )
+        super().__init__(f"Registry HTTP {status} from {host}{suffix}")
+
+
+def retry_delay(value, attempt: int, status: int, host: str) -> float:
+    """Bound server-requested waits without retrying earlier than a valid hint."""
+    delay = 2**attempt
+    if isinstance(value, str):
+        value = value.strip()
+        if re.fullmatch(r"[0-9]+", value):
+            digits = value.lstrip("0") or "0"
+            seconds = int(digits) if len(digits) <= 2 else MAX_RETRY_WAIT_SECONDS + 1
+            delay = max(delay, seconds)
+        elif len(value) <= 128:
+            try:
+                date = parsedate_to_datetime(value)
+                if date.tzinfo is None and re.fullmatch(
+                    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Z][a-z]{2} "
+                    r"(?: [0-9]|[0-9]{2}) [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}",
+                    value,
+                ):
+                    date = date.replace(tzinfo=timezone.utc)
+                if date.utcoffset() is not None:
+                    delay = max(delay, (date - observation_time()).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    if delay > MAX_RETRY_WAIT_SECONDS:
+        raise RegistryHTTPError(status, host, excessive_wait=True) from None
+    return delay
 
 
 def timestamp(value: str) -> datetime:
@@ -172,17 +231,21 @@ def _fetch(
     ):
         raise ValueError("Registry requests require credential-free HTTPS URLs")
     for attempt in range(3):
+        delay = 2**attempt
         try:
             request = Request(
                 url,
                 headers={
-                    "User-Agent": "nix-just-toolchain",
+                    "User-Agent": "chainman (https://github.com/chainmandev/chainman)",
                     "Accept": accept,
                     **({"Cache-Control": "no-cache"} if fresh else {}),
                 },
                 method=method,
             )
-            with urlopen(request, timeout=30) as response:
+            with (
+                request_window(parsed.hostname),
+                urlopen(request, timeout=30) as response,
+            ):
                 body = response.read(MAX_RESPONSE_BYTES + 1)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise ValueError(
@@ -190,12 +253,21 @@ def _fetch(
                     )
                 return body, dict(response.headers.items())
         except HTTPError as exc:
-            if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
-                raise RegistryHTTPError(exc.code, parsed.hostname) from None
+            try:
+                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                    raise RegistryHTTPError(exc.code, parsed.hostname) from None
+                delay = retry_delay(
+                    exc.headers.get("Retry-After") if exc.headers else None,
+                    attempt,
+                    exc.code,
+                    parsed.hostname,
+                )
+            finally:
+                exc.close()
         except (URLError, TimeoutError):
             if attempt == 2:
                 raise ValueError(f"Registry unavailable: {parsed.hostname}") from None
-        time.sleep(2**attempt)
+        time.sleep(delay)
     raise AssertionError("unreachable")
 
 
