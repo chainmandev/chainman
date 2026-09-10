@@ -22,6 +22,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -570,7 +571,7 @@ def scoped_policy(policy, name, ranges):
     }
 
 
-def compatible_scope(pin, before, *, check_declaration=False):
+def compatible_scope(pin, before, *, spec, check_declaration=False):
     originals = [
         value
         for value in before.get("requirements", [])
@@ -578,6 +579,23 @@ def compatible_scope(pin, before, *, check_declaration=False):
         and tuple(value["pointer"]) == pin.pointer
         and value["name"] == pin.name
     ]
+    if (
+        not originals
+        and spec.get("manager", "pnpm") == "pnpm"
+        and spec.get("reconcile_policy")
+        and pin.file == spec.get("workspace", "pnpm-workspace.yaml")
+        and len(pin.pointer) == 2
+        and pin.pointer[0] == "overrides"
+    ):
+        # Reconciliation changes the owner, not the original compatibility
+        # contract. Join only this exact selector and package to its old owner.
+        originals = [
+            value
+            for value in before.get("requirements", [])
+            if value["file"] == "package.json"
+            and tuple(value["pointer"]) == ("pnpm", "overrides", pin.pointer[1])
+            and value["name"] == pin.name
+        ]
     if len(originals) != 1:
         raise ValueError("Missing or ambiguous original compatible dependency scope")
     original = originals[0]["requirement"]
@@ -653,12 +671,27 @@ def reconcile_policy(workspace, policy, *, check=False):
                 ):
                     assign(content[section], alias, "catalog:")
     overrides = options.get("override_constraints", {})
-    if overrides:
-        table = (
-            workspace.documents["package.json"][0]
-            .setdefault("pnpm", {})
-            .setdefault("overrides", {})
+    manifest = workspace.documents["package.json"][0]
+    legacy_settings = manifest.get("pnpm", {})
+    legacy = legacy_settings.get("overrides", {})
+    effective = workspace.settings.get("overrides", {})
+    # pnpm 11 no longer reads package.json configuration. Preserve every legacy
+    # override, but do not guess precedence when two declarations disagree.
+    if any(
+        key in effective and effective[key] != value for key, value in legacy.items()
+    ):
+        raise ValueError(
+            "Conflicting pnpm override declarations require reconciliation"
         )
+    if "overrides" in legacy_settings or overrides:
+        table = workspace.settings.setdefault("overrides", {})
+        for selector, value in legacy.items():
+            assign(table, selector, value)
+        if "overrides" in legacy_settings:
+            del legacy_settings["overrides"]
+            if not legacy_settings:
+                del manifest["pnpm"]
+            changed = True
         for selector, rule in overrides.items():
             assign(table, selector, rule_range(rule))
     if check and changed:
@@ -707,7 +740,7 @@ def plan(workspace, policy, now, *, before=None):
         if pin.held:
             pin.ranges.append(pin.requirement)
         elif mode == "compatible":
-            pin.ranges.append(compatible_scope(pin, before))
+            pin.ranges.append(compatible_scope(pin, before, spec=workspace.spec))
         floor_match = re.match(
             r"(?:[~^]|>=?)?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?", pin.requirement
         )
@@ -1453,7 +1486,7 @@ def direct_scope(pin, spec, options, version, before):
         spec.get("mode", options.get("mode", "aggressive")) == "compatible"
         and not pin.held
     ):
-        bound = compatible_scope(pin, before, check_declaration=True)
+        bound = compatible_scope(pin, before, spec=spec, check_declaration=True)
         if Version(version) not in NpmSpec(bound):
             raise ValueError(
                 "Resolved dependency escaped its original compatible range"
@@ -1487,6 +1520,10 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
     workspace.source_contents = javascript_sources.audit(workspace, before, policy, now)
     evidence = Evidence(policy, now)
     options = policy.get("javascript", {})
+    if spec.get("mode", options.get("mode", "aggressive")) == "compatible":
+        for pin in workspace.pins:
+            if "overrides" in pin.pointer and not pin.held:
+                compatible_scope(pin, before, spec=spec, check_declaration=True)
     scopes = audit_peers(workspace, evidence, options)
     # Recheck policy at actual locked versions; ranges/wildcards may resolve to
     # another version from the planner's preferred candidate.
@@ -1577,40 +1614,20 @@ def fallback(workspace, selected, message, temporary):
     return tuple(revised)
 
 
-def restore_lock_specifiers(workspace, directory):
-    """Restore declared ranges after solving with exact temporary candidates.
-
-    Only specifier metadata changes; selected versions and artifact identities stay
-    untouched. A real frozen pnpm pass subsequently validates this lock against the
-    restored manifests, followed by independent age, identity and peer audits.
-    """
-    path = tc.contained(directory, workspace.lock)
-    lock, render = document(path, tc.regular_input(directory, workspace.lock).decode())
-    for manifest in workspace.manifests:
-        importer = lock.get("importers", {}).get(str(Path(manifest).parent), {})
+def normalization_graph(lock):
+    """Retain every graph field while excluding native declaration metadata."""
+    graph = deepcopy(lock)
+    graph.pop("overrides", None)
+    for importer in graph.get("importers", {}).values():
         for section in SECTIONS:
-            for alias, requirement in (
-                workspace.documents[manifest][0].get(section, {}).items()
-            ):
-                entry = importer.get(section, {}).get(alias)
-                if entry is not None:
-                    entry["specifier"] = requirement
-    for pin in workspace.pins:
-        if pin.catalog:
-            entry = lock.get("catalogs", {}).get(pin.catalog, {}).get(pin.alias)
-            if entry is not None:
-                requirement = workspace.documents[pin.file][0]
-                for component in pin.pointer:
-                    requirement = requirement[component]
-                entry["specifier"] = requirement
-    if "overrides" in lock:
-        lock["overrides"] = {
-            **workspace.documents["package.json"][0]
-            .get("pnpm", {})
-            .get("overrides", {}),
-            **workspace.settings.get("overrides", {}),
-        }
-    tc.atomic_bytes(path, render().encode(), 0o644)
+            for entry in importer.get(section, {}).values():
+                if isinstance(entry, Mapping):
+                    entry.pop("specifier", None)
+    for catalog in graph.get("catalogs", {}).values():
+        for entry in catalog.values():
+            if isinstance(entry, Mapping):
+                entry.pop("specifier", None)
+    return graph
 
 
 def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
@@ -1712,7 +1729,11 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                 raise ValueError(
                     "pnpm changed a declared resolver input outside the planned dependency edits"
                 )
-        workspace.settings["minimumReleaseAgeExclude"] = sorted(set(excludes))
+        # Normalization remains resolution: retain the exact baseline allowances
+        # until the full artifact audit determines the final exclusion set.
+        workspace.settings["minimumReleaseAgeExclude"] = sorted(
+            set(excludes + baseline_excludes)
+        )
         content = workspace.render(selected)
         for relative, data in content.items():
             if relative != workspace.lock:
@@ -1723,8 +1744,49 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                 )
         import javascript_sources
 
+        # Native override and catalog semantics determine the effective importer
+        # specifiers. Normalize restored ranges during resolution, before freeze;
+        # neither a new identity nor an edge change may escape this step.
+        lock_path = tc.contained(temporary, workspace.lock)
+        resolved_lock = document(
+            lock_path, tc.regular_input(temporary, workspace.lock).decode()
+        )[0]
+        normalized = chainman.execute(
+            root,
+            spec.get("profile", "javascript"),
+            [
+                "pnpm",
+                "install",
+                "--lockfile-only",
+                "--ignore-scripts",
+                "--strict-peer-dependencies=false",
+                "--no-frozen-lockfile",
+            ],
+            cwd=temporary,
+            env=tc.environment(root),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if normalized.returncode:
+            raise ValueError("pnpm lock normalization rejected restored declarations")
+        normalized_lock = document(
+            lock_path, tc.regular_input(temporary, workspace.lock).decode()
+        )[0]
+        if normalization_graph(resolved_lock) != normalization_graph(normalized_lock):
+            raise ValueError(
+                "pnpm lock normalization changed the selected dependency graph"
+            )
+        for relative, planned in content.items():
+            if (
+                relative != workspace.lock
+                and tc.regular_input(temporary, relative) != planned
+            ):
+                raise ValueError(
+                    "pnpm lock normalization changed a declared resolver input"
+                )
         javascript_sources.bind(workspace, temporary)
-        restore_lock_specifiers(workspace, temporary)
         workspace.settings["minimumReleaseAgeExclude"] = audit_details(
             temporary, {**spec, "directory": "."}, before, policy, now
         )

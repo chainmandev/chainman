@@ -158,6 +158,33 @@ class JavaScriptTests(unittest.TestCase):
             self.assertTrue((cwd / "pnpm-lock.yaml").is_file())
             return subprocess.CompletedProcess(argv, 0, "", "")
         workspace = js.Workspace(cwd, {**self.spec, "directory": "."})
+        if "--no-frozen-lockfile" in argv:
+            # Installation with an existing acceptable lock preserves its graph;
+            # this fixture only refreshes declaration metadata during normalization.
+            path = cwd / "pnpm-lock.yaml"
+            lock = js.document(path, path.read_text())[0]
+            for manifest in workspace.manifests:
+                importer = lock["importers"][str(Path(manifest).parent)]
+                for section in js.SECTIONS:
+                    for alias, requirement in (
+                        workspace.documents[manifest][0].get(section, {}).items()
+                    ):
+                        entry = importer.get(section, {}).get(alias)
+                        if entry is not None:
+                            entry["specifier"] = requirement
+            for catalog, entries in lock.get("catalogs", {}).items():
+                ranges = (
+                    workspace.settings.get("catalog", {})
+                    if catalog == "default"
+                    else workspace.settings.get("catalogs", {}).get(catalog, {})
+                )
+                for alias, entry in entries.items():
+                    if alias in ranges:
+                        entry["specifier"] = ranges[alias]
+            if "overrides" in lock:
+                lock["overrides"] = dict(workspace.settings.get("overrides", {}))
+            path.write_text(json.dumps(lock))
+            return subprocess.CompletedProcess(argv, 0, "", "")
         packages, snapshots, importers = {}, {}, {}
 
         def add(name, version):
@@ -408,6 +435,123 @@ class JavaScriptTests(unittest.TestCase):
                 self.release("library", "0.6.0")
                 self.assertEqual(self.selected()[1]["library"], "0.5.9")
                 self.resolve(self.fake_npm if manager == "npm" else self.fake_pnpm)
+
+    def test_compatible_legacy_override_migration_resolves_and_audits_original_range(
+        self,
+    ):
+        self.spec.update(mode="compatible", reconcile_policy=True)
+        self.manifest(
+            "package.json",
+            {"utility": "^1.0.0"},
+            pnpm={"overrides": {"utility": "^1.0.0"}},
+        )
+        modes = {"package.json": 0o640, "pnpm-workspace.yaml": 0o600}
+        for relative, mode in modes.items():
+            (self.root / relative).chmod(mode)
+        for version in ("1.0.0", "1.2.0", "2.0.0"):
+            self.release("utility", version)
+        before = js.snapshot(self.root, self.spec)
+        self.assertEqual(
+            [row for row in before["requirements"] if "overrides" in row["pointer"]],
+            [
+                {
+                    "file": "package.json",
+                    "pointer": ["pnpm", "overrides", "utility"],
+                    "name": "utility",
+                    "requirement": "^1.0.0",
+                }
+            ],
+        )
+        result = self.resolve()
+        self.assertEqual(
+            result["selected"],
+            {
+                "package.json:dependencies/utility": "1.2.0",
+                "pnpm-workspace.yaml:overrides/utility": "1.2.0",
+            },
+        )
+        workspace = js.Workspace(self.root, self.spec)
+        self.assertNotIn("pnpm", workspace.documents["package.json"][0])
+        self.assertEqual(workspace.settings["overrides"], {"utility": "^1.2.0"})
+        self.assertEqual(
+            {row[2] for row in js.snapshot(self.root, self.spec)["identities"]},
+            {"1.2.0"},
+        )
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+        for relative, mode in modes.items():
+            self.assertEqual((self.root / relative).stat().st_mode & 0o7777, mode)
+
+    def test_compatible_migrated_workspace_audit_rejects_escaped_direct_declaration(
+        self,
+    ):
+        self.spec.update(mode="compatible", reconcile_policy=True)
+        self.manifest(
+            "package.json",
+            {"utility": "^1.0.0"},
+            pnpm={"overrides": {"utility": "^1.0.0"}},
+        )
+        for version in ("1.0.0", "1.2.0", "2.0.0"):
+            self.release("utility", version)
+        before = js.snapshot(self.root, self.spec)
+        self.resolve()
+        manifest = json.loads((self.root / "package.json").read_text())
+        self.assertNotIn("pnpm", manifest)
+        for replacement in ("^2.0.0", "^1.0.0 || ^2.0.0"):
+            with self.subTest(replacement=replacement):
+                manifest["dependencies"]["utility"] = replacement
+                self.write("package.json", json.dumps(manifest, indent=2) + "\n")
+                inputs = {
+                    path: (path.read_bytes(), path.stat().st_mode)
+                    for path in self.root.iterdir()
+                    if path.is_file()
+                }
+                with self.assertRaisesRegex(ValueError, "original compatible range"):
+                    js.audit(self.root, self.spec, before, self.policy, self.now)
+                self.assertEqual(
+                    {path: (path.read_bytes(), path.stat().st_mode) for path in inputs},
+                    inputs,
+                )
+
+    def test_compatible_migrated_override_audit_rejects_widened_declaration(self):
+        self.spec.update(mode="compatible", reconcile_policy=True)
+        self.manifest(
+            "package.json",
+            {"utility": "^1.0.0"},
+            pnpm={"overrides": {"utility": "^1.0.0"}},
+        )
+        for version in ("1.0.0", "1.2.0", "2.0.0"):
+            self.release("utility", version)
+        before = js.snapshot(self.root, self.spec)
+        self.resolve()
+        fixed = {
+            relative: (self.root / relative).read_bytes()
+            for relative in ("package.json", "pnpm-lock.yaml")
+        }
+        for replacement in ("^1.0.0 || ^2.0.0", "*"):
+            with self.subTest(replacement=replacement):
+                workspace = js.Workspace(self.root, self.spec)
+                workspace.settings["overrides"]["utility"] = replacement
+                (self.root / "pnpm-workspace.yaml").write_bytes(
+                    workspace.render([])["pnpm-workspace.yaml"]
+                )
+                self.assertEqual(
+                    {
+                        relative: (self.root / relative).read_bytes()
+                        for relative in fixed
+                    },
+                    fixed,
+                )
+                inputs = {
+                    path: (path.read_bytes(), path.stat().st_mode)
+                    for path in self.root.iterdir()
+                    if path.is_file()
+                }
+                with self.assertRaisesRegex(ValueError, "original compatible range"):
+                    js.audit(self.root, self.spec, before, self.policy, self.now)
+                self.assertEqual(
+                    {path: (path.read_bytes(), path.stat().st_mode) for path in inputs},
+                    inputs,
+                )
 
     def test_compatible_catalog_and_alias_audits_require_one_original_identity(self):
         self.spec["mode"] = "compatible"
@@ -1063,6 +1207,120 @@ class JavaScriptTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity mismatch"):
             self.selected()
 
+    def test_policy_overrides_use_effective_workspace_settings(self):
+        self.spec["reconcile_policy"] = True
+        self.write(
+            "pnpm-workspace.yaml",
+            "overrides:\n  utility: ^1.0.0\n  unmanaged: 2.0.0\n"
+            "allowBuilds:\n  esbuild: true\n",
+        )
+        self.policy["javascript"] = {
+            "override_constraints": {
+                "utility": {"range": "^1.2.0", "reason": "Supported interface."}
+            }
+        }
+        workspace = js.Workspace(self.root, self.spec)
+        js.reconcile_policy(workspace, self.policy)
+        self.assertEqual(
+            workspace.settings["overrides"],
+            {"utility": "^1.2.0", "unmanaged": "2.0.0"},
+        )
+        self.assertNotIn("pnpm", workspace.documents["package.json"][0])
+        self.assertEqual(workspace.settings["allowBuilds"], {"esbuild": True})
+        self.assertEqual({pin.file for pin in workspace.pins}, {"pnpm-workspace.yaml"})
+
+    def test_policy_migrates_all_legacy_overrides_without_new_rules(self):
+        self.spec["reconcile_policy"] = True
+        (self.root / "pnpm-workspace.yaml").unlink()
+        legacy = {
+            "utility": "^1.0.0",
+            "parent>transitive": "1.0.0",
+            "removed": "-",
+            "shared": "$library",
+        }
+        self.manifest(
+            "package.json",
+            {"library": "1.0.0"},
+            pnpm={"overrides": legacy, "onlyBuiltDependencies": ["esbuild"]},
+        )
+        workspace = js.Workspace(self.root, self.spec)
+        js.reconcile_policy(workspace, self.policy)
+        self.assertEqual(workspace.settings["overrides"], legacy)
+        self.assertEqual(
+            workspace.documents["package.json"][0]["pnpm"],
+            {"onlyBuiltDependencies": ["esbuild"]},
+        )
+
+    def test_policy_coalesces_equal_override_duplicates(self):
+        self.spec["reconcile_policy"] = True
+        self.manifest("package.json", {}, pnpm={"overrides": {"utility": "^1"}})
+        self.write("pnpm-workspace.yaml", "overrides:\n  utility: ^1\n")
+        workspace = js.Workspace(self.root, self.spec)
+        js.reconcile_policy(workspace, self.policy)
+        self.assertEqual(workspace.settings["overrides"], {"utility": "^1"})
+        self.assertNotIn("pnpm", workspace.documents["package.json"][0])
+        self.assertEqual(len(workspace.pins), 1)
+
+    def test_policy_rejects_conflicting_duplicate_overrides_before_assignment(self):
+        self.spec["reconcile_policy"] = True
+        self.manifest("package.json", {}, pnpm={"overrides": {"utility": "^1"}})
+        self.write("pnpm-workspace.yaml", "overrides:\n  utility: ^2\n")
+        self.policy["javascript"] = {
+            "override_constraints": {
+                "utility": {"range": "^3", "reason": "Explicit new policy."}
+            }
+        }
+        workspace = js.Workspace(self.root, self.spec)
+        with self.assertRaisesRegex(ValueError, "Conflicting.*override"):
+            js.reconcile_policy(workspace, self.policy)
+        self.assertEqual(workspace.settings["overrides"], {"utility": "^2"})
+        self.assertEqual(
+            workspace.documents["package.json"][0]["pnpm"]["overrides"],
+            {"utility": "^1"},
+        )
+
+    def test_policy_check_rejects_legacy_migration_without_writing_files(self):
+        self.spec["reconcile_policy"] = True
+        self.manifest("package.json", {}, pnpm={"overrides": {"utility": "^1"}})
+        workspace = js.Workspace(self.root, self.spec)
+        original = dict(workspace.original)
+        with self.assertRaisesRegex(ValueError, "policy ranges drifted"):
+            js.reconcile_policy(workspace, self.policy, check=True)
+        for name, body in original.items():
+            self.assertEqual((self.root / name).read_bytes(), body)
+
+    def test_policy_check_accepts_effective_workspace_without_legacy_recreation(self):
+        self.spec["reconcile_policy"] = True
+        self.write("pnpm-workspace.yaml", "overrides:\n  utility: ^1\n")
+        self.policy["javascript"] = {
+            "override_constraints": {
+                "utility": {"range": "^1", "reason": "Supported interface."}
+            }
+        }
+        workspace = js.Workspace(self.root, self.spec)
+        original = dict(workspace.original)
+        js.reconcile_policy(workspace, self.policy, check=True)
+        self.assertNotIn("pnpm", workspace.documents["package.json"][0])
+        for name, body in original.items():
+            self.assertEqual((self.root / name).read_bytes(), body)
+
+    def test_override_migration_requires_explicit_policy_reconciliation(self):
+        self.manifest("package.json", {}, pnpm={"overrides": {"utility": "^1"}})
+        workspace = js.Workspace(self.root, self.spec)
+        before = workspace.render([])
+        js.reconcile_policy(workspace, self.policy)
+        self.assertEqual(workspace.render([]), before)
+        self.assertNotIn("overrides", workspace.settings)
+
+    def test_pnpm_override_migration_does_not_change_npm_projects(self):
+        self.spec.update(manager="npm", reconcile_policy=True)
+        self.manifest("package.json", {}, overrides={"utility": "^1"})
+        workspace = js.Workspace(self.root, self.spec)
+        before = workspace.render([])
+        with self.assertRaisesRegex(ValueError, "requires pnpm"):
+            js.reconcile_policy(workspace, self.policy)
+        self.assertEqual(workspace.render([]), before)
+
     def test_declarative_catalog_reconciliation_preserves_exception_ranges(self):
         self.spec["reconcile_policy"] = True
         self.manifest("package.json", {"compiler": "1.0.0"})
@@ -1105,7 +1363,7 @@ class JavaScriptTests(unittest.TestCase):
             "^1.0.0",
         )
         self.assertEqual(
-            workspace.documents["package.json"][0]["pnpm"]["overrides"]["utility"],
+            workspace.settings["overrides"]["utility"],
             "^1.0.0",
         )
         before = js.snapshot(self.root, self.spec)
@@ -1377,6 +1635,225 @@ class JavaScriptTests(unittest.TestCase):
         self.assertEqual(
             list((self.root / ".cache/toolchain/work").glob("javascript-update-*")), []
         )
+
+    def native_override_normalization_fixture(self, fault=None):
+        self.spec["reconcile_policy"] = True
+        self.manifest(
+            "package.json",
+            {"utility": "^7.0.0", "unrelated": "1.0.0"},
+            pnpm={"overrides": {"utility": "^6.0.0"}},
+        )
+        self.policy["javascript"] = {
+            "override_constraints": {
+                "utility": {"range": "^6.0.0", "reason": "Supported interface."}
+            }
+        }
+        for version in ("6.0.0", "6.1.0", "7.0.0"):
+            self.release("utility", version)
+        self.release("unrelated", "1.0.0")
+        calls = []
+        original = {
+            path: (path.read_bytes(), path.stat().st_mode)
+            for path in self.root.iterdir()
+            if path.is_file()
+        }
+
+        def package(name, version):
+            return {
+                "resolution": {
+                    "integrity": self.metadata[name]["versions"][version]["dist"][
+                        "integrity"
+                    ]
+                }
+            }
+
+        def execute(root, profile, argv, *, cwd, **kwargs):
+            self.assertEqual(root, self.root)
+            self.assertEqual(profile, "host")
+            self.assertIn("--lockfile-only", argv)
+            self.assertIn("--ignore-scripts", argv)
+            self.assertNotEqual(cwd, self.root)
+            path = cwd / "pnpm-lock.yaml"
+            if "--frozen-lockfile" in argv:
+                calls.append("frozen")
+                lock = js.document(path, path.read_text())[0]
+                accepted = (
+                    lock["importers"]["."]["dependencies"]["utility"]["specifier"]
+                    == "^6.0.0"
+                )
+                return subprocess.CompletedProcess(
+                    argv,
+                    0 if accepted else 1,
+                    "",
+                    ""
+                    if accepted
+                    else "ERR_PNPM_OUTDATED_LOCKFILE: effective override specifier differs",
+                )
+            if not calls:
+                calls.append("resolve")
+                lock = {
+                    "lockfileVersion": "9.0",
+                    "overrides": {"utility": "6.1.0"},
+                    "importers": {
+                        ".": {
+                            "dependencies": {
+                                "utility": {"specifier": "6.1.0", "version": "6.1.0"},
+                                "unrelated": {"specifier": "1.0.0", "version": "1.0.0"},
+                            }
+                        }
+                    },
+                    "packages": {
+                        "utility@6.1.0": package("utility", "6.1.0"),
+                        "unrelated@1.0.0": package("unrelated", "1.0.0"),
+                    },
+                    "snapshots": {"utility@6.1.0": {}, "unrelated@1.0.0": {}},
+                }
+            else:
+                self.assertEqual(calls, ["resolve"])
+                self.assertIn("--no-frozen-lockfile", argv)
+                calls.append("normalize")
+                lock = js.document(path, path.read_text())[0]
+                lock["overrides"] = {"utility": "^6.0.0"}
+                lock["importers"]["."]["dependencies"]["utility"]["specifier"] = (
+                    "^6.0.0"
+                )
+                if fault == "identity":
+                    lock["importers"]["."]["dependencies"]["utility"]["version"] = (
+                        "6.0.0"
+                    )
+                    del lock["packages"]["utility@6.1.0"]
+                    lock["packages"]["utility@6.0.0"] = package("utility", "6.0.0")
+                    del lock["snapshots"]["utility@6.1.0"]
+                    lock["snapshots"]["utility@6.0.0"] = {}
+                elif fault == "edge":
+                    lock["snapshots"]["utility@6.1.0"]["dependencies"] = {
+                        "unrelated": "1.0.0"
+                    }
+            path.write_text(json.dumps(lock))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        return execute, calls, original
+
+    def test_native_override_normalization_preserves_selected_graph_before_freeze(self):
+        execute, calls, original = self.native_override_normalization_fixture()
+        before = js.snapshot(self.root, self.spec)
+        result = self.resolve(execute)
+        self.assertEqual(calls, ["resolve", "normalize", "frozen"])
+        self.assertEqual(result["resolution_attempts"], 1)
+        workspace = js.Workspace(self.root, self.spec)
+        self.assertEqual(
+            workspace.documents["package.json"][0]["dependencies"]["utility"],
+            "^7.0.0",
+        )
+        self.assertEqual(workspace.settings["overrides"], {"utility": "^6.0.0"})
+        self.assertEqual(
+            {
+                (row[1], row[2])
+                for row in js.snapshot(self.root, self.spec)["identities"]
+            },
+            {("utility", "6.1.0"), ("unrelated", "1.0.0")},
+        )
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+        for path, (_, mode) in original.items():
+            self.assertEqual(path.stat().st_mode, mode)
+
+    def test_native_normalization_rejects_mature_identity_drift_before_freeze(self):
+        execute, calls, original = self.native_override_normalization_fixture(
+            "identity"
+        )
+        with self.assertRaises(ValueError):
+            self.resolve(execute)
+        self.assertEqual(calls, ["resolve", "normalize"])
+        self.assertEqual(
+            {path: (path.read_bytes(), path.stat().st_mode) for path in original},
+            original,
+        )
+        self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+
+    def test_native_normalization_rejects_graph_only_drift_before_freeze(self):
+        execute, calls, original = self.native_override_normalization_fixture("edge")
+        with self.assertRaises(ValueError):
+            self.resolve(execute)
+        self.assertEqual(calls, ["resolve", "normalize"])
+        self.assertEqual(
+            {path: (path.read_bytes(), path.stat().st_mode) for path in original},
+            original,
+        )
+        self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+
+    def test_native_normalization_failure_stops_before_freeze_and_publication(self):
+        execute, calls, original = self.native_override_normalization_fixture()
+
+        def fail(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            if "--no-frozen-lockfile" in args[2]:
+                return subprocess.CompletedProcess(
+                    args[2], 41, "", "neutral normalization failure"
+                )
+            return result
+
+        with self.assertRaisesRegex(ValueError, "normalization"):
+            self.resolve(fail)
+        self.assertEqual(calls, ["resolve", "normalize"])
+        self.assertEqual(
+            {path: (path.read_bytes(), path.stat().st_mode) for path in original},
+            original,
+        )
+        self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+
+    def test_native_normalization_rejects_manifest_drift_before_freeze(self):
+        execute, calls, original = self.native_override_normalization_fixture()
+
+        def mutate(*args, **kwargs):
+            result = execute(*args, **kwargs)
+            if "--no-frozen-lockfile" in args[2]:
+                (kwargs["cwd"] / "package.json").write_text("unexpected native edit\n")
+            return result
+
+        with self.assertRaisesRegex(ValueError, "declared resolver input"):
+            self.resolve(mutate)
+        self.assertEqual(calls, ["resolve", "normalize"])
+        self.assertEqual(
+            {path: (path.read_bytes(), path.stat().st_mode) for path in original},
+            original,
+        )
+        self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+
+    def test_baseline_maturity_exclusions_survive_normalization_then_retire(self):
+        self.manifest("package.json", {"library": "1.0.0"})
+        self.release("library", "1.0.0")
+        self.resolve()
+        self.release("library", "1.0.0", days=1)
+        self.release("library", "2.0.0", days=1)
+        before = js.snapshot(self.root, self.spec)
+        phases = []
+
+        def observe(*args, **kwargs):
+            workspace = js.Workspace(kwargs["cwd"], self.spec)
+            argv = args[2]
+            phase = (
+                "frozen"
+                if "--frozen-lockfile" in argv
+                else "normalize"
+                if "--no-frozen-lockfile" in argv
+                else "resolve"
+            )
+            phases.append(phase)
+            self.assertEqual(
+                workspace.settings["minimumReleaseAgeExclude"],
+                [] if phase == "frozen" else ["library@1.0.0"],
+            )
+            return self.fake_pnpm(*args, **kwargs)
+
+        self.resolve(observe)
+        self.assertEqual(phases, ["resolve", "normalize", "frozen"])
+        self.assertEqual(
+            js.snapshot(self.root, self.spec)["identities"], before["identities"]
+        )
+        self.assertEqual(
+            js.Workspace(self.root, self.spec).settings["minimumReleaseAgeExclude"], []
+        )
+        js.audit(self.root, self.spec, before, self.policy, self.now)
 
     def test_failed_resolution_and_unexpected_source_edit_do_not_install_plan(self):
         self.manifest("package.json", {"library": "1.0.0"})

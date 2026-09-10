@@ -366,6 +366,23 @@ replace direct registry declarations with `catalog:`; explicit named catalog and
 local workspace references remain intact. Per-manifest rules retain intentional
 range exceptions. Final audit checks the same declarations for drift.
 
+Policy reconciliation writes pnpm overrides to `pnpm-workspace.yaml`, which is
+supported by current pnpm 10 and 11 releases. It moves existing root
+`package.json` pnpm overrides there, preserving selectors outside the configured
+rules and other pnpm settings. Equal duplicates are coalesced; conflicting root
+and workspace declarations fail for explicit reconciliation. The final audit
+rejects a still-required migration without writing files. This migration requires
+`reconcile_policy=true`; it does not migrate other pnpm settings or npm projects.
+Compatible updates retain each moved override's original range through its exact
+selector and package identity. Final audit rejects widened override declarations
+even when the current lock still falls inside the original range.
+
+After exact resolution, pnpm normalizes the restored declarations before the
+candidate is frozen. Only importer/catalog specifiers and override metadata may
+change; every selected identity, artifact and dependency edge must stay unchanged.
+Normalization failure or input drift aborts the update. The subsequent frozen
+lock check and full audits never regenerate files or retry verification.
+
 Local `file:`, `link:` and `workspace:` dependencies must bind their package names
 to included workspace manifests within the adopted project. Directory lock entries
 are validated against those manifests, and their resolved dependency and peer graph
