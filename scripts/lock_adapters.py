@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
 import registry
-from toolchain import contained, environment, managed_run, entry_command
+from toolchain import (
+    contained,
+    environment,
+    managed_run,
+    entry_command,
+    local_source,
+    regular_input,
+)
 
 
 def paths(root: Path, directory: Path, filename: str) -> list[Path]:
@@ -103,6 +112,202 @@ def swift_repository(url: str) -> str:
     if any(part in (".", "..", "") for part in repository.split("/")):
         raise ValueError("Invalid SwiftPM GitHub repository")
     return repository
+
+
+def swift_declarations(root: Path, name: str, *, explicit: bool = False) -> list[dict]:
+    """Read only literal package calls; native evaluation verifies their inventory."""
+    body = regular_input(root, name).decode()
+    # Hide comments and string contents when locating calls, preserving offsets.
+    tokens = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.DOTALL)
+    masked = tokens.sub(lambda m: " " * len(m[0]), body)
+    result, seen = [], set()
+    for call in re.finditer(r"\.package\b", masked):
+        opening = re.match(r"\s*\(", masked[call.end() :])
+        if opening is None:
+            raise ValueError("Swift dependencies require literal package calls")
+        start = call.end() + opening.end()
+        end = masked.find(")", start)
+        if end < 0:
+            raise ValueError("Unclosed Swift dependency declaration")
+        arguments = tokens.sub(
+            lambda m: m[0] if m[0].startswith('"') else " " * len(m[0]),
+            body[start:end],
+        )
+        local = re.fullmatch(
+            r'\s*(?:name\s*:\s*"(?P<name>[^"\\\n]+)"\s*,\s*)?'
+            r'path\s*:\s*"(?P<path>[^"\\\n]+)"\s*,?\s*',
+            arguments,
+        )
+        remote = re.fullmatch(
+            r'\s*url\s*:\s*"(?P<url>[^"\\\n]+)"\s*,\s*'
+            r'(?P<style>from|exact)\s*:\s*"(?P<version>[^"\\\n]+)"\s*,?\s*',
+            arguments,
+        )
+        if local:
+            target = local_source(root, (root / name).parent, local["path"])
+            item = {"kind": "local", "path": str(target), "name": local["name"]}
+            key = ("local", str(target))
+        elif remote:
+            package = swift_repository(remote["url"])
+            value = remote["version"]
+            if (
+                not re.fullmatch(r"\d+\.\d+\.\d+", value)
+                or registry.version("swift", value) is None
+            ):
+                raise ValueError("Swift dependencies require a stable release version")
+            upper = str(int(value.split(".")[0]) + 1) + ".0.0"
+            item = {
+                "kind": "remote",
+                "package": package,
+                "version": value,
+                "style": remote["style"],
+                "bound": value if remote["style"] == "exact" else f">={value} <{upper}",
+                "requirement": {"exact": [value]}
+                if remote["style"] == "exact"
+                else {"range": [{"lowerBound": value, "upperBound": upper}]},
+                "value_start": start + remote.start("version"),
+                "value_end": start + remote.end("version"),
+                "style_start": start + remote.start("style"),
+                "style_end": start + remote.end("style"),
+            }
+            key = ("remote", package)
+        elif explicit and (
+            configured := re.fullmatch(
+                r'\s*url\s*:\s*(?:[A-Za-z_]\w*|"[^"\\\n]+")\s*,\s*'
+                r"exact\s*:\s*(?:(?P<reference>[A-Za-z_]\w*)|"
+                r'"(?P<value>[^"\\\n]+)")\s*,?\s*',
+                arguments,
+            )
+        ):
+            # Existing explicit pins may own evaluated exact remote declarations.
+            # Native inventory and the configured field, not this call text, bind them.
+            item = {
+                "kind": "explicit",
+                "reference": configured["reference"],
+                "value_span": (
+                    start + configured.start("value"),
+                    start + configured.end("value"),
+                )
+                if configured["value"] is not None
+                else None,
+            }
+            key = ("explicit", call.start())
+        else:
+            raise ValueError(
+                "Swift dependencies require literal from/exact GitHub releases or contained paths"
+            )
+        if key in seen:
+            raise ValueError("Duplicate Swift dependency declaration")
+        seen.add(key)
+        result.append({**item, "start": call.start(), "end": end + 1})
+    return result
+
+
+def swift_explicit_requirements(root: Path, spec: dict) -> dict:
+    result = {}
+    name = str((contained(root, spec["directory"]) / "Package.swift").relative_to(root))
+    body = regular_input(root, name).decode()
+    # A named exact argument must refer to the configured literal initializer;
+    # coincidentally equal, unused variables do not own a native dependency.
+    visible = re.sub(
+        r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"',
+        lambda m: m[0] if m[0].startswith('"') else " " * len(m[0]),
+        body,
+        flags=re.DOTALL,
+    )
+    for pin in spec.get("pins", []):
+        if pin.get("file") != name:
+            continue
+        package = pin.get("name")
+        if (
+            pin.get("provider") != "swift"
+            or not isinstance(package, str)
+            or swift_repository("https://github.com/" + package) != package
+        ):
+            raise ValueError("Explicit Swift pin requires its canonical repository")
+        if pin.get("format") != "regex" or not isinstance(pin.get("pattern"), str):
+            raise ValueError("Explicit Swift pin requires an owning manifest regex")
+        matches = list(re.finditer(pin["pattern"], body, re.MULTILINE))
+        if (
+            len(matches) != 1
+            or "value" not in matches[0].groupdict()
+            or package in result
+        ):
+            raise ValueError("Ambiguous explicit Swift pin ownership")
+        value = matches[0]["value"]
+        if (
+            not re.fullmatch(r"\d+\.\d+\.\d+", value)
+            or registry.version("swift", value) is None
+        ):
+            raise ValueError("Explicit Swift pin must own one stable release version")
+        span = matches[0].span("value")
+        if any(
+            span[0] < item["span"][1] and item["span"][0] < span[1]
+            for item in result.values()
+        ):
+            raise ValueError("Overlapping explicit Swift pin ownership")
+        references = [
+            match["name"]
+            for match in re.finditer(
+                r"\b(?:let|var)\s+(?P<name>[A-Za-z_]\w*)\s*"
+                r"(?::\s*(?:PackageDescription\.)?Version\s*)?"
+                r'=\s*"(?P<value>\d+\.\d+\.\d+)"',
+                visible,
+            )
+            if match.span("value") == span
+        ]
+        result[package] = {"value": value, "span": span, "references": references}
+    return result
+
+
+def swift_local_manifests(root: Path, spec: dict) -> dict:
+    """Read the project-local closure without expanding configured pin ownership."""
+    pending = [contained(root, spec["directory"]) / "Package.swift"]
+    result = {}
+    while pending:
+        path = pending.pop()
+        name = str(path.relative_to(root))
+        if name in result:
+            continue
+        declarations = swift_declarations(root, name, explicit=bool(spec.get("pins")))
+        result[name] = declarations
+        pending.extend(
+            Path(item["path"]) / "Package.swift"
+            for item in declarations
+            if item["kind"] == "local"
+        )
+    return result
+
+
+def swift_manifest_state(root: Path, spec: dict) -> dict:
+    return {
+        name: [
+            hashlib.sha256(regular_input(root, name)).hexdigest(),
+            contained(root, name).stat().st_mode,
+        ]
+        for name in swift_local_manifests(root, spec)
+    }
+
+
+def swift_lock_path(root: Path, spec: dict) -> Path:
+    return contained(
+        root,
+        str(
+            (contained(root, spec["directory"]) / "Package.resolved").relative_to(root)
+        ),
+    )
+
+
+def swift_validation_state(root: Path, spec: dict) -> dict:
+    result = swift_manifest_state(root, spec)
+    path = swift_lock_path(root, spec)
+    name = str(path.relative_to(root))
+    result[name] = (
+        [hashlib.sha256(regular_input(root, name)).hexdigest(), path.stat().st_mode]
+        if path.exists()
+        else None
+    )
+    return result
 
 
 def maven_repository(spec: dict, package: str) -> str:
@@ -214,8 +419,10 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
                 url = f"https://proxy.golang.org/{registry.go_path(package)}/@v/{quote(value, safe='')}{suffix}"
                 result.add((kind, package, value, url, registry.go_digest(checksum)))
     elif kind == "swift":
-        for path in paths(root, directory, "Package.resolved"):
-            content = json.loads(path.read_text())
+        for path in [swift_lock_path(root, spec)]:
+            if not path.exists():
+                continue
+            content = json.loads(regular_input(root, str(path.relative_to(root))))
             schema = content.get("version")
             if schema == 1:
                 pins = content.get("object", {}).get("pins")
@@ -529,33 +736,265 @@ def validate_go_sources(root: Path, spec: dict, items: set) -> None:
                 raise ValueError("Go requirement lacks a checksum lock identity")
 
 
-def validate_swift_sources(root: Path, spec: dict, items: set) -> None:
+def swift_declared_sources(
+    root: Path, spec: dict, items: set, *, require_locked: bool = True
+) -> set:
     directory = contained(root, spec["directory"])
+    declarations = swift_declarations(
+        root,
+        str((directory / "Package.swift").relative_to(root)),
+        explicit=bool(spec.get("pins")),
+    )
+    configured = swift_explicit_requirements(root, spec)
     body = native(
         root,
-        "swift",
+        spec.get("profile", "swift"),
         ["swift", "package", "--package-path", str(directory), "dump-package"],
     )
-    for dependency in body.get("dependencies", []):
-        sources = dependency.get("sourceControl")
-        if not isinstance(sources, list) or len(sources) != 1:
-            raise ValueError(
-                "SwiftPM dependency needs an exact public GitHub source contract"
-            )
-        source = sources[0]
-        remote = source.get("location", {}).get("remote")
-        exact = source.get("requirement", {}).get("exact")
+    dependencies = body.get("dependencies") if isinstance(body, dict) else None
+    if not isinstance(dependencies, list):
+        raise ValueError("SwiftPM native dependency inventory is missing or malformed")
+    expected = {
+        (item["kind"], item.get("package", item.get("path"))): item
+        for item in declarations
+        if item["kind"] != "explicit"
+    }
+    explicit_count = sum(item["kind"] == "explicit" for item in declarations)
+    explicit_seen = set()
+    seen = set()
+    for dependency in dependencies:
+        if not isinstance(dependency, dict) or len(dependency) != 1:
+            raise ValueError("Unsupported SwiftPM native dependency source")
+        kind = next(iter(dependency))
+        sources = dependency[kind]
         if (
-            not isinstance(remote, list)
-            or len(remote) != 1
-            or not isinstance(exact, list)
-            or len(exact) != 1
+            not isinstance(sources, list)
+            or len(sources) != 1
+            or not isinstance(sources[0], dict)
         ):
-            raise ValueError(
-                "SwiftPM direct dependency must use an exact GitHub release version"
+            raise ValueError("Malformed SwiftPM native dependency source")
+        source = sources[0]
+        if kind == "fileSystem":
+            path = source.get("path")
+            if not isinstance(path, str) or not Path(path).is_absolute():
+                raise ValueError(
+                    "SwiftPM local source requires an absolute native path"
+                )
+            key = ("local", path)
+            declared = expected.get(key)
+            if (
+                declared is None
+                or source.get("nameForTargetDependencyResolutionOnly")
+                != declared["name"]
+            ):
+                raise ValueError(
+                    "SwiftPM local source differs from its declared path or name"
+                )
+        elif kind == "sourceControl":
+            location = source.get("location")
+            remote = location.get("remote") if isinstance(location, dict) else None
+            if (
+                not isinstance(remote, list)
+                or len(remote) != 1
+                or not isinstance(remote[0], dict)
+            ):
+                raise ValueError("SwiftPM dependency requires a public GitHub remote")
+            package = swift_repository(remote[0].get("urlString"))
+            key = ("remote", package)
+            declared = expected.get(key)
+            if declared is None and package in configured:
+                owner = configured[package]
+                calls = [
+                    item
+                    for item in declarations
+                    if item["kind"] == "explicit"
+                    and (
+                        item["value_span"] == owner["span"]
+                        or item["reference"] in owner["references"]
+                    )
+                ]
+                if len(calls) != 1 or calls[0]["start"] in explicit_seen:
+                    raise ValueError(
+                        "Explicit Swift pin lacks unique declaration ownership"
+                    )
+                explicit_seen.add(calls[0]["start"])
+                requirement = source.get("requirement")
+                exact = (
+                    requirement.get("exact") if isinstance(requirement, dict) else None
+                )
+                if (
+                    not isinstance(exact, list)
+                    or len(exact) != 1
+                    or set(requirement) != {"exact"}
+                    or not isinstance(exact[0], str)
+                    or not re.fullmatch(r"\d+\.\d+\.\d+", exact[0])
+                    or registry.version("swift", exact[0]) is None
+                ):
+                    raise ValueError(
+                        "Explicit Swift dependencies require evaluated exact releases"
+                    )
+                declared = {"bound": exact[0], "requirement": requirement}
+            if declared is None or source.get("requirement") != declared["requirement"]:
+                raise ValueError(
+                    "SwiftPM native requirement differs from its literal declaration"
+                )
+            if package in configured:
+                if declared.get("kind") == "remote" and configured[package]["span"] != (
+                    declared["value_start"],
+                    declared["value_end"],
+                ):
+                    raise ValueError(
+                        "Explicit Swift pin does not own its literal declaration"
+                    )
+                value = declared["requirement"].get("exact", [None])[0]
+                if value is None:
+                    value = declared["requirement"]["range"][0]["lowerBound"]
+                if value != configured[package]["value"]:
+                    raise ValueError(
+                        "Swift native requirement differs from its configured pin"
+                    )
+            locked = [item for item in items if item[:2] == ("swift", package)]
+            if require_locked and (
+                len(locked) != 1
+                or not registry.compatible("swift", locked[0][2], declared["bound"])
+            ):
+                raise ValueError(
+                    "SwiftPM manifest dependency lacks its required resolved identity"
+                )
+        else:
+            raise ValueError("Unsupported SwiftPM native dependency source")
+        if key in seen:
+            raise ValueError("Duplicate SwiftPM native dependency source")
+        seen.add(key)
+    if (
+        not set(expected).issubset(seen)
+        or len(seen) != len(expected) + explicit_count
+        or len(explicit_seen) != explicit_count
+        or not {("remote", package) for package in configured}.issubset(seen)
+    ):
+        raise ValueError(
+            "SwiftPM native dependency inventory differs from its declarations"
+        )
+    return seen
+
+
+def validate_swift_graph(root: Path, spec: dict, items: set, edges: dict) -> None:
+    directory = contained(root, spec["directory"])
+    key = hashlib.sha256(str(directory).encode()).hexdigest()
+    work = Path(environment(root)["TOOLCHAIN_WORK"])
+    scratch = contained(root, str((work / "swift-audit" / key).relative_to(root)))
+    graph = native(
+        root,
+        spec.get("profile", "swift"),
+        [
+            "swift",
+            "package",
+            "--package-path",
+            str(directory),
+            "--scratch-path",
+            str(scratch),
+            "--skip-update",
+            "--force-resolved-versions",
+            "show-dependencies",
+            "--format",
+            "json",
+        ],
+    )
+    remote, local, names = set(), set(), {}
+
+    def identity(node):
+        if (
+            not isinstance(node, dict)
+            or set(node)
+            != {"identity", "name", "url", "version", "path", "dependencies"}
+            or any(
+                not isinstance(node[field], str) or not node[field]
+                for field in ("identity", "name", "url", "version", "path")
             )
-        package = swift_repository(remote[0].get("urlString"))
-        if not any(i[1:3] == (package, exact[0]) for i in items):
-            raise ValueError(
-                "SwiftPM manifest dependency lacks its exact resolved identity"
+            or not isinstance(node["dependencies"], list)
+        ):
+            raise ValueError("Malformed SwiftPM resolved graph node")
+        path = Path(node["path"])
+        if not path.is_absolute():
+            raise ValueError("SwiftPM graph requires an absolute source path")
+        if node["url"] in edges:
+            if node["path"] != node["url"] or node["version"] != "unspecified":
+                raise ValueError("SwiftPM graph changed a project-local source")
+            contained(root, str(path.relative_to(root)))
+            return ("local", node["url"])
+        package = swift_repository(node["url"])
+        if registry.version(
+            "swift", node["version"]
+        ) is None or not path.is_relative_to(scratch / "checkouts"):
+            raise ValueError("Unsupported SwiftPM resolved graph source")
+        contained(root, str(path.relative_to(root)))
+        return ("remote", package)
+
+    if identity(graph) != ("local", str(directory)):
+        raise ValueError("SwiftPM resolved graph has a different command root")
+    pending = [graph]
+    while pending:
+        node = pending.pop()
+        kind, source = identity(node)
+        resolved = (kind, source, node["version"])
+        if node["identity"] in names and names[node["identity"]] != resolved:
+            raise ValueError("Conflicting SwiftPM graph package identity")
+        names[node["identity"]] = resolved
+        children = [identity(child) for child in node["dependencies"]]
+        if len(children) != len(set(children)):
+            raise ValueError("Duplicate SwiftPM graph dependency edge")
+        if kind == "local":
+            local.add(source)
+            if set(children) != edges[source]:
+                raise ValueError("SwiftPM graph omits or changes a declared dependency")
+        else:
+            remote.add((source, node["version"]))
+        pending.extend(node["dependencies"])
+    locked = {(item[1], item[2]) for item in items if item[0] == "swift"}
+    if local != set(edges) or remote != locked:
+        raise ValueError(
+            "SwiftPM resolved graph differs from the command-root lock inventory"
+        )
+
+
+def validate_swift_sources(
+    root: Path, spec: dict, items: set, *, require_locked: bool = True
+) -> None:
+    before = swift_validation_state(root, spec)
+    original = None
+    try:
+        edges = {}
+        for name in swift_local_manifests(root, spec):
+            directory = str(Path(name).parent)
+            edges[str(contained(root, directory))] = swift_declared_sources(
+                root,
+                {**spec, "directory": directory},
+                items,
+                require_locked=require_locked,
             )
+        if require_locked:
+            # Caller-supplied or recursively aggregated identities cannot discharge
+            # this command root's lock obligation.
+            actual = identities(root, spec)
+            if actual != items:
+                raise ValueError(
+                    "SwiftPM audit identities differ from the command-root lock"
+                )
+            validate_swift_graph(root, spec, actual, edges)
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        try:
+            if swift_validation_state(root, spec) != before:
+                raise ValueError(
+                    "unexpected manifest closure, lock bytes or full modes"
+                )
+        except (OSError, ValueError) as error:
+            message = (
+                f"Swift validation changed guarded inputs; changes preserved: {error}"
+            )
+            if original is None:
+                raise ValueError(message) from error
+            print(message, file=sys.stderr)
+            original.add_note(message)

@@ -19,6 +19,17 @@ import registry
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 
 
+def swift_graph_node(url, version="unspecified", dependencies=(), *, path=None):
+    return {
+        "identity": url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git").lower(),
+        "name": url.rstrip("/").rsplit("/", 1)[-1],
+        "url": url,
+        "version": version,
+        "path": str(path) if path is not None else url,
+        "dependencies": list(dependencies),
+    }
+
+
 class NativeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="native workspace ")
@@ -1669,6 +1680,516 @@ class NativeTests(unittest.TestCase):
                     self.assertEqual(
                         {p: (p.read_bytes(), p.stat().st_mode) for p in before}, before
                     )
+
+
+class SwiftResolutionTests(unittest.TestCase):
+    setUp = NativeTests.setUp
+    put = NativeTests.put
+
+    def swift_plan(self):
+        self.put("local/Package.swift", "// local package\n")
+        path = self.put(
+            "Package.swift",
+            "// public contract\n"
+            '.package(url: "https://github.com/example/package", from: "0.63.2"),\n'
+            '.package(path: "local")\n',
+        )
+        path.chmod(0o640)
+        spec = {"adapter": "swift", "profile": "swift"}
+        specs = native.specifications(self.root, spec)
+        pins = native.pins(self.root, spec, specs)
+        return path, spec, specs, pins
+
+    def test_swift_compatible_zero_major_keeps_the_native_interval(self):
+        _, spec, _, pins = self.swift_plan()
+        inventory = [
+            registry.Release(value, NOW - timedelta(days=60))
+            for value in ["0.63.2", "0.65.0", "1.0.0"]
+        ]
+        with patch.object(registry, "releases", return_value=inventory):
+            self.assertEqual(
+                native.choose(
+                    self.root, pins[0], {**spec, "mode": "compatible"}, {}, NOW
+                ).version,
+                "0.65.0",
+            )
+            self.assertEqual(
+                native.choose(self.root, pins[0], spec, {}, NOW).version, "1.0.0"
+            )
+
+    def test_swift_temporary_exact_restores_post_selection_bytes_and_modes(self):
+        path, _, _, pins = self.swift_plan()
+        chosen = registry.Release("0.65.0", NOW - timedelta(days=60))
+        native.manifests.replace(pins[0], chosen, self.root)
+        expected = (path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                try:
+                    with native.swift_resolution_pins(self.root, [(pins[0], chosen)]):
+                        self.assertIn(b'exact: "0.65.0"', path.read_bytes())
+                        self.assertIn(b'.package(path: "local")', path.read_bytes())
+                        if failed:
+                            raise subprocess.CalledProcessError(
+                                41,
+                                ["swift", "package", "update"],
+                                stderr="native conflict",
+                            )
+                except subprocess.CalledProcessError as error:
+                    self.assertEqual(
+                        (error.returncode, error.stderr), (41, "native conflict")
+                    )
+                self.assertEqual(
+                    (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)), expected
+                )
+                self.assertIn(b'from: "0.65.0"', path.read_bytes())
+
+    def test_swift_temporary_conflicting_bytes_modes_and_links_are_preserved(self):
+        for change in ("bytes", "mode", "symlink"):
+            with self.subTest(change=change):
+                path, _, _, pins = self.swift_plan()
+                chosen = registry.Release("0.63.2", NOW)
+                outside = self.put("outside.txt", "outside preserved\n")
+                with self.assertRaisesRegex(ValueError, "changes preserved"):
+                    with native.swift_resolution_pins(self.root, [(pins[0], chosen)]):
+                        if change == "bytes":
+                            path.write_text("concurrent edit\n")
+                        elif change == "mode":
+                            path.chmod(0o600)
+                        else:
+                            path.unlink()
+                            path.symlink_to(outside)
+                if change == "bytes":
+                    self.assertEqual(path.read_text(), "concurrent edit\n")
+                elif change == "mode":
+                    self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                else:
+                    self.assertTrue(path.is_symlink())
+                    path.unlink()
+                self.assertEqual(outside.read_text(), "outside preserved\n")
+
+    def test_swift_partial_pin_write_restores_earlier_manifest(self):
+        path, _, _, pins = self.swift_plan()
+        second = self.put(
+            "other/Package.swift",
+            '.package(url: "https://github.com/example/other", from: "0.63.2")',
+        )
+        spec = {"adapter": "swift", "directories": [".", "other"]}
+        pins = native.pins(self.root, spec, native.specifications(self.root, spec))
+        before = path.read_bytes(), second.read_bytes()
+        atomic = native.tc.atomic_bytes
+
+        def write(target, body, mode):
+            if target == second:
+                raise OSError("second write failed")
+            atomic(target, body, mode)
+
+        with (
+            patch.object(native.tc, "atomic_bytes", side_effect=write),
+            self.assertRaisesRegex(OSError, "second write failed"),
+        ):
+            with native.swift_resolution_pins(
+                self.root, [(pin, registry.Release("0.63.2", NOW)) for pin in pins]
+            ):
+                self.fail("native command must not run")
+        self.assertEqual((path.read_bytes(), second.read_bytes()), before)
+
+    def test_swift_final_direct_version_revision_and_input_substitutions_fail(self):
+        path, spec, specs, _ = self.swift_plan()
+        identity = (
+            "swift",
+            "example/package",
+            "0.63.2",
+            "https://github.com/example/package",
+            "git:" + "a" * 40,
+        )
+        before = {
+            "identities": [],
+            "resolution": {
+                "swift_inputs": native.swift_input_state(self.root, specs),
+                "swift_selected": {"swift-0": {"example/package": "0.63.2"}},
+                "swift_identities": {"swift-0": [list(identity)]},
+            },
+        }
+        for identities in (
+            set(),
+            {(*identity[:2], "0.65.0", *identity[3:])},
+            {(*identity[:4], "git:" + "b" * 40)},
+        ):
+            with (
+                patch.object(
+                    native.lock_adapters, "identities", return_value=identities
+                ),
+                patch.object(native.updates, "audit_locks") as audit,
+            ):
+                with self.subTest(identities=identities), self.assertRaises(ValueError):
+                    native.audit(self.root, spec, before, {}, NOW)
+                audit.assert_not_called()
+        with (
+            patch.object(native.lock_adapters, "identities", return_value={identity}),
+            patch.object(native.updates, "audit_locks") as audit,
+        ):
+            native.audit(self.root, spec, before, {}, NOW)
+            audit.assert_called_once()
+        path.write_text(path.read_text() + "// hook edit\n")
+        with self.assertRaisesRegex(ValueError, "guarded Swift inputs"):
+            native.audit(self.root, spec, before, {}, NOW)
+
+    def test_swift_native_resolve_honors_selection_and_public_result_is_serializable(
+        self,
+    ):
+        path, spec, _, _ = self.swift_plan()
+        url = "https://github.com/example/package"
+        published = NOW - timedelta(days=60)
+        release = registry.Release(
+            "0.65.0",
+            published,
+            artifacts=(registry.Artifact(url, "git:" + "a" * 40, published),),
+        )
+
+        def evaluate(*args, **kwargs):
+            argv = args[2]
+            if "show-dependencies" in argv:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                return swift_graph_node(
+                    str(self.root),
+                    dependencies=[
+                        swift_graph_node(
+                            url, "0.65.0", path=scratch / "checkouts/package"
+                        ),
+                        swift_graph_node(str(self.root / "local")),
+                    ],
+                )
+            if argv[argv.index("--package-path") + 1] == str(self.root / "local"):
+                return {"dependencies": []}
+            text = path.read_text()
+            value = "0.65.0" if "0.65.0" in text else "0.63.2"
+            requirement = (
+                {"exact": [value]}
+                if "exact:" in text
+                else {"range": [{"lowerBound": value, "upperBound": "1.0.0"}]}
+            )
+            return {
+                "dependencies": [
+                    {
+                        "sourceControl": [
+                            {
+                                "location": {"remote": [{"urlString": url}]},
+                                "requirement": requirement,
+                            }
+                        ]
+                    },
+                    {"fileSystem": [{"path": str(self.root / "local")}]},
+                ]
+            }
+
+        def execute(*args, **kwargs):
+            self.assertIn('exact: "0.65.0"', path.read_text())
+            self.put(
+                "Package.resolved",
+                json.dumps(
+                    {
+                        "version": 3,
+                        "pins": [
+                            {
+                                "kind": "remoteSourceControl",
+                                "location": url,
+                                "state": {"version": "0.65.0", "revision": "a" * 40},
+                            }
+                        ],
+                    }
+                ),
+            )
+
+        with (
+            patch.object(native.lock_adapters, "native", side_effect=evaluate),
+            patch.object(registry, "releases", return_value=[release]),
+            patch.object(native.lock_adapters, "evidence", return_value=[release]),
+            patch.object(native.chainman, "execute", side_effect=execute),
+        ):
+            result = native.resolve(self.root, spec, {}, NOW)
+            json.dumps(result)
+            self.assertIn('from: "0.65.0"', path.read_text())
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+            self.assertEqual(
+                result["swift_selected"], {"swift-0": {"example/package": "0.65.0"}}
+            )
+            before = {"identities": [], "resolution": result}
+            lock = self.root / "Package.resolved"
+            original = lock.read_text()
+            for changed in (
+                original.replace("0.65.0", "0.65.1"),
+                original.replace("a" * 40, "b" * 40),
+            ):
+                lock.write_text(changed)
+                with self.assertRaises(ValueError):
+                    native.audit(self.root, spec, before, {}, NOW)
+
+    def test_swift_computed_native_inventory_fails_before_release_queries(self):
+        self.put("Package.swift", "let dependencies = computedDependencies()\n")
+        with (
+            patch.object(
+                native.lock_adapters,
+                "native",
+                return_value={
+                    "dependencies": [{"fileSystem": [{"path": str(self.root)}]}]
+                },
+            ),
+            patch.object(registry, "releases") as releases,
+            patch.object(native.chainman, "execute") as execute,
+        ):
+            with self.assertRaises(ValueError):
+                native.resolve(self.root, {"adapter": "swift"}, {}, NOW)
+            releases.assert_not_called()
+            execute.assert_not_called()
+
+    def test_swift_explicit_exact_variables_retain_existing_supported_route(self):
+        path = self.put(
+            "Package.swift",
+            'let repoURL = "https://github.com/example/package"\n'
+            'let release: Version = "0.63.2"\n.package(url: repoURL, exact: release)\n',
+        )
+        path.chmod(0o640)
+        pin = {
+            "provider": "swift",
+            "name": "example/package",
+            "file": "Package.swift",
+            "format": "regex",
+            "pattern": r'let release: Version = "(?P<value>[^"\n]+)"',
+        }
+        spec = {"adapter": "swift", "pins": [pin]}
+        url = "https://github.com/example/package"
+        published = NOW - timedelta(days=60)
+        release = registry.Release(
+            "0.65.0",
+            published,
+            artifacts=(registry.Artifact(url, "git:" + "a" * 40, published),),
+        )
+
+        def evaluate(*args, **kwargs):
+            argv = args[2]
+            if "show-dependencies" in argv:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                return swift_graph_node(
+                    str(self.root),
+                    dependencies=[
+                        swift_graph_node(
+                            url, "0.65.0", path=scratch / "checkouts/package"
+                        ),
+                    ],
+                )
+            value = native.old_requirement(self.root, pin)
+            return {
+                "dependencies": [
+                    {
+                        "sourceControl": [
+                            {
+                                "location": {"remote": [{"urlString": url}]},
+                                "requirement": {"exact": [value]},
+                            }
+                        ]
+                    }
+                ]
+            }
+
+        def execute(*args, **kwargs):
+            self.assertIn('let release: Version = "0.65.0"', path.read_text())
+            self.assertIn(".package(url: repoURL, exact: release)", path.read_text())
+            self.put(
+                "Package.resolved",
+                json.dumps(
+                    {
+                        "version": 3,
+                        "pins": [
+                            {
+                                "kind": "remoteSourceControl",
+                                "location": url,
+                                "state": {"version": "0.65.0", "revision": "a" * 40},
+                            }
+                        ],
+                    }
+                ),
+            )
+
+        with (
+            patch.object(native.lock_adapters, "native", side_effect=evaluate),
+            patch.object(registry, "releases", return_value=[release]),
+            patch.object(native.lock_adapters, "evidence", return_value=[release]),
+            patch.object(native.chainman, "execute", side_effect=execute),
+        ):
+            result = native.resolve(self.root, spec, {}, NOW)
+            json.dumps(result)
+            self.assertEqual(
+                result["swift_selected"], {"swift-0": {"example/package": "0.65.0"}}
+            )
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
+            self.assertEqual(
+                path.read_text(),
+                'let repoURL = "https://github.com/example/package"\n'
+                'let release: Version = "0.65.0"\n.package(url: repoURL, exact: release)\n',
+            )
+        for changed in (
+            {**pin, "name": "example/wrong"},
+            {**pin, "file": "other/Package.swift"},
+            {**pin, "provider": "npm"},
+            {**pin, "pattern": r"(?P<value>0\.65\.0)|(?P<other>release)"},
+        ):
+            with (
+                self.subTest(pin=changed),
+                patch.object(native.lock_adapters, "native", side_effect=evaluate),
+                patch.object(registry, "releases") as query,
+                self.assertRaises(ValueError),
+            ):
+                native.resolve(
+                    self.root, {"adapter": "swift", "pins": [changed]}, {}, NOW
+                )
+            query.assert_not_called()
+
+    def test_swift_explicit_ownership_rejects_unused_and_unowned_native_calls(self):
+        body = (
+            'let repoURL = "https://github.com/example/package"\n'
+            'let release: Version = "0.63.2"\n'
+            'let unused: Version = "0.63.2"\n'
+            ".package(url: repoURL, exact: release)\n"
+        )
+        path = self.put("Package.swift", body)
+        pin = {
+            "provider": "swift",
+            "name": "example/package",
+            "file": "Package.swift",
+            "format": "regex",
+            "pattern": r'let release: Version = "(?P<value>[^"\n]+)"',
+        }
+        remote = {
+            "sourceControl": [
+                {
+                    "location": {
+                        "remote": [{"urlString": "https://github.com/example/package"}]
+                    },
+                    "requirement": {"exact": ["0.63.2"]},
+                }
+            ]
+        }
+        cases = [
+            (
+                body,
+                [{**pin, "pattern": pin["pattern"].replace("release", "unused")}],
+                [remote],
+            ),
+            (
+                body + ".package(url: otherURL, exact: release)\n",
+                [pin],
+                [
+                    remote,
+                    {
+                        "sourceControl": [
+                            {
+                                "location": {
+                                    "remote": [
+                                        {
+                                            "urlString": "https://github.com/example/other"
+                                        }
+                                    ]
+                                },
+                                "requirement": {"exact": ["0.63.2"]},
+                            }
+                        ]
+                    },
+                ],
+            ),
+            (body.replace("exact: release", "from: release"), [pin], [remote]),
+            (
+                body.replace("url: repoURL, exact: release", "path: localPath"),
+                [pin],
+                [],
+            ),
+            (body, [pin], []),
+            (body, [pin], [{"fileSystem": [{"path": str(self.root)}]}]),
+            (
+                body,
+                [pin],
+                [
+                    {
+                        "sourceControl": [
+                            {
+                                "location": {
+                                    "remote": [
+                                        {
+                                            "urlString": "https://github.com/example/package"
+                                        }
+                                    ]
+                                },
+                                "requirement": {"exact": ["0.65.0"]},
+                            }
+                        ]
+                    }
+                ],
+            ),
+            (
+                body.replace(
+                    "url: repoURL, exact: release",
+                    'url: "https://github.com/example/package", exact: "0.63.2"',
+                ),
+                [pin],
+                [remote],
+            ),
+            (body, [pin, {**pin, "name": "example/other"}], [remote]),
+        ]
+        for manifest, pins, dependencies in cases:
+            with (
+                self.subTest(manifest=manifest, pins=pins, dependencies=dependencies),
+                patch.object(
+                    native.lock_adapters,
+                    "native",
+                    return_value={"dependencies": dependencies},
+                ),
+                patch.object(registry, "releases") as query,
+                self.assertRaises(ValueError),
+            ):
+                path.write_text(manifest)
+                native.resolve(self.root, {"adapter": "swift", "pins": pins}, {}, NOW)
+            query.assert_not_called()
+
+    def test_swift_local_closure_drift_fails_even_without_selected_pins(self):
+        self.put("Package.swift", '.package(path: "local")\n')
+        local = self.put("local/Package.swift", "// all local dependency\n")
+        local.chmod(0o640)
+        spec = {"adapter": "swift"}
+        specs = native.specifications(self.root, spec)
+        before = {
+            "identities": [],
+            "resolution": {
+                "swift_inputs": native.swift_input_state(self.root, specs),
+                "swift_selected": {"swift-0": {}},
+                "swift_identities": {"swift-0": []},
+            },
+        }
+        self.assertEqual(
+            set(before["resolution"]["swift_inputs"]),
+            {"Package.swift", "local/Package.swift"},
+        )
+        original = local.read_bytes()
+        for change in ("bytes", "mode", "symlink", "closure"):
+            with self.subTest(change=change):
+                if change == "bytes":
+                    local.write_bytes(original + b"// changed\n")
+                elif change == "mode":
+                    local.chmod(0o600)
+                elif change == "symlink":
+                    local.unlink()
+                    local.symlink_to(self.root / "Package.swift")
+                else:
+                    self.put("other/Package.swift", "// newly reachable\n")
+                    local.write_text('.package(path: "../other")\n')
+                with (
+                    patch.object(native.updates, "audit_locks") as final_audit,
+                    self.assertRaises(ValueError),
+                ):
+                    native.audit(self.root, spec, before, {}, NOW)
+                final_audit.assert_not_called()
+                if local.is_symlink():
+                    local.unlink()
+                local.write_bytes(original)
+                local.chmod(0o640)
 
 
 if __name__ == "__main__":

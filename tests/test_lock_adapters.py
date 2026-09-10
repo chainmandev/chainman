@@ -27,11 +27,23 @@ SHA = "a" * 64
 H1 = "h1:" + base64.b64encode(b"a" * 32).decode()
 
 
+def swift_graph_node(url, version="unspecified", dependencies=(), *, path=None):
+    return {
+        "identity": url.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git").lower(),
+        "name": url.rstrip("/").rsplit("/", 1)[-1],
+        "url": url,
+        "version": version,
+        "path": str(path) if path is not None else url,
+        "dependencies": list(dependencies),
+    }
+
+
 class NativeLockTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="native-lock-evidence-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        (self.root / "toolchain.toml").write_text('schema=1\nmodules=["swift"]\n')
         for kind in ("go", "swift", "maven"):
             self.write(
                 f"modules/{kind}.toml",
@@ -126,6 +138,19 @@ class NativeLockTests(unittest.TestCase):
                 "Versions": ["v1.6.0"],
             }
         if argv[:2] == ["swift", "package"]:
+            if "show-dependencies" in argv:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                self.assertIn("--force-resolved-versions", argv)
+                return swift_graph_node(
+                    str(self.root / "swift"),
+                    dependencies=[
+                        swift_graph_node(
+                            f"https://github.com/{SWIFT}",
+                            "1.5.0",
+                            path=scratch / "checkouts/swift-argument-parser",
+                        )
+                    ],
+                )
             return {
                 "dependencies": [
                     {
@@ -964,6 +989,493 @@ class GoReplacementTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "outside.*root"),
             ):
                 self.audit()
+
+
+class SwiftSourceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="swift declarations ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / "toolchain.toml").write_text('schema=1\nmodules=["swift"]\n')
+        (self.root / "app").mkdir()
+        (self.root / "local").mkdir()
+        self.manifest = self.root / "app/Package.swift"
+        self.spec = {"directory": "app", "ecosystem": "swift"}
+        (self.root / "local/Package.swift").write_text(
+            "// empty local dependency inventory\n"
+        )
+
+    def check(self, text, dependencies, items=()):
+        self.manifest.write_text(text)
+        lock = self.root / "app/Package.resolved"
+        lock.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "pins": [
+                        {
+                            "kind": "remoteSourceControl",
+                            "location": item[3],
+                            "state": {
+                                "version": item[2],
+                                "revision": item[4].removeprefix("git:"),
+                            },
+                        }
+                        for item in items
+                    ],
+                }
+            )
+        )
+
+        def evaluate(root, profile, argv, **kwargs):
+            directory = argv[argv.index("--package-path") + 1]
+            if "show-dependencies" in argv:
+                scratch = Path(argv[argv.index("--scratch-path") + 1])
+                children = []
+                for entry in dependencies:
+                    if "sourceControl" in entry:
+                        package = entry["sourceControl"][0]["location"]["remote"][0][
+                            "urlString"
+                        ]
+                        value = next(item[2] for item in items if item[3] == package)
+                        children.append(
+                            swift_graph_node(
+                                package,
+                                value,
+                                path=scratch / "checkouts" / package.rsplit("/", 1)[-1],
+                            )
+                        )
+                    elif "fileSystem" in entry:
+                        children.append(
+                            swift_graph_node(entry["fileSystem"][0]["path"])
+                        )
+                return swift_graph_node(directory, dependencies=children)
+            return {
+                "dependencies": dependencies
+                if directory == str(self.root / "app")
+                else []
+            }
+
+        with patch.object(lock_adapters, "native", side_effect=evaluate):
+            lock_adapters.validate_swift_sources(self.root, self.spec, set(items))
+
+    def remote(self, requirement, url="https://github.com/example/package"):
+        return {
+            "sourceControl": [
+                {
+                    "identity": "package",
+                    "location": {"remote": [{"urlString": url}]},
+                    "requirement": requirement,
+                    "productFilter": None,
+                }
+            ]
+        }
+
+    def test_native_exact_and_both_next_major_ranges(self):
+        for style, lower, selected, requirement in (
+            ("exact", "1.2.3", "1.2.3", {"exact": ["1.2.3"]}),
+            (
+                "from",
+                "1.2.3",
+                "1.8.0",
+                {"range": [{"lowerBound": "1.2.3", "upperBound": "2.0.0"}]},
+            ),
+            (
+                "from",
+                "0.63.2",
+                "0.65.0",
+                {"range": [{"lowerBound": "0.63.2", "upperBound": "1.0.0"}]},
+            ),
+        ):
+            with self.subTest(style=style, lower=lower):
+                self.check(
+                    f'.package(url: "https://github.com/example/package", {style}: "{lower}")',
+                    [self.remote(requirement)],
+                    [
+                        (
+                            "swift",
+                            "example/package",
+                            selected,
+                            "https://github.com/example/package",
+                            "git:" + "a" * 40,
+                        )
+                    ],
+                )
+
+    def test_native_literal_local_path_and_name_must_match(self):
+        text = '.package(name: "LocalName", path: "../local")'
+        source = {
+            "fileSystem": [
+                {
+                    "identity": "local",
+                    "path": str(self.root / "local"),
+                    "nameForTargetDependencyResolutionOnly": "LocalName",
+                    "productFilter": None,
+                }
+            ]
+        }
+        self.check(text, [source])
+        self.check(
+            '.package(path: "../local")',
+            [{"fileSystem": [{"path": str(self.root / "local")}]}],
+        )
+        for field, value in (
+            ("path", str(self.root / "app")),
+            ("nameForTargetDependencyResolutionOnly", "Wrong"),
+        ):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                changed = json.loads(json.dumps(source))
+                changed["fileSystem"][0][field] = value
+                self.check(text, [changed])
+        with self.assertRaises(ValueError):
+            self.check(text, [self.remote({"exact": ["1.2.3"]})])
+
+    def test_native_inventory_and_requirement_substitutions_fail(self):
+        text = '.package(url: "https://github.com/example/package", from: "0.63.2")'
+        good = self.remote({"range": [{"lowerBound": "0.63.2", "upperBound": "1.0.0"}]})
+        items = [
+            (
+                "swift",
+                "example/package",
+                "0.65.0",
+                "https://github.com/example/package",
+                "git:" + "a" * 40,
+            )
+        ]
+        for dependencies in (
+            None,
+            {},
+            [],
+            [good, good],
+            [self.remote({"branch": ["main"]})],
+            [
+                self.remote(
+                    {"range": [{"lowerBound": "0.63.2", "upperBound": "0.64.0"}]}
+                )
+            ],
+            [self.remote({"exact": ["0.65.0"]})],
+            [
+                self.remote(
+                    good["sourceControl"][0]["requirement"],
+                    "https://github.com/example/other",
+                )
+            ],
+            [{"fileSystem": [{"path": str(self.root / "local")}]}],
+            [{"registry": []}],
+        ):
+            with self.subTest(dependencies=dependencies), self.assertRaises(ValueError):
+                self.check(text, dependencies, items)
+        for changed_items in ([], [("swift", "example/package", "1.0.0", "", "")]):
+            with self.subTest(items=changed_items), self.assertRaises(ValueError):
+                self.check(text, [good], changed_items)
+        self.manifest.write_text(text)
+        for malformed in ({}, [], {"dependencies": "invalid"}):
+            with (
+                patch.object(lock_adapters, "native", return_value=malformed),
+                self.assertRaises(ValueError),
+            ):
+                lock_adapters.validate_swift_sources(self.root, self.spec, set(items))
+
+    def test_literal_parser_rejects_unsupported_or_ambiguous_calls(self):
+        call = '.package(url: "https://github.com/example/package", from: "1.2.3")'
+        for text in (
+            call + "," + call,
+            call.replace("from:", "branch:"),
+            call.replace('"1.2.3"', "minimumVersion"),
+            call.replace('"1.2.3"', '"v1.2.3"'),
+            call.replace("https://github.com/", "https://elsewhere.invalid/"),
+            ".package(path: computePath())",
+            '.package(path: "../../outside")',
+            call.replace("from:", 'exact: "1.2.3", from:'),
+        ):
+            self.manifest.write_text(text)
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                lock_adapters.swift_declarations(self.root, "app/Package.swift")
+        (self.root / "alias").symlink_to(self.root / "local", target_is_directory=True)
+        self.manifest.write_text('.package(path: "../alias/../local")')
+        with self.assertRaises(ValueError):
+            lock_adapters.swift_declarations(self.root, "app/Package.swift")
+
+    def test_comment_and_string_calls_are_not_dependency_declarations(self):
+        self.manifest.write_text(
+            '// .package(path: "../not-real")\nlet example = ".package()"\n'
+            '.package( /* retain comment */ url: "https://github.com/example/package", from: "1.2.3")'
+        )
+        declarations = lock_adapters.swift_declarations(self.root, "app/Package.swift")
+        self.assertEqual(len(declarations), 1)
+        self.assertEqual(declarations[0]["package"], "example/package")
+
+
+class SwiftGraphTests(unittest.TestCase):
+    # Native graph shape and warm-cache behavior are independent Swift SDK oracles.
+    write = NativeLockTests.write
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="swift local graph ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / "toolchain.toml").write_text('schema=1\nmodules=["swift"]\n')
+        self.spec = {
+            "directory": "app",
+            "ecosystem": "swift",
+            "profile": "custom-swift",
+        }
+        self.url = "https://github.com/apple/swift-numerics"
+        self.app = self.write("app/Package.swift", '.package(path: "../bridge")\n')
+        self.bridge = self.write(
+            "bridge/Package.swift", f'.package(url: "{self.url}", exact: "1.0.2")\n'
+        )
+        self.app.chmod(0o640)
+        self.bridge.chmod(0o640)
+        self.lock = self.root / "app/Package.resolved"
+        self.set_lock([(self.url, "1.0.2")])
+        self.all_local = False
+        self.transitive = False
+        self.graph_calls = []
+        self.graph_change = lambda graph: graph
+
+    def set_lock(self, entries):
+        self.lock.write_text(
+            json.dumps(
+                {
+                    "version": 3,
+                    "pins": [
+                        {
+                            "kind": "remoteSourceControl",
+                            "location": url,
+                            "state": {"version": value, "revision": "a" * 40},
+                        }
+                        for url, value in entries
+                    ],
+                }
+            )
+        )
+        self.lock.chmod(0o640)
+
+    def native(self, root, profile, argv, **kwargs):
+        self.assertEqual(profile, "custom-swift")
+        directory = argv[argv.index("--package-path") + 1]
+        if "show-dependencies" in argv:
+            self.assertIn("--force-resolved-versions", argv)
+            self.assertIn("--skip-update", argv)
+            scratch = Path(argv[argv.index("--scratch-path") + 1])
+            self.assertTrue(scratch.is_relative_to(self.root / ".cache/toolchain/work"))
+            self.graph_calls.append(argv)
+            remote = (
+                []
+                if self.all_local
+                else [
+                    swift_graph_node(
+                        self.url,
+                        "1.0.2",
+                        path=scratch / "checkouts/swift-numerics",
+                        dependencies=[
+                            swift_graph_node(
+                                "https://github.com/example/transitive",
+                                "2.0.0",
+                                path=scratch / "checkouts/transitive",
+                            )
+                        ]
+                        if self.transitive
+                        else [],
+                    )
+                ]
+            )
+            return self.graph_change(
+                swift_graph_node(
+                    str(self.root / "app"),
+                    dependencies=[
+                        swift_graph_node(str(self.root / "bridge"), dependencies=remote)
+                    ],
+                )
+            )
+        if directory == str(self.root / "app"):
+            return {
+                "dependencies": [{"fileSystem": [{"path": str(self.root / "bridge")}]}]
+            }
+        self.assertEqual(directory, str(self.root / "bridge"))
+        return {
+            "dependencies": []
+            if self.all_local
+            else [
+                {
+                    "sourceControl": [
+                        {
+                            "location": {"remote": [{"urlString": self.url}]},
+                            "requirement": {"exact": ["1.0.2"]},
+                        }
+                    ]
+                }
+            ]
+        }
+
+    def validate(self):
+        with patch.object(lock_adapters, "native", side_effect=self.native):
+            lock_adapters.validate_swift_sources(
+                self.root, self.spec, lock_adapters.identities(self.root, self.spec)
+            )
+
+    def test_real_shaped_local_remote_and_all_local_graphs(self):
+        self.validate()
+        self.assertEqual(len(self.graph_calls), 1)
+        self.all_local = True
+        self.bridge.write_text("// genuinely all local\n")
+        self.lock.unlink()
+        self.validate()
+        self.set_lock([])
+        self.validate()
+        self.assertEqual(len(self.graph_calls), 3)
+
+    def test_missing_empty_and_nested_decoy_cannot_supply_the_root_lock(self):
+        original = self.lock.read_bytes()
+        self.write("app/unrelated/Package.resolved", original.decode())
+        for missing in (True, False):
+            with self.subTest(missing=missing):
+                if missing:
+                    self.lock.unlink()
+                else:
+                    self.set_lock([])
+                self.assertEqual(lock_adapters.identities(self.root, self.spec), set())
+                with self.assertRaises(ValueError):
+                    self.validate()
+                self.assertEqual(
+                    (self.root / "app/unrelated/Package.resolved").read_bytes(),
+                    original,
+                )
+
+    def test_native_success_with_partial_lock_or_missing_graph_node_fails(self):
+        self.transitive = True
+        with self.assertRaisesRegex(ValueError, "lock inventory"):
+            self.validate()
+        self.assertEqual(len(self.graph_calls), 1)
+        self.set_lock(
+            [(self.url, "1.0.2"), ("https://github.com/example/transitive", "2.0.0")]
+        )
+        self.validate()
+        self.transitive = False
+        with self.assertRaisesRegex(ValueError, "lock inventory"):
+            self.validate()
+        self.assertEqual(len(self.graph_calls), 3)
+
+    def test_malformed_missing_local_and_substituted_sources_fail(self):
+        changes = [
+            lambda graph: {},
+            lambda graph: {**graph, "dependencies": []},
+            lambda graph: {**graph, "url": str(self.root / "bridge")},
+            lambda graph: {
+                **graph,
+                "dependencies": [
+                    swift_graph_node(
+                        "https://elsewhere.invalid/name", "1.0.0", path=self.root
+                    )
+                ],
+            },
+            lambda graph: {**graph, "source": "registry"},
+            lambda graph: {**graph, "path": str(self.root)},
+        ]
+        for change in changes:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.graph_change = change
+                self.validate()
+
+    def test_audit_preserves_unexpected_manifest_and_lock_changes(self):
+        baseline = {
+            path: (path.read_bytes(), path.stat().st_mode)
+            for path in (self.app, self.bridge, self.lock)
+        }
+        for path, mode_only in (
+            (self.bridge, False),
+            (self.bridge, True),
+            (self.lock, False),
+            (self.lock, True),
+        ):
+
+            def change(graph):
+                if mode_only:
+                    path.chmod(0o600)
+                else:
+                    path.write_bytes(baseline[path][0] + b" ")
+                return graph
+
+            with self.subTest(path=path, mode=mode_only):
+                self.graph_change = change
+                with self.assertRaisesRegex(ValueError, "changes preserved"):
+                    self.validate()
+                self.assertNotEqual(
+                    (path.read_bytes(), path.stat().st_mode), baseline[path]
+                )
+                path.write_bytes(baseline[path][0])
+                path.chmod(baseline[path][1])
+
+    def test_native_failure_and_conflicting_edit_keep_original_diagnostic(self):
+        error = subprocess.CalledProcessError(
+            41,
+            ["swift", "package"],
+            output="original native output",
+            stderr="original diagnostic",
+        )
+
+        def change(graph):
+            self.bridge.write_text("// concurrent change\n")
+            raise error
+
+        self.graph_change = change
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.validate()
+        self.assertIs(caught.exception, error)
+        self.assertEqual(error.returncode, 41)
+        self.assertEqual(error.stderr, "original diagnostic")
+        self.assertTrue(any("changes preserved" in note for note in error.__notes__))
+        self.assertEqual(self.bridge.read_text(), "// concurrent change\n")
+
+    def test_local_closure_guards_components_and_handles_repeated_edges(self):
+        self.bridge.write_text('.package(path: "../app")\n')
+        self.assertEqual(
+            set(lock_adapters.swift_manifest_state(self.root, self.spec)),
+            {"app/Package.swift", "bridge/Package.swift"},
+        )
+        saved = self.bridge.read_bytes()
+        self.bridge.unlink()
+        self.bridge.symlink_to(self.app)
+        with self.assertRaises(ValueError):
+            lock_adapters.swift_manifest_state(self.root, self.spec)
+        self.bridge.unlink()
+        self.bridge.write_bytes(saved)
+        (self.root / "alias").symlink_to(self.root / "bridge", target_is_directory=True)
+        self.app.write_text('.package(path: "../alias/../bridge")\n')
+        with self.assertRaises(ValueError):
+            lock_adapters.swift_manifest_state(self.root, self.spec)
+        self.app.write_text('.package(path: "../../outside")\n')
+        with self.assertRaises(ValueError):
+            lock_adapters.swift_manifest_state(self.root, self.spec)
+
+    def test_independent_command_roots_use_distinct_scoped_graph_caches(self):
+        observed = []
+
+        def evaluate(root, profile, argv, **kwargs):
+            self.assertEqual(profile, "custom-swift")
+            self.assertIn("--force-resolved-versions", argv)
+            directory = argv[argv.index("--package-path") + 1]
+            observed.append(Path(argv[argv.index("--scratch-path") + 1]))
+            return swift_graph_node(directory)
+
+        with patch.object(lock_adapters, "native", side_effect=evaluate):
+            for name in ("app", "other"):
+                directory = self.root / name
+                directory.mkdir(exist_ok=True)
+                lock_adapters.validate_swift_graph(
+                    self.root,
+                    {**self.spec, "directory": name},
+                    set(),
+                    {str(directory): set()},
+                )
+        self.assertEqual(len(set(observed)), 2)
+        self.assertTrue(
+            all(
+                path.is_relative_to(self.root / ".cache/toolchain/work")
+                for path in observed
+            )
+        )
 
 
 if __name__ == "__main__":

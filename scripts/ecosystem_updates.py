@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime
 import hashlib
@@ -159,45 +159,97 @@ def swift_pins(root: Path, specs: dict) -> list[dict]:
             if not name.endswith("Package.swift"):
                 continue
             body = tc.regular_input(root, name).decode()
-            for match in re.finditer(r"\.package\s*\(([^)]*)\)", body, re.DOTALL):
-                declaration = match.group(1)
-                if re.search(r"\bpath\s*:", declaration):
-                    local = re.search(r'\bpath\s*:\s*"([^"\\]+)"', declaration)
-                    if not local:
-                        raise ValueError(
-                            "Computed Swift package paths need an explicit source declaration"
-                        )
-                    tc.local_source(root, (root / name).parent, local.group(1))
+            for item in lock_adapters.swift_declarations(root, name):
+                if item["kind"] == "local":
                     continue
-                url = re.search(r'\burl\s*:\s*"([^"\\]+)"', declaration)
-                value = re.search(r'\b(from|exact)\s*:\s*"([^"\\]+)"', declaration)
-                if not url or not value:
-                    raise ValueError(
-                        "Swift remote dependencies require literal from/exact releases or explicit pins"
-                    )
-                repository = lock_adapters.swift_repository(url.group(1))
-                # Escape the declaration context, leaving exactly one named version group.
-                prefix = match.group(0)[
-                    : match.start(1) - match.start(0) + value.start(2)
-                ]
-                suffix = match.group(0)[
-                    match.start(1) - match.start(0) + value.end(2) :
-                ]
                 result.append(
                     {
                         "provider": "swift",
-                        "name": repository,
+                        "name": item["package"],
                         "file": name,
                         "format": "regex",
-                        "pattern": re.escape(prefix)
+                        "bound": item["bound"],
+                        "pattern": re.escape(body[item["start"] : item["value_start"]])
                         + r'(?P<value>[^"\n]+)'
-                        + re.escape(suffix),
-                        "bound": value.group(2)
-                        if value.group(1) == "exact"
-                        else "^" + value.group(2),
+                        + re.escape(body[item["value_end"] : item["end"]]),
                     }
                 )
     return result
+
+
+def swift_input_state(root: Path, specs: dict) -> dict:
+    result = {}
+    for member in specs.values():
+        result.update(lock_adapters.swift_manifest_state(root, member))
+    return result
+
+
+@contextmanager
+def swift_resolution_pins(root: Path, planned: list, *, explicit: bool = False):
+    """Temporarily narrow owned requirements, restoring post-selection public bytes."""
+    selected = {}
+    for pin, chosen in planned:
+        if pin["provider"] == "swift" and chosen is not None:
+            key = (pin["file"], pin["name"])
+            if key in selected:
+                raise ValueError("Ambiguous selected Swift dependency")
+            selected[key] = chosen.version
+    before, images = {}, {}
+    for name, _ in selected:
+        if name in before:
+            continue
+        before[name] = cargo_file_state(root, name)
+        body = before[name][0].decode()
+        edits, found = [], set()
+        for item in lock_adapters.swift_declarations(root, name, explicit=explicit):
+            if item["kind"] != "remote" or (name, item["package"]) not in selected:
+                continue
+            value = selected[name, item["package"]]
+            if value != item["version"]:
+                raise ValueError(
+                    "Swift selected requirement changed before native resolution"
+                )
+            found.add(item["package"])
+            edits.append((item["style_start"], item["style_end"], "exact"))
+        if not explicit and found != {
+            package for filename, package in selected if filename == name
+        }:
+            raise ValueError("Missing selected Swift declaration")
+        for start, end, value in sorted(edits, reverse=True):
+            body = body[:start] + value + body[end:]
+        images[name] = (body.encode(), before[name][1])
+    written, original = {}, None
+    try:
+        for name, image in images.items():
+            if cargo_file_state(root, name) != before[name]:
+                raise ValueError("Swift manifest changed before temporary pinning")
+            # Register the expected write first so a partial preparation is restored.
+            written[name] = image
+            tc.atomic_bytes(tc.contained(root, name), *image)
+        yield
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        errors = []
+        for name, image in written.items():
+            try:
+                current = cargo_file_state(root, name)
+                if current == before[name]:
+                    continue
+                if current != image:
+                    raise ValueError("unexpected bytes, mode or source")
+                tc.atomic_bytes(tc.contained(root, name), *before[name])
+            except (OSError, ValueError) as error:
+                errors.append(f"{name}: {error}")
+        if errors:
+            message = "Swift restoration failed; changes preserved: " + "; ".join(
+                errors
+            )
+            if original is None:
+                raise ValueError(message)
+            print(message, file=sys.stderr)
+            original.add_note(message)
 
 
 def gradle_pins(root: Path, spec: dict) -> list[dict]:
@@ -1469,6 +1521,21 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     repair_cargo, cargo_max_attempts = cargo_resolution_settings(spec)
     specs = specifications(root, spec)
     selected = list(specs)
+    if spec["adapter"] == "swift":
+        owned = {
+            str(
+                (tc.contained(root, member["directory"]) / "Package.swift").relative_to(
+                    root
+                )
+            )
+            for member in specs.values()
+        }
+        if any(pin.get("file") not in owned for pin in spec.get("pins", [])):
+            raise ValueError("Explicit Swift pin is not owned by a selected manifest")
+        for member in specs.values():
+            lock_adapters.validate_swift_sources(
+                root, member, set(), require_locked=False
+            )
     before = snapshot(root, spec)
     manifests.configure_build_dependencies(
         root, selected, specs=specs, validate_only=True
@@ -1498,59 +1565,95 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         if repair_cargo
         else None
     )
-    if spec["adapter"] != "flutter" and not repair_cargo:
-        for member in specs.values():
-            directory = tc.contained(root, member["directory"])
-            kind = spec["adapter"]
-            default = {
-                "rust": [["cargo", "update"]],
-                "python": [["uv", "lock", "--upgrade"]],
-                "swift": [["swift", "package", "update"]],
-                "gradle": [
-                    [
-                        "gradle",
-                        "--no-daemon",
-                        "dependencies",
-                        "--write-locks",
-                        "--write-verification-metadata",
-                        "sha256",
-                    ]
-                ],
-            }[kind]
-            commands = deepcopy(spec.get("resolve", default))
-            if not isinstance(commands, list) or not commands:
-                raise ValueError(
-                    "Native resolution requires explicit argument-array commands"
+    swift_resolution = {}
+    if spec["adapter"] == "swift":
+        if spec.get("pins"):
+            for member in specs.values():
+                lock_adapters.validate_swift_sources(
+                    root, member, set(), require_locked=False
                 )
-            if kind == "python":
-                options = updates.uv_resolution_options(policy, now)
-                if any(argv[:2] != ["uv", "lock"] for argv in commands):
+        swift_resolution["swift_inputs"] = swift_input_state(root, specs)
+        swift_resolution["swift_selected"] = {
+            name: {
+                pin["name"]: chosen.version
+                for pin, chosen in planned
+                if pin["file"] in member["inputs"] and chosen is not None
+            }
+            for name, member in specs.items()
+        }
+    with (
+        swift_resolution_pins(root, planned, explicit=bool(spec.get("pins")))
+        if spec["adapter"] == "swift"
+        else nullcontext()
+    ):
+        if spec["adapter"] != "flutter" and not repair_cargo:
+            for member in specs.values():
+                directory = tc.contained(root, member["directory"])
+                kind = spec["adapter"]
+                default = {
+                    "rust": [["cargo", "update"]],
+                    "python": [["uv", "lock", "--upgrade"]],
+                    "swift": [["swift", "package", "update"]],
+                    "gradle": [
+                        [
+                            "gradle",
+                            "--no-daemon",
+                            "dependencies",
+                            "--write-locks",
+                            "--write-verification-metadata",
+                            "sha256",
+                        ]
+                    ],
+                }[kind]
+                commands = deepcopy(spec.get("resolve", default))
+                if not isinstance(commands, list) or not commands:
                     raise ValueError(
-                        "Python resolution must use uv lock for artifact-age policy"
+                        "Native resolution requires explicit argument-array commands"
                     )
-                manifest = directory / "pyproject.toml"
-                lock = directory / "uv.lock"
-                old_manifest, old_lock = (
-                    manifest.read_text(),
-                    lock.read_text() if lock.exists() else None,
-                )
-                configured = updates.configure_uv(root, member, options)
-                commands = [argv + options for argv in commands]
-            env = tc.environment(root)
-            env["TOOLCHAIN_FRESH"] = "1"
-            for command in commands:
-                chainman.execute(
-                    root, spec.get("profile", kind), command, cwd=directory, env=env
-                )
-            if kind == "gradle":
-                # The ordinary dependencies task visits only one project. Traverse all
-                # resolvable project and buildscript configurations before final audit.
-                project_graphs.append(gradle_graph(root, spec, directory, write=True))
-            if kind == "python":
-                updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)
+                if kind == "python":
+                    options = updates.uv_resolution_options(policy, now)
+                    if any(argv[:2] != ["uv", "lock"] for argv in commands):
+                        raise ValueError(
+                            "Python resolution must use uv lock for artifact-age policy"
+                        )
+                    manifest = directory / "pyproject.toml"
+                    lock = directory / "uv.lock"
+                    old_manifest, old_lock = (
+                        manifest.read_text(),
+                        lock.read_text() if lock.exists() else None,
+                    )
+                    configured = updates.configure_uv(root, member, options)
+                    commands = [argv + options for argv in commands]
+                env = tc.environment(root)
+                env["TOOLCHAIN_FRESH"] = "1"
+                for command in commands:
+                    chainman.execute(
+                        root, spec.get("profile", kind), command, cwd=directory, env=env
+                    )
+                if kind == "gradle":
+                    # The ordinary dependencies task visits only one project. Traverse all
+                    # resolvable project and buildscript configurations before final audit.
+                    project_graphs.append(
+                        gradle_graph(root, spec, directory, write=True)
+                    )
+                if kind == "python":
+                    updates.retain_uv_noop(
+                        root, member, old_manifest, old_lock, configured
+                    )
+    if swift_resolution:
+        swift_resolution["swift_identities"] = {
+            name: [
+                list(item)
+                for item in sorted(lock_adapters.identities(root, member))
+                if item[1] in swift_resolution["swift_selected"][name]
+            ]
+            for name, member in specs.items()
+        }
+        before = {**before, "resolution": swift_resolution}
     audit(root, spec, before, policy, now)
     return {
         **pub_resolution,
+        **swift_resolution,
         **(
             {"cargo_identities": cargo_identities}
             if cargo_identities is not None
@@ -1566,6 +1669,31 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
 
 def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     specs = specifications(root, spec)
+    if spec["adapter"] == "swift":
+        resolution = before.get("resolution", {})
+        if (
+            "swift_inputs" in resolution
+            and swift_input_state(root, specs) != resolution["swift_inputs"]
+        ):
+            raise ValueError(
+                "A native resolver or project hook changed guarded Swift inputs"
+            )
+        for name, selected in resolution.get("swift_selected", {}).items():
+            current = lock_adapters.identities(root, specs[name])
+            for package, version in selected.items():
+                matching = [item for item in current if item[1] == package]
+                if len(matching) != 1 or matching[0][2] != version:
+                    raise ValueError(
+                        "SwiftPM did not retain the selected direct release"
+                    )
+            expected = {
+                tuple(item)
+                for item in resolution.get("swift_identities", {}).get(name, [])
+            }
+            if {item for item in current if item[1] in selected} != expected:
+                raise ValueError(
+                    "A project hook changed a selected Swift artifact identity"
+                )
     if spec["adapter"] == "flutter":
         expected = before.get("resolution", {}).get("pub_inputs")
         if expected is not None and pub_input_state(root, expected) != expected:

@@ -123,6 +123,41 @@ floors and exception expiry remain enforced. Final SDK audit probes the tools
 again and refreshes registry observations. Application generators and
 deployment-specific reconciliation remain hooks.
 
+Swift discovery supports literal public GitHub `from:` and `exact:` release
+requirements and contained literal local package paths, including named locals.
+Compatible `from:` selection uses Swift's next-major interval, including
+`0.63.2..<1.0.0`; aggressive selection may update the release literal beyond the
+original interval. Native manifest evaluation must agree with the complete supported
+declaration inventory and its source kinds. Automatic discovery rejects computed,
+ambiguous, branch/revision and unsupported dependency forms. Existing explicit
+Swift regex pins may instead own an exact argument's literal or a named `let`/`var`
+initializer containing a stable version literal, optionally typed `Version` or
+`PackageDescription.Version`. The URL argument may be a literal or a named constant.
+The owning field, manifest, canonical repository and selected version must match the
+complete native inventory. Unused or overlapping fields and unowned computed calls
+fail explicitly. This bounded compatibility route rejects computed expressions,
+range arguments and local paths. Local paths retain lexical
+containment and symlink checks and are never treated as registry packages.
+
+Swift resolution temporarily narrows selected direct releases to exact requirements,
+then restores the intended public `from:`/`exact:` syntax and full file modes before
+audit. Restoration only overwrites expected temporary bytes; conflicting changes
+are preserved and reported. Selected direct versions and immutable identities must
+survive native resolution and later hooks. Every actual remote lock artifact,
+including transitives reached through local packages, retains the ordinary release
+age, source/revision and package-policy checks. An impossible native graph fails;
+local package support does not exempt its remote dependencies from audit.
+The read-only Swift input guard follows the reachable contained local manifest
+closure without adding those manifests to configured pin selection. Final audits
+run a forced-resolved native dependency graph in a separate command-root scratch
+cache under `TOOLCHAIN_WORK`. Its remote repository/version inventory must match
+that command root's `Package.resolved`; descendant locks cannot substitute for it.
+Native graph success alone does not prove lock completeness. An absent lock is
+valid only for a complete all-local graph. Manifest closure, lock bytes and full
+modes must remain unchanged by validation; unexpected changes are preserved and
+reported. Native graph paths never replace lexical project-local source checks.
+
+
 JavaScript `peer_exceptions` require an exact `manifest`, source package `source`,
 `peer` package and nonempty `reason`. They exempt only that owning importer's
 edge from peer-range syntax and membership checks, including transitive copies
