@@ -29,6 +29,13 @@ to core. The special `host` profile runs directly in the already bootstrapped co
 context; it is useful for an adapter that subsequently selects the project shell.
 It does not provision host language tools.
 
+For `deps-query` with `provider="swift"` and `operation="metadata"`, supply an exact
+stable version such as `1.0.0`. Chainman reads the bounded release inventory, then
+resolves tag and commit-time evidence only for that version, including a matching
+`v1.0.0` tag. The response retains the raw tag identity and the later release or
+commit publication time; metadata does not claim eligibility. Full version
+selection and final artifact audits still require their complete evidence.
+
 The optional-module example uses `modules = ["core", "rust"]` and individual files
 under `modules/`. Each declares directory, input globs, readiness artifacts, commands
 and update outputs. A project may keep its own modules and flake; runtime updates

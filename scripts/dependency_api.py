@@ -380,6 +380,13 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
                 bounds=(restriction,) if restriction else (),
                 exact=request.get("version") if operation == "metadata" else None,
             )
+        elif provider == "swift" and operation == "metadata":
+            exact = request.get("version")
+            if not isinstance(exact, str):
+                raise ValueError(
+                    "Exact Swift metadata requires a canonical stable version"
+                )
+            candidates = registry.swift_releases(package, exact=exact)
         else:
             candidates = registry.releases(provider, package)
         if restriction:

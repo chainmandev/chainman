@@ -1,6 +1,7 @@
 """Independent acceptance for shared update ordering and the public query boundary."""
 
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -332,6 +333,150 @@ class QueryTests(unittest.TestCase):
             self.assertNotEqual(result.get("disposition"), "selected")
             with self.assertRaisesRegex(ValueError, "Exact release"):
                 api.query(self.root, {**request, "version": "1.0.0"}, now=NOW)
+
+    def swift_wire(self, versions):
+        registry.fetch.cache_clear()
+        self.addCleanup(registry.fetch.cache_clear)
+        prefix = "https://api.github.com/repos/example/numerics"
+        responses = {"/releases?per_page=100&page=1": []}
+        for index, (tag, release_days, commit_days) in enumerate(versions, 1):
+            identity = f"{index:040x}"
+            responses["/releases?per_page=100&page=1"].append(
+                {
+                    "tag_name": tag,
+                    "draft": False,
+                    "prerelease": False,
+                    "published_at": (NOW - timedelta(days=release_days)).isoformat(),
+                }
+            )
+            responses["/git/ref/tags/" + tag] = {
+                "object": {"type": "commit", "sha": identity}
+            }
+            responses["/commits/" + identity] = {
+                "sha": identity,
+                "commit": {
+                    "committer": {
+                        "date": (NOW - timedelta(days=commit_days)).isoformat()
+                    }
+                },
+            }
+        sent = []
+
+        def send(request, timeout):
+            self.assertEqual(timeout, 30)
+            self.assertTrue(request.full_url.startswith(prefix))
+            path = request.full_url.removeprefix(prefix)
+            sent.append(path)
+            self.assertIn(path, responses, "Unrequested release identity was fetched")
+            response = io.BytesIO(json.dumps(responses[path]).encode())
+            response.headers = {"Content-Type": "application/json"}
+            return response
+
+        self.enterContext(patch.object(registry, "urlopen", side_effect=send))
+        return responses, sent
+
+    def test_swift_metadata_queries_only_exact_identity_without_claiming_maturity(self):
+        responses, sent = self.swift_wire(
+            [("2.0.0", 90, 90), ("1.0.0", 90, 60), ("v1.0.0", 40, 1)]
+        )
+        # Unrelated release discovery stays visible, but its identity endpoint
+        # must never be requested by an exact metadata operation.
+        del responses["/git/ref/tags/2.0.0"]
+        result = api.query(
+            self.root,
+            {
+                "schema": 1,
+                "operation": "metadata",
+                "provider": "swift",
+                "package": "example/numerics",
+                "version": "1.0.0",
+            },
+            now=NOW,
+        )
+        self.assertEqual(
+            result,
+            {
+                "schema": 1,
+                "disposition": "metadata",
+                "version": "1.0.0",
+                "identity": "v1.0.0",
+                "published": (NOW - timedelta(days=1)).isoformat(),
+                "artifacts": [],
+            },
+        )
+        self.assertEqual(
+            sent,
+            [
+                "/releases?per_page=100&page=1",
+                "/git/ref/tags/1.0.0",
+                "/commits/" + f"{2:040x}",
+                "/git/ref/tags/v1.0.0",
+                "/commits/" + f"{3:040x}",
+            ],
+        )
+
+    def test_swift_metadata_requires_a_canonical_exact_version_before_transport(self):
+        _, sent = self.swift_wire([])
+        request = {
+            "schema": 1,
+            "operation": "metadata",
+            "provider": "swift",
+            "package": "example/numerics",
+        }
+        for value in (None, False, 1, "", "v1.0.0", "main", "1.0.0-beta.1"):
+            with self.subTest(version=value), self.assertRaises(ValueError):
+                api.query(self.root, {**request, "version": value}, now=NOW)
+        self.assertEqual(sent, [])
+        with self.assertRaisesRegex(
+            ValueError, "Exact release metadata is unavailable"
+        ):
+            api.query(self.root, {**request, "version": "1.0.0"}, now=NOW)
+        self.assertEqual(sent, ["/releases?per_page=100&page=1"])
+
+    def test_swift_selection_and_artifact_audit_still_enrich_the_full_inventory(self):
+        _, sent = self.swift_wire(
+            [("1.0.0", 90, 90), ("2.0.0", 60, 31), ("3.0.0", 90, 29)]
+        )
+        request = {
+            "schema": 1,
+            "operation": "select",
+            "provider": "swift",
+            "package": "example/numerics",
+        }
+        self.assertEqual(api.query(self.root, request, now=NOW)["version"], "2.0.0")
+        self.assertEqual(len(sent), 7)
+        self.assertIn("/git/ref/tags/3.0.0", sent)
+        constrained = {
+            **request,
+            "constraint": {"range": "<2.0.0", "reason": "Supported interface"},
+        }
+        self.assertEqual(api.query(self.root, constrained, now=NOW)["version"], "1.0.0")
+        good = [
+            "swift",
+            "example/numerics",
+            "2.0.0",
+            "https://github.com/example/numerics",
+            "git:" + f"{2:040x}",
+        ]
+        self.assertEqual(
+            api.query(
+                self.root,
+                {"schema": 1, "operation": "audit", "artifacts": [good]},
+                now=NOW,
+            )["disposition"],
+            "audited",
+        )
+        for version, identity in (("2.0.0", "f" * 40), ("3.0.0", f"{3:040x}")):
+            with self.subTest(version=version), self.assertRaises(ValueError):
+                api.query(
+                    self.root,
+                    {
+                        "schema": 1,
+                        "operation": "audit",
+                        "artifacts": [[*good[:2], version, good[3], "git:" + identity]],
+                    },
+                    now=NOW,
+                )
 
     def test_query_constraint_is_never_a_fallback_hint(self):
         request = {

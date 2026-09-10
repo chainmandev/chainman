@@ -503,6 +503,33 @@ def github_commit(repository: str, tag: str, *, fresh: bool = False) -> str:
     raise ValueError("Release tag does not resolve to a bounded commit identity")
 
 
+def swift_releases(package: str, *, exact: str | None = None) -> list[Release]:
+    """Enrich all release candidates, or only the requested Swift version's tags."""
+    if exact is not None and (
+        not isinstance(exact, str)
+        or exact.startswith("v")
+        or version("swift", exact) is None
+    ):
+        raise ValueError("Exact Swift metadata requires a canonical stable version")
+    import source_updates
+
+    source_updates.repository_name(package)
+    return [
+        Release(
+            item.version.removeprefix("v"),
+            max(
+                item.published,
+                source_updates.commit_time(
+                    package, github_commit(package, item.version)
+                ),
+            ),
+            item.version,
+        )
+        for item in github_releases(package)
+        if exact is None or item.version.removeprefix("v") == exact
+    ]
+
+
 def go_path(package: str) -> str:
     if (
         not isinstance(package, str)
@@ -787,21 +814,7 @@ def releases(
     if provider == "go":
         return go_releases(package)
     if provider == "swift":
-        import source_updates
-
-        return [
-            Release(
-                r.version.removeprefix("v"),
-                max(
-                    r.published,
-                    source_updates.commit_time(
-                        package, github_commit(package, r.version)
-                    ),
-                ),
-                r.version,
-            )
-            for r in github_releases(package)
-        ]
+        return swift_releases(package)
     if provider == "npm":
         body = data(f"https://registry.npmjs.org/{quote(package, safe='')}")
         result = []

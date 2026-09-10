@@ -434,6 +434,154 @@ class RegistryTransportTests(unittest.TestCase):
         self.assertEqual(waits, [1])
 
 
+class SwiftExactMetadataTests(unittest.TestCase):
+    prefix = "https://api.github.com/repos/example/numerics"
+    page = "/releases?per_page=100&page="
+
+    def setUp(self):
+        registry.fetch.cache_clear()
+        self.addCleanup(registry.fetch.cache_clear)
+        self.enterContext(patch.object(registry, "observation_time", return_value=NOW))
+
+    def published(self, tag, days=90, **extra):
+        return {
+            "tag_name": tag,
+            "published_at": (NOW - timedelta(days=days)).isoformat(),
+            "draft": False,
+            "prerelease": False,
+            **extra,
+        }
+
+    def transport(self, responses):
+        sent = []
+
+        def send(request, timeout):
+            self.assertEqual(timeout, 30)
+            self.assertTrue(request.full_url.startswith(self.prefix))
+            path = request.full_url.removeprefix(self.prefix)
+            sent.append(path)
+            self.assertIn(path, responses, "Unrequested release identity was fetched")
+            body = io.BytesIO(json.dumps(responses[path]).encode())
+            body.headers = {"Content-Type": "application/json"}
+            return body
+
+        self.enterContext(patch.object(registry, "urlopen", side_effect=send))
+        return sent
+
+    def commit(self, identity, days):
+        return {
+            "sha": identity,
+            "commit": {"committer": {"date": (NOW - timedelta(days=days)).isoformat()}},
+        }
+
+    def test_exact_metadata_enriches_only_matching_aliases_across_all_pages(self):
+        first, second, tag = "a" * 40, "b" * 40, "c" * 40
+        responses = {
+            self.page + "1": [self.published("1.0.0")]
+            + [self.published(f"2.0.{index}") for index in range(99)],
+            self.page + "2": [
+                self.published("v1.0.0", 40),
+                self.published("3.0.0", draft=True),
+                self.published("4.0.0", prerelease=True),
+                self.published("5.0.0-beta.1"),
+            ],
+            "/git/ref/tags/1.0.0": {"object": {"type": "commit", "sha": first}},
+            "/git/ref/tags/v1.0.0": {"object": {"type": "tag", "sha": tag}},
+            "/git/tags/" + tag: {"object": {"type": "commit", "sha": second}},
+            "/commits/" + first: self.commit(first, 60),
+            "/commits/" + second: self.commit(second, 1),
+        }
+        sent = self.transport(responses)
+        values = registry.swift_releases("example/numerics", exact="1.0.0")
+        self.assertEqual(
+            [(item.version, item.identity, item.published) for item in values],
+            [
+                ("1.0.0", "1.0.0", NOW - timedelta(days=60)),
+                ("1.0.0", "v1.0.0", NOW - timedelta(days=1)),
+            ],
+        )
+        self.assertEqual(
+            sent,
+            [
+                self.page + "1",
+                self.page + "2",
+                "/git/ref/tags/1.0.0",
+                "/commits/" + first,
+                "/git/ref/tags/v1.0.0",
+                "/git/tags/" + tag,
+                "/commits/" + second,
+            ],
+        )
+        self.assertTrue(all(not item.artifacts for item in values))
+
+    def test_missing_exact_metadata_does_not_probe_unrelated_tags(self):
+        sent = self.transport({self.page + "1": [self.published("2.0.0")]})
+        self.assertEqual(registry.swift_releases("example/numerics", exact="1.0.0"), [])
+        self.assertEqual(sent, [self.page + "1"])
+
+    def test_exact_metadata_keeps_selected_immutable_identity_and_date_checks(self):
+        identity, tag = "a" * 40, "b" * 40
+        valid = {
+            self.page + "1": [self.published("1.0.0"), self.published("2.0.0")],
+            "/git/ref/tags/1.0.0": {"object": {"type": "commit", "sha": identity}},
+            "/commits/" + identity: self.commit(identity, 60),
+        }
+        invalid = [
+            ("/git/ref/tags/1.0.0", {"object": {"type": "branch", "sha": identity}}),
+            ("/git/ref/tags/1.0.0", {"object": {"type": "commit", "sha": "bad"}}),
+            ("/commits/" + identity, self.commit("d" * 40, 60)),
+            ("/commits/" + identity, self.commit(identity, -1)),
+            (
+                "/commits/" + identity,
+                {"sha": identity, "commit": {"committer": {"date": "2026-01-01"}}},
+            ),
+        ]
+        for path, value in invalid:
+            with self.subTest(path=path, value=value):
+                registry.fetch.cache_clear()
+                self.transport({**valid, path: value})
+                with self.assertRaises(ValueError):
+                    registry.swift_releases("example/numerics", exact="1.0.0")
+        registry.fetch.cache_clear()
+        sent = self.transport(
+            {
+                **valid,
+                "/git/ref/tags/1.0.0": {"object": {"type": "tag", "sha": tag}},
+                "/git/tags/" + tag: {"object": {"type": "tag", "sha": tag}},
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "bounded commit"):
+            registry.swift_releases("example/numerics", exact="1.0.0")
+        self.assertNotIn("/commits/" + identity, sent)
+        self.assertEqual(sent.count("/git/tags/" + tag), 1)
+
+    def test_exact_metadata_rejects_incomplete_or_malformed_release_discovery(self):
+        sent = self.transport(
+            {
+                self.page + str(page): [self.published("2.0.0")] * 100
+                for page in range(1, 101)
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "pagination ceiling"):
+            registry.swift_releases("example/numerics", exact="1.0.0")
+        self.assertEqual(len(sent), 100)
+        for payload in ({"unexpected": []}, [self.published("1.0.0", -1)]):
+            with self.subTest(payload=payload):
+                registry.fetch.cache_clear()
+                self.transport({self.page + "1": payload})
+                with self.assertRaises(ValueError):
+                    registry.swift_releases("example/numerics", exact="1.0.0")
+
+    def test_invalid_exact_metadata_fails_before_transport(self):
+        sent = self.transport({})
+        for value in (True, 1, "", "main", "v1.0.0", "1.0.0-beta.1", "../1.0.0"):
+            with self.subTest(version=value), self.assertRaises(ValueError):
+                registry.swift_releases("example/numerics", exact=value)
+        with self.assertRaises(ValueError):
+            registry.swift_releases("../other", exact="1.0.0")
+        self.assertEqual(sent, [])
+
+
 class PublicationObservationTests(unittest.TestCase):
     def setUp(self):
         self.anchor = datetime(2026, 9, 8, 12, tzinfo=timezone.utc)
