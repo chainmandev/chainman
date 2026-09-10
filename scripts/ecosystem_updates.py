@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -36,6 +37,8 @@ KINDS = {
 
 
 def members(root: Path, directory: Path, kind: str) -> list[str]:
+    if kind == "flutter":
+        return manifests.pub_workspace(root, directory)["inputs"]
     filename = KINDS[kind][1]
     path = tc.contained(root, str((directory / filename).relative_to(root)))
     result = {path}
@@ -81,11 +84,22 @@ def specifications(root: Path, spec: dict) -> dict:
             "Native dependency adapters require distinct workspace directories"
         )
     result = {}
+    pub_directories = set()
     for index, relative in enumerate(directories):
         directory = tc.contained(root, relative)
         if not directory.is_dir():
             raise ValueError("Declared dependency workspace does not exist")
-        inputs = spec.get("manifests") or members(root, directory, kind)
+        pub = manifests.pub_workspace(root, directory) if kind == "flutter" else None
+        if pub is not None:
+            relative = pub["directory"]
+            if relative in pub_directories:
+                raise ValueError(
+                    "Pub adapter directories must name distinct resolution groups"
+                )
+            pub_directories.add(relative)
+        inputs = spec.get("manifests") or (
+            pub["inputs"] if pub is not None else members(root, directory, kind)
+        )
         if not isinstance(inputs, list):
             raise ValueError("Native manifest inputs must be a path list")
         for path in inputs:
@@ -97,6 +111,7 @@ def specifications(root: Path, spec: dict) -> dict:
             "ecosystem": ecosystem,
             "directory": relative,
             "inputs": inputs,
+            **({"pub": pub} if pub is not None else {}),
         }
     return result
 
@@ -298,7 +313,7 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
             if provider == "maven"
             else registry.releases(provider, coordinate)
         )
-        if spec.get("mode", "aggressive") == "compatible":
+        if spec.get("mode", "aggressive") == "compatible" or pin.get("pub_override"):
             candidates = [
                 item
                 for item in candidates
@@ -326,26 +341,33 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
         )
         for value in common
     }
-    eligible = [
-        registry.eligible(
-            provider,
-            [
-                registry.Release(
-                    item.version,
-                    dates[item.version],
-                    item.identity,
-                    item.python,
-                    item.artifacts,
-                )
-                for item in inventory
-                if item.version in common
-            ],
-            policy,
-            coordinate,
-            now,
-        )
-        for coordinate, inventory in zip(coordinates, inventories, strict=True)
-    ]
+    try:
+        eligible = [
+            registry.eligible(
+                provider,
+                [
+                    registry.Release(
+                        item.version,
+                        dates[item.version],
+                        item.identity,
+                        item.python,
+                        item.artifacts,
+                    )
+                    for item in inventory
+                    if item.version in common
+                ],
+                policy,
+                coordinate,
+                now,
+            )
+            for coordinate, inventory in zip(coordinates, inventories, strict=True)
+        ]
+    except ValueError as error:
+        if pin.get("pub_override"):
+            raise ValueError(
+                f"Cannot satisfy declared overrides for Pub {package}: {error}"
+            ) from error
+        raise
     common = set.intersection(
         *({item.version for item in values} for values in eligible)
     )
@@ -355,6 +377,8 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
             f"No eligible version satisfies the declared policy for {provider}:{package}"
         )
     chosen = max(candidates, key=lambda item: registry.version(provider, item.version))
+    if pin.get("pub_override"):
+        return chosen  # An override is a constraint, not an installed-version template.
     lower = re.search(
         r"(?<![\w.])v?(\d+(?:\.\d+){1,3}(?:-[A-Za-z0-9.]+)?)", requirement
     )
@@ -404,6 +428,92 @@ def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dic
         return lock_adapters.validate_gradle_projects(root, spec, values)
 
 
+def pub_input_state(root: Path, names) -> dict:
+    result = {}
+    for name in sorted(names):
+        path = tc.contained(root, name)
+        result[name] = (
+            [
+                hashlib.sha256(tc.regular_input(root, name)).hexdigest(),
+                stat.S_IMODE(path.stat().st_mode),
+            ]
+            if path.exists()
+            else None
+        )
+    return result
+
+
+def pub_lock_packages(root: Path, directory: Path) -> Mapping:
+    path = directory / "pubspec.lock"
+    if not path.exists():
+        raise ValueError("Missing resolved dependency lock: pubspec.lock")
+    value = manifests.document(
+        path, body=tc.regular_input(root, str(path.relative_to(root))).decode()
+    )[0]
+    if not isinstance(value, Mapping) or not isinstance(value.get("packages"), Mapping):
+        raise ValueError("Malformed Pub lock package mapping")
+    return value["packages"]
+
+
+def pub_validate_sources(root: Path, specs: dict) -> None:
+    for member in specs.values():
+        directory = tc.contained(root, member["directory"])
+        packages = pub_lock_packages(root, directory)
+        for package, source in member["pub"]["sources"].items():
+            item = packages.get(package)
+            if item is None and source["kind"] == "workspace":
+                continue  # Pub omits actual workspace members from the shared lock.
+            if not isinstance(item, Mapping):
+                raise ValueError(
+                    f"Pub resolved source is missing from its lock: {package}"
+                )
+            if source["kind"] == "sdk":
+                valid = (
+                    item.get("source") == "sdk"
+                    and item.get("description") == source["sdk"]
+                )
+            else:
+                description = item.get("description")
+                valid = item.get("source") == "path" and isinstance(
+                    description, Mapping
+                )
+                if valid:
+                    actual = tc.local_source(root, directory, description.get("path"))
+                    valid = actual == tc.contained(root, source["path"])
+            if not valid:
+                raise ValueError(
+                    f"Pub resolved source disagrees with its effective declaration: {package}"
+                )
+
+
+def pub_validate_overrides(root: Path, specs: dict, selected: dict) -> None:
+    for group, versions in selected.items():
+        if group not in specs:
+            raise ValueError("Selected Pub override resolution group is missing")
+        directory = tc.contained(root, specs[group]["directory"])
+        packages = pub_lock_packages(root, directory)
+        for package, version in versions.items():
+            item = packages.get(package)
+            if not isinstance(item, Mapping):
+                raise ValueError(
+                    f"Selected hosted Pub override is missing from its lock: {package}"
+                )
+            description = item.get("description")
+            if (
+                item.get("source") != "hosted"
+                or not isinstance(description, Mapping)
+                or description.get("name") != package
+                or description.get("url") != "https://pub.dev"
+            ):
+                raise ValueError(
+                    f"Selected hosted Pub override changed its resolved source: {package}"
+                )
+            if item.get("version") != version:
+                raise ValueError(
+                    "Pub did not honor the selected version within declared overrides"
+                )
+
+
 @contextmanager
 def pub_resolution_pins(root: Path, planned: list, extra: dict | None = None):
     """Keep public ranges while binding native resolution to the chosen releases."""
@@ -423,6 +533,12 @@ def pub_resolution_pins(root: Path, planned: list, extra: dict | None = None):
         if "pointer" not in pin:
             raise ValueError("Pub resolution requires structured dependency pointers")
         name = pin["file"]
+        if pin.get("pub_override"):
+            original = manifests.lookup(document(name), pin["pointer"])
+            if original != pin["bound"] or not accepts("pub", chosen.version, original):
+                raise ValueError(
+                    "Temporary Pub pin must stay within unchanged declared overrides"
+                )
         manifests.assign(document(name), pin["pointer"], chosen.version)
     for (name, package), version in (extra or {}).items():
         value = document(name)
@@ -482,7 +598,7 @@ def pub_resolve(
     before: dict,
     policy: dict,
     now: datetime,
-) -> None:
+) -> dict:
     """Repair newly ineligible transitives with bounded, ordinary Pub constraints."""
     commands = deepcopy(spec.get("resolve", [["flutter", "pub", "get"]]))
     if (
@@ -505,6 +621,7 @@ def pub_resolve(
     )
     watched = set()
     for member in specs.values():
+        watched.update(member["pub"]["guarded_inputs"])
         watched.update(
             str(Path(member["directory"]) / name)
             for name in ("pubspec.yaml", "pubspec_overrides.yaml")
@@ -516,15 +633,7 @@ def pub_resolve(
                 )
 
     def manifest_state():
-        result = {}
-        for name in watched:
-            path = tc.contained(root, name)
-            result[name] = (
-                (tc.regular_input(root, name), stat.S_IMODE(path.stat().st_mode))
-                if path.exists()
-                else None
-            )
-        return result
+        return pub_input_state(root, watched)
 
     expected = manifest_state()
 
@@ -539,6 +648,7 @@ def pub_resolve(
             )
 
     def identities():
+        pub_validate_sources(root, specs)
         return {
             name: updates.lock_identities(root, [name], specs=specs) for name in specs
         }
@@ -579,6 +689,16 @@ def pub_resolve(
         return True
 
     baseline = {tuple(item) for item in before["identities"]}
+    selected_overrides = {
+        name: {
+            pin["name"]: chosen.version
+            for pin, chosen in planned
+            if pin.get("pub_override")
+            and chosen is not None
+            and pin["pub_directory"] == member["directory"]
+        }
+        for name, member in specs.items()
+    }
     inventories = {}
 
     def inventory(package):
@@ -675,6 +795,7 @@ def pub_resolve(
                 if not run(retry=bool(state)):
                     continue
                 graph = identities()
+                pub_validate_overrides(root, specs, selected_overrides)
                 conflict = issue(graph)
         finally:
             unchanged()
@@ -703,7 +824,7 @@ def pub_resolve(
                 raise ValueError(
                     "Pub normalization changed the selected immutable artifact graph"
                 )
-        return
+        return {"pub_inputs": expected, "pub_overrides": selected_overrides}
     raise ValueError(
         f"No eligible Pub transitive graph satisfies native constraints: {last}"
     )
@@ -1358,11 +1479,18 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     changed = []
     project_graphs = []
     for pin, chosen in planned:
-        if chosen and manifests.replace(pin, chosen, root):
+        if (
+            chosen
+            and not pin.get("pub_override")
+            and manifests.replace(pin, chosen, root)
+        ):
             changed.append(pin["file"])
     manifests.configure_build_dependencies(root, selected, specs=specs)
-    if spec["adapter"] == "flutter":
+    pub_resolution = (
         pub_resolve(root, spec, specs, planned, before, policy, now)
+        if spec["adapter"] == "flutter"
+        else {}
+    )
     cargo_identities = (
         cargo_resolve(
             root, spec, specs, planned, before, policy, now, cargo_max_attempts
@@ -1422,6 +1550,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                 updates.retain_uv_noop(root, member, old_manifest, old_lock, configured)
     audit(root, spec, before, policy, now)
     return {
+        **pub_resolution,
         **(
             {"cargo_identities": cargo_identities}
             if cargo_identities is not None
@@ -1437,6 +1566,18 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
 
 def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     specs = specifications(root, spec)
+    if spec["adapter"] == "flutter":
+        expected = before.get("resolution", {}).get("pub_inputs")
+        if expected is not None and pub_input_state(root, expected) != expected:
+            raise ValueError(
+                "A project hook changed a guarded Pub manifest or override"
+            )
+        pub_validate_sources(root, specs)
+        pub_validate_overrides(
+            root,
+            specs,
+            before.get("resolution", {}).get("pub_overrides", {}),
+        )
     if spec.get("bootstrap_verification"):
         for member in specs.values():
             if not lock_adapters.paths(

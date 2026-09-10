@@ -12,7 +12,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from ruamel.yaml import YAML
 
-from toolchain import contained, local_source, module
+from toolchain import contained, local_source, module, regular_input
 
 
 def document(path: Path, *, body: str | None = None):
@@ -73,6 +73,169 @@ def js_pin(file: str, pointer: list, name: str, value: str):
         "file": file,
         "pointer": pointer,
         "prefix": prefix + (value[0] if value[:1] in ("^", "~") else ""),
+    }
+
+
+def pub_workspace(root: Path, directory: Path) -> dict:
+    """Read one native Pub resolution group without importing dependency overrides."""
+    guarded = set()
+    documents = {}
+
+    def read(path):
+        name = path.relative_to(root).as_posix()
+        guarded.add(name)
+        value = document(path, body=regular_input(root, name).decode())[0]
+        if not isinstance(value, Mapping):
+            raise ValueError(f"Pub manifest must be a mapping: {name}")
+        return value
+
+    def effective(path):
+        if path not in documents:
+            value = dict(read(path))
+            owners = {key: path for key in value}
+            sibling = contained(
+                root, str(path.with_name("pubspec_overrides.yaml").relative_to(root))
+            )
+            guarded.add(sibling.relative_to(root).as_posix())
+            if sibling.exists():
+                override = read(sibling)
+                if set(override) - {"dependency_overrides", "workspace", "resolution"}:
+                    raise ValueError("Unsupported Pub override-file attribute")
+                value.update(override)
+                owners.update({key: sibling for key in override})
+            if value.get("resolution") not in (None, "workspace"):
+                raise ValueError("Unsupported Pub resolution attribute")
+            documents[path] = value, owners
+        return documents[path]
+
+    def members(path):
+        value, _ = effective(path)
+        entries = value.get("workspace", [])
+        if not isinstance(entries, list) or any(
+            not isinstance(item, str) or not item or any(c in item for c in "*?[")
+            for item in entries
+        ):
+            raise ValueError("Pub workspace requires literal member directories")
+        found = [path]
+        for item in entries:
+            child = contained(
+                root,
+                str((contained(path.parent, item) / "pubspec.yaml").relative_to(root)),
+            )
+            member, _ = effective(child)
+            if child in found or member.get("resolution") != "workspace":
+                raise ValueError("Pub workspace has duplicate or non-workspace members")
+            if member.get("workspace"):
+                raise ValueError("Nested Pub workspaces are not supported")
+            found.append(child)
+        return found
+
+    entry = contained(root, str((directory / "pubspec.yaml").relative_to(root)))
+    value, _ = effective(entry)
+    owner = entry
+    if value.get("resolution") == "workspace":
+        owner = None
+        for parent in directory.parents:
+            if not parent.is_relative_to(root):
+                break
+            candidate = contained(
+                root, str((parent / "pubspec.yaml").relative_to(root))
+            )
+            guarded.add(candidate.relative_to(root).as_posix())
+            if candidate.exists() and entry in members(candidate):
+                owner = candidate
+                break
+        if owner is None:
+            raise ValueError(
+                "Pub workspace member has no declared containing workspace"
+            )
+    paths = members(owner)
+    overrides = {}
+    local_members = {}
+    for path in paths:
+        value, owners = effective(path)
+        package = value.get("name")
+        if not isinstance(package, str) or not package or package in local_members:
+            raise ValueError("Pub workspace requires distinct package names")
+        local_members[package] = path.parent
+        declared = value.get("dependency_overrides", {})
+        if not isinstance(declared, Mapping):
+            raise ValueError("Pub dependency_overrides must be a mapping")
+        for package, requirement in declared.items():
+            if package in overrides:
+                raise ValueError("Duplicate effective Pub workspace override")
+            overrides[package] = (requirement, owners["dependency_overrides"])
+
+    sources = {}
+    pins = []
+
+    def classify(package, requirement, path, pointer, *, override=False):
+        if not isinstance(package, str) or not package:
+            raise ValueError("Pub dependency requires a package name")
+        if isinstance(requirement, Mapping):
+            if set(requirement) == {"path"}:
+                relative = requirement["path"]
+                if not isinstance(relative, str) or not relative:
+                    raise ValueError("Pub path dependency requires a nonempty path")
+                target = local_source(root, path.parent, relative)
+                target_manifest = target / "pubspec.yaml"
+                if read(target_manifest).get("name") != package:
+                    raise ValueError("Pub local dependency package identity mismatch")
+                source = {"kind": "path", "path": target.relative_to(root).as_posix()}
+            elif set(requirement) == {"sdk"} and requirement["sdk"] == "flutter":
+                source = {"kind": "sdk", "sdk": "flutter"}
+            else:
+                raise ValueError(
+                    "Unsupported Pub dependency source; expected hosted range, contained path or Flutter SDK"
+                )
+            if package in sources and sources[package] != source:
+                raise ValueError("Conflicting Pub local dependency sources")
+            sources[package] = source
+            return
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise ValueError("Pub hosted dependency requires a version range")
+        pins.append(
+            {
+                "provider": "pub",
+                "name": package,
+                "file": path.relative_to(root).as_posix(),
+                "pointer": pointer,
+                "prefix": "^",
+                "pub_directory": owner.parent.relative_to(root).as_posix(),
+                **({"pub_override": True, "bound": requirement} if override else {}),
+            }
+        )
+
+    for package, (requirement, path) in overrides.items():
+        classify(
+            package, requirement, path, ["dependency_overrides", package], override=True
+        )
+    for path in paths:
+        value, _ = effective(path)
+        for section in ("dependencies", "dev_dependencies"):
+            table = value.get(section, {})
+            if not isinstance(table, Mapping):
+                raise ValueError("Pub dependency sections must be mappings")
+            for package, requirement in table.items():
+                if package in overrides:
+                    continue
+                if (
+                    len(paths) > 1
+                    and package in local_members
+                    and isinstance(requirement, str)
+                ):
+                    sources[package] = {
+                        "kind": "workspace",
+                        "path": local_members[package].relative_to(root).as_posix(),
+                    }
+                    continue
+                classify(package, requirement, path, [section, package])
+    return {
+        "directory": owner.parent.relative_to(root).as_posix(),
+        "inputs": [path.relative_to(root).as_posix() for path in paths],
+        "guarded_inputs": sorted(guarded),
+        "sources": sources,
+        "pins": pins,
     }
 
 
@@ -260,36 +423,20 @@ def discover(
                             }
                         )
         elif kind == "pub":
-            paths = {directory / "pubspec.yaml"}
+            group = pub_workspace(root, directory)
+            declared = set()
             for pattern in spec.get("inputs", []):
-                paths.update(p for p in root.glob(pattern) if p.name == "pubspec.yaml")
-            for path in sorted(paths):
-                rel = path.relative_to(root).as_posix()
-                content = document(contained(root, rel))[0]
-                for section in (
-                    "dependencies",
-                    "dev_dependencies",
-                    "dependency_overrides",
-                ):
-                    for dependency, requirement in content.get(section, {}).items():
-                        if isinstance(requirement, Mapping):
-                            if requirement.get("path"):
-                                local_source(root, path.parent, requirement["path"])
-                                continue
-                            if requirement.get("sdk"):
-                                continue
-                            raise ValueError(
-                                "Non-hosted Dart dependency needs an explicit release pin"
-                            )
-                        pins.append(
-                            {
-                                "provider": "pub",
-                                "name": dependency,
-                                "file": rel,
-                                "pointer": [section, dependency],
-                                "prefix": "^",
-                            }
-                        )
+                contained(root, pattern)
+                declared.update(
+                    str(p.relative_to(root))
+                    for p in root.glob(pattern)
+                    if p.name == "pubspec.yaml"
+                )
+            if declared and declared != set(group["inputs"]):
+                raise ValueError(
+                    "Pub manifest inputs must cover exactly one complete native resolution group"
+                )
+            pins.extend(group["pins"])
     return pins
 
 

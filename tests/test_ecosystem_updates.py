@@ -1,6 +1,8 @@
 """Native workspace policies and manifest preservation, independent of project layouts."""
 
 from datetime import datetime, timedelta, timezone
+import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -509,6 +511,7 @@ class NativeTests(unittest.TestCase):
             digest = digit * 64 if digit else item.artifacts[0].digest.split(":")[1]
             (directory / "pubspec.lock").write_text(
                 f"packages:\n  sample:\n    dependency: '{role}'\n    source: hosted\n    version: '{value}'\n    description:\n      name: sample\n      url: https://pub.dev\n      sha256: '{digest}'\n"
+                f"  consumer:\n    dependency: direct main\n    source: path\n    version: 1.0.0\n    description:\n      path: {os.path.relpath(self.root / 'consumer', directory)}\n      relative: true\n"
             )
 
         def resolver(root, profile, argv, **kwargs):
@@ -893,6 +896,779 @@ class NativeTests(unittest.TestCase):
         ):
             native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
         self.assertEqual(len(calls), 1)
+
+    def test_pub_local_override_precedence_preserves_shadowed_ranges(self):
+        for sibling in (False, True):
+            with self.subTest(sibling=sibling):
+                root = self.root / str(sibling)
+                root.mkdir()
+                manifest = self.put(
+                    f"{sibling}/pubspec.yaml",
+                    "# publishable\nname: root\ndependencies:\n  local_probe: ^99.0.0\n  sample: ^1.0.0\n",
+                )
+                self.put(
+                    f"{sibling}/local/pubspec.yaml",
+                    "name: local_probe\nversion: 1.0.0\n",
+                )
+                override = "dependency_overrides:\n  local_probe:\n    path: local\n"
+                owner = (
+                    self.put(f"{sibling}/pubspec_overrides.yaml", override)
+                    if sibling
+                    else manifest
+                )
+                if not sibling:
+                    manifest.write_text(manifest.read_text() + override)
+                for path in {manifest, owner}:
+                    path.chmod(0o640)
+                original = {
+                    p: (p.read_bytes(), p.stat().st_mode) for p in {manifest, owner}
+                }
+                spec = {"adapter": "flutter", "directory": str(sibling)}
+                pins = native.pins(
+                    self.root, spec, native.specifications(self.root, spec)
+                )
+                self.assertEqual([p["name"] for p in pins], ["sample"])
+                with native.pub_resolution_pins(
+                    self.root, [(pins[0], registry.Release("2.0.0", NOW))]
+                ):
+                    current = native.manifests.document(manifest)[0]
+                    self.assertEqual(current["dependencies"]["local_probe"], "^99.0.0")
+                    self.assertEqual(current["dependencies"]["sample"], "2.0.0")
+                self.assertEqual(
+                    {p: (p.read_bytes(), p.stat().st_mode) for p in original}, original
+                )
+
+    def test_pub_sibling_attributes_replace_maps_and_do_not_merge_sources(self):
+        self.put(
+            "pubspec.yaml",
+            "name: root\ndependencies:\n  sample: ^1.0.0\ndependency_overrides:\n  sample:\n    path: missing-shadowed\n",
+        )
+        self.put("local/pubspec.yaml", "name: sample\n")
+        sibling = self.put(
+            "pubspec_overrides.yaml",
+            "dependency_overrides:\n  sample:\n    path: local\n",
+        )
+        group = native.manifests.pub_workspace(self.root, self.root)
+        self.assertEqual(group["sources"]["sample"], {"kind": "path", "path": "local"})
+        self.assertEqual(group["pins"], [])
+        sibling.write_text("dependency_overrides: {}\n")
+        group = native.manifests.pub_workspace(self.root, self.root)
+        self.assertEqual([p["name"] for p in group["pins"]], ["sample"])
+        self.assertEqual(group["sources"], {})
+        sibling.write_text("resolution: null\n")
+        with self.assertRaises(FileNotFoundError):
+            native.manifests.pub_workspace(self.root, self.root)
+
+    def test_pub_workspace_override_uses_actual_group_from_root_or_member(self):
+        self.put("pubspec.yaml", "name: root\nworkspace: [members/a, members/b]\n")
+        self.put(
+            "members/a/pubspec.yaml",
+            "name: a\nresolution: workspace\ndependencies:\n  sample: ^99.0.0\n  b: ^1.0.0\n",
+        )
+        self.put(
+            "members/b/pubspec.yaml",
+            "name: b\nversion: 1.0.0\nresolution: workspace\ndependency_overrides:\n  sample:\n    path: ../../local\n",
+        )
+        self.put("local/pubspec.yaml", "name: sample\nversion: 1.0.0\n")
+        for directory in (".", "members/a"):
+            spec = {"adapter": "flutter", "directory": directory}
+            specs = native.specifications(self.root, spec)
+            self.assertEqual(specs["flutter-0"]["directory"], ".")
+            self.assertEqual(native.pins(self.root, spec, specs), [])
+            self.assertEqual(
+                specs["flutter-0"]["pub"]["sources"]["sample"]["path"], "local"
+            )
+            self.assertEqual(
+                specs["flutter-0"]["pub"]["sources"]["b"]["kind"], "workspace"
+            )
+        partial = {"adapter": "flutter", "manifests": ["pubspec.yaml"]}
+        with self.assertRaisesRegex(ValueError, "complete native resolution group"):
+            native.pins(self.root, partial, native.specifications(self.root, partial))
+        with self.assertRaisesRegex(ValueError, "distinct resolution groups"):
+            native.specifications(
+                self.root, {"adapter": "flutter", "directories": [".", "members/a"]}
+            )
+        self.put(
+            "members/a/pubspec_overrides.yaml",
+            "dependency_overrides:\n  sample:\n    path: ../../local\n",
+        )
+        with self.assertRaisesRegex(ValueError, "Duplicate effective"):
+            native.specifications(self.root, {"adapter": "flutter"})
+
+    def test_pub_effective_workspace_and_resolution_control_membership(self):
+        self.put("pubspec.yaml", "name: root\nworkspace: [missing]\n")
+        sibling = self.put("pubspec_overrides.yaml", "workspace: [member]\n")
+        self.put(
+            "member/pubspec.yaml",
+            "name: member\nresolution: workspace\ndependencies:\n  sample: ^1.0.0\n",
+        )
+        self.assertEqual(
+            native.members(self.root, self.root, "flutter"),
+            ["pubspec.yaml", "member/pubspec.yaml"],
+        )
+        sibling.write_text("workspace: []\n")
+        self.assertEqual(
+            native.members(self.root, self.root, "flutter"), ["pubspec.yaml"]
+        )
+        with self.assertRaisesRegex(ValueError, "no declared containing"):
+            native.manifests.pub_workspace(self.root, self.root / "member")
+        self.put("member/pubspec_overrides.yaml", "resolution: null\n")
+        group = native.manifests.pub_workspace(self.root, self.root / "member")
+        self.assertEqual(group["directory"], "member")
+        self.assertEqual([p["name"] for p in group["pins"]], ["sample"])
+
+    def test_pub_dependent_package_overrides_and_independent_roots_do_not_leak(self):
+        self.put(
+            "pubspec.yaml",
+            "name: root\ndependencies:\n  consumer:\n    path: consumer\n  sample: ^1.0.0\n",
+        )
+        self.put(
+            "consumer/pubspec.yaml",
+            "name: consumer\ndependencies:\n  sample: ^1.0.0\ndependency_overrides:\n  sample:\n    path: ../local\n",
+        )
+        self.put("local/pubspec.yaml", "name: sample\n")
+        spec = {"adapter": "flutter", "directories": [".", "consumer"]}
+        pins = native.pins(self.root, spec, native.specifications(self.root, spec))
+        self.assertEqual(
+            [(p["file"], p["name"]) for p in pins], [("pubspec.yaml", "sample")]
+        )
+        with patch.object(registry, "releases", side_effect=self.inventory) as queried:
+            native.choose(self.root, pins[0], spec, {}, NOW)
+        queried.assert_called_once_with("pub", "sample")
+
+    def test_pub_effective_sources_reject_unsupported_or_uncontained_inputs(self):
+        cases = [
+            ("dependency_overrides: []\n", ValueError),
+            ("dependency_overrides:\n  sample: {path: ''}\n", ValueError),
+            ("dependency_overrides:\n  sample: {path: 2}\n", ValueError),
+            (
+                "dependency_overrides:\n  sample: {path: local, sdk: flutter}\n",
+                ValueError,
+            ),
+            ("dependency_overrides:\n  sample: {sdk: unknown}\n", ValueError),
+            (
+                "dependency_overrides:\n  sample: {git: https://example.test/repo}\n",
+                ValueError,
+            ),
+            (
+                "dependency_overrides:\n  sample: {hosted: https://example.test, version: ^1.0.0}\n",
+                ValueError,
+            ),
+            ("dependency_overrides:\n  sample: {path: ../outside}\n", ValueError),
+            ("dependency_overrides:\n  sample: {path: missing}\n", FileNotFoundError),
+            ("dependency_overrides:\n  sample: {path: wrong}\n", ValueError),
+            ("workspace: ['packages/*']\n", ValueError),
+            ("resolution: unknown\n", ValueError),
+        ]
+        self.put("pubspec.yaml", "name: root\ndependencies:\n  sample: ^1.0.0\n")
+        self.put("wrong/pubspec.yaml", "name: another\n")
+        for body, error in cases:
+            with self.subTest(body=body):
+                self.put("pubspec_overrides.yaml", body)
+                with self.assertRaises(error):
+                    native.specifications(self.root, {"adapter": "flutter"})
+
+    def test_pub_override_and_target_symlinks_are_rejected_before_parent_walk(self):
+        manifest = self.put("pubspec.yaml", "name: root\n")
+        target = self.put("local/pubspec.yaml", "name: sample\n")
+        override = self.put(
+            "pubspec_overrides.yaml",
+            "dependency_overrides:\n  sample: {path: alias/../local}\n",
+        )
+        (self.root / "alias").symlink_to(self.root / "local", target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            native.manifests.pub_workspace(self.root, self.root)
+        override.unlink()
+        override.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            native.manifests.pub_workspace(self.root, self.root)
+        override.unlink()
+        manifest.unlink()
+        manifest.symlink_to(target)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            native.manifests.pub_workspace(self.root, self.root)
+
+    def test_pub_hosted_override_is_narrowed_only_temporarily_with_source_ownership(
+        self,
+    ):
+        for sibling in (False, True):
+            with self.subTest(sibling=sibling):
+                path, releases, _, write, _ = self.pub_transitive_fixture()
+                old_sibling = self.root / "pubspec_overrides.yaml"
+                old_sibling.unlink(missing_ok=True)
+                override = "dependency_overrides:\n  sample: '>=1.0.0 <3.0.0'\n"
+                owner = (
+                    self.put("pubspec_overrides.yaml", override) if sibling else path
+                )
+                if not sibling:
+                    path.write_text(path.read_text() + override)
+                owner.chmod(0o640)
+                before = {p: (p.read_bytes(), p.stat().st_mode) for p in {owner, path}}
+                calls = []
+
+                def resolve(root, profile, argv, **kwargs):
+                    effective = native.manifests.document(owner)[0][
+                        "dependency_overrides"
+                    ]["sample"]
+                    calls.append(effective)
+                    self.assertEqual(effective, "1.5.0")
+                    self.assertNotIn(
+                        "sample",
+                        native.manifests.document(path)[0].get("dev_dependencies", {}),
+                    )
+                    write(self.root, effective)
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout="native eligible override\n"
+                    )
+
+                with (
+                    patch.object(registry, "releases", return_value=releases),
+                    patch.object(native.chainman, "execute", side_effect=resolve),
+                ):
+                    result = native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+                self.assertEqual(calls, ["1.5.0"])
+                self.assertEqual(result["changed_manifests"], [])
+                self.assertEqual(
+                    {p: (p.read_bytes(), p.stat().st_mode) for p in before}, before
+                )
+                self.assertEqual(
+                    result["pub_overrides"], {"flutter-0": {"sample": "1.5.0"}}
+                )
+
+    def test_pub_fixed_override_selection_and_temporary_bound_are_authoritative(self):
+        self.put("pubspec.yaml", "name: root\ndependencies:\n  sample: ^99.0.0\n")
+        owner = self.put(
+            "pubspec_overrides.yaml", "dependency_overrides:\n  sample: 1.2.0\n"
+        )
+        spec = {"adapter": "flutter"}
+        (pin,) = native.pins(self.root, spec, native.specifications(self.root, spec))
+        with patch.object(registry, "releases", side_effect=self.inventory):
+            chosen = native.choose(self.root, pin, spec, {}, NOW)
+        self.assertEqual(chosen.version, "1.2.0")
+        original = owner.read_bytes()
+        with native.pub_resolution_pins(self.root, [(pin, chosen)]):
+            self.assertEqual(native.old_requirement(self.root, pin), "1.2.0")
+        self.assertEqual(owner.read_bytes(), original)
+        with (
+            self.assertRaisesRegex(ValueError, "within unchanged declared overrides"),
+            native.pub_resolution_pins(
+                self.root, [(pin, registry.Release("2.0.0", NOW))]
+            ),
+        ):
+            self.fail("An outside-bound version must not reach the native solve")
+        self.assertEqual(owner.read_bytes(), original)
+
+    def test_pub_temporarily_narrowed_override_preserves_unexpected_postimages(self):
+        self.put("pubspec.yaml", "name: root\ndependencies:\n  sample: ^99.0.0\n")
+        target = self.put("unrelated.yaml", "retained target\n")
+        for change in ("bytes", "mode", "symlink"):
+            with self.subTest(change=change):
+                owner = self.put(
+                    "pubspec_overrides.yaml",
+                    "dependency_overrides:\n  sample: '>=1.0.0 <3.0.0'\n",
+                )
+                owner.chmod(0o640)
+                spec = {"adapter": "flutter"}
+                (pin,) = native.pins(
+                    self.root, spec, native.specifications(self.root, spec)
+                )
+                with (
+                    self.assertRaisesRegex(ValueError, "preserve and inspect"),
+                    native.pub_resolution_pins(
+                        self.root, [(pin, registry.Release("1.5.0", NOW))]
+                    ),
+                ):
+                    if change == "bytes":
+                        owner.write_text("concurrent override\n")
+                    elif change == "mode":
+                        owner.chmod(0o600)
+                    else:
+                        owner.unlink()
+                        owner.symlink_to(target)
+                if change == "bytes":
+                    self.assertEqual(owner.read_text(), "concurrent override\n")
+                elif change == "mode":
+                    self.assertEqual(stat.S_IMODE(owner.stat().st_mode), 0o600)
+                else:
+                    self.assertTrue(owner.is_symlink())
+                    self.assertEqual(target.read_text(), "retained target\n")
+                    owner.unlink()
+
+    def test_pub_inline_hosted_override_cannot_escape_age_by_rewrite(self):
+        path, releases, _, _, _ = self.pub_transitive_fixture()
+        path.write_text(path.read_text() + "dependency_overrides:\n  sample: 2.0.0\n")
+        before = path.read_bytes()
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute") as execute,
+            self.assertRaisesRegex(ValueError, "declared overrides"),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        execute.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_pub_hosted_override_cannot_materialize_a_different_eligible_version(self):
+        path, releases, _, write, _ = self.pub_transitive_fixture()
+        owner = self.put(
+            "pubspec_overrides.yaml",
+            "dependency_overrides:\n  sample: '>=1.0.0 <4.0.0'\n",
+        )
+        before = (path.read_bytes(), owner.read_bytes())
+
+        def wrong(root, profile, argv, **kwargs):
+            write(self.root, "1.5.0")
+            return subprocess.CompletedProcess(argv, 0, stdout="wrong mature version\n")
+
+        with (
+            patch.object(registry, "releases", return_value=releases),
+            patch.object(native.chainman, "execute", side_effect=wrong),
+            self.assertRaisesRegex(
+                ValueError, "selected version within declared overrides"
+            ),
+        ):
+            native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+        self.assertEqual((path.read_bytes(), owner.read_bytes()), before)
+
+    def test_pub_local_and_sdk_sources_have_no_hosted_exemption(self):
+        self.put(
+            "pubspec.yaml",
+            "name: root\ndependencies:\n  sample: ^99.0.0\n  flutter: ^99.0.0\n",
+        )
+        self.put(
+            "pubspec_overrides.yaml",
+            "dependency_overrides:\n  sample: {path: local}\n  flutter: {sdk: flutter}\n",
+        )
+        self.put("local/pubspec.yaml", "name: sample\nversion: 1.0.0\n")
+        spec = {"adapter": "flutter"}
+        original = [
+            p.read_bytes()
+            for p in (self.root / "pubspec.yaml", self.root / "pubspec_overrides.yaml")
+        ]
+        for source in ("local", "wrong-local", "hosted", "wrong-sdk"):
+            with self.subTest(source=source):
+
+                def resolve(root, profile, argv, **kwargs):
+                    local = "path" if source != "hosted" else "hosted"
+                    target = "wrong" if source == "wrong-local" else "local"
+                    sdk = "unknown" if source == "wrong-sdk" else "flutter"
+                    self.put(
+                        "pubspec.lock",
+                        f"packages:\n  sample:\n    source: {local}\n    version: 1.0.0\n    description:\n      path: {target}\n  flutter:\n    source: sdk\n    version: 0.0.0\n    description: {sdk}\n",
+                    )
+                    return subprocess.CompletedProcess(
+                        argv, 0, stdout="source observation\n"
+                    )
+
+                (self.root / "pubspec.lock").unlink(missing_ok=True)
+                with (
+                    patch.object(registry, "releases") as queried,
+                    patch.object(native.chainman, "execute", side_effect=resolve),
+                ):
+                    if source == "local":
+                        native.resolve(self.root, spec, {}, NOW)
+                    else:
+                        with self.assertRaisesRegex(
+                            ValueError, "resolved source disagrees"
+                        ):
+                            native.resolve(self.root, spec, {}, NOW)
+                    queried.assert_not_called()
+                self.assertEqual(
+                    [
+                        p.read_bytes()
+                        for p in (
+                            self.root / "pubspec.yaml",
+                            self.root / "pubspec_overrides.yaml",
+                        )
+                    ],
+                    original,
+                )
+
+    def test_pub_guarded_local_manifest_and_post_hook_override_changes_are_preserved(
+        self,
+    ):
+        self.put("pubspec.yaml", "name: root\ndependencies:\n  sample: ^99.0.0\n")
+        owner = self.put(
+            "pubspec_overrides.yaml", "dependency_overrides:\n  sample: {path: local}\n"
+        )
+        target = self.put("local/pubspec.yaml", "name: sample\nversion: 1.0.0\n")
+        spec = {"adapter": "flutter"}
+
+        def resolve(root, profile, argv, **kwargs):
+            self.put("pubspec.lock", "packages: {}\n")
+            target.chmod(0o600)
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="concurrent mode change\n"
+            )
+
+        target.chmod(0o640)
+        with (
+            patch.object(native.chainman, "execute", side_effect=resolve),
+            self.assertRaisesRegex(ValueError, "preserve and inspect"),
+        ):
+            native.resolve(self.root, spec, {}, NOW)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
+        specs = native.specifications(self.root, spec)
+        frozen = native.pub_input_state(
+            self.root, specs["flutter-0"]["pub"]["guarded_inputs"]
+        )
+        owner.write_text("dependency_overrides: {}\n")
+        with self.assertRaisesRegex(ValueError, "project hook changed a guarded Pub"):
+            native.audit(
+                self.root,
+                spec,
+                {"identities": [], "resolution": {"pub_inputs": frozen}},
+                {},
+                NOW,
+            )
+        self.assertEqual(owner.read_text(), "dependency_overrides: {}\n")
+
+    def pub_lock_output(self, directory, packages):
+        path = directory / "pubspec.lock"
+        path.write_text(json.dumps({"packages": packages}) + "\n")
+        return path.read_bytes(), path.stat().st_mode
+
+    def test_pub_selected_override_source_and_presence_survive_native_and_hook_audits(
+        self,
+    ):
+        for phase in ("native", "hook"):
+            for source in ("hosted", "path", "sdk", "missing"):
+                with self.subTest(phase=phase, source=source):
+                    manifest, releases, _, write, _ = self.pub_transitive_fixture()
+                    owner = self.put(
+                        "pubspec_overrides.yaml",
+                        "dependency_overrides:\n  sample: '>=1.0.0 <3.0.0'\n",
+                    )
+                    owner.chmod(0o640)
+                    self.put("shadow/pubspec.yaml", "name: sample\nversion: 1.5.0\n")
+                    public = {
+                        p: (p.read_bytes(), p.stat().st_mode) for p in (manifest, owner)
+                    }
+                    lock = self.root / "pubspec.lock"
+                    lock.unlink(missing_ok=True)
+                    observed = {}
+
+                    def replace_source():
+                        packages = native.manifests.document(lock)[0]["packages"]
+                        if source == "path":
+                            packages["sample"] = {
+                                "source": "path",
+                                "version": "1.5.0",
+                                "description": {"path": "shadow", "relative": True},
+                            }
+                        elif source == "sdk":
+                            packages["sample"] = {
+                                "source": "sdk",
+                                "version": "1.5.0",
+                                "description": "flutter",
+                            }
+                        elif source == "missing":
+                            del packages["sample"]
+                        observed["lock"] = self.pub_lock_output(self.root, packages)
+
+                    def resolve(root, profile, argv, **kwargs):
+                        self.assertEqual(
+                            native.manifests.document(owner)[0]["dependency_overrides"][
+                                "sample"
+                            ],
+                            "1.5.0",
+                        )
+                        write(self.root, "1.5.0")
+                        if phase == "native":
+                            replace_source()
+                        return subprocess.CompletedProcess(
+                            argv, 0, stdout="observed Pub output\n"
+                        )
+
+                    with (
+                        patch.object(registry, "releases", return_value=releases),
+                        patch.object(native.chainman, "execute", side_effect=resolve),
+                    ):
+
+                        def evaluate():
+                            result = native.resolve(
+                                self.root, {"adapter": "flutter"}, {}, NOW
+                            )
+                            self.assertEqual(
+                                result["pub_overrides"],
+                                {"flutter-0": {"sample": "1.5.0"}},
+                            )
+                            if phase == "hook":
+                                replace_source()
+                                native.audit(
+                                    self.root,
+                                    {"adapter": "flutter"},
+                                    {"identities": [], "resolution": result},
+                                    {},
+                                    NOW,
+                                )
+
+                        if source == "hosted":
+                            evaluate()
+                        else:
+                            with self.assertRaisesRegex(
+                                ValueError, "Selected hosted Pub override"
+                            ):
+                                evaluate()
+                    self.assertEqual(
+                        {p: (p.read_bytes(), p.stat().st_mode) for p in public}, public
+                    )
+                    self.assertEqual(
+                        (lock.read_bytes(), lock.stat().st_mode), observed["lock"]
+                    )
+
+    def test_pub_override_only_sources_must_materialize_in_their_group(self):
+        for kind in ("hosted", "path", "sdk"):
+            for present in (False, True):
+                with self.subTest(kind=kind, present=present):
+                    root = self.root / f"{kind}-{present}"
+                    root.mkdir()
+                    manifest = self.put(f"{root.name}/pubspec.yaml", "name: root\n")
+                    declaration = {
+                        "hosted": "'1.2.0'",
+                        "path": "{path: local}",
+                        "sdk": "{sdk: flutter}",
+                    }[kind]
+                    owner = self.put(
+                        f"{root.name}/pubspec_overrides.yaml",
+                        f"dependency_overrides:\n  sample: {declaration}\n",
+                    )
+                    self.put(
+                        f"{root.name}/local/pubspec.yaml",
+                        "name: sample\nversion: 1.2.0\n",
+                    )
+                    before = {
+                        p: (p.read_bytes(), p.stat().st_mode) for p in (manifest, owner)
+                    }
+                    release = registry.Release(
+                        "1.2.0",
+                        NOW - timedelta(days=60),
+                        artifacts=(
+                            registry.Artifact(
+                                "https://pub.dev/api/archives/sample-1.2.0.tar.gz",
+                                "sha256:" + "a" * 64,
+                                NOW - timedelta(days=60),
+                            ),
+                        ),
+                    )
+                    item = {
+                        "source": kind,
+                        "version": "1.2.0",
+                        "description": {
+                            "hosted": {
+                                "name": "sample",
+                                "url": "https://pub.dev",
+                                "sha256": "a" * 64,
+                            },
+                            "path": {"path": "local", "relative": True},
+                            "sdk": "flutter",
+                        }[kind],
+                    }
+
+                    def resolve(root, profile, argv, **kwargs):
+                        self.pub_lock_output(
+                            kwargs["cwd"], {"sample": item} if present else {}
+                        )
+                        return subprocess.CompletedProcess(
+                            argv, 0, stdout="override-only output\n"
+                        )
+
+                    spec = {"adapter": "flutter", "directory": root.name}
+                    with (
+                        patch.object(
+                            registry, "releases", return_value=[release]
+                        ) as queried,
+                        patch.object(native.chainman, "execute", side_effect=resolve),
+                    ):
+                        if present:
+                            result = native.resolve(self.root, spec, {}, NOW)
+                            native.audit(
+                                self.root,
+                                spec,
+                                {"identities": [], "resolution": result},
+                                {},
+                                NOW,
+                            )
+                            self.pub_lock_output(root, {})
+                            with self.assertRaisesRegex(
+                                ValueError, "missing from its lock"
+                            ):
+                                native.audit(
+                                    self.root,
+                                    spec,
+                                    {"identities": [], "resolution": result},
+                                    {},
+                                    NOW,
+                                )
+                        else:
+                            with self.assertRaisesRegex(
+                                ValueError, "missing from its lock"
+                            ):
+                                native.resolve(self.root, spec, {}, NOW)
+                        if kind != "hosted":
+                            queried.assert_not_called()
+                    self.assertEqual(
+                        {p: (p.read_bytes(), p.stat().st_mode) for p in before}, before
+                    )
+
+    def test_pub_inactive_overrides_do_not_require_nodes(self):
+        self.put(
+            "pubspec.yaml",
+            "name: root\ndependencies:\n  consumer: {path: consumer}\ndependency_overrides:\n  shadowed: 1.2.0\n",
+        )
+        self.put("pubspec_overrides.yaml", "dependency_overrides: {}\n")
+        self.put(
+            "consumer/pubspec.yaml",
+            "name: consumer\nversion: 1.0.0\ndependency_overrides:\n  dependency_only: 1.2.0\n",
+        )
+
+        def resolve(root, profile, argv, **kwargs):
+            self.pub_lock_output(
+                self.root,
+                {
+                    "consumer": {
+                        "source": "path",
+                        "version": "1.0.0",
+                        "description": {"path": "consumer", "relative": True},
+                    },
+                },
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout="effective group only\n")
+
+        with (
+            patch.object(registry, "releases") as queried,
+            patch.object(native.chainman, "execute", side_effect=resolve),
+        ):
+            result = native.resolve(self.root, {"adapter": "flutter"}, {}, NOW)
+            self.assertEqual(result["pub_overrides"], {"flutter-0": {}})
+            queried.assert_not_called()
+
+    def test_pub_workspace_members_may_be_absent_from_the_shared_lock(self):
+        self.put(
+            "pubspec.yaml",
+            "name: root\nworkspace: [member]\ndependencies:\n  member: ^1.0.0\n",
+        )
+        self.put(
+            "member/pubspec.yaml",
+            "name: member\nversion: 1.0.0\nresolution: workspace\n",
+        )
+
+        def resolve(root, profile, argv, **kwargs):
+            self.assertEqual(kwargs["cwd"], self.root)
+            self.pub_lock_output(self.root, {})
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="workspace members omitted\n"
+            )
+
+        with (
+            patch.object(registry, "releases") as queried,
+            patch.object(native.chainman, "execute", side_effect=resolve),
+        ):
+            result = native.resolve(
+                self.root, {"adapter": "flutter", "directory": "member"}, {}, NOW
+            )
+            self.assertEqual(result["pub_overrides"], {"flutter-0": {}})
+            queried.assert_not_called()
+
+    def test_pub_hosted_override_requirements_stay_with_their_independent_group(self):
+        self.put("pubspec.yaml", "name: root\ndependency_overrides:\n  sample: 1.2.0\n")
+        self.put("other/pubspec.yaml", "name: other\n")
+        release = registry.Release(
+            "1.2.0",
+            NOW - timedelta(days=60),
+            artifacts=(
+                registry.Artifact(
+                    "https://pub.dev/api/archives/sample-1.2.0.tar.gz",
+                    "sha256:" + "a" * 64,
+                    NOW - timedelta(days=60),
+                ),
+            ),
+        )
+
+        def resolve(root, profile, argv, **kwargs):
+            directory = kwargs["cwd"]
+            self.pub_lock_output(
+                directory,
+                {
+                    "sample": {
+                        "source": "hosted",
+                        "version": "1.2.0",
+                        "description": {
+                            "name": "sample",
+                            "url": "https://pub.dev",
+                            "sha256": "a" * 64,
+                        },
+                    },
+                }
+                if directory == self.root
+                else {},
+            )
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="independent group output\n"
+            )
+
+        spec = {"adapter": "flutter", "directories": [".", "other"]}
+        with (
+            patch.object(registry, "releases", return_value=[release]),
+            patch.object(native.chainman, "execute", side_effect=resolve),
+        ):
+            result = native.resolve(self.root, spec, {}, NOW)
+            self.assertEqual(
+                result["pub_overrides"],
+                {"flutter-0": {"sample": "1.2.0"}, "flutter-1": {}},
+            )
+            native.audit(
+                self.root, spec, {"identities": [], "resolution": result}, {}, NOW
+            )
+
+    def test_pub_authoritative_upper_and_disjunctive_bounds_select_highest_eligible(
+        self,
+    ):
+        cases = [("<3.0.0", "2.0.0"), (">=3.0.0 <4.0.0 || >=1.0.0 <2.0.0", "1.2.0")]
+        for sibling in (False, True):
+            for bound, expected in cases:
+                with self.subTest(sibling=sibling, bound=bound):
+                    root = self.root / f"range-{sibling}-{expected}"
+                    root.mkdir()
+                    manifest = self.put(
+                        f"{root.name}/pubspec.yaml",
+                        "name: root\ndependencies:\n  sample: ^99.0.0\n",
+                    )
+                    declaration = f"dependency_overrides:\n  sample: '{bound}'\n"
+                    owner = (
+                        self.put(f"{root.name}/pubspec_overrides.yaml", declaration)
+                        if sibling
+                        else manifest
+                    )
+                    if not sibling:
+                        manifest.write_text(manifest.read_text() + declaration)
+                    owner.chmod(0o640)
+                    before = {
+                        p: (p.read_bytes(), p.stat().st_mode) for p in (manifest, owner)
+                    }
+                    spec = {"adapter": "flutter", "directory": root.name}
+                    (pin,) = native.pins(
+                        self.root, spec, native.specifications(self.root, spec)
+                    )
+                    with patch.object(registry, "releases", side_effect=self.inventory):
+                        selected = native.choose(self.root, pin, spec, {}, NOW)
+                    self.assertIsNotNone(selected)
+                    self.assertEqual(selected.version, expected)
+                    with native.pub_resolution_pins(self.root, [(pin, selected)]):
+                        self.assertEqual(
+                            native.manifests.document(owner)[0]["dependency_overrides"][
+                                "sample"
+                            ],
+                            expected,
+                        )
+                        self.assertEqual(
+                            native.manifests.document(manifest)[0]["dependencies"][
+                                "sample"
+                            ],
+                            "^99.0.0",
+                        )
+                    self.assertEqual(
+                        {p: (p.read_bytes(), p.stat().st_mode) for p in before}, before
+                    )
 
 
 if __name__ == "__main__":

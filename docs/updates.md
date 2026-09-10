@@ -250,6 +250,32 @@ The final lock audit still enforces publication age, constraints, security floor
 exception expiry and immutable evidence. Verification then uses that frozen graph;
 temporary pins grant no audit exemption.
 
+Pub discovery uses the effective native resolution group. A sibling
+`pubspec_overrides.yaml` replaces each attribute it declares, including an empty
+`dependency_overrides` or `workspace`; absent attributes keep their inline values.
+Contained literal workspace members and member invocations share their overrides,
+while independent adapter roots and packages used only as dependencies do not.
+Duplicate workspace overrides, partial manifest selections, nested/glob workspace
+forms and unsupported resolution/source descriptors fail explicitly. A member can use an effective
+`resolution: null` to resolve independently.
+
+Effective contained path and Flutter SDK dependencies receive no hosted lookup or
+version pin. Their shadowed publishable ranges remain unchanged. Local package
+names and target manifests are checked, and resolved lock sources must be present
+and agree with the effective declarations. Only actual workspace members may be
+omitted from their shared lock. Effective overrides require their resolved nodes
+even when no ordinary dependency names them. Hosted overrides must retain the
+selected name, version and pub.dev source in both native output and the final
+post-hook lock; changing them to local or SDK entries does not bypass the audit.
+Effective hosted overrides also keep their original bytes and permissions:
+selection stays within that authoritative range and policy,
+and resolution temporarily narrows only the owning override to the highest
+eligible selected version. A numeric token in an override range is not treated as
+an installed version to retain. The shadowed ordinary range is not pinned. A native
+result that ignores that selection fails; an ineligible exact override cannot be
+rewritten to escape the policy. Manifest, override and local-target manifest
+changes remain guarded through resolution and the final post-hook audit.
+
 Gradle resolution additionally visits every resolvable project and buildscript
 configuration, requiring failures to stop the update. A root `dependencies` report
 alone does not cover child projects. Exact `local_projects` coordinate-to-directory
