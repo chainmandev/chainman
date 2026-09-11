@@ -505,6 +505,71 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
                     0,
                 )
 
+    def test_runtime_source_has_registered_gc_root_and_resists_collection(self):
+        candidate = self.root / "unique-runtime"
+        shutil.copytree(self.tree, candidate)
+        (candidate / "unique-source").write_text(str(self.root))
+        self.lock["narHash"] = subprocess.check_output(
+            [
+                NIX,
+                "--extra-experimental-features",
+                "nix-command",
+                "hash",
+                "path",
+                str(candidate),
+            ],
+            text=True,
+        ).strip()
+        with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
+            archive.add(candidate, arcname="runtime")
+        self.write_lock()
+        cache = self.root / "private-cache"
+        env = dict(self.env, XDG_CACHE_HOME=str(cache))
+        self.run_bootstrap("first", env=env)
+        runtime = Path(self.records()[0]["runtime"])
+        root = (
+            cache
+            / "chainman/runtime-roots"
+            / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
+        )
+        self.assertEqual(root.resolve(), runtime)
+        nix_store = str(Path(NIX).resolve().with_name("nix-store"))
+        roots = subprocess.check_output(
+            [nix_store, "--query", "--roots", str(runtime)], text=True
+        )
+        self.assertIn(str(root), roots)
+        # Only this unique neutral fixture is addressed, never a global GC.
+        result = subprocess.run(
+            [nix_store, "--delete", str(runtime)], capture_output=True, text=True
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((runtime / "scripts/chainman.py").is_file())
+        self.run_bootstrap("second", env=env)
+        self.assertEqual(
+            {record["runtime"] for record in self.records()}, {str(runtime)}
+        )
+
+    def test_runtime_gc_cache_rejects_directory_links_and_regular_root_files(self):
+        cache = self.root / "private-cache"
+        cache.mkdir()
+        outside = self.root / "outside-cache"
+        outside.mkdir()
+        (cache / "chainman").symlink_to(outside, target_is_directory=True)
+        env = dict(self.env, XDG_CACHE_HOME=str(cache))
+        self.assertIn(
+            "must not contain symlinks", self.run_bootstrap(check=False, env=env).stderr
+        )
+        self.assertEqual(list(outside.iterdir()), [])
+        (cache / "chainman").unlink()
+        roots = cache / "chainman/runtime-roots"
+        roots.mkdir(parents=True)
+        root = roots / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
+        root.write_text("preserve this ordinary file")
+        self.assertIn(
+            "must be a symlink", self.run_bootstrap(check=False, env=env).stderr
+        )
+        self.assertEqual(root.read_text(), "preserve this ordinary file")
+
     def test_verified_upgrade_retains_old_generation_and_bad_candidate(self):
         self.run_bootstrap("old")
         old_runtime = Path(self.records()[0]["runtime"])

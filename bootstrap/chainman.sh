@@ -227,7 +227,30 @@ EOF
         CHAINMAN_ARCHIVE=$archive
         export CHAINMAN_ARCHIVE
     fi
-    store=$(nix_eval fetch)
+    # Fetch and register a normal Nix GC root in the same evaluator process.
+    # A bare `nix eval --raw` result loses its temporary root before the next
+    # `nix develop`, allowing automatic GC to remove even the runtime scripts.
+    if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
+        runtime_roots=/nix/var/nix/chainman-runtime-roots
+    else
+        runtime_roots=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/runtime-roots
+    fi
+    single_line "$runtime_roots"
+    case "$runtime_roots" in /*) ;; *) fail 'Runtime cache must be an absolute path.' ;; esac
+    probe=$runtime_roots
+    while [ "$probe" != / ]; do
+        [ ! -L "$probe" ] || fail 'Runtime cache directories must not contain symlinks.'
+        probe=$(dirname -- "$probe")
+    done
+    (
+        umask 077
+        mkdir -p "$runtime_roots"
+    )
+    runtime_root=$runtime_roots/$_content_id
+    [ ! -e "$runtime_root" ] || [ -L "$runtime_root" ] || fail 'Runtime GC root must be a symlink.'
+    store=$(CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=fetch \
+        "$nix_bin" --extra-experimental-features 'nix-command flakes' build --impure --expr "$expression" \
+        --out-link "$runtime_root" --print-out-paths)
     actual=$("$nix_bin" --extra-experimental-features nix-command hash path "$store")
     [ "$actual" = "$nar_hash" ] || fail 'Runtime store source failed NAR verification.'
     # Archives are source distributions: symlinks are excluded before evaluating

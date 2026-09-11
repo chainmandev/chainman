@@ -22,6 +22,16 @@ installation or mutable current pointer. Concurrent fetching and atomic store
 installation are Nix responsibilities. Existing project-local generations are not
 executed; they can be removed after stopping old sessions.
 
+Bootstrap fetches the source with `nix build --out-link`, registering a normal
+[Nix garbage-collection root](https://nix.dev/manual/nix/2.28/command-ref/new-cli/nix3-build)
+before that evaluator exits. Roots are keyed by the pinned NAR hash under
+`${XDG_CACHE_HOME:-$HOME/.cache}/chainman/runtime-roots` on hosts and
+`/nix/var/nix/chainman-runtime-roots` in the selected Nix container volume.
+They retain runtime source archives across nested commands and concurrent versions;
+they do not install a Nix executable or retain every project SDK. Old source roots
+may be removed after all sessions using those versions stop. Nix then decides
+when to collect the unreferenced source. Runtime-cache directory symlinks are refused.
+
 The container maps project commands to the calling user's ownership: rootful Docker
 uses the caller's UID/GID, rootless Docker uses its mapped `0:0`, and Podman uses
 `keep-id`. A failed Docker identity probe stops before execution. Nix runs without a
