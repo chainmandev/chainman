@@ -66,6 +66,53 @@ control_dispatch() {
     trap - EXIT HUP INT TERM
     exit "$control_result"
 }
+update_dispatch() {
+    # Fixed phases only. Host shell orchestration needs neither host Python nor
+    # an engine socket in the resolver or verifier containers.
+    umask 077
+    update_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates
+    mkdir -p "$update_cache"
+    update_output=$(mktemp -d "$update_cache/candidate.XXXXXXXX")
+    update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
+    trap 'printf "Chainman: update candidate preserved at %s\n" "$update_output/candidate" >&2' EXIT
+    mkdir "$update_output/candidate" "$update_output/control"
+    printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+        "$self" _update-prepare "$update_output" "$@" >&2
+    if [ -f "$update_output/control/help" ]; then
+        rm -rf -- "$update_output"
+        trap - EXIT
+        exit 0
+    fi
+    IFS= read -r update_at < "$update_output/control/at"
+    update_launcher=$update_output/original-bootstrap/chainman.sh
+    update_candidate "$update_launcher" _update-resolve "$update_at" "$@" >&2
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+        CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-inspect "$update_output" >&2
+    IFS= read -r update_changed < "$update_output/control/changed"
+    if [ "$update_changed" = yes ]; then
+        {
+            IFS= read -r update_action
+            IFS= read -r update_task
+        } < "$update_output/control/verify"
+        CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
+            "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" >&2
+    fi
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+        CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-finalize "$update_output"
+    rm -rf -- "$update_output"
+    trap - EXIT
+    exit 0
+}
+update_candidate() (
+    # A disposable checkout must not inherit Git routing, hooks or identity that
+    # target the original. Values never become shell code.
+    for update_git in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
+        unset "$update_git"
+    done
+    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 \
+        CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
+)
 expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) {
     root = builtins.getEnv "CHAINMAN_PROJECT_ROOT";
     archive = builtins.getEnv "CHAINMAN_ARCHIVE";
@@ -84,6 +131,16 @@ fi
 cd "$root"
 [ -f chainman.lock ] && [ ! -L chainman.lock ] || fail 'Missing regular chainman.lock.'
 [ ! -L "$root/.chainman" ] || fail '.chainman must be a real directory.'
+
+case "$CHAINMAN_REQUEST_ACTION" in
+    deps-update | chainman-update)
+        [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || fail 'Start updates through the host launcher so candidate verification can control its own services.'
+        [ -z "${CHAINMAN_UPDATE_ACTIVE:-}" ] || fail 'An update hook must not recursively start another update.'
+        shift
+        if [ "$CHAINMAN_REQUEST_ACTION" = chainman-update ]; then set -- --only-chainman "$@"; fi
+        update_dispatch "$@"
+        ;;
+esac
 
 if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     # Nix assigns TMPDIR on every shell entry. Keep the caller's selected base

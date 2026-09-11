@@ -137,6 +137,7 @@
     "scripts/source_updates.py",
     "scripts/toolchain.py",
     "scripts/toolchain_build.py",
+    "scripts/update_staging.py",
     "scripts/updates.py",
     "scripts/workflows.py",
     "sdk-versions.toml",
@@ -175,6 +176,7 @@
     "tests/test_source_github.py",
     "tests/test_source_toolchain_pin.py",
     "tests/test_source_updates.py",
+    "tests/test_update_staging.py",
     "tests/test_updates.py",
     "tests/test_workflows.py",
     "toolchain.toml"
@@ -228,6 +230,7 @@
     "scripts/source_toolchain_pin.py",
     "scripts/source_updates.py",
     "scripts/toolchain.py",
+    "scripts/update_staging.py",
     "scripts/updates.py",
     "scripts/workflows.py"
   ]

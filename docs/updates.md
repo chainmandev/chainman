@@ -9,13 +9,35 @@ configuration against the pinned runtime. This is a configuration contract check
 not dependency eligibility auditing or application verification.
 
 `just deps-update` selects current eligible stable releases, including majors, with
-a configurable 30-day maturity window. `--preview` performs resolution and verification
-in a disposable copy. `--no-commit` leaves the verified changes for a coordinated
+a configurable 30-day maturity window. Resolution and verification run in a
+disposable checkout. The host launcher sequences preparation, resolution,
+inspection, verification and finalization; it needs neither host Python nor a
+container-engine socket inside project containers. `--preview` stops before applying
+the verified changes. `--no-commit` applies them without committing, for a coordinated
 checkpoint. Project dependency updates retain the Chainman pin and never query
 Chainman releases. `just chainman-update` explicitly updates the runtime pin and
 managed bootstrap, followed by consumer verification. The transitional
 `--only-chainman` spelling does the same; `--skip-chainman` is now redundant.
 A missing release source or eligibility date is an error, never an implicit exemption.
+
+Schema 2 consumers declare `updates.verify_task = "verify"` (or another finite
+task). The launcher runs that ordinary task against the candidate's updated Nix
+lock and verified runtime. Its setup groups, service readiness, container namespaces
+and cleanup are identical to an ordinary task invocation. Start updates through the
+host launcher, including on container-only machines, outside an active project
+container. Legacy command/module verification remains available for schema 1.
+
+Resolvers and verifiers can write the disposable checkout, but only trusted runtime
+phases mount the private transaction metadata and original checkout. Inspection
+freezes the allowed candidate files before verification and exports a bootstrap from
+the verified runtime for host execution; it never executes the candidate's mutable
+bootstrap on the host. Finalization checks the original HEAD, index and raw source
+snapshot again before applying anything. A resolver failure, verification failure,
+out-of-scope change or concurrent original edit leaves the original unchanged and
+preserves the candidate under the host's Chainman update cache for inspection.
+Candidate source changes during verification are failures. Failures while applying
+or committing already verified files preserve the resulting files/index for review.
+No reset, stash, push, background updater or automatic retry is involved.
 Registry metadata responses are bounded to 64 MiB, including complete package
 histories; a larger response fails explicitly rather than dropping release evidence.
 Crates.io API requests are serialized within each process with a conservative
@@ -64,7 +86,7 @@ Projects declare shared adapters and ordered application hooks:
 [updates]
 minimum_age_days = 30
 profile = "default"
-verify = [["just", "verify"]]
+verify_task = "verify"
 outputs = ["nix/flake.lock", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "generated/labels.json"]
 targets = ["assets"]
 
@@ -473,7 +495,7 @@ It never pushes, creates an empty commit or silently falls back to unsigned comm
 The exact candidate commit is created directly, so arbitrary Git commit hooks do not
 run; all required checks belong in verification.
 
-Preview copies visible project files into a disposable Git repository, rebinds the
+Each update copies visible project files into a disposable Git repository, rebinds the
 project root and executes the same update and verification path. Nested launchers
 verify/fetch the copied pin. Refreshed subprocesses bind that copied project
 explicitly, even when their executable belongs to the original immutable runtime.
@@ -490,17 +512,16 @@ the commit and both required release assets' creation/modification dates, as wel
 as release publication. Downloads use asset IDs and must match GitHub's recorded
 SHA-256 and size; missing evidence and a tag moving during download fail before
 candidate evaluation. Locally edited bootstrap files
-must be reconciled explicitly. Candidate runtime tests and full project verification
-run from refreshed environments. If verification fails, the previous managed pin,
-bootstrap and bundled archive are restored only where their current bytes still
-match the transaction's candidate; concurrent edits are preserved and reported.
-Other failed dependency edits remain visible for diagnosis. Prior installed runtime
-generations remain available throughout the transaction.
-Recovery assumes cooperating process locks and ordinary caught failures. An
-unhandled termination (including SIGTERM, SIGHUP or SIGKILL) while a candidate pin is live can leave visible uncommitted candidate
-files; inspect the Git diff and restore the previous managed files before retrying.
-The conditional restore does not claim filesystem compare-and-swap against a hostile
-writer changing a file between the final check and atomic replacement.
+must be reconciled explicitly. Consumer verification runs from refreshed environments.
+Until verification passes, the previous pin, bootstrap and bundled archive remain
+untouched in the original checkout. Failed candidate files remain available for
+diagnosis. Prior installed runtime generations remain available throughout the
+transaction. Partial runtime publication inside the candidate restores only
+still-identical managed outputs; concurrent edits are preserved. Final application
+assumes cooperating process locks, not filesystem compare-and-swap against a hostile
+same-user writer. Termination during final application can leave verified but
+partially applied files; inspect the original diff and preserved candidate before
+retrying.
 
 Runtime releases are qualified in the Chainman source project. Consumer runtime
 upgrades validate the candidate configuration and run the declared project verifier

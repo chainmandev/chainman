@@ -150,16 +150,13 @@ class SelfUpdateTests(unittest.TestCase):
                             side_effect=AssertionError("candidate evaluated"),
                         ) as evaluate,
                         patch.object(
-                            subject.updates, "transaction", side_effect=self.transaction
-                        ),
-                        patch.object(
                             subject,
                             "verify",
                             side_effect=AssertionError("candidate executed"),
                         ),
                     ):
                         with self.assertRaises(ValueError):
-                            subject.apply(self.root, self.opts, self.now)
+                            subject.runtime_candidate(self.root, {}, self.now)
                         evaluate.assert_not_called()
                     self.assertEqual(self.managed(), self.before)
 
@@ -190,23 +187,26 @@ class SelfUpdateTests(unittest.TestCase):
             )
         }
 
-    def transaction(self, root, patterns, update, verify, commit, *, message):
-        # This callback exercises publication and verification without Git or
-        # consumer execution; Git transaction integrity has its own real tests.
-        self.assertEqual(
-            message, getattr(self.opts, "message", "chore: update dependencies")
-        )
-        update()
-        verify()
-        return {"verification": "passed"}
-
     def run_apply(self, verifier):
-        with (
-            patch.object(subject, "fetch_runtime", return_value=self.candidate),
-            patch.object(subject.updates, "transaction", side_effect=self.transaction),
-            patch.object(subject, "verify", side_effect=verifier),
-        ):
-            return subject.apply(self.root, self.opts, self.now)
+        # Exercise the managed-publication utility independently. Actual update
+        # isolation and verifier failure are covered by staged transaction tests.
+        managed = subject.ManagedFiles(self.root)
+        with patch.object(subject, "fetch_runtime", return_value=self.candidate):
+            try:
+                runtime = subject.perform(
+                    self.root,
+                    {},
+                    self.now,
+                    [],
+                    only_runtime=self.opts.only_chainman,
+                    skip_runtime=False,
+                    managed=managed,
+                )
+                verifier(self.root, {}, runtime)
+                return {"verification": "passed"}
+            except BaseException:
+                managed.restore()
+                raise
 
     def test_failed_verification_restores_exact_managed_bytes_and_modes(self):
         def reject(*_):
@@ -282,13 +282,10 @@ class SelfUpdateTests(unittest.TestCase):
                     (tree / "scripts/chainman.py").mkdir()
                 with (
                     patch.object(subject, "fetch_runtime", return_value=tree),
-                    patch.object(
-                        subject.updates, "transaction", side_effect=self.transaction
-                    ),
                     patch.object(subject, "verify") as execute,
                 ):
                     with self.assertRaises(ValueError):
-                        subject.apply(self.root, self.opts, self.now)
+                        subject.runtime_candidate(self.root, {}, self.now)
                     execute.assert_not_called()
                 self.assertEqual(self.managed(), self.before)
 
@@ -301,12 +298,9 @@ class SelfUpdateTests(unittest.TestCase):
             with self.subTest(failure=failure):
                 with (
                     patch.object(subject, "fetch_runtime", side_effect=failure),
-                    patch.object(
-                        subject.updates, "transaction", side_effect=self.transaction
-                    ),
                     self.assertRaises(type(failure)),
                 ):
-                    subject.apply(self.root, self.opts, self.now)
+                    subject.runtime_candidate(self.root, {}, self.now)
                 self.assertEqual(self.managed(), self.before)
 
     def test_concurrent_change_during_fetch_is_not_overwritten(self):
@@ -316,11 +310,10 @@ class SelfUpdateTests(unittest.TestCase):
 
         with (
             patch.object(subject, "fetch_runtime", side_effect=fetched),
-            patch.object(subject.updates, "transaction", side_effect=self.transaction),
             patch.object(subject, "verify") as execute,
         ):
             with self.assertRaisesRegex(ValueError, "changed during preparation"):
-                subject.apply(self.root, self.opts, self.now)
+                subject.runtime_candidate(self.root, {}, self.now)
             execute.assert_not_called()
         self.assertEqual(
             (self.root / "bundle.tar.gz").read_bytes(), b"concurrent archive"

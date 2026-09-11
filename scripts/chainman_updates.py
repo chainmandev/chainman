@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -457,112 +456,7 @@ def verify_current(root: Path):
         updates.verify(root, tc.config(root)["modules"])
 
 
-def apply(root: Path, opts, now: datetime):
-    import dependency_api
-
-    policy = dependency_api.policy(root)
-    if not policy:
-        raise ValueError("Declare project updates and verification first")
-    patterns = [
-        *policy.get("outputs", []),
-        "chainman.lock",
-        "scripts/chainman.sh",
-        "scripts/chainman-fetch.nix",
-    ]
-    if (root / "chainman.lock").exists():
-        lock = json.loads(tc.regular_input(root, "chainman.lock"))
-        if lock.get("bundled_archive"):
-            patterns.append(lock["bundled_archive"])
-    if not policy.get("resolver") and not policy.get("steps"):
-        patterns += [
-            p
-            for n in tc.config(root)["modules"]
-            for p in tc.module(n, root).get("update_outputs", [])
-        ]
-    runtime = [chainman.RUNTIME]
-    managed = ManagedFiles(root)
-
-    def change():
-        runtime[0] = perform(
-            root,
-            policy,
-            now,
-            opts.extra,
-            only_runtime=opts.only_chainman,
-            skip_runtime=opts.skip_chainman,
-            managed=managed,
-        )
-
-    try:
-        return updates.transaction(
-            root,
-            patterns,
-            change,
-            lambda: verify(root, policy, runtime[0]),
-            not opts.no_commit,
-            message=getattr(opts, "message", "chore: update dependencies"),
-        )
-    except BaseException:
-        managed.restore()
-        raise
-
-
-def preview(root: Path, opts, now: datetime):
-    updates.repository(root, clean=False)
-    before = updates.snapshot(root)
-    with tempfile.TemporaryDirectory(prefix="chainman-preview-") as directory:
-        copy = Path(directory)
-        with updates.preview_git_environment():
-            updates.prepare_preview(root, copy, before)
-            # Ignored installed runtimes are not copied. Nested launchers verify
-            # the copied bundle or fetch the declared pin, just like a new checkout.
-            saved = {
-                name: os.environ.get(name)
-                for name in (
-                    "TOOLCHAIN_LOCK_FD",
-                    "CHAINMAN_ROOT",
-                    "CHAINMAN_PROJECT_ROOT",
-                    "CHAINMAN_COMPILER_OWNER",
-                    "CHAINMAN_CONTAINER_OPTIONS_FILE",
-                )
-            }
-            try:
-                for name in saved:
-                    os.environ.pop(name, None)
-                os.environ["CHAINMAN_ROOT"] = str(copy)
-                os.environ["CHAINMAN_PROJECT_ROOT"] = str(copy)
-                opts.no_commit = True
-                with tc.operation(copy):
-                    result = apply(copy, opts, now)
-            finally:
-                for name, value in saved.items():
-                    if value is None:
-                        os.environ.pop(name, None)
-                    else:
-                        os.environ[name] = value
-        if updates.snapshot(root) != before:
-            raise ValueError("Original project changed during preview")
-        return {"preview": True, **result}
-
-
-@contextmanager
-def machine_output(enabled: bool):
-    """Keep inherited child-process output out of the JSON result stream."""
-    if not enabled:
-        yield
-        return
-    sys.stdout.flush()
-    saved = os.dup(1)
-    try:
-        os.dup2(2, 1)
-        yield
-    finally:
-        sys.stdout.flush()
-        os.dup2(saved, 1)
-        os.close(saved)
-
-
-def run(root: Path, args: list[str]):
+def options(args: list[str]):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--no-commit", action="store_true")
@@ -583,13 +477,13 @@ def run(root: Path, args: list[str]):
     opts.skip_chainman = not opts.only_chainman
     if opts.extra[:1] == ["--"]:
         opts.extra = opts.extra[1:]
+    if not opts.message.strip() or "\0" in opts.message:
+        raise ValueError("Commit message must be nonempty text without NUL")
+    if opts.only_chainman and opts.extra:
+        raise ValueError("Runtime updates do not accept dependency resolver arguments")
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start another update")
-    now = datetime.now(timezone.utc)
-    with machine_output(opts.json), tc.operation(root):
-        result = preview(root, opts, now) if opts.preview else apply(root, opts, now)
-    print(json.dumps({"schema": 1, **result}, indent=2))
-    return 0
+    return opts
 
 
 if __name__ == "__main__":

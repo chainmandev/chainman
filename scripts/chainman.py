@@ -264,12 +264,6 @@ def run_project(root: Path, action: str, extra: list[str]):
                 tc.run_commands(spec, action, env, root)
 
 
-def dependencies(root: Path, args: list[str]):
-    import chainman_updates
-
-    return chainman_updates.run(root, args)
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -287,6 +281,11 @@ def main(argv=None):
             "deps-resolve",
             "deps-check",
             "nix-update",
+            "_update-prepare",
+            "_update-resolve",
+            "_update-inspect",
+            "_update-verify",
+            "_update-finalize",
         }:
             if any(
                 importlib.util.find_spec(name) is None
@@ -317,6 +316,10 @@ def main(argv=None):
             if part.is_symlink():
                 raise ValueError("Project root must not contain symlink components")
         root = root.resolve(strict=True)
+        if args.action.startswith("_update-"):
+            import update_staging
+
+            return update_staging.run(root, args.action, args.arguments)
         if args.action == "_control-export":
             import services
 
@@ -356,10 +359,10 @@ def main(argv=None):
                     env["RUSTC_WRAPPER"] = os.environ.get("RUSTC_WRAPPER", "")
                 with tc.compiler_cache(name, env, root) as owned:
                     return execute(root, name, rest, env=owned, check=False).returncode
-        elif args.action == "deps-update":
-            return dependencies(root, rest)
-        elif args.action == "chainman-update":
-            return dependencies(root, ["--only-chainman", *rest])
+        elif args.action in {"deps-update", "chainman-update"}:
+            raise ValueError(
+                "Start updates through scripts/chainman.sh on the host; direct Python entry cannot orchestrate candidate services"
+            )
         elif args.action == "deps-check":
             import dependency_api
 

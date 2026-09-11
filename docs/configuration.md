@@ -12,7 +12,7 @@ default_profile = "default"
 flake = "nix#default"
 [commands]
 setup = [["sh", "scripts/setup-project.sh"]]
-verify = [["just", "check"]]
+verify = [["just", "check"]] # Schema 1 hook; schema 2 uses verify_task = "check".
 [setup]
 inputs = ["nix/flake.nix", "nix/flake.lock", "package.json", "pnpm-lock.yaml"]
 artifacts = ["node_modules/.pnpm/lock.yaml"]

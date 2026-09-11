@@ -21,6 +21,7 @@ import chainman_updates as consumer_updates
 import registry
 import toolchain
 import updates
+import update_staging
 
 
 class ConsumerFixture(unittest.TestCase):
@@ -612,9 +613,28 @@ outputs=["deps.txt"]
         )
         self.initial = self.init_git()
 
-    def update(self, *args):
-        with redirect_stdout(io.StringIO()):
-            return consumer_updates.run(self.root, list(args))
+    def update(self, *args, root=None):
+        root = self.root if root is None else root
+        self.stage = Path(tempfile.mkdtemp(dir=self.base, prefix="staged-"))
+        for name in ("control", "candidate"):
+            (self.stage / name).mkdir()
+        self.copy = self.stage / "candidate"
+        update_staging.prepare(root, self.stage, list(args))
+        at = (self.stage / "control/at").read_text().strip()
+        update_staging.resolve(self.copy, at, list(args))
+        # These hook fixtures have no distribution pin. Runtime authenticity has
+        # separate Nix/bootstrap tests; the transaction uses real Git and hooks.
+        with patch.object(
+            update_staging, "verified_runtime", return_value=chainman.RUNTIME
+        ):
+            update_staging.inspect(root, self.stage)
+        state = json.loads((self.stage / "control/state.json").read_text())
+        if state["paths"]:
+            update_staging.run(self.copy, "_update-verify", ["legacy"])
+        with redirect_stdout(io.StringIO()) as stream:
+            update_staging.finalize(root, self.stage)
+        self.record = json.loads(stream.getvalue())
+        return 0
 
     def test_verified_real_git_commit_then_noop(self):
         self.assertEqual(self.update("--", "2.0"), 0)
@@ -626,18 +646,19 @@ outputs=["deps.txt"]
             self.git("show", "--format=", "--name-only", "HEAD"), "deps.txt"
         )
         self.assertEqual(self.git("status", "--porcelain"), "")
-        self.assertEqual((self.root / ".cache/verified").read_text(), str(self.root))
+        self.assertEqual((self.copy / ".cache/verified").read_text(), str(self.copy))
         self.assertEqual(self.update("--", "2.0"), 0)
         self.assertEqual(self.git("rev-parse", "HEAD"), new_head)
 
-    def test_machine_result_separates_child_logs_and_preserves_commit_message(self):
-        resolver = self.root / "resolver.py"
-        resolver.write_text(
-            resolver.read_text() + '\nprint("resolver progress on stdout")\n'
-        )
-        self.git("add", "resolver.py")
-        self.git("commit", "-m", "Fixture emits native command output")
+    def test_exact_commit_message_survives_staging(self):
         message = "Refresh dependencies: literal $(do-not-run)\n\nVerified candidate."
+        self.update("--json", "--message", message, "--", "2.0")
+        self.assertEqual(self.record["schema"], 1)
+        self.assertEqual(self.record["changed"], ["deps.txt"])
+        self.assertEqual(self.record["commit"], self.git("rev-parse", "HEAD"))
+        self.assertEqual(self.git("log", "-1", "--format=%B"), message)
+
+    def test_direct_python_update_entry_cannot_bypass_host_orchestration(self):
         result = subprocess.run(
             [
                 sys.executable,
@@ -645,49 +666,23 @@ outputs=["deps.txt"]
                 "--root",
                 str(self.root),
                 "deps-update",
-                "--skip-chainman",
                 "--json",
-                "--message",
-                message,
                 "--",
                 "2.0",
-            ],
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        record = json.loads(result.stdout)
-        self.assertEqual(record["schema"], 1)
-        self.assertEqual(record["changed"], ["deps.txt"])
-        self.assertEqual(record["commit"], self.git("rev-parse", "HEAD"))
-        self.assertEqual(self.git("log", "-1", "--format=%B"), message)
-        self.assertIn("resolver progress on stdout", result.stderr)
-
-    def test_failed_machine_update_has_no_success_json(self):
-        result = subprocess.run(
-            [
-                sys.executable,
-                str(chainman.RUNTIME / "scripts/chainman.py"),
-                "--root",
-                str(self.root),
-                "deps-update",
-                "--skip-chainman",
-                "--json",
-                "--",
-                "bad",
             ],
             text=True,
             capture_output=True,
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
+        self.assertIn("direct Python entry", result.stderr)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
 
     def test_commit_disabled_still_verifies_without_staging(self):
         self.assertEqual(self.update("--no-commit", "--", "2.0"), 0)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
-        self.assertTrue((self.root / ".cache/verified").is_file())
+        self.assertTrue((self.copy / ".cache/verified").is_file())
         self.assertEqual((self.root / "deps.txt").read_text(), "2.0\n")
 
     def test_preview_nested_launcher_cannot_target_ambient_original_root(self):
@@ -705,39 +700,45 @@ outputs=["deps.txt"]
             self.update("--", "fail")
         self.assertEqual(raised.exception.returncode, 17)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
-        self.assertEqual((self.root / "deps.txt").read_text(), "2.0\n")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((self.copy / "deps.txt").read_text(), "2.0\n")
         self.assertFalse((self.root / ".cache/verified").exists())
 
     def test_failed_verification_preserves_changes_without_commit(self):
         with self.assertRaises(subprocess.CalledProcessError):
             self.update("--", "bad")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
-        self.assertEqual((self.root / "deps.txt").read_text(), "bad\n")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertEqual((self.copy / "deps.txt").read_text(), "bad\n")
 
     def test_unexpected_resolver_output_is_rejected_before_verification(self):
         with self.assertRaisesRegex(ValueError, "Unexpected"):
             self.update("--", "unexpected")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+        self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertFalse((self.root / ".cache/verified").exists())
         self.assertEqual(
-            (self.root / "notes.txt").read_text(), "unauthorized mutation\n"
+            (self.copy / "notes.txt").read_text(), "unauthorized mutation\n"
         )
 
     def test_verification_cannot_change_source_even_with_success_exit(self):
         with self.assertRaisesRegex(ValueError, "Verification changed"):
             self.update("--", "alter")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+        self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertEqual(
-            (self.root / "notes.txt").read_text(), "verification mutation\n"
+            (self.copy / "notes.txt").read_text(), "verification mutation\n"
         )
 
     def test_nested_parent_repository_is_not_an_adopted_consumer(self):
         nested = self.root / "nested example"
         nested.mkdir()
         (nested / "chainman.toml").write_text((self.root / "chainman.toml").read_text())
+        before = self.git("status", "--porcelain")
         with self.assertRaisesRegex(ValueError, "enclosing"):
-            consumer_updates.run(nested, ["--skip-chainman"])
+            self.update("--skip-chainman", root=nested)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+        self.assertEqual(self.git("status", "--porcelain"), before)
 
     def test_custom_hook_must_explicitly_own_release_eligibility(self):
         cfg = (
@@ -966,7 +967,7 @@ class RuntimeReleaseTests(ConsumerFixture):
             patch.object(consumer_updates, "verify") as verify,
         ):
             with self.assertRaisesRegex(ValueError, "checksum"):
-                consumer_updates.run(self.root, ["--only-chainman"])
+                consumer_updates.runtime_candidate(self.root, self.policy, self.now)
             verify.assert_not_called()
         self.assertEqual(self.git("rev-parse", "HEAD"), initial)
         self.assertEqual(

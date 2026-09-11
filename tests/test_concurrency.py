@@ -100,9 +100,16 @@ class ConcurrencyTests(unittest.TestCase):
                     "exec", "--", sys.executable, "-c", "print('stop command reached')"
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                for action in ("clean", "cache-prune", "deps-update"):
-                    result = self.command(action)
-                    self.assertNotEqual(result.returncode, 0, action)
+                staging = self.root.parent / "update-staging"
+                for directory in (staging / "control", staging / "candidate"):
+                    directory.mkdir(parents=True)
+                for command in (
+                    ("clean",),
+                    ("cache-prune",),
+                    ("_update-prepare", str(staging)),
+                ):
+                    result = self.command(*command)
+                    self.assertNotEqual(result.returncode, 0, command)
                     self.assertIn("active", result.stderr)
                 self.assertEqual(active.read_text(), "in use")
         result = self.command("cache-prune", "--all")
