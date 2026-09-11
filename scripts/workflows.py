@@ -92,10 +92,7 @@ def configuration(root):
                         raise ValueError("Invalid setup readiness artifact")
             else:
                 names(spec.get("setup", []))
-                if spec.get("services"):
-                    raise ValueError(
-                        "Service workflows are pending backend qualification"
-                    )
+                names(spec.get("services", []))
         order(entries, list(entries))
     for spec in cfg.get("tasks", {}).values():
         order(cfg.get("setup", {}), spec.get("setup", []))
@@ -221,7 +218,7 @@ def setup_use(root, cfg, requested, env):
         yield (lease.fileno(),)
 
 
-def run(root: Path, action: str, extra: list[str]):
+def run(root: Path, action: str, extra: list[str], *, service_context=False):
     cfg = configuration(root)
     with tc.operation(root, exclusive=False, new_execution=True, automatic_prune=False):
         env = tc.environment(root)
@@ -229,6 +226,10 @@ def run(root: Path, action: str, extra: list[str]):
             with setup_use(root, cfg, extra or list(cfg.get("setup", {})), env):
                 return 0
         task_names = order(cfg.get("tasks", {}), [action])
+        if not service_context and any(
+            cfg["tasks"][key].get("services") for key in task_names
+        ):
+            raise ValueError("Service tasks require the checked-in host bootstrap")
         groups = list(
             dict.fromkeys(
                 group

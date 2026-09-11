@@ -5,7 +5,7 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 profile=${1:-core}
 [ "$#" -eq 0 ] || shift
-case "$profile" in core | javascript | rust | python | go | flutter | swift | compose | browser) ;; *)
+case "$profile" in core | javascript | rust | python | go | flutter | swift | compose | browser | control) ;; *)
     echo 'Unknown development profile.' >&2
     exit 2
     ;;

@@ -1,0 +1,81 @@
+"""Qualify the native ownership adapter and the exact pinned backend locally."""
+
+import os
+from pathlib import Path
+import platform
+import subprocess
+import tempfile
+
+import toolchain as tc
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def main():
+    target = (
+        f"{platform.system().lower()}-"
+        + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
+    )
+    source = ROOT / "nix/control"
+    formatted = subprocess.check_output(
+        ["gofmt", "-l", *map(str, source.glob("*.go"))], text=True
+    )
+    if formatted:
+        raise ValueError("Go files require gofmt:\n" + formatted)
+    subprocess.run(["go", "test", "-mod=readonly", "./..."], cwd=source, check=True)
+    package = subprocess.check_output(
+        [
+            tc.nix_command(),
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "build",
+            f"path:{ROOT / 'nix'}#control-{target}",
+            "--no-link",
+            "--print-out-paths",
+            "--no-write-lock-file",
+        ],
+        text=True,
+    ).strip()
+    env = dict(
+        os.environ,
+        CHAINMAN_TEST_CONTROL=package + "/bin/chainman-control",
+        CHAINMAN_TEST_PROCESS_COMPOSE=package + "/bin/process-compose",
+    )
+    subprocess.run(
+        [
+            "python3",
+            "-m",
+            "unittest",
+            "discover",
+            "-s",
+            "tests",
+            "-p",
+            "test_services_control.py",
+            "-v",
+        ],
+        cwd=ROOT,
+        env=env,
+        check=True,
+    )
+    with tempfile.TemporaryDirectory(prefix="chainman-cross-build-") as tmp:
+        for system in ("linux", "darwin"):
+            for arch in ("arm64", "amd64"):
+                subprocess.run(
+                    [
+                        "go",
+                        "build",
+                        "-mod=readonly",
+                        "-trimpath",
+                        "-buildvcs=false",
+                        "-o",
+                        str(Path(tmp) / f"{system}-{arch}"),
+                        ".",
+                    ],
+                    cwd=source,
+                    env=dict(os.environ, CGO_ENABLED="0", GOOS=system, GOARCH=arch),
+                    check=True,
+                )
+
+
+if __name__ == "__main__":
+    main()

@@ -326,10 +326,18 @@ def main(argv=None):
             if part.is_symlink():
                 raise ValueError("Project root must not contain symlink components")
         root = root.resolve(strict=True)
+        if args.action == "_control-export":
+            import services
+
+            return services.export(root, args.arguments)
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
-        if args.action == "version":
+        if args.action in {"_workflow-task", "_workflow-service", "_workflow-prepare"}:
+            import services
+
+            return services.execute_internal(root, args.action, rest)
+        elif args.action == "version":
             print((RUNTIME / "VERSION").read_text().strip())
         elif args.action in {"exec", "shell"}:
             reuse = rest[:1] == ["--reuse-operation"]

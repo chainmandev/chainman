@@ -178,3 +178,35 @@ and memory per job; it is always at least one. Linux considers available memory,
 affinity and cgroup-v2 ancestor limits, with v1 memory-limit support. macOS uses
 available CPU count and physical memory. These are concurrency hints rather than
 memory isolation. Workflows without a resource declaration perform no resource probe.
+
+Schema 2 service workflows use the checked-in host launcher. A task's `services`
+array selects services and their declared dependencies. Each service declares one
+argument-array `command` with a `profile`, or a digest-pinned `container`. Optional
+`setup` groups hold shared artifact leases for the entire service lifetime.
+`readiness.command` runs in that service's execution context; its positive
+`period_seconds`, `timeout_seconds`, and `failure_threshold` bound startup.
+`restart` is `no`, `always`, or `on_failure`; `shutdown_seconds` bounds cleanup.
+Commands must stay in the foreground so the backend can own their lifetime.
+
+The launcher routes service-bearing tasks through an upstream Process Compose
+binary and a native Chainman ownership adapter. Both are built/materialized from
+the verified runtime only when services are used. The adapter owns compatible
+reuse, per-client leases, and identity-checked crash recovery. Process Compose
+owns readiness, process supervision, dependency ordering, and restart policy.
+Go and the pinned `golang.org/x/sys` dependency are build inputs, not required host
+installations. Container-only hosts build/materialize the controller through the
+stock Nix container and execute the resulting native binary on the host.
+
+`services-up TASK` retains the task's service set until an explicit
+`services-stop`. `services-status` and `services-stop` use saved ownership data;
+they do not parse the current project configuration or run setup. Normal `run`
+releases only its own lease. A surviving task retains its lease even if its caller
+is killed. After an abrupt controller failure, explicit stop recovers owned
+process groups and labeled containers; it never signals an unrelated reused PID.
+Project containers receive neither controller state nor an engine socket.
+
+The initial service scope is one canonical worktree and execution mode. Live
+services with incompatible inputs are rejected. Stale client records are reaped
+on the next controller operation. Shared scopes across worktrees, build/watch
+replacement, and full backend/platform release qualification remain rollout gates;
+the API must not be represented as qualified for those behaviors yet.

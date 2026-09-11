@@ -60,3 +60,6 @@ example destination="dist/nix-just-toolchain":
 
 bootstrap-test engine="docker":
     @command -v "$1" >/dev/null; ./scripts/enter.sh core env CHAINMAN_TEST_ENGINE_PATH="$PATH" CHAINMAN_TEST_CONTAINER="$1" sh -eu -c 'export PATH="$PATH:$CHAINMAN_TEST_ENGINE_PATH"; python3 -B -m unittest discover -s tests -p test_bootstrap.py -v'
+
+control-test:
+    @./scripts/enter.sh control python3 scripts/control_test.py

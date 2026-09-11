@@ -19,6 +19,45 @@ single_line "$root"
 helper=$script_dir/chainman-fetch.nix
 [ -f "$helper" ] || helper=$script_dir/fetch.nix
 [ -f "$helper" ] && [ ! -L "$helper" ] || fail 'Missing regular chainman-fetch.nix companion.'
+CHAINMAN_REQUEST_ACTION=${1:-doctor}
+CHAINMAN_REQUEST_TASK=${2:-}
+export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK
+control_dispatch() {
+    # Only the internal export operation mounts this private output directory.
+    # It builds verified tooling and emits JSON; no consumer code executes there.
+    control_output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-control.XXXXXXXX")
+    trap 'rm -rf -- "$control_output"' EXIT HUP INT TERM
+    case "$(uname -s):$(uname -m)" in
+        Linux:aarch64 | Linux:arm64) control_target=linux-arm64 ;;
+        Linux:x86_64) control_target=linux-amd64 ;;
+        Darwin:arm64) control_target=darwin-arm64 ;;
+        Darwin:x86_64) control_target=darwin-amd64 ;;
+        *) fail 'Unsupported native service-controller platform.' ;;
+    esac
+    control_engine=
+    for candidate in "${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-docker}}" podman; do
+        case "$candidate" in docker | podman) ;; *) fail 'Unsupported container engine.' ;; esac
+        if command -v "$candidate" > /dev/null 2>&1; then
+            control_engine=$(command -v "$candidate")
+            break
+        fi
+    done
+    printf '%s\n%s\n' --mount "type=bind,src=$control_output,dst=$control_output" > "$control_output/mounts"
+    CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts "$self" _control-export "$control_output" "$control_target" \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" "$control_engine" "$self" "$@"
+    case "$1" in
+        services-status | services-stop)
+            IFS= read -r control_state < "$control_output/state"
+            "$control_output/chainman-control" "${1#services-}" "$control_state"
+            ;;
+        services-up) "$control_output/chainman-control" up "$control_output/plan.json" ;;
+        *) "$control_output/chainman-control" run "$control_output/plan.json" ;;
+    esac
+    control_result=$?
+    rm -rf -- "$control_output"
+    trap - EXIT HUP INT TERM
+    exit "$control_result"
+}
 expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) {
     root = builtins.getEnv "CHAINMAN_PROJECT_ROOT";
     archive = builtins.getEnv "CHAINMAN_ARCHIVE";
@@ -98,6 +137,9 @@ EOF
     # Archives are source distributions: symlinks are excluded before evaluating
     # even the verified flake, so extraction cannot introduce an outside path.
     [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
+    if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] && [ "$(nix_eval route)" = 1 ]; then
+        control_dispatch "$@"
+    fi
     export CHAINMAN_MODE="$mode" CHAINMAN_ACTIVE_MODE="$mode"
     # Bootstrap entry replaces an external project shell. Its old profile token no
     # longer describes PATH, even when the project inputs themselves are unchanged.
@@ -192,8 +234,14 @@ run --rm --user "$container_uid:$container_gid" --security-opt no-new-privileges
     --env 'NIX_CONFIG=build-users-group =' \
     --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
+    --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
     "$image" sh -eu -c "$container_init" \
     sh nix --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression" > "$temporary/options"
+if grep -q -- '^--controller$' "$temporary/options"; then
+    rm -rf -- "$temporary"
+    trap - EXIT HUP INT TERM
+    control_dispatch "$@"
+fi
 
 # A selected name is passed to the engine without its value in the argument list.
 env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' > "$temporary/names"
@@ -343,8 +391,16 @@ if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
     set -- --env "CHAINMAN_ARCHIVE=$archive" "$@"
 fi
 case "$self" in "$root"/*) ;; *) set -- --mount "type=bind,src=$script_dir,dst=$script_dir,readonly" "$@" ;; esac
+if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
+    case "$CHAINMAN_CONTAINER_NAME" in chainman-[A-Za-z0-9_-]*) ;; *) fail 'Invalid owned container name.' ;; esac
+    case "${CHAINMAN_CONTAINER_OWNER:-}" in '' | *[!a-f0-9]*) fail 'Invalid container ownership token.' ;; esac
+    [ "${#CHAINMAN_CONTAINER_OWNER}" = 32 ] || fail 'Invalid container ownership token.'
+    set -- --name "$CHAINMAN_CONTAINER_NAME" --label "dev.chainman.owner=$CHAINMAN_CONTAINER_OWNER" "$@"
+fi
+project_mount="type=bind,src=$root,dst=$root"
+if [ "$CHAINMAN_REQUEST_ACTION" = _control-export ]; then project_mount=$project_mount,readonly; fi
 set -- --rm --init --interactive --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
-    --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root" \
+    --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \

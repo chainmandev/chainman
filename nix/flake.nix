@@ -127,6 +127,7 @@
           ] "";
           python = shell "python" [ pkgs.uv pkgs.ruff ] "";
           go = shell "go" [ pkgs.go_latest pkgs.stdenv.cc ] "";
+          control = shell "control" [ pkgs.go_latest ] "";
           flutter = shell "flutter" [ flutterPkgs.flutter ] "";
           swift =
             shell "swift"
@@ -152,9 +153,25 @@
           '';
         }
       );
-      packages = each (pkgs: {
-        just = pkgs.just;
-      });
+      packages = each (
+        pkgs:
+        {
+          just = pkgs.just;
+        }
+        // builtins.listToAttrs (
+          map
+            (target: {
+              name = "control-${target}";
+              value = import ./control.nix { inherit pkgs target; };
+            })
+            [
+              "linux-arm64"
+              "linux-amd64"
+              "darwin-arm64"
+              "darwin-amd64"
+            ]
+        )
+      );
       formatter = each (pkgs: pkgs.nixfmt);
     };
 }
