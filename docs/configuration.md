@@ -392,3 +392,10 @@ container values affect shared resource compatibility. Environment-file bytes al
 participate in the planning/execution guard. Status and stop remain independent of
 current environment-file validity. Plans containing service credentials stay in the
 user's private host state outside project-container mounts.
+
+A task with `depends_on` may omit commands to act as an aggregate; dependencies
+execute once in order. It does not accept extra command arguments. For declared
+application cleanup, `exclusive = true` takes the same project maintenance gate as
+shared cache cleanup and updates. It refuses independent active tasks and cannot
+acquire or borrow services. Project cleanup commands still declare exactly which
+application outputs they own; the exclusive gate supplies concurrency protection.

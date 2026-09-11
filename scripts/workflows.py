@@ -68,6 +68,7 @@ def configuration(root):
                     "wait_for_services",
                     "environment",
                     "transport",
+                    "exclusive",
                 }
             )
             if set(spec) - allowed:
@@ -78,7 +79,9 @@ def configuration(root):
                 project_environment.transport(spec.get("transport", {}))
                 if "timeout_env" in spec:
                     project_environment.variable(spec["timeout_env"])
-            if section == "tasks" and spec.get("wait_for_services") is True:
+            if section == "tasks" and (
+                spec.get("wait_for_services") is True or spec.get("depends_on")
+            ):
                 if spec.get("commands", []) != []:
                     commands(spec["commands"])
             else:
@@ -114,6 +117,8 @@ def configuration(root):
             else:
                 names(spec.get("setup", []))
                 names(spec.get("services", []))
+                if type(spec.get("exclusive", False)) is not bool:
+                    raise ValueError("exclusive must be a boolean")
                 if type(spec.get("cleanup_children", False)) is not bool:
                     raise ValueError("cleanup_children must be a boolean")
                 if type(spec.get("wait_for_services", False)) is not bool:
@@ -129,6 +134,13 @@ def configuration(root):
     for spec in cfg.get("tasks", {}).values():
         order(cfg.get("setup", {}), spec.get("setup", []))
     for key, spec in cfg.get("tasks", {}).items():
+        graph = [cfg["tasks"][name] for name in order(cfg["tasks"], [key])]
+        if any(task.get("exclusive", False) for task in graph) and any(
+            task.get("services") for task in graph
+        ):
+            raise ValueError(
+                "Exclusive maintenance tasks cannot acquire or borrow services"
+            )
         if spec.get("wait_for_services") and not any(
             cfg["tasks"][name].get("services") for name in order(cfg["tasks"], [key])
         ):
@@ -257,12 +269,21 @@ def setup_use(root, cfg, requested, env):
 
 def run(root: Path, action: str, extra: list[str], *, service_context=False):
     cfg = configuration(root)
-    with tc.operation(root, exclusive=False, new_execution=True, automatic_prune=False):
+    task_names = order(cfg.get("tasks", {}), [action]) if action != "setup" else []
+    exclusive = any(cfg["tasks"][key].get("exclusive", False) for key in task_names)
+    if exclusive and (
+        service_context or any(cfg["tasks"][key].get("services") for key in task_names)
+    ):
+        raise ValueError(
+            "Exclusive maintenance tasks cannot acquire or borrow services"
+        )
+    with tc.operation(
+        root, exclusive=exclusive, new_execution=True, automatic_prune=False
+    ):
         env = tc.environment(root)
         if action == "setup":
             with setup_use(root, cfg, extra or list(cfg.get("setup", {})), env):
                 return 0
-        task_names = order(cfg.get("tasks", {}), [action])
         if not service_context and any(
             cfg["tasks"][key].get("services") for key in task_names
         ):
@@ -299,9 +320,7 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                 with tc.compiler_cache(profile, env, root) as selected:
                     arguments = [list(argv) for argv in spec.get("commands", [])]
                     if key == action and extra and not arguments:
-                        raise ValueError(
-                            "A service-wait task without commands takes no arguments"
-                        )
+                        raise ValueError("A task without commands takes no arguments")
                     if key == action and arguments:
                         arguments[-1] += extra
                     if arguments and (

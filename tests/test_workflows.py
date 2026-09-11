@@ -96,6 +96,25 @@ commands=[["python3","task.py"]]
         self.assertTrue((self.root / "installed").exists())
         self.assertFalse((self.root / "arguments.json").exists())
 
+    def test_aggregate_task_runs_dependencies_once_without_a_noop_command(self):
+        self.body += '\n[tasks.all]\ndepends_on=["build"]\n'
+        self.write_config()
+        result = self.run_cli("run", "all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+        self.assertTrue((self.root / "arguments.json").exists())
+
+    def test_exclusive_maintenance_refuses_another_active_task(self):
+        self.body += '\n[tasks.clean]\nexclusive=true\ncommands=[["python3","-c","from pathlib import Path; Path(\\"cleaned\\").touch()"]]\n'
+        self.write_config()
+        with tc.operation(self.root, exclusive=False, new_execution=True):
+            result = self.run_cli("run", "clean")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse((self.root / "cleaned").exists())
+        result = self.run_cli("run", "clean")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "cleaned").exists())
+
     def test_task_without_setup_remains_available_when_outputs_are_missing(self):
         self.body += '\n[tasks.inspect]\ncommands=[["python3","-c","print(42)"]]\n'
         self.write_config()
