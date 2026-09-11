@@ -32,6 +32,11 @@ they do not install a Nix executable or retain every project SDK. Old source roo
 may be removed after all sessions using those versions stop. Nix then decides
 when to collect the unreferenced source. Runtime-cache directory symlinks are refused.
 
+Native task helpers have temporary GC roots for the duration of command execution.
+Controller export similarly retains its Nix package until the standalone binaries
+have been copied. The temporary directories, including their roots, are removed
+when these operations finish or fail; Nix handles later collection normally.
+
 The container maps project commands to the calling user's ownership: rootful Docker
 uses the caller's UID/GID, rootless Docker uses its mapped `0:0`, and Podman uses
 `keep-id`. A failed Docker identity probe stops before execution. Nix runs without a

@@ -12,6 +12,9 @@ import tempfile
 import time
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import native_tasks
+
 CONTROL = os.environ.get("CHAINMAN_TEST_CONTROL")
 BACKEND = os.environ.get("CHAINMAN_TEST_PROCESS_COMPOSE")
 WATCHER = os.environ.get("CHAINMAN_TEST_WATCHEXEC")
@@ -67,6 +70,28 @@ while True:time.sleep(.1)
 
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
+
+    def test_finite_command_retains_its_nix_package_until_context_exits(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                try:
+                    with native_tasks.command(self.root, [["true"]], {}) as command:
+                        root = Path(command[2]).parent / "runtime"
+                        package = Path(command[0]).parents[1]
+                        self.assertEqual(root.resolve(), package)
+                        roots = subprocess.check_output(
+                            ["nix-store", "--query", "--roots", str(package)],
+                            text=True,
+                        )
+                        self.assertIn(str(root), roots)
+                        self.assertTrue(Path(command[0]).is_file())
+                        if fail:
+                            raise RuntimeError("fixture interruption")
+                except RuntimeError as error:
+                    self.assertEqual(str(error), "fixture interruption")
+                self.assertFalse(root.exists())
+                self.assertFalse(root.is_symlink())
+                self.assertFalse(root.parent.exists())
 
     def shared_resource(self):
         resource = json.loads(json.dumps(self.plan))

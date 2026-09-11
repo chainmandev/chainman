@@ -23,41 +23,43 @@ def main():
     if formatted:
         raise ValueError("Go files require gofmt:\n" + formatted)
     subprocess.run(["go", "test", "-mod=readonly", "./..."], cwd=source, check=True)
-    package = subprocess.check_output(
-        [
-            tc.nix_command(),
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "build",
-            f"path:{ROOT / 'nix'}#control-{target}",
-            "--no-link",
-            "--print-out-paths",
-            "--no-write-lock-file",
-        ],
-        text=True,
-    ).strip()
-    env = dict(
-        os.environ,
-        CHAINMAN_TEST_CONTROL=package + "/bin/chainman-control",
-        CHAINMAN_TEST_PROCESS_COMPOSE=package + "/bin/process-compose",
-        CHAINMAN_TEST_WATCHEXEC=package + "/bin/watchexec",
-    )
-    subprocess.run(
-        [
-            "python3",
-            "-m",
-            "unittest",
-            "discover",
-            "-s",
-            "tests",
-            "-p",
-            "test_services_control.py",
-            "-v",
-        ],
-        cwd=ROOT,
-        env=env,
-        check=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="chainman-control-test-") as directory:
+        package = subprocess.check_output(
+            [
+                tc.nix_command(),
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "build",
+                f"path:{ROOT / 'nix'}#control-{target}",
+                "--out-link",
+                str(Path(directory) / "runtime"),
+                "--print-out-paths",
+                "--no-write-lock-file",
+            ],
+            text=True,
+        ).strip()
+        env = dict(
+            os.environ,
+            CHAINMAN_TEST_CONTROL=package + "/bin/chainman-control",
+            CHAINMAN_TEST_PROCESS_COMPOSE=package + "/bin/process-compose",
+            CHAINMAN_TEST_WATCHEXEC=package + "/bin/watchexec",
+        )
+        subprocess.run(
+            [
+                "python3",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-p",
+                "test_services_control.py",
+                "-v",
+            ],
+            cwd=ROOT,
+            env=env,
+            check=True,
+        )
     with tempfile.TemporaryDirectory(prefix="chainman-cross-build-") as tmp:
         for system in ("linux", "darwin"):
             for arch in ("arm64", "amd64"):
