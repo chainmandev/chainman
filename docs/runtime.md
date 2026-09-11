@@ -68,8 +68,9 @@ lease before removing its unchanged socket, and reports a nonzero server exit. A
 that is forcibly killed can leave children holding that lock; inspect those processes
 before stopping an exact compiler endpoint. Do not remove a live operation lock.
 
-The consumer bootstrap shell includes the runtime and its Python libraries, Git,
-Just, and basic command-line tools. It does not include Chainman's source
+The consumer bootstrap shell includes standard-library Python, Git, Just and basic
+command-line tools. Dependency operations enter the separate `updates` shell for
+parsing and policy libraries only when needed. It does not include Chainman's source
 formatters or a C compiler; development and optional language profiles supply
 their own tools. Source development continues to use the full `core` profile.
 After verifying the installed generation, the launcher reuses that same pinned
@@ -99,6 +100,8 @@ separately opt-in and restricted to declared disposable hosted CI locations.
 `release-files.json` is the archive allowlist. The release builder reads committed
 regular-file blobs and executable modes, never Git history, ignored caches or local
 build products. The consumer generator verifies both flat archive checksum and NAR
-hash before copying templates and examples. Every generated consumer bundles the
-same release archive at `vendor/chainman/chainman.tar.gz`. Remove that optional file
+hash before copying templates and examples. The release emits a runtime archive and a separately hashed source archive.
+Development tests, examples, templates and authoring utilities belong to the source
+archive. The consumer generator verifies both products and their shared file
+identities; every generated consumer bundles only the runtime archive at `vendor/chainman/chainman.tar.gz`. Remove that optional file
 and its lock field only after its pinned public URL is available.

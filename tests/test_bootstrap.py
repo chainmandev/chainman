@@ -503,11 +503,14 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             "#!/bin/sh\nprintf 'host Python must not execute\\n' >&2\nexit 97\n"
         )
         python.chmod(0o755)
+        # A global Nix profile may also contain unrelated host language tools.
+        (tools / "nix").symlink_to(NIX)
         read_fd, write_fd = os.pipe()
         try:
             env = dict(
                 self.env,
                 PATH=str(tools) + os.pathsep + self.env["PATH"],
+                CHAINMAN_NIX_BIN=str(tools / "nix"),
                 DEMO_TEST_FD=str(write_fd),
             )
             result = subprocess.run(

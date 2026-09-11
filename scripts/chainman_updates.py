@@ -132,8 +132,6 @@ def validate_runtime(runtime: Path, version: str):
                 raise ValueError(
                     "Candidate runtime must contain only regular files and directories"
                 )
-    if not (runtime / "tests").is_dir():
-        raise ValueError("Candidate runtime is missing its test directory")
     for name in (
         "VERSION",
         "bootstrap/chainman.sh",
@@ -337,7 +335,7 @@ def perform(
                 "--extra-experimental-features",
                 "nix-command flakes",
                 "develop",
-                f"path:{quote(str(runtime / 'nix'), safe='/')}#core",
+                f"path:{quote(str(runtime / 'nix'), safe='/')}#updates",
                 "--no-write-lock-file",
                 "--command",
                 "python3",
@@ -367,6 +365,8 @@ def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
 
     policy = dependency_api.policy(root)
     env = tc.environment(root)
+    if policy.get("adapters") or policy.get("steps"):
+        dependency_api.plan_steps(root, policy, [])
     env.update(
         TOOLCHAIN_FRESH="1",
         CHAINMAN_ROOT=str(root),
@@ -415,35 +415,13 @@ def verify(root: Path, policy: dict, runtime: Path):
         TOOLCHAIN_FRESH="1",
         CHAINMAN_UPDATE_ACTIVE="1",
     )
-    if runtime != chainman.RUNTIME:
-        tc.managed_run(
-            [
-                tc.nix_command(),
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "develop",
-                f"path:{quote(str(runtime / 'nix'), safe='/')}#core",
-                "--no-write-lock-file",
-                "--command",
-                "python3",
-                "-B",
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                str(runtime / "tests"),
-            ],
-            cwd=runtime,
-            env=env,
-            check=True,
-        )
     tc.managed_run(
         [
             tc.nix_command(),
             "--extra-experimental-features",
             "nix-command flakes",
             "develop",
-            f"path:{quote(str(runtime / 'nix'), safe='/')}#core",
+            f"path:{quote(str(runtime / 'nix'), safe='/')}#updates",
             "--no-write-lock-file",
             "--command",
             "python3",

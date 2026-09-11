@@ -265,7 +265,7 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertTrue(self.previous.is_dir())
 
     def test_bad_candidate_tree_is_rejected_before_publication_or_execution(self):
-        for bad in ("missing", "symlink", "fifo", "version", "directory", "tests"):
+        for bad in ("missing", "symlink", "fifo", "version", "directory"):
             with self.subTest(bad=bad):
                 tree = self.base / ("bad-" + bad)
                 shutil.copytree(self.candidate, tree)
@@ -277,8 +277,6 @@ class SelfUpdateTests(unittest.TestCase):
                     os.mkfifo(tree / "pipe")
                 elif bad == "version":
                     (tree / "VERSION").write_text("9.9.9\n")
-                elif bad == "tests":
-                    (tree / "tests").rmdir()
                 else:
                     (tree / "scripts/chainman.py").unlink()
                     (tree / "scripts/chainman.py").mkdir()
@@ -293,6 +291,10 @@ class SelfUpdateTests(unittest.TestCase):
                         subject.apply(self.root, self.opts, self.now)
                     execute.assert_not_called()
                 self.assertEqual(self.managed(), self.before)
+
+    def test_candidate_runtime_does_not_require_development_tests(self):
+        (self.candidate / "tests").rmdir()
+        self.assertEqual(self.run_apply(lambda *_: None), {"verification": "passed"})
 
     def test_download_or_fetch_failure_does_not_publish_candidate(self):
         for failure in (ValueError("bad archive"), OSError("fetch unavailable")):

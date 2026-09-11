@@ -22,7 +22,10 @@ class DistributionTests(unittest.TestCase):
     def test_release_ignores_replacement_refs_added_after_revision_capture(self):
         self.release_revision_case(replace=True)
 
-    def release_revision_case(self, *, replace):
+    def test_runtime_archive_excludes_authoring_inputs(self):
+        self.release_revision_case(replace=False, split=True)
+
+    def release_revision_case(self, *, replace, split=False):
         with (
             tempfile.TemporaryDirectory(prefix="release source ") as temporary,
             patch.dict(
@@ -48,7 +51,13 @@ class DistributionTests(unittest.TestCase):
             source.chmod(0o644)
             inventory = root / "release-files.json"
             inventory.write_text(
-                json.dumps({"schema": 1, "files": ["VERSION", source.name]})
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "files": ["VERSION", source.name],
+                        **({"runtime_files": ["VERSION"]} if split else {}),
+                    }
+                )
             )
             git(root, "add", ".")
             git(root, "commit", "-m", "original")
@@ -86,6 +95,15 @@ class DistributionTests(unittest.TestCase):
             self.assertEqual(
                 example.read_archive(
                     (output / "chainman-1.0.0.tar.gz").read_bytes(), "1.0.0"
+                ),
+                {
+                    "VERSION": (b"1.0.0\n", 0o644),
+                    **({} if split else {source.name: (b"original bytes\n", 0o644)}),
+                },
+            )
+            self.assertEqual(
+                example.read_archive(
+                    (output / metadata["source"]["filename"]).read_bytes(), "1.0.0"
                 ),
                 {
                     "VERSION": (b"1.0.0\n", 0o644),

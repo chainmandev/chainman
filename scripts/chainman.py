@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -137,7 +138,7 @@ def execute(
         executable = shutil.which(tc.nix_command(selected), path=selected.get("PATH"))
         if executable:
             selected["CHAINMAN_RUNTIME_NIX_BIN"] = str(
-                Path(executable).absolute().parent
+                Path(executable).resolve().parent
             )
     selected.update(
         CHAINMAN_ROOT=str(root),
@@ -272,6 +273,38 @@ def main(argv=None):
     args = parser.parse_args(argv)
     root = args.root.absolute()
     try:
+        if args.action in {
+            "deps-update",
+            "chainman-update",
+            "deps-query",
+            "deps-resolve",
+            "deps-check",
+            "nix-update",
+        }:
+            if any(
+                importlib.util.find_spec(name) is None
+                for name in ("tomlkit", "packaging", "yaml", "semantic_version")
+            ):
+                # Ordinary execution needs only the standard library. Resolve
+                # updater libraries lazily in this same immutable runtime.
+                return tc.managed_run(
+                    [
+                        tc.nix_command(),
+                        "--extra-experimental-features",
+                        "nix-command flakes",
+                        "develop",
+                        f"path:{quote(str(RUNTIME / 'nix'), safe='/')}#updates",
+                        "--no-write-lock-file",
+                        "--command",
+                        "python3",
+                        str(RUNTIME / "scripts/chainman.py"),
+                        "--root",
+                        str(root),
+                        args.action,
+                        *args.arguments,
+                    ],
+                    check=False,
+                ).returncode
         # Resolve after rejecting indirection in existing project components.
         for part in [root, *root.parents]:
             if part.is_symlink():

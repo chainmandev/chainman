@@ -68,26 +68,38 @@ def release(root: Path, output: Path) -> dict:
             int(meta.split()[0][-3:], 8),
         )
     version = files["VERSION"][0].decode().strip()
-    body = archive_bytes(files, version)
-    with tempfile.TemporaryDirectory(prefix="chainman-release-") as directory:
-        tree = Path(directory)
-        for name, (data, mode) in files.items():
-            path = tree / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            path.chmod(mode)
-        nar = subprocess.check_output(
-            [
-                "nix",
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(tree),
-            ],
-            text=True,
-        ).strip()
+    runtime_names = inventory.get("runtime_files", list(files))
+    if len(runtime_names) != len(set(runtime_names)) or any(
+        name not in files for name in runtime_names
+    ):
+        raise ValueError("Runtime inventory must be a unique subset of release files")
+    runtime_files = {name: files[name] for name in runtime_names}
+    body = archive_bytes(runtime_files, version)
+    source_body = archive_bytes(files, version)
+
+    def nar_hash(selected):
+        with tempfile.TemporaryDirectory(prefix="chainman-release-") as directory:
+            tree = Path(directory)
+            for name, (data, mode) in selected.items():
+                path = tree / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                path.chmod(mode)
+            return subprocess.check_output(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "hash",
+                    "path",
+                    str(tree),
+                ],
+                text=True,
+            ).strip()
+
+    nar = nar_hash(runtime_files)
     filename = f"chainman-{version}.tar.gz"
+    source_filename = f"chainman-source-{version}.tar.gz"
     metadata = {
         "schema": 1,
         "version": version,
@@ -95,11 +107,18 @@ def release(root: Path, output: Path) -> dict:
         "url": f"https://github.com/chainmandev/chainman/releases/download/v{version}/{filename}",
         "narHash": nar,
         "archive_sha256": hashlib.sha256(body).hexdigest(),
+        "source": {
+            "filename": source_filename,
+            "url": f"https://github.com/chainmandev/chainman/releases/download/v{version}/{source_filename}",
+            "archive_sha256": hashlib.sha256(source_body).hexdigest(),
+            "narHash": nar_hash(files),
+        },
     }
     output.mkdir(parents=True, exist_ok=True)
     (output / filename).write_bytes(body)
+    (output / source_filename).write_bytes(source_body)
     (output / "chainman-release.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    names = (filename, "chainman-release.json")
+    names = (filename, source_filename, "chainman-release.json")
     (output / "SHA256SUMS").write_text(
         "".join(
             f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n"

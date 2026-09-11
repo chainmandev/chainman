@@ -51,7 +51,7 @@
             else
               pkgs;
           runtimeBase = with pkgs; [
-            python
+            python3
             git
             just
             bash
@@ -64,8 +64,9 @@
             curl
             cacert
           ];
+          updateBase = [ python ] ++ runtimeBase;
           base =
-            runtimeBase
+            updateBase
             ++ (with pkgs; [
               nixfmt
               shellcheck
@@ -90,7 +91,8 @@
                 fi
                 export PYTHONDONTWRITEBYTECODE=1
                 export UV_PYTHON_DOWNLOADS=never
-                export UV_PYTHON=${python}/bin/python3
+                UV_PYTHON=$(command -v python3)
+                export UV_PYTHON
                 export GOTOOLCHAIN=local
                 export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
                 # Repeated shell refreshes must not nest browser socket paths.
@@ -110,6 +112,7 @@
           # Consumer entry needs the runtime, not Chainman's source formatters or
           # a C compiler. Language toolchains still come from the chosen profile.
           bootstrap = shellWith pkgs.mkShellNoCC runtimeBase "bootstrap" [ ] "";
+          updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ ] "";
           core = shell "core" [ ] "";
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";

@@ -21,7 +21,12 @@ fi
 # Keep the installed host Nix through project profiles; never provision a replacement.
 nix_bin=${CHAINMAN_NIX_BIN:-$(command -v nix)}
 case "$nix_bin" in /*) ;; *) nix_bin=$(CDPATH='' cd -- "$(dirname -- "$nix_bin")" && pwd)/$(basename -- "$nix_bin") ;; esac
-CHAINMAN_RUNTIME_NIX_BIN=$(dirname -- "$nix_bin")
+selected_nix=$nix_bin
+while [ -L "$selected_nix" ]; do
+    target=$(readlink "$selected_nix")
+    case "$target" in /*) selected_nix=$target ;; *) selected_nix=$(dirname -- "$selected_nix")/$target ;; esac
+done
+CHAINMAN_RUNTIME_NIX_BIN=$(CDPATH='' cd -P -- "$(dirname -- "$selected_nix")" && pwd)
 export CHAINMAN_RUNTIME_NIX_BIN
 inputs=$(cksum "$root/nix/flake.nix" "$root/nix/flake.lock")
 if [ "${TOOLCHAIN_ACTIVE_PROFILE:-}" = "$profile" ] && [ "${TOOLCHAIN_ACTIVE_ROOT:-}" = "$root" ] && [ "${TOOLCHAIN_ACTIVE_INPUTS:-}" = "$inputs" ] && [ "${TOOLCHAIN_FRESH:-0}" != 1 ]; then

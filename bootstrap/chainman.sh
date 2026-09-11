@@ -58,7 +58,14 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
       if builtins.compareVersions builtins.nixVersion "2.24" >= 0
       then "compatible" else throw "Chainman requires Nix >= 2.24"
     ' > /dev/null || fail 'Nix compatibility check failed; update the selected host/image Nix. Chainman does not replace it.'
-    CHAINMAN_RUNTIME_NIX_BIN=$(dirname -- "$nix_bin")
+    # Resolve the profile symlinks so forwarding Nix does not also forward every
+    # unrelated program installed in the user's global profile.
+    selected_nix=$nix_bin
+    while [ -L "$selected_nix" ]; do
+        target=$(readlink "$selected_nix")
+        case "$target" in /*) selected_nix=$target ;; *) selected_nix=$(dirname -- "$selected_nix")/$target ;; esac
+    done
+    CHAINMAN_RUNTIME_NIX_BIN=$(CDPATH='' cd -P -- "$(dirname -- "$selected_nix")" && pwd)
     export CHAINMAN_RUNTIME_NIX_BIN
     nix_eval() {
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=$1 \

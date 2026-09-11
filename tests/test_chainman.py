@@ -1010,7 +1010,7 @@ class RuntimeReleaseTests(ConsumerFixture):
                 for c in commands
             )
         )
-        self.assertTrue(any(str(candidate / "tests") in c for c in commands))
+        self.assertFalse(any(str(candidate / "tests") in c for c in commands))
         for call in execute.call_args_list:
             self.assertEqual(call.kwargs["env"]["TOOLCHAIN_FRESH"], "1")
 

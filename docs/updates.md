@@ -501,3 +501,8 @@ unhandled termination (including SIGTERM, SIGHUP or SIGKILL) while a candidate p
 files; inspect the Git diff and restore the previous managed files before retrying.
 The conditional restore does not claim filesystem compare-and-swap against a hostile
 writer changing a file between the final check and atomic replacement.
+
+Runtime releases are qualified in the Chainman source project. Consumer runtime
+upgrades validate the candidate configuration and run the declared project verifier
+using the candidate runtime; they do not run Chainman's development test suite.
+The consumer archive consequently does not need to ship those tests.

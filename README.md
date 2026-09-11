@@ -4,7 +4,7 @@ Chainman keeps shared development machinery behind a project's `just` commands.
 Developers install `just`, Git, and either Docker/Podman or Nix. A checked-in launcher
 fetches a pinned source archive, verifies its SHA-256 NAR hash through Nix, and executes
 the runtime directly from its verified Nix-store source. Python and development languages
-come from Nix. There is no global Chainman installation.
+come from Nix. Update libraries are loaded only for dependency operations. There is no global Chainman installation.
 
 The intended public home is **chainman.dev**, with source at
 **github.com/chainmandev/chainman**. These are publication destinations; local release

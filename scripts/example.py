@@ -54,27 +54,45 @@ def create(destination: Path, metadata_path: Path):
     ).read_bytes()
     if hashlib.sha256(body).hexdigest() != metadata["archive_sha256"]:
         raise ValueError("Release archive checksum mismatch")
-    files = read_archive(body, metadata["version"])
-    with tempfile.TemporaryDirectory(prefix="chainman-example-") as directory:
-        tree = Path(directory)
-        for name, (data, mode) in files.items():
-            path = tree / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
-            path.chmod(mode)
-        actual = subprocess.check_output(
-            [
-                "nix",
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(tree),
-            ],
-            text=True,
-        ).strip()
-        if actual != metadata["narHash"]:
-            raise ValueError("Release unpacked NAR hash mismatch")
+    runtime_files = read_archive(body, metadata["version"])
+    files = runtime_files
+    expected_nar = metadata["narHash"]
+    if "source" in metadata:
+        source = metadata["source"]
+        filename = source["filename"]
+        if filename != f"chainman-source-{metadata['version']}.tar.gz":
+            raise ValueError("Invalid source archive filename")
+        source_body = (metadata_path.parent / filename).read_bytes()
+        if hashlib.sha256(source_body).hexdigest() != source["archive_sha256"]:
+            raise ValueError("Source archive checksum mismatch")
+        files = read_archive(source_body, metadata["version"])
+        if any(files.get(name) != item for name, item in runtime_files.items()):
+            raise ValueError("Runtime and source archive content disagree")
+        expected_nar = source["narHash"]
+    for selected_files, expected_hash in [
+        (runtime_files, metadata["narHash"]),
+        (files, expected_nar),
+    ]:
+        with tempfile.TemporaryDirectory(prefix="chainman-example-") as directory:
+            tree = Path(directory)
+            for name, (data, mode) in selected_files.items():
+                path = tree / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+                path.chmod(mode)
+            actual = subprocess.check_output(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "hash",
+                    "path",
+                    str(tree),
+                ],
+                text=True,
+            ).strip()
+            if actual != expected_hash:
+                raise ValueError("Release unpacked NAR hash mismatch")
     selected = {
         name: item
         for name, item in files.items()
