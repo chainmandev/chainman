@@ -59,17 +59,29 @@ def runtime_files(root):
 
 def verification(root, policy):
     task = policy.get("verify_task")
-    if task is not None:
-        if policy.get("verify"):
-            raise ValueError("Declare updates.verify_task or updates.verify, not both")
-        workflows.name(task)
+    tasks = policy.get("verify_tasks")
+    if (
+        sum(
+            policy.get(key) is not None
+            for key in ("verify_task", "verify_tasks", "verify")
+        )
+        > 1
+    ):
+        raise ValueError(
+            "Declare only one of updates.verify_task, verify_tasks or verify"
+        )
+    if task is not None or tasks is not None:
+        tasks = [task] if task is not None else tasks
+        workflows.names(tasks)
+        if not tasks or len(tasks) != len(set(tasks)):
+            raise ValueError("Update verification requires distinct finite tasks")
         cfg = workflows.configuration(root)
-        order = workflows.order(cfg.get("tasks", {}), [task])
+        order = workflows.order(cfg.get("tasks", {}), tasks)
         if any(cfg["tasks"][name].get("wait_for_services") for name in order):
             raise ValueError("Update verification must be a finite task")
-        return ["run", task]
+        return [argument for task in tasks for argument in ("run", task)]
     if tc.config(root)["schema"] == 2 and not policy.get("verify"):
-        raise ValueError("Schema 2 updates require updates.verify_task")
+        raise ValueError("Schema 2 updates require updates.verify_task or verify_tasks")
     return ["_update-verify", "legacy"]
 
 

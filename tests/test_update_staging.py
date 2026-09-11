@@ -266,6 +266,30 @@ commands=[["true"]]
         with self.assertRaisesRegex(ValueError, "finite task"):
             subject.verification(self.root, {"verify_task": "verify"})
 
+    def test_verification_sequence_preserves_separate_service_lifetimes(self):
+        path = self.root / "chainman.toml"
+        path.write_text(path.read_text() + '\n[tasks.second]\ncommands=[["true"]]\n')
+        self.assertEqual(
+            subject.verification(self.root, {"verify_tasks": ["verify", "second"]}),
+            ["run", "verify", "run", "second"],
+        )
+        for policy in (
+            {"verify_task": "verify", "verify_tasks": ["second"]},
+            {"verify_tasks": ["verify"], "verify": [["true"]]},
+            {"verify_tasks": []},
+            {"verify_tasks": ["verify", "verify"]},
+            {"verify_tasks": ["verify", "missing"]},
+            {"verify_tasks": ["verify", "not\na\ntask"]},
+        ):
+            with self.subTest(policy=policy), self.assertRaises(ValueError):
+                subject.verification(self.root, policy)
+        path.write_text(
+            path.read_text()
+            + 'wait_for_services=true\nservices=["endpoint"]\n[services.endpoint]\ncommand=["true"]\n'
+        )
+        with self.assertRaisesRegex(ValueError, "finite task"):
+            subject.verification(self.root, {"verify_tasks": ["verify", "second"]})
+
 
 if __name__ == "__main__":
     unittest.main()

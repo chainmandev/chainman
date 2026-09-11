@@ -122,12 +122,10 @@ update_dispatch() {
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-inspect "$update_output" >&2
     IFS= read -r update_changed < "$update_output/control/changed"
     if [ "$update_changed" = yes ]; then
-        {
-            IFS= read -r update_action
-            IFS= read -r update_task
-        } < "$update_output/control/verify"
-        CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
-            "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" >&2
+        while IFS= read -r update_action && IFS= read -r update_task; do
+            CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
+                "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2
+        done < "$update_output/control/verify"
     fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-finalize "$update_output"

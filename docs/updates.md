@@ -27,6 +27,15 @@ and cleanup are identical to an ordinary task invocation. Start updates through 
 host launcher, including on container-only machines, outside an active project
 container. Legacy command/module verification remains available for schema 1.
 
+Projects with mutually exclusive service configurations can instead declare
+`updates.verify_tasks = ["verify-postgres", "verify-spanner"]`. The host launcher
+runs each finite task in order and releases its service claims before the next
+task starts. This differs from one task's `depends_on`, whose service graph is
+acquired together. The first failure stops verification and preserves the
+candidate; all tasks must pass against the same frozen candidate before apply.
+Update verification is noninteractive and receives closed input (`/dev/null`).
+Declare exactly one verification form.
+
 Resolvers and verifiers can write the disposable checkout, but only trusted runtime
 phases mount the private transaction metadata and original checkout. Inspection
 freezes the allowed candidate files before verification and exports a bootstrap from
