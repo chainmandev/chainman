@@ -12,7 +12,7 @@ import (
 
 var servicesStopped = errors.New("services explicitly stopped")
 
-// A waiting client observes backend outcomes; it does not implement restarts or
+// A service client observes backend outcomes; it does not implement restarts or
 // readiness probes. Setup leases remain in its ordinary project task process.
 func monitorServices(ctx context.Context, p Plan) <-chan error {
 	result := make(chan error, 1)

@@ -14,9 +14,73 @@ import (
 )
 
 type TaskCommands struct {
-	Commands []Command `json:"commands"`
-	Timeout  int       `json:"timeout_seconds"`
-	Shutdown int       `json:"shutdown_seconds"`
+	Commands      []Command `json:"commands"`
+	Timeout       int       `json:"timeout_seconds"`
+	Shutdown      int       `json:"shutdown_seconds"`
+	RecoveryState string    `json:"recovery_state,omitempty"`
+}
+
+// Service-bearing tasks publish their anchor below the private service scope.
+// Explicit stop can then recover them even when their original client is gone.
+func taskRecoveryState(p Plan) (string, error) {
+	gate, e := locked(filepath.Join(p.State, "gate"), false)
+	if e != nil {
+		return "", e
+	}
+	defer gate.Close()
+	if _, e = os.Stat(filepath.Join(p.State, "stop-request.json")); e == nil {
+		return "", servicesStopped
+	} else if !os.IsNotExist(e) {
+		return "", e
+	}
+	parent := filepath.Join(p.State, "tasks")
+	if e = private(parent); e != nil {
+		return "", e
+	}
+	state := filepath.Join(parent, token())
+	return state, private(state)
+}
+
+func stopTasks(p Plan) error {
+	parent := filepath.Join(p.State, "tasks")
+	entries, e := os.ReadDir(parent)
+	if os.IsNotExist(e) {
+		return nil
+	}
+	if e != nil {
+		return e
+	}
+	if e = private(parent); e != nil {
+		return e
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !validName.MatchString(entry.Name()) {
+			return fmt.Errorf("invalid task recovery directory")
+		}
+		state := filepath.Join(parent, entry.Name())
+		if e = private(state); e != nil {
+			return e
+		}
+		// The marker precedes the owner read. A task whose launch was delayed
+		// until after stop observes it before starting any application process.
+		taskPlan := Plan{State: state, Services: map[string]Service{"task": {Shutdown: 10}}}
+		if e = serviceStopping(taskPlan, "task", true); e != nil {
+			return e
+		}
+		var spec Service
+		if e = readJSON(filepath.Join(state, "task.command.json"), &spec); e == nil {
+			if spec.Shutdown < 1 || spec.Shutdown > 300 {
+				return fmt.Errorf("invalid task recovery timeout")
+			}
+			taskPlan.Services["task"] = spec
+		} else if !os.IsNotExist(e) {
+			return e
+		}
+		if e = stopOwner(taskPlan, "task"); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // Forward checked Chainman operation/setup leases into the identity anchor and
@@ -160,11 +224,19 @@ func taskCommand(action, path string) int {
 		}
 		return 0
 	}
-	state, e := os.MkdirTemp("", "chainman-command-")
+	state := task.RecoveryState
+	var e error
+	if state == "" {
+		state, e = os.MkdirTemp("", "chainman-command-")
+	} else {
+		e = private(state)
+	}
 	if e != nil {
 		return exitCode(e)
 	}
-	defer os.RemoveAll(state)
+	if task.RecoveryState == "" {
+		defer os.RemoveAll(state)
+	}
 	self, e := os.Executable()
 	if e != nil {
 		return exitCode(e)

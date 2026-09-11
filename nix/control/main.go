@@ -727,7 +727,7 @@ func stopContainer(c *Container, seconds int) error {
 	if e != nil {
 		return e
 	}
-	if info == nil {
+	if info == nil || !info.Running {
 		return nil
 	}
 	id := info.ID
@@ -735,6 +735,11 @@ func stopContainer(c *Container, seconds int) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Engine, "container", "stop", "--time", fmt.Sprint(seconds), id)
 	if b, e := cmd.CombinedOutput(); e != nil {
+		// The foreground client and explicit recovery can finish together.
+		// Reconfirm absence/stopped state; never confuse an engine outage with it.
+		if current, err := inspectContainer(c); err == nil && (current == nil || !current.Running) {
+			return nil
+		}
 		return fmt.Errorf("owned container stop: %w: %s", e, b)
 	}
 	return nil
@@ -790,6 +795,23 @@ func releaseUnused(p Plan, force bool) error {
 		admission.Close()
 		if e != nil {
 			return e
+		}
+	}
+	if force {
+		if e = stopTasks(p); e != nil {
+			return e
+		}
+		// Older receipts may predate durable task anchors. Preserve their
+		// immutable engine/container witness until recovery has succeeded.
+		entries, _ := filepath.Glob(filepath.Join(p.State, "*.lease"))
+		for _, path := range entries {
+			var lease Lease
+			if err := readJSON(path, &lease); err != nil {
+				continue
+			}
+			if e = stopContainer(lease.Container, 10); e != nil {
+				return e
+			}
 		}
 	}
 	all := make([]string, 0, len(p.Services))
@@ -1358,6 +1380,7 @@ func mainAction(args []string) (result int) {
 		fmt.Println(p.State)
 		return 0
 	}
+	recoveryState := ""
 	defer func() {
 		// Docker/Podman clients do not carry descriptors into their daemon's
 		// containers. Stop an owned task before releasing its service lease;
@@ -1374,6 +1397,14 @@ func mainAction(args []string) (result int) {
 		lock, err := locked(filepath.Join(p.State, "gate"), false)
 		if err == nil {
 			defer lock.Close()
+			if recoveryState != "" {
+				// Only discard a completed anchor. Forced stop holds this same
+				// gate while recording admission markers and recovering owners.
+				var owner Owner
+				if e := readJSON(filepath.Join(recoveryState, "task.owner.json"), &owner); os.IsNotExist(e) {
+					_ = os.RemoveAll(recoveryState)
+				}
+			}
 			var saved Plan
 			err = readJSON(filepath.Join(p.State, "plan.json"), &saved)
 			if err == nil && saved.State != p.State {
@@ -1412,7 +1443,12 @@ func mainAction(args []string) (result int) {
 			return exitCode(fmt.Errorf("invalid task shutdown timeout"))
 		}
 		path := filepath.Join(p.State, token()+".task.json")
-		if e = atomic(path, TaskCommands{Commands: []Command{task}, Shutdown: p.TaskShutdown}); e != nil {
+		recovery, err := taskRecoveryState(p)
+		if err != nil {
+			return exitCode(err)
+		}
+		recoveryState = recovery
+		if e = atomic(path, TaskCommands{Commands: []Command{task}, Shutdown: p.TaskShutdown, RecoveryState: recovery}); e != nil {
 			return exitCode(e)
 		}
 		defer os.Remove(path)
@@ -1470,19 +1506,20 @@ func mainAction(args []string) (result int) {
 	go func() { done <- cmd.Wait() }()
 	monitorContext, cancelMonitor := context.WithCancel(context.Background())
 	defer cancelMonitor()
-	var failed <-chan error
-	if p.WaitForServices {
-		failed = monitorServices(monitorContext, p)
-	}
+	failed := monitorServices(monitorContext, p)
 	select {
 	case e = <-done:
 	case sig := <-signals:
 		e = cancelTask(cmd, done, sig, p.TaskShutdown)
 	case e = <-failed:
 		_ = cancelTask(cmd, done, syscall.SIGTERM, p.TaskShutdown)
-		if errors.Is(e, servicesStopped) {
+	}
+	// Forced recovery may end the native task before the monitor's next tick.
+	if _, stopped := os.Stat(filepath.Join(p.State, "stop-request.json")); stopped == nil {
+		if p.WaitForServices {
 			return 0
 		}
+		e = servicesStopped
 	}
 	return exitCode(e)
 }

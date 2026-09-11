@@ -242,6 +242,11 @@ is killed. After an abrupt controller failure, explicit stop recovers owned
 process groups and labeled containers; it never signals an unrelated reused PID.
 Project containers receive neither controller state nor an engine socket.
 
+Explicit stop also cancels finite tasks that are using those services, including
+their owned process groups and containers after a client crash. Such an interrupted
+finite task fails; it cannot report a successful test or build after its services
+were stopped. Finite clients also fail when a required service or controller dies.
+
 For a foreground development stack, declare `wait_for_services = true` on its
 task. `commands` may be omitted, or can run application preparation after services
 are ready. The task then keeps its setup and service leases until interrupted,

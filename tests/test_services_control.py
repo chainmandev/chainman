@@ -656,8 +656,8 @@ if text=='bad': raise SystemExit(3)
         self.run_control("run", check=7)
         self.assertFalse(self.alive(self.pid()))
 
-    def waiting_task(self):
-        self.plan.update(wait_for_services=True, own_task=True, task_shutdown_seconds=1)
+    def waiting_task(self, *, wait=True):
+        self.plan.update(wait_for_services=wait, own_task=True, task_shutdown_seconds=1)
         self.plan["task"] = self.command(
             [
                 sys.executable,
@@ -673,6 +673,40 @@ if text=='bad': raise SystemExit(3)
         )
         self.wait_file(self.root / "waiting")
         return parent
+
+    def test_explicit_stop_cancels_finite_task_with_failure(self):
+        parent = self.waiting_task(wait=False)
+        try:
+            self.run_control("stop", check=0)
+            self.assertNotEqual(parent.wait(timeout=15), 0)
+            self.assertFalse(self.alive(int((self.root / "waiting").read_text())))
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+
+    def test_finite_task_is_cancelled_when_its_service_fails(self):
+        parent = self.waiting_task(wait=False)
+        try:
+            os.kill(self.pid(), signal.SIGKILL)
+            self.assertEqual(parent.wait(timeout=15), 1)
+            self.assertFalse(self.alive(int((self.root / "waiting").read_text())))
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+
+    def test_stop_recovers_finite_task_after_client_death_and_receipt_corruption(self):
+        parent = self.waiting_task(wait=False)
+        task = int((self.root / "waiting").read_text())
+        parent.kill()
+        parent.wait(timeout=5)
+        self.assertTrue(self.alive(task))
+        for path in self.state.glob("*.lease"):
+            path.write_text("corrupt client receipt")
+        self.run_control("stop", check=0)
+        self.wait_until(lambda: not self.alive(task))
+        self.assertFalse(self.alive(self.pid()))
 
     def test_waiting_task_reports_service_failure_and_cleans_its_command(self):
         parent = self.waiting_task()
