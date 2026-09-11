@@ -134,7 +134,17 @@ def prepare(root, destination, args):
             at=datetime.now(timezone.utc).isoformat(),
         )
         with updates.preview_git_environment():
-            updates.prepare_preview(root, candidate, before)
+            if opts.preview:
+                updates.prepare_preview(root, candidate, before)
+            else:
+                # Keep clean-source revision metadata meaningful to project
+                # verifiers without copying history, remotes or executable hooks.
+                updates.copy_submodule(root, candidate, identity[1])
+                previous = updates.git(candidate, "symbolic-ref", "HEAD")
+                updates.git(candidate, "update-ref", identity[0], identity[1])
+                updates.git(candidate, "symbolic-ref", "HEAD", identity[0])
+                if previous != identity[0]:
+                    updates.git(candidate, "update-ref", "-d", previous)
             state["candidate_identity"] = list(updates.repository(candidate))
             state["candidate_before"] = updates.snapshot(candidate)
             state["candidate_index"] = index(candidate)

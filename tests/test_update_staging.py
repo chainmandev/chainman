@@ -73,6 +73,14 @@ commands=[["true"]]
 
     def test_apply_only_after_verification_and_commit_exact_candidate(self):
         self.update()
+        self.assertEqual(
+            updates.repository(self.root),
+            updates.repository(self.candidate, clean=False),
+        )
+        self.assertEqual(updates.git(self.candidate, "remote"), "")
+        self.assertEqual(
+            updates.git(self.candidate, "rev-list", "--count", "HEAD"), "1"
+        )
         self.assertEqual(updates.snapshot(self.root), self.before)
         result = self.finish()
         self.assertEqual(result["changed"], ["dependency.lock"])

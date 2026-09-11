@@ -499,6 +499,10 @@ Each update copies visible project files into a disposable Git repository, rebin
 project root and executes the same update and verification path. Nested launchers
 verify/fetch the copied pin. Refreshed subprocesses bind that copied project
 explicitly, even when their executable belongs to the original immutable runtime.
+Clean-source updates preserve the current commit identity and branch in a shallow
+copy, so version checks see the same baseline revision. Previews may include dirty
+sources and create a disposable baseline commit instead. Neither copies remotes,
+hooks or older history.
 Source symlinks must be relative and remain within
 their copied project or submodule; absolute, escaping and cyclic links are rejected
 before update hooks execute. It preserves the original checkout, disables external
