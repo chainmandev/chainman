@@ -193,6 +193,11 @@ func watchGates(p Plan, names []string) (func(), error) {
 
 func startMissing(p Plan, selected []string, used map[string]bool) error {
 	for _, name := range selected {
+		if !used[name] {
+			if e := serviceStopping(p, name, false); e != nil {
+				return e
+			}
+		}
 		if !used[name] && p.Services[name].Watch != nil {
 			if e := watchStopping(p, name, false); e != nil {
 				return e

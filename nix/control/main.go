@@ -44,6 +44,7 @@ type Service struct {
 	Watch         *Watch     `json:"watch,omitempty"`
 	Timeout       int        `json:"timeout_seconds,omitempty"`
 	ForwardLeases bool       `json:"forward_leases,omitempty"`
+	Generation    string     `json:"generation,omitempty"`
 }
 type Container struct {
 	Engine         string `json:"engine"`
@@ -368,7 +369,9 @@ func ordered(p Plan, names []string) ([]string, error) {
 }
 func configuration(p Plan, self string) error {
 	processes := map[string]any{}
+	generation := token()
 	for n, s := range p.Services {
+		s.Generation = generation
 		if s.Watch != nil {
 			if e := watchStopping(p, n, false); e != nil {
 				return e
@@ -380,10 +383,19 @@ func configuration(p Plan, self string) error {
 			}
 		}
 		spec := filepath.Join(p.State, n+".command.json")
-		if e := atomic(spec, s); e != nil {
+		admission, e := locked(filepath.Join(p.State, n+".admission"), false)
+		if e != nil {
 			return e
 		}
-		d := map[string]any{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" exec \"$CHAINMAN_CONTROL_STATE\" " + quote(n), "is_template_disabled": true, "availability": map[string]any{"restart": s.Restart}, "shutdown": map[string]any{"timeout_seconds": s.Shutdown + 2}}
+		e = atomic(spec, s)
+		if e == nil {
+			e = clearStopping(p, n)
+		}
+		admission.Close()
+		if e != nil {
+			return e
+		}
+		d := map[string]any{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" exec \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation), "is_template_disabled": true, "availability": map[string]any{"restart": s.Restart}, "shutdown": map[string]any{"timeout_seconds": s.Shutdown + 2}}
 		deps := map[string]any{}
 		for _, name := range s.Dependencies {
 			condition := "process_started"
@@ -397,7 +409,7 @@ func configuration(p Plan, self string) error {
 		}
 		if s.Readiness != nil {
 			r := s.Readiness
-			d["readiness_probe"] = map[string]any{"exec": map[string]string{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" probe \"$CHAINMAN_CONTROL_STATE\" " + quote(n)}, "period_seconds": r.Period, "timeout_seconds": r.Timeout, "failure_threshold": r.Failures}
+			d["readiness_probe"] = map[string]any{"exec": map[string]string{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" probe \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation)}, "period_seconds": r.Period, "timeout_seconds": r.Timeout, "failure_threshold": r.Failures}
 		}
 		processes[n] = d
 	}
@@ -421,12 +433,7 @@ func start(p Plan, self string) error {
 		return e
 	}
 	defer log.Close()
-	socket, e := socketPath(p)
-	if e != nil {
-		return e
-	}
-	args := []string{"--use-uds", "--unix-socket", socket, "--log-file", os.DevNull, "--ordered-shutdown", "up", "--config", filepath.Join(p.State, "compose.json"), "--disable-dotenv", "--tui=false", "--keep-project"}
-	cmd := exec.Command(p.Backend, append(args, p.Requested...)...)
+	cmd := exec.Command(self, "controller", filepath.Join(p.State, "plan.json"))
 	cmd.Dir = p.State
 	cmd.Env = append(os.Environ(), "CHAINMAN_CONTROL_EXECUTABLE="+self, "CHAINMAN_CONTROL_STATE="+p.State)
 	cmd.Stdout = log
@@ -437,11 +444,6 @@ func start(p Plan, self string) error {
 	}
 	id, e := identify(cmd.Process.Pid)
 	if e != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		return e
-	}
-	if e = atomic(filepath.Join(p.State, "controller.json"), id); e != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return e
@@ -753,6 +755,11 @@ func releaseUnused(p Plan, force bool) error {
 	}
 	live := controller(p).alive()
 	for _, n := range ordered {
+		if !used[n] {
+			if e = serviceStopping(p, n, true); e != nil {
+				return e
+			}
+		}
 		if !used[n] && p.Services[n].Watch != nil {
 			if e = watchStopping(p, n, true); e != nil {
 				return e
@@ -974,15 +981,23 @@ func persistTools(p *Plan) (string, error) {
 	}
 	return installed[0], nil
 }
-func owned(state, name string, probe bool) int {
+func owned(state, name string, probe bool, generation string) int {
 	if !validName.MatchString(name) {
 		fmt.Fprintln(os.Stderr, "invalid service name")
 		return 1
 	}
+	admission, e := locked(filepath.Join(state, name+".admission"), false)
+	if e != nil {
+		return exitCode(e)
+	}
+	defer admission.Close()
 	var s Service
 	if e := readJSON(filepath.Join(state, name+".command.json"), &s); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
+	}
+	if s.Generation != generation {
+		return exitCode(fmt.Errorf("service generation changed before admission"))
 	}
 	if e := checkEngine(s.Container); e != nil {
 		fmt.Fprintln(os.Stderr, e)
@@ -1007,6 +1022,7 @@ func owned(state, name string, probe bool) int {
 		defer closeForwarded(cmd)
 	}
 	if probe {
+		admission.Close()
 		return exitCode(cmd.Run())
 	}
 	if strings.HasSuffix(name, watchSuffix) {
@@ -1035,11 +1051,24 @@ func owned(state, name string, probe bool) int {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
 	}
+	// Register before observing the stop marker. Stop first publishes that marker,
+	// then reads this receipt, so a delayed launch is either found or refused.
+	if _, e = os.Stat(filepath.Join(state, name+".stopping")); e == nil {
+		_ = os.Remove(path)
+		return 0
+	} else if !os.IsNotExist(e) {
+		return exitCode(e)
+	}
+	var current Service
+	if e = readJSON(filepath.Join(state, name+".command.json"), &current); e != nil || current.Generation != generation {
+		return exitCode(fmt.Errorf("service generation changed during admission"))
+	}
 	if e = cmd.Start(); e != nil {
 		_ = os.Remove(path)
 		fmt.Fprintln(os.Stderr, e)
 		return 1
 	}
+	admission.Close()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	var timeout <-chan time.Time
@@ -1148,6 +1177,9 @@ func mainAction(args []string) (result int) {
 		}
 		return taskCommand(args[0], args[1])
 	}
+	if args[0] == "controller" && len(args) == 2 {
+		return controllerExec(args[1])
+	}
 	if args[0] == "build" || args[0] == "built" {
 		if len(args) != 3 || !validName.MatchString(args[2]) {
 			return 2
@@ -1155,10 +1187,14 @@ func mainAction(args []string) (result int) {
 		return watchAction(args[0], args[1], args[2])
 	}
 	if args[0] == "exec" || args[0] == "probe" {
-		if len(args) != 3 {
+		if len(args) != 3 && len(args) != 4 {
 			return 2
 		}
-		return owned(args[1], args[2], args[0] == "probe")
+		generation := ""
+		if len(args) == 4 {
+			generation = args[3]
+		}
+		return owned(args[1], args[2], args[0] == "probe", generation)
 	}
 	if args[0] == "status" || args[0] == "stop" {
 		if e := private(args[1]); e != nil {

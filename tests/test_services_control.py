@@ -68,6 +68,58 @@ while True:time.sleep(.1)
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
 
+    def test_backend_registers_before_exec_and_recovers_abandoned_start(self):
+        backend = self.base / "backend"
+        backend.write_text(
+            f"#!{sys.executable}\n"
+            "import json,os,sys,time\nfrom pathlib import Path\n"
+            "if 'up' not in sys.argv: raise SystemExit(1)\n"
+            "receipt=json.loads(Path('controller.json').read_text())\n"
+            "assert receipt['pid']==os.getpid()\n"
+            f"Path({str(self.root / 'backend-pid')!r}).write_text(str(os.getpid()))\n"
+            "time.sleep(120)\n"
+        )
+        backend.chmod(0o700)
+        self.plan["backend"] = str(backend)
+        self.path.write_text(json.dumps(self.plan))
+        client = subprocess.Popen(
+            [CONTROL, "up", str(self.path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: client.poll() is None and client.kill())
+        self.wait_file(self.root / "backend-pid")
+        pid = int((self.root / "backend-pid").read_text())
+        client.kill()
+        client.wait(timeout=5)
+        self.run_control("stop", check=0)
+        self.wait_until(lambda: not self.alive(pid))
+
+    def test_delayed_old_generation_cannot_launch_or_replace_owner(self):
+        spec = dict(self.plan["services"]["worker"], generation="new")
+        (self.state / "worker.command.json").write_text(json.dumps(spec))
+        owner = self.state / "worker.owner.json"
+        owner.write_text("{}")
+        result = subprocess.run(
+            [CONTROL, "exec", str(self.state), "worker", "old"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(owner.read_text(), "{}")
+        self.assertFalse((self.root / "pid").exists())
+        owner.unlink()
+        (self.state / "worker.stopping").write_text("true")
+        result = subprocess.run(
+            [CONTROL, "exec", str(self.state), "worker", "new"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "pid").exists())
+
     def run_control(self, action, check=None, timeout=30):
         self.path.write_text(json.dumps(self.plan))
         result = subprocess.run(
