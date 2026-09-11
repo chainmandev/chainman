@@ -320,12 +320,12 @@ def perform(
     extra: list[str],
     *,
     only_runtime=False,
-    skip_runtime=False,
+    skip_runtime=True,
     managed: ManagedFiles | None = None,
 ) -> Path:
     runtime = (
         chainman.RUNTIME
-        if skip_runtime
+        if skip_runtime and not only_runtime
         else runtime_candidate(root, policy, now, managed)
     )
     if only_runtime:
@@ -599,6 +599,10 @@ def run(root: Path, args: list[str]):
     group.add_argument("--skip-chainman", action="store_true")
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     opts = parser.parse_args(args)
+    # Runtime changes are an explicit operation, never an incidental part of
+    # updating application dependencies. Keep the old skip flag harmless while
+    # initial consumers migrate to the standardized command.
+    opts.skip_chainman = not opts.only_chainman
     if opts.extra[:1] == ["--"]:
         opts.extra = opts.extra[1:]
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):

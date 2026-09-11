@@ -79,6 +79,84 @@ class QueryTests(unittest.TestCase):
             "schema=1\n[updates]\nminimum_age_days=30\n"
         )
 
+    def test_batch_preserves_order_and_one_eligibility_instant(self):
+        def inventory(provider, package):
+            return [
+                registry.Release("1.0.0", NOW - timedelta(days=90)),
+                registry.Release(
+                    "2.0.0" if package == "first" else "3.0.0", NOW - timedelta(days=31)
+                ),
+                registry.Release("4.0.0", NOW - timedelta(days=29)),
+            ]
+
+        request = {
+            "schema": 1,
+            "operation": "batch",
+            "requests": [
+                {
+                    "schema": 1,
+                    "operation": "select",
+                    "provider": "npm",
+                    "package": name,
+                    "current": "1.0.0",
+                }
+                for name in ("first", "second")
+            ],
+        }
+        with (
+            patch.object(api, "instant", side_effect=[NOW]),
+            patch.object(registry, "releases", side_effect=inventory),
+        ):
+            result = api.query(self.root, request)
+        self.assertEqual(
+            [item["version"] for item in result["results"]], ["2.0.0", "3.0.0"]
+        )
+
+    def test_invalid_batch_is_rejected_before_registry_requests(self):
+        for entries in (
+            [],
+            [{}],
+            [{"schema": 1, "operation": "batch", "requests": []}],
+            [{}] * 129,
+        ):
+            with (
+                self.subTest(entries=len(entries)),
+                patch.object(registry, "releases") as fetch,
+            ):
+                with self.assertRaises(ValueError):
+                    api.query(
+                        self.root,
+                        {"schema": 1, "operation": "batch", "requests": entries},
+                        now=NOW,
+                    )
+                fetch.assert_not_called()
+
+    def test_batch_does_not_return_partial_success_after_query_failure(self):
+        request = {
+            "schema": 1,
+            "operation": "batch",
+            "requests": [
+                {
+                    "schema": 1,
+                    "operation": "select",
+                    "provider": "npm",
+                    "package": name,
+                    "current": "1.0.0",
+                }
+                for name in ("first", "second")
+            ],
+        }
+        with patch.object(
+            registry,
+            "releases",
+            side_effect=[
+                [registry.Release("2.0.0", NOW - timedelta(days=40))],
+                ValueError("registry evidence missing"),
+            ],
+        ):
+            with self.assertRaisesRegex(ValueError, "registry evidence missing"):
+                api.query(self.root, request, now=NOW)
+
     def test_selects_new_major_only_after_maturity_window(self):
         inventory = [
             registry.Release("1.0.0", NOW - timedelta(days=90)),

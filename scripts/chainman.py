@@ -310,6 +310,8 @@ def main(argv=None):
                     return execute(root, name, rest, env=owned, check=False).returncode
         elif args.action == "deps-update":
             return dependencies(root, rest)
+        elif args.action == "chainman-update":
+            return dependencies(root, ["--only-chainman", *rest])
         elif args.action == "deps-check":
             import dependency_api
 

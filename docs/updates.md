@@ -11,9 +11,10 @@ not dependency eligibility auditing or application verification.
 `just deps-update` selects current eligible stable releases, including majors, with
 a configurable 30-day maturity window. `--preview` performs resolution and verification
 in a disposable copy. `--no-commit` leaves the verified changes for a coordinated
-checkpoint. `--only-chainman` updates the runtime pin and managed bootstrap;
-`--skip-chainman` updates project dependencies without querying runtime releases.
-Until the first public Chainman release is published, use `--skip-chainman` explicitly.
+checkpoint. Project dependency updates retain the Chainman pin and never query
+Chainman releases. `just chainman-update` explicitly updates the runtime pin and
+managed bootstrap, followed by consumer verification. The transitional
+`--only-chainman` spelling does the same; `--skip-chainman` is now redundant.
 A missing release source or eligibility date is an error, never an implicit exemption.
 Registry metadata responses are bounded to 64 MiB, including complete package
 histories; a larger response fails explicitly rather than dropping release evidence.

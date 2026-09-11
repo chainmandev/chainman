@@ -20,6 +20,12 @@ artifacts = ["node_modules/.pnpm/lock.yaml"]
 
 Commands are arrays of argument arrays. `exec --profile NAME -- ARGS...` preserves
 literal arguments; shell expansion happens only in an explicitly chosen shell.
+
+`deps-query` also accepts `{"schema":1,"operation":"batch","requests":[...]}`.
+Each entry is a normal schema-1 query. The response contains `schema`, `operation`
+and an ordered `results` array. A batch uses one eligibility time and credential
+context; any failed query fails the whole response. Batches contain 1–128 entries,
+cannot nest, and retain the existing 4 MiB input bound and per-query network bounds.
 `run NAME` invokes a declared command. `command_profiles.NAME` overrides the project
 default for that command. `setup` uses manifest/toolchain fingerprints and declared
 artifacts. A profile selects a project-relative `path#shell` (also `flake.nix#shell`)

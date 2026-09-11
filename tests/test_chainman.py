@@ -614,7 +614,7 @@ outputs=["deps.txt"]
 
     def update(self, *args):
         with redirect_stdout(io.StringIO()):
-            return consumer_updates.run(self.root, ["--skip-chainman", *args])
+            return consumer_updates.run(self.root, list(args))
 
     def test_verified_real_git_commit_then_noop(self):
         self.assertEqual(self.update("--", "2.0"), 0)
@@ -991,7 +991,7 @@ class RuntimeReleaseTests(ConsumerFixture):
             patch.object(toolchain, "managed_run") as execute,
         ):
             selected = consumer_updates.perform(
-                self.root, self.policy, self.now, ["two words"]
+                self.root, self.policy, self.now, ["two words"], skip_runtime=False
             )
             self.assertEqual(selected, candidate)
             consumer_updates.verify(self.root, self.policy, selected)

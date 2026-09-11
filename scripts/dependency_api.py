@@ -315,6 +315,28 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
     ):
         raise ValueError("Dependency requests require schema=1")
     now = instant() if now is None else now
+    if request.get("operation") == "batch":
+        requests = request.get("requests")
+        if not isinstance(requests, list) or not 1 <= len(requests) <= 128:
+            raise ValueError("A dependency batch requires 1 to 128 requests")
+        if any(
+            not isinstance(item, dict)
+            or type(item.get("schema")) is not int
+            or item["schema"] != 1
+            or item.get("operation") == "batch"
+            for item in requests
+        ):
+            raise ValueError(
+                "Batch entries must be schema-1 requests; nested batches are not supported"
+            )
+        # One eligibility instant and credential context cover the entire batch.
+        # query() is read-only; errors abort the result rather than return a partial
+        # success that a generator could accidentally treat as a complete audit.
+        return {
+            "schema": 1,
+            "operation": "batch",
+            "results": [query(root, item, now=now) for item in requests],
+        }
     settings = policy(root)
     if request.get("adapter"):
         spec = configured(root, request["adapter"], settings)

@@ -37,6 +37,9 @@ module name action="verify":
 deps-update *args:
     @./scripts/chainman.sh deps-update "$@"
 
+chainman-update *args:
+    @./scripts/chainman.sh chainman-update "$@"
+
 cache-status:
     @./scripts/chainman.sh cache-status
 
