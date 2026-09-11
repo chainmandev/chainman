@@ -1,5 +1,13 @@
 # Verified dependency updates
 
+`./scripts/chainman.sh deps-check` validates the configured adapter names and
+ordered update steps without resolving dependencies, running hooks, or requiring
+a clean Git checkout. It accepts the same selection arguments as the resolver,
+for example `deps-check --targets core`. Every declared resolution step is checked,
+including adapters that are not selected. Use it when testing generated consumer
+configuration against the pinned runtime. This is a configuration contract check,
+not dependency eligibility auditing or application verification.
+
 `just deps-update` selects current eligible stable releases, including majors, with
 a configurable 30-day maturity window. `--preview` performs resolution and verification
 in a disposable copy. `--no-commit` leaves the verified changes for a coordinated

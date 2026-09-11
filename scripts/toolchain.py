@@ -19,10 +19,15 @@ import sys
 import tempfile
 import time
 import tomllib
+import uuid
 
 RUNTIME = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
 _operation_fd: int | None = None
+_operation_gate_fd: int | None = None
+_operation_id = ""
+_operation_compat_fd: int | None = None
+_ancestor_fds: tuple[int, ...] = ()
 
 
 def nix_command(env=None) -> str:
@@ -61,6 +66,7 @@ def entry_command(root: Path, profile: str) -> list[str]:
             "--root",
             str(root),
             "exec",
+            "--reuse-operation",
             "--profile",
             profile,
             "--",
@@ -200,60 +206,287 @@ def cache_root(root: Path = ROOT) -> Path:
 
 
 @contextlib.contextmanager
-def operation(root: Path = ROOT):
-    global _operation_fd
-    directory = cache_root(root)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = contained(root, ".cache/toolchain/operation.lock")
-    inherited = (
-        _operation_fd
-        if _operation_fd is not None
-        else os.environ.get("TOOLCHAIN_LOCK_FD")
-    )
-    if inherited:
-        descriptor = int(inherited)
-        actual = os.fstat(descriptor)
-        expected = path.stat() if path.exists() else None
-        if expected is not None and (actual.st_dev, actual.st_ino) == (
-            expected.st_dev,
-            expected.st_ino,
-        ):
-            previous = _operation_fd
-            _operation_fd = descriptor
-            try:
-                yield False
-            finally:
-                _operation_fd = previous
-            return
+def operation_file(root: Path, name: str, *, create=True, unique=False):
+    path = contained(root, f".cache/toolchain/{name}")
     if path.exists() and not stat.S_ISREG(path.lstat().st_mode):
         raise ValueError("Operation lock must be a regular file")
-    with path.open("a") as lock:
+    flags = os.O_RDWR | os.O_NOFOLLOW
+    if create:
+        flags |= os.O_CREAT
+    if unique:
+        flags |= os.O_EXCL
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
         if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
             raise ValueError("Operation lock must be a regular file")
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        yield lock
+
+
+@contextlib.contextmanager
+def operation_gate(root: Path):
+    # This mutex covers admission and stale-lease inspection only, never a child
+    # command. A writer retains writer.lock after admission.
+    with operation_file(root, "operation-admission.lock") as gate:
+        fcntl.flock(gate, fcntl.LOCK_EX)
+        yield
+
+
+def acquire_operation(descriptor: int):
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise ValueError(
+            "Another managed operation is active; no cleanup or concurrent update was started."
+        ) from None
+
+
+def active_operations(root: Path) -> set[tuple[int, int]]:
+    """Inspect leases only while holding the admission mutex and writer gate."""
+    active = set()
+    for path in contained(root, ".cache/toolchain/operations").iterdir():
+        with operation_file(root, f"operations/{path.name}", create=False) as lease:
+            try:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                metadata = os.fstat(lease.fileno())
+                active.add((metadata.st_dev, metadata.st_ino))
+            else:
+                path.unlink()
+    return active
+
+
+def descriptor_identities(descriptors) -> set[tuple[int, int]]:
+    result = set()
+    for descriptor in descriptors:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ValueError("Operation descriptors must identify regular files")
+        result.add((metadata.st_dev, metadata.st_ino))
+    return result
+
+
+@contextlib.contextmanager
+def operation_state(descriptor, gate, identity, compat, ancestors):
+    global \
+        _operation_fd, \
+        _operation_gate_fd, \
+        _operation_id, \
+        _operation_compat_fd, \
+        _ancestor_fds
+    previous = (
+        _operation_fd,
+        _operation_gate_fd,
+        _operation_id,
+        _operation_compat_fd,
+        _ancestor_fds,
+    )
+    (
+        _operation_fd,
+        _operation_gate_fd,
+        _operation_id,
+        _operation_compat_fd,
+        _ancestor_fds,
+    ) = descriptor, gate, identity, compat, ancestors
+    try:
+        yield
+    finally:
+        (
+            _operation_fd,
+            _operation_gate_fd,
+            _operation_id,
+            _operation_compat_fd,
+            _ancestor_fds,
+        ) = previous
+
+
+def inherited_operation():
+    if _operation_fd is not None:
+        return (
+            _operation_fd,
+            _operation_gate_fd,
+            _operation_id,
+            _operation_compat_fd,
+            _ancestor_fds,
+        )
+    value = os.environ.get("TOOLCHAIN_LOCK_FD")
+    if value is None:
+        return None, None, "", None, ()
+    descriptor = int(value)
+    gate = os.environ.get("TOOLCHAIN_GATE_FD")
+    compat = os.environ.get("TOOLCHAIN_COMPAT_FD")
+    identity = os.environ.get("TOOLCHAIN_OPERATION_ID", "")
+    if identity and (
+        len(identity) != 12 or any(c not in "0123456789abcdef" for c in identity)
+    ):
+        raise ValueError("Invalid inherited operation identity")
+    ancestors = json.loads(os.environ.get("TOOLCHAIN_ANCESTOR_FDS", "[]"))
+    if not isinstance(ancestors, list) or any(
+        type(fd) is not int or fd < 0 for fd in ancestors
+    ):
+        raise ValueError("Invalid inherited ancestor descriptors")
+    # Legacy entry held operation.lock exclusively. Keep it intact during an
+    # incoming runtime handoff; never convert that inherited kernel lock.
+    # An old exclusive compatibility lease is not a modern writer gate: nested
+    # writers must still exclude later modern siblings through writer.lock.
+    gate = int(gate) if gate is not None else None
+    compat = int(compat) if compat is not None else (None if identity else descriptor)
+    descriptor_identities(
+        [
+            descriptor,
+            *ancestors,
+            *([gate] if gate is not None else []),
+            *([compat] if compat is not None else []),
+        ]
+    )
+    return descriptor, gate, identity, compat, tuple(ancestors)
+
+
+def descriptor_matches(descriptor: int, path: Path) -> bool:
+    actual = os.fstat(descriptor)
+    expected = path.lstat() if path.exists() else None
+    return (
+        expected is not None
+        and stat.S_ISREG(actual.st_mode)
+        and (actual.st_dev, actual.st_ino) == (expected.st_dev, expected.st_ino)
+    )
+
+
+@contextlib.contextmanager
+def operation(
+    root: Path = ROOT,
+    *,
+    exclusive: bool = True,
+    automatic_prune=False,
+    new_execution=False,
+):
+    cache_root(root).mkdir(parents=True, exist_ok=True)
+    contained(root, ".cache/toolchain/operations").mkdir(exist_ok=True)
+    descriptor, inherited_gate, identity, inherited_compat, ancestors = (
+        inherited_operation()
+    )
+    compat_path = contained(root, ".cache/toolchain/operation.lock")
+    writer_path = contained(root, ".cache/toolchain/writer.lock")
+    lease_path = (
+        contained(root, f".cache/toolchain/operations/{identity}")
+        if identity
+        else compat_path
+    )
+    same = descriptor is not None and descriptor_matches(descriptor, lease_path)
+    if same:
+        if inherited_compat is None or not descriptor_matches(
+            inherited_compat, compat_path
+        ):
             raise ValueError(
-                "Another managed operation is active; no cleanup or concurrent update was started."
-            ) from None
-        previous = _operation_fd
-        _operation_fd = lock.fileno()
-        try:
-            yield True
-        finally:
-            _operation_fd = previous
+                "Inherited compatibility lease does not belong to this project"
+            )
+        if inherited_gate is not None and not descriptor_matches(
+            inherited_gate, writer_path
+        ):
+            raise ValueError("Inherited writer gate does not belong to this project")
+    owners = tuple(
+        dict.fromkeys(
+            (
+                *ancestors,
+                *[
+                    fd
+                    for fd in (descriptor, inherited_gate, inherited_compat)
+                    if fd is not None
+                ],
+            )
+        )
+    )
+    nested_project = any(descriptor_matches(fd, compat_path) for fd in owners)
+    if same and not new_execution:
+        if exclusive and inherited_gate is None:
+            with operation_file(root, "writer.lock") as gate:
+                with operation_gate(root):
+                    acquire_operation(gate.fileno())
+                    if active_operations(root) - descriptor_identities(owners):
+                        raise ValueError(
+                            "Another managed operation is active; close independent commands before updating"
+                        )
+                with operation_state(
+                    descriptor, gate.fileno(), identity, inherited_compat, ancestors
+                ):
+                    yield False
+        else:
+            if exclusive:
+                with operation_gate(root):
+                    if active_operations(root) - descriptor_identities(owners):
+                        raise ValueError(
+                            "Another managed operation is active; close independent commands before updating"
+                        )
+            with operation_state(
+                descriptor, inherited_gate, identity, inherited_compat, ancestors
+            ):
+                yield False
+        return
+    with contextlib.ExitStack() as stack:
+        if same:
+            compat_descriptor = inherited_compat
+        else:
+            compat = stack.enter_context(operation_file(root, "operation.lock"))
+            try:
+                fcntl.flock(compat, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError(
+                    "Another managed operation is active; an older runtime owns exclusive access"
+                ) from None
+            compat_descriptor = compat.fileno()
+        gate = (
+            None
+            if same and inherited_gate is not None
+            else stack.enter_context(operation_file(root, "writer.lock"))
+        )
+        with operation_gate(root):
+            if gate is not None:
+                acquire_operation(gate.fileno())
+            active = active_operations(root)
+            if exclusive and active - descriptor_identities(owners):
+                raise ValueError(
+                    "Another managed operation is active; no cleanup or concurrent update was started."
+                )
+            identity = uuid.uuid4().hex[:12]
+            lease = stack.enter_context(
+                operation_file(root, f"operations/{identity}", unique=True)
+            )
+            acquire_operation(lease.fileno())
+            if automatic_prune and not active and not nested_project:
+                prune(root)
+            gate_descriptor = (
+                inherited_gate
+                if gate is None
+                else (gate.fileno() if exclusive else None)
+            )
+            if gate is not None and not exclusive:
+                gate.close()
+        with operation_state(
+            lease.fileno(), gate_descriptor, identity, compat_descriptor, owners
+        ):
+            yield not nested_project
 
 
 def managed_options(kwargs):
-    """Keep the cooperating operation lock open in a managed child."""
-    descriptor = _operation_fd
-    if descriptor is None and os.environ.get("TOOLCHAIN_LOCK_FD"):
-        descriptor = int(os.environ["TOOLCHAIN_LOCK_FD"])
-        os.fstat(descriptor)  # A lost lock is an error, never permission to continue.
+    """Retain every outstanding project lease through nested managed children."""
+    descriptor, gate, identity, compat, ancestors = inherited_operation()
     if descriptor is not None:
         env = dict(kwargs.get("env", os.environ))
         env["TOOLCHAIN_LOCK_FD"] = str(descriptor)
-        kwargs.update(env=env, pass_fds=(descriptor,))
+        env["TOOLCHAIN_OPERATION_ID"] = identity
+        ancestors = tuple(dict.fromkeys((*ancestors, *kwargs.get("pass_fds", ()))))
+        env["TOOLCHAIN_ANCESTOR_FDS"] = json.dumps(ancestors)
+        descriptors = [descriptor, *ancestors]
+        for name, value in (
+            ("TOOLCHAIN_GATE_FD", gate),
+            ("TOOLCHAIN_COMPAT_FD", compat),
+        ):
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = str(value)
+                descriptors.append(value)
+        descriptor_identities(descriptors)
+        kwargs.update(env=env, pass_fds=tuple(dict.fromkeys(descriptors)))
     return kwargs
 
 
@@ -278,6 +511,11 @@ def pnpm_store_environment(env: dict[str, str], values: dict[str, str]) -> None:
 
 def environment(root: Path = ROOT) -> dict[str, str]:
     env = dict(os.environ)
+    if _operation_id and env.get("TOOLCHAIN_OPERATION_ID") != _operation_id:
+        # Public child commands own their server lifetime. Reusing the parent
+        # owner with a new socket would spawn an unmanaged daemon; reusing its
+        # socket would let parent exit stop an active child's compiler.
+        env.pop("CHAINMAN_COMPILER_OWNER", None)
     work = contained(root, f".cache/toolchain/work/{context_id()}")
     work.mkdir(parents=True, exist_ok=True)
     downloads = Path(
@@ -308,6 +546,14 @@ def environment(root: Path = ROOT) -> dict[str, str]:
     socket_name = hashlib.sha256(
         (str(root.resolve()) + context_id()).encode()
     ).hexdigest()[:24]
+    # Independent Rust commands own separate foreground servers. Descendants
+    # share the operation identity and endpoint; the on-disk compiler cache is
+    # still shared and its implementation owns concurrent access to those bytes.
+    identity = _operation_id or os.environ.get("TOOLCHAIN_OPERATION_ID", "")
+    if identity:
+        if len(identity) != 12 or any(c not in "0123456789abcdef" for c in identity):
+            raise ValueError("Invalid inherited operation identity")
+        socket_name += identity
     env.update(
         CARGO_HOME=str(downloads / "cargo"),
         CARGO_TARGET_DIR=str(work / "cargo"),
@@ -333,7 +579,15 @@ def environment(root: Path = ROOT) -> dict[str, str]:
     pnpm_store_environment(env, {"PNPM_CONFIG_STORE_DIR": str(downloads / "pnpm")})
     preserved = {}
     for name in config(root).get("cache", {}).get("preserve_environment", []):
-        if name in {"RUSTC_WRAPPER", "SCCACHE_SERVER_UDS", "TOOLCHAIN_LOCK_FD"}:
+        if name in {
+            "RUSTC_WRAPPER",
+            "SCCACHE_SERVER_UDS",
+            "TOOLCHAIN_LOCK_FD",
+            "TOOLCHAIN_GATE_FD",
+            "TOOLCHAIN_OPERATION_ID",
+            "TOOLCHAIN_COMPAT_FD",
+            "TOOLCHAIN_ANCESTOR_FDS",
+        }:
             raise ValueError("Cannot override managed compiler-cache lifecycle")
         if name in os.environ:
             env[name] = os.environ[name]
@@ -386,10 +640,23 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         check=True,
         stdout=sys.stderr,
     )
-    server = subprocess.Popen(
-        [*prefix, "sccache"],
-        **managed_options({"cwd": root, "env": server_env, "stdout": sys.stderr}),
-    )
+    lifecycle_name = "compiler-" + uuid.uuid4().hex + ".lock"
+    # Keep a distinct lifetime lease in the actual compiler process and every
+    # intermediate launcher. Reaping only the launcher does not prove its child
+    # has exited. The parent closes its copy immediately after spawn.
+    with operation_file(root, lifecycle_name, unique=True) as lifecycle:
+        acquire_operation(lifecycle.fileno())
+        server = subprocess.Popen(
+            [*prefix, "sccache"],
+            **managed_options(
+                {
+                    "cwd": root,
+                    "env": server_env,
+                    "stdout": sys.stderr,
+                    "pass_fds": (lifecycle.fileno(),),
+                }
+            ),
+        )
     deadline = time.monotonic() + 120
     try:
         while True:
@@ -446,6 +713,14 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
                 raise ValueError(
                     "Compiler cache shutdown timed out; the server retains the operation lock until it exits"
                 ) from None
+            with operation_file(root, lifecycle_name, create=False) as lifecycle:
+                try:
+                    fcntl.flock(lifecycle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ValueError(
+                        "Compiler cache process is still active after its launcher exited; its endpoint was preserved"
+                    ) from None
+                contained(root, f".cache/toolchain/{lifecycle_name}").unlink()
             if endpoint.exists() or endpoint.is_symlink():
                 current = endpoint.lstat()
                 if not stat.S_ISSOCK(current.st_mode) or (
@@ -680,8 +955,17 @@ def main() -> int:
                 )
             )
             return 0
-        with operation():
+        with operation(
+            exclusive=args.action != "exec",
+            new_execution=args.action == "exec",
+            automatic_prune=args.action not in ("cache-prune", "clean")
+            and cfg.get("cache", {}).get("automatic_prune", True),
+        ) as outer_operation:
             if args.action in ("cache-prune", "clean"):
+                if not outer_operation:
+                    raise ValueError(
+                        "Cleanup cannot run inside an active managed operation"
+                    )
                 if any(a != "--all" for a in args.arguments):
                     raise ValueError("cache-prune accepts only --all")
                 print(
@@ -700,8 +984,6 @@ def main() -> int:
                         size(dist)
                         shutil.rmtree(dist)
                 return 0
-            if cfg.get("cache", {}).get("automatic_prune", True):
-                prune()
             env = environment()
             if args.action == "doctor":
                 for executable in ("nix", "python3", "git", "just"):

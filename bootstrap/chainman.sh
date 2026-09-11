@@ -81,12 +81,12 @@ EOF
     # even the verified flake, so extraction cannot introduce an outside path.
     [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
     export CHAINMAN_MODE="$mode" CHAINMAN_ACTIVE_MODE="$mode"
-    # Core entry replaces an external project shell. Its old profile token no
+    # Bootstrap entry replaces an external project shell. Its old profile token no
     # longer describes PATH, even when the project inputs themselves are unchanged.
     unset IN_NIX_SHELL CHAINMAN_ACTIVE_PROFILE CHAINMAN_ACTIVE_FINGERPRINT
-    exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#core" --no-write-lock-file \
+    exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file \
         --command python3 -c '
-import fcntl, os, pathlib, shutil, stat, subprocess, sys, tempfile, urllib.parse
+import fcntl, os, pathlib, shutil, stat, subprocess, sys, tempfile
 root, content_id, expected, store, *args = sys.argv[1:]
 nix = os.path.join(os.environ["CHAINMAN_RUNTIME_NIX_BIN"], "nix")
 cache = pathlib.Path(root) / ".chainman"
@@ -131,9 +131,11 @@ try:
     os.chdir(root)
     os.environ.update(CHAINMAN_RUNTIME=str(runtime), CHAINMAN_ROOT=root, CHAINMAN_PROJECT_ROOT=root,
                       PYTHONDONTWRITEBYTECODE="1")
-    os.execv(nix, [nix, "--extra-experimental-features", "nix-command flakes", "develop",
-        "path:" + urllib.parse.quote(str(runtime / "nix"), safe="/") + "#core", "--no-write-lock-file", "--command",
-        "python3", str(runtime / "scripts/chainman.py"), "--root", root, *args])
+    # The current interpreter/environment came from the same verified archive.
+    # Keep them while executing the rehashed project-local source generation;
+    # entering an identical second bootstrap shell adds no integrity check.
+    os.execv(sys.executable, [sys.executable,
+        str(runtime / "scripts/chainman.py"), "--root", root, *args])
 except (OSError, ValueError, subprocess.CalledProcessError) as error:
     sys.exit("Chainman bootstrap: " + str(error))
 ' "$root" "$content_id" "$nar_hash" "$store" "$@"

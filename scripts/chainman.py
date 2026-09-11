@@ -222,9 +222,12 @@ def run_hook(root: Path, commands, *, name="default", extra=(), env=None):
 
 def run_project(root: Path, action: str, extra: list[str]):
     cfg = configuration(root)
-    with tc.operation(root) as outer_operation:
-        if outer_operation and cfg.get("cache", {}).get("automatic_prune", True):
-            tc.prune(root)
+    with tc.operation(
+        root,
+        exclusive=action == "setup" or action not in cfg.get("commands", {}),
+        new_execution=True,
+        automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+    ):
         env = tc.environment(root)
         if action in cfg.get("commands", {}) and action != "setup":
             name = cfg.get("command_profiles", {}).get(
@@ -272,6 +275,9 @@ def main(argv=None):
         if args.action == "version":
             print((RUNTIME / "VERSION").read_text().strip())
         elif args.action in {"exec", "shell"}:
+            reuse = rest[:1] == ["--reuse-operation"]
+            if reuse:
+                rest = rest[1:]
             name = cfg.get("project", {}).get("default_profile", "default")
             if rest[:1] == ["--profile"]:
                 if len(rest) < 2:
@@ -283,18 +289,31 @@ def main(argv=None):
                 if args.action != "shell":
                     raise ValueError("exec requires a command")
                 rest = ["bash"]
-            with tc.operation(root) as outer_operation:
-                if outer_operation and cfg.get("cache", {}).get(
-                    "automatic_prune", True
-                ):
-                    tc.prune(root)
+            with tc.operation(
+                root,
+                exclusive=False,
+                new_execution=not reuse,
+                automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+            ):
                 env = tc.environment(root)
-                if os.environ.get("CHAINMAN_COMPILER_OWNER") == str(root):
+                if env.get("CHAINMAN_COMPILER_OWNER") == str(root):
                     env["RUSTC_WRAPPER"] = os.environ.get("RUSTC_WRAPPER", "")
                 with tc.compiler_cache(name, env, root) as owned:
                     return execute(root, name, rest, env=owned, check=False).returncode
         elif args.action == "deps-update":
             return dependencies(root, rest)
+        elif args.action == "deps-check":
+            import dependency_api
+
+            settings = dependency_api.policy(root)
+            if rest[:1] == ["--"]:
+                rest = rest[1:]
+            names, _, adapters = dependency_api.plan_steps(root, settings, rest)
+            print(
+                json.dumps(
+                    {"schema": 1, "targets": sorted(names), "adapters": list(adapters)}
+                )
+            )
         elif args.action in {"deps-query", "deps-resolve"}:
             import dependency_api
 
@@ -322,11 +341,12 @@ def main(argv=None):
                 raise ValueError("module requires a name and optional action")
             spec = tc.module(rest[0], root)
             action = rest[1] if len(rest) == 2 else "verify"
-            with tc.operation(root) as outer_operation:
-                if outer_operation and cfg.get("cache", {}).get(
-                    "automatic_prune", True
-                ):
-                    tc.prune(root)
+            with tc.operation(
+                root,
+                exclusive=True,
+                new_execution=True,
+                automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+            ):
                 env = tc.environment(root)
                 if action != "format":
                     tc.setup(spec, env, root)

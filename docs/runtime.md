@@ -43,20 +43,46 @@ separate engine stores. Project outputs live separately under `.cache/toolchain/
 Git administrative mounts belong only to a repository whose root is the selected
 project, including linked worktrees. Nested unadopted examples receive global/system
 Git identity and signing policy without mounting or inheriting their enclosing repository.
+Independent ordinary commands and shells may run concurrently in one project.
+Each public managed command owns an inherited advisory lease. Updates and cleanup take
+an exclusive writer gate and refuse to proceed while an independent family is
+active. A nested update can acquire that gate when only its own ancestors remain
+active; background managed commands from the same shell have distinct leases.
+Its execution lease stays held even if admission fails or the updater
+is killed. Cleanup remains forbidden inside an active managed operation.
+Automatic pruning runs only while no execution or ancestor for that project is active; otherwise
+it is deferred. Stale lease files are reclaimed only after their lock is free.
+Module setup and use remain exclusive for their complete lifecycle, so another
+context cannot reinstall an environment while it is in use. Direct execution and
+declared application commands can run concurrently; projects still own the safety
+of arbitrary application commands and unmanaged background processes.
+All ancestor leases remain inherited when entering another project. New executions
+also hold a shared legacy lock, preventing an older runtime from performing cleanup.
+An incoming old exclusive runtime can hand off to the new pin. Explicitly executing
+older runtime code from a new ordinary session fails closed; use the pinned launcher.
+
 Package managers own locking in shared downloads. Rust compiler cache servers run
-in the foreground and retain the project operation lock until they exit. Cold Nix
+in the foreground and retain their execution lease until they exit. Independent
+executions own distinct server sockets and share the on-disk compiler cache. Cold Nix
 environment realization completes before the cache-server readiness deadline starts.
 The owned server has no idle timeout, so a long non-Rust phase cannot outlive it.
-Cleanup reaps an already-exited server, removes only its unchanged socket, and
-reports a nonzero server exit. A process
+Cleanup reaps an already-exited launcher, checks the actual compiler process lifetime
+lease before removing its unchanged socket, and reports a nonzero server exit. A process
 that is forcibly killed can leave children holding that lock; inspect those processes
 before stopping an exact compiler endpoint. Do not remove a live operation lock.
 
-After bootstrap, the verified core shell supplies the Nix executable family ahead
+The consumer bootstrap shell includes the runtime and its Python libraries, Git,
+Just, and basic command-line tools. It does not include Chainman's source
+formatters or a C compiler; development and optional language profiles supply
+their own tools. Source development continues to use the full `core` profile.
+After verifying the installed generation, the launcher reuses that same pinned
+bootstrap interpreter instead of entering a duplicate bootstrap environment.
+
+After bootstrap, the verified runtime shell supplies the Nix executable family ahead
 of project tools, including after shell refreshes. Other languages still come from
 the selected project shell. `CHAINMAN_NIX_BIN` selects the initial bootstrap only;
 `CHAINMAN_RUNTIME_NIX_BIN` is internal and cannot be set in project configuration.
-Core entry invalidates a previous project-profile token, so nested launchers reload
+Bootstrap entry invalidates a previous project-profile token, so nested launchers reload
 the actual project shell. The runtime includes Nix's CLI and Linux namespace helper;
 Nix's combined development package and generated manuals are excluded from the
 consumer shell.
@@ -66,11 +92,14 @@ and original modes, including restoration on rename failure. Updating Nix requir
 reviewing or retiring that version-bounded patch; it is never applied speculatively
 to a new version. In the Chainman source checkout, run `just verify-nix` on the
 host to repeat the full patched Nix package build and its upstream unit/functional
-gates after changing either the patch or pin.
+gates after changing either the patch or pin. A fresh store without a cached patched
+build compiles Nix and needs its build dependencies, even with the small consumer
+bootstrap profile. Host and container stores are separate; published binary-cache
+coverage would reduce this first-entry cost without changing the runtime pin.
 
 Cache reporting distinguishes project builds, shared downloads and free disk bytes.
 Limits and stale age live in `cache`; automatic pruning removes only old declared
-build contexts after acquiring the project lock. `clean` clears those same contexts.
+build contexts after acquiring exclusive maintenance access. `clean` clears those same contexts.
 Application outputs elsewhere require application-owned cleanup. Symlink escapes
 and actual deletion failures fail visibly. Host-wide Nix GC and container volume
 removal are explicit operator actions and can affect other projects. SDK removal is

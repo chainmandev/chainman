@@ -132,7 +132,7 @@ class BootstrapTests(unittest.TestCase):
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
 
-    def test_explicit_temporary_base_survives_both_bootstrap_shells(self):
+    def test_explicit_temporary_base_survives_bootstrap_and_runtime_entry(self):
         private = self.root / "private temporary files"
         private.mkdir(mode=0o700)
         env = dict(self.env, TMPDIR=str(private))

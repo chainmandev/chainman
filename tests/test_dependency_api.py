@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,57 @@ import registry
 
 
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+
+class PlanTests(unittest.TestCase):
+    def test_public_plan_checks_unselected_adapters_without_running_hooks(self):
+        with tempfile.TemporaryDirectory(prefix="consumer plan ") as directory:
+            root = Path(directory)
+            config = root / "chainman.toml"
+            body = """schema=1
+[updates]
+minimum_age_days=30
+[updates.adapters.core]
+adapter="rust"
+directories=["."]
+[updates.adapters.sdk-sources]
+adapter="artifact"
+explicit_only=true
+entries=[]
+[[updates.steps]]
+resolve="core"
+[[updates.steps]]
+resolve="sdk-sources"
+[[updates.steps]]
+commands=[["sh", "-c", "touch unexpected-hook"]]
+"""
+            for adapter, expected in (("artifact", 0), ("artifacts", 1)):
+                with self.subTest(adapter=adapter):
+                    config.write_text(
+                        body.replace('adapter="artifact"', f'adapter="{adapter}"')
+                    )
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            str(Path(api.__file__).with_name("chainman.py")),
+                            "--root",
+                            str(root),
+                            "deps-check",
+                            "--targets",
+                            "core",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    if expected:
+                        self.assertIn("Unknown dependency adapter", result.stderr)
+                    else:
+                        self.assertEqual(json.loads(result.stdout)["targets"], ["core"])
+                    self.assertEqual(
+                        sorted(p.name for p in root.iterdir()), ["chainman.toml"]
+                    )
 
 
 class QueryTests(unittest.TestCase):

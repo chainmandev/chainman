@@ -140,6 +140,57 @@ class RuntimeTests(unittest.TestCase):
                     self.assertIn(diagnostic + "\n", result.stderr)
                 self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
 
+    def test_dead_launcher_does_not_authorize_unlinking_a_live_compiler_socket(self):
+        env = self.cache_fixture()
+        (self.root / "scripts/enter.sh").write_text(
+            "#!/bin/sh\nshift\n"
+            'if [ "$#" = 1 ] && [ "$1" = sccache ]; then\n'
+            '  "$@" &\n  echo "$!" > compiler-pid\n  wait\n'
+            'else exec "$@"; fi\n'
+        )
+        real_popen = subprocess.Popen
+        launchers = []
+
+        def launch(argv, **kwargs):
+            process = real_popen(argv, **kwargs)
+            if argv[-1] == "sccache":
+                launchers.append(process)
+            return process
+
+        endpoint = Path(env["SCCACHE_SERVER_UDS"])
+        with (
+            toolchain.operation(self.root),
+            patch.object(toolchain.subprocess, "Popen", side_effect=launch),
+        ):
+            try:
+                with self.assertRaisesRegex(ValueError, "still active"):
+                    with toolchain.compiler_cache("rust", env, self.root):
+                        launchers[0].kill()
+                        launchers[0].wait(timeout=5)
+                self.assertTrue(
+                    endpoint.exists(), "A surviving compiler owns this endpoint"
+                )
+            finally:
+                pid_file = self.root / "compiler-pid"
+                if pid_file.exists():
+                    os.kill(int(pid_file.read_text()), signal.SIGTERM)
+                # The compiler is a child of the killed launcher. Its inherited
+                # lease, rather than parentage, establishes completion here.
+                deadline = time.monotonic() + 5
+                for lease in (self.root / ".cache/toolchain").glob("compiler-*.lock"):
+                    with lease.open("a") as stream:
+                        while True:
+                            try:
+                                toolchain.fcntl.flock(
+                                    stream,
+                                    toolchain.fcntl.LOCK_EX | toolchain.fcntl.LOCK_NB,
+                                )
+                                break
+                            except BlockingIOError:
+                                if time.monotonic() >= deadline:
+                                    self.fail("Owned compiler did not exit")
+                                time.sleep(0.01)
+
     def test_owned_cache_exits_and_releases_lock_after_success_and_failure(self):
         env = self.cache_fixture()
         for status in (0, 23):
@@ -460,6 +511,15 @@ class RuntimeTests(unittest.TestCase):
             toolchain.contained(self.root, "example/.venv/bin/python")
 
     def test_direct_child_retains_lock_after_wrapper_termination(self):
+        self.child_retains_lock_after_wrapper_termination(exclusive=True)
+
+    def test_concurrent_child_retains_lease_after_wrapper_termination(self):
+        self.child_retains_lock_after_wrapper_termination(exclusive=False)
+
+    def test_child_retains_both_project_leases_after_wrapper_termination(self):
+        self.child_retains_lock_after_wrapper_termination(exclusive=False, another=True)
+
+    def child_retains_lock_after_wrapper_termination(self, *, exclusive, another=False):
         scripts = Path(toolchain.__file__).parent
         ready = self.root / "ready"
         child = self.root / "child.py"
@@ -467,8 +527,18 @@ class RuntimeTests(unittest.TestCase):
             "import os,sys,time\nfrom pathlib import Path\nPath(sys.argv[1]).write_text(str(os.getpid()))\ntime.sleep(30)\n"
         )
         wrapper = self.root / "wrapper.py"
+        other = self.root / "other"
+        other.mkdir()
+        (other / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
+        extra = (
+            ", toolchain.operation(Path(sys.argv[2]) / 'other', exclusive=False)"
+            if another
+            else ""
+        )
         wrapper.write_text(
-            "import sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport toolchain\nwith toolchain.operation(Path(sys.argv[2])):\n toolchain.managed_run([sys.executable,sys.argv[3],sys.argv[4]],check=True)\n"
+            "import sys\nfrom pathlib import Path\nsys.path.insert(0,sys.argv[1])\nimport toolchain\n"
+            f"with toolchain.operation(Path(sys.argv[2]), exclusive={exclusive!r}){extra}:\n"
+            " toolchain.managed_run([sys.executable,sys.argv[3],sys.argv[4]],check=True)\n"
         )
         process = subprocess.Popen(
             [
@@ -500,6 +570,10 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "active"):
                 with toolchain.operation(self.root):
                     self.fail("Orphaned build lost cleanup protection")
+            if another:
+                with self.assertRaisesRegex(ValueError, "active"):
+                    with toolchain.operation(other):
+                        self.fail("Nested project lost cleanup protection")
         finally:
             try:
                 os.kill(pid, signal.SIGTERM)

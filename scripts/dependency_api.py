@@ -165,8 +165,8 @@ def target_names(settings: dict) -> set[str]:
     return adapters | set(hooks)
 
 
-def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
-    """Resolve in order, then audit every selected adapter after all project hooks."""
+def plan_steps(root: Path, settings: dict, extra: list[str]):
+    """Validate the adapter/step contract without running resolvers or hooks."""
     steps = settings.get("steps")
     if not isinstance(steps, list) or not steps:
         raise ValueError("Configured adapters require a nonempty updates.steps list")
@@ -201,6 +201,13 @@ def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
         adapters[name] = (spec, effective_policy(settings, spec))
     if names.intersection(settings.get("adapters", {})) - seen or names - covered:
         raise ValueError("Selected update targets are missing from updates.steps")
+    return names, modes, adapters
+
+
+def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
+    """Resolve in order, then audit every selected adapter after all project hooks."""
+    names, modes, adapters = plan_steps(root, settings, extra)
+    steps = settings["steps"]
     # Capture all pre-update identities before any resolver or generator can run.
     baselines = {
         name: implementation(spec).snapshot(root, spec)

@@ -74,7 +74,7 @@
               )
             else
               pkgs;
-          base = with pkgs; [
+          runtimeBase = with pkgs; [
             python
             git
             just
@@ -88,14 +88,18 @@
             diffutils
             curl
             cacert
-            nixfmt
-            shellcheck
-            shfmt
-            ruff
           ];
-          shell =
-            name: packages: extra:
-            pkgs.mkShell {
+          base =
+            runtimeBase
+            ++ (with pkgs; [
+              nixfmt
+              shellcheck
+              shfmt
+              ruff
+            ]);
+          shellWith =
+            builder: base: name: packages: extra:
+            builder {
               packages = base ++ packages;
               # Development has no installed output; its dummy path can contain
               # spaces that compiler wrappers cannot represent in linker flags.
@@ -122,8 +126,12 @@
                 ${extra}
               '';
             };
+          shell = shellWith pkgs.mkShell base;
         in
         {
+          # Consumer entry needs the runtime, not Chainman's source formatters or
+          # a C compiler. Language toolchains still come from the chosen profile.
+          bootstrap = shellWith pkgs.mkShellNoCC runtimeBase "bootstrap" [ ] "";
           core = shell "core" [ ] "";
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";
