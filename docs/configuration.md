@@ -161,7 +161,7 @@ exclusive access and fails visibly while another task uses them. Child commands
 inherit those leases. Missing outputs or changed fingerprints require setup again;
 failed installation or inputs changed during installation never receive a fresh
 stamp. Setup commands should install from frozen inputs, with generation declared
-separately as project tasks. Service declarations remain gated on backend qualification.
+separately as project tasks.
 
 An optional project or profile `resources` table controls build-job hints:
 
@@ -213,8 +213,34 @@ label before addressing an immutable container ID. Engine errors or a changed
 daemon fail closed; restore the original engine context to recover those services.
 Explicit stop can recover service ownership even if a client lease is corrupt.
 
+Services can declare queued builds with the same task API:
+
+```toml
+[services.server.watch]
+task = "build-server"
+paths = ["server/src", "server/Cargo.toml", "server/Cargo.lock"]
+ignore = ["**/target/**"]
+debounce_ms = 100
+startup_seconds = 300
+```
+
+Watchexec watches the declared paths, finishes an in-progress build and queues
+one rebuild for edits received while busy. A successful initial build admits the
+service; only subsequent successful builds request its replacement through Process
+Compose. Failed builds retain the last successful service. The build task must
+not recursively request services. Its setup groups are prepared before startup.
+Container builds use the same labeled ownership and recovery as service containers.
+Watchexec and Process Compose are unmodified, checksum-pinned upstream binaries;
+their licenses are retained with the native controller assets.
+
+`services-status` reports the private `services.log` path. Process Compose rotates
+service output at 10 MiB with three backups and a seven-day retention window,
+and keeps 500 lines per process in memory. Duplicate console and internal debug
+logs are discarded. The private build-result receipts record the last build
+completion or error; application containers cannot rewrite these receipts.
+
 The initial service scope is one canonical worktree and execution mode. Live
 services with incompatible inputs are rejected. Stale client records are reaped
-on the next controller operation. Shared scopes across worktrees, build/watch
-replacement, and full backend/platform release qualification remain rollout gates;
+on the next controller operation. Shared scopes across worktrees and full
+backend/platform release qualification remain rollout gates;
 the API must not be represented as qualified for those behaviors yet.

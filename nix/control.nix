@@ -1,15 +1,17 @@
 { pkgs, target }:
 let
-  assets = {
-    linux-arm64 = "c5f4fcfc63e849279ac531bce2394a918fb28746339088a7d3d02bb5fb218a68";
-    linux-amd64 = "3792e1ed9f383832eb2362154444e8564fbc8e7e8e7cff8754c68aea5eca086e";
-    darwin-arm64 = "21c83530a13e156d207be17db4d9fe6b76629ca9ac33560554cf2f416b1d8e4b";
-    darwin-amd64 = "844756b341772fdcb9f4abe076c041077cde0128e5c06d4afa0c1d41bc316663";
-  };
+  sources = builtins.fromJSON (builtins.readFile ./control-sources.json);
   parts = pkgs.lib.splitString "-" target;
   archive = pkgs.fetchurl {
-    url = "https://github.com/F1bonacc1/process-compose/releases/download/v1.120.0/process-compose_${builtins.elemAt parts 0}_${builtins.elemAt parts 1}.tar.gz";
-    sha256 = assets.${target};
+    url = "https://github.com/F1bonacc1/process-compose/releases/download/v${sources.process-compose.version}/process-compose_${builtins.elemAt parts 0}_${builtins.elemAt parts 1}.tar.gz";
+    sha256 = sources.process-compose.hashes.${target};
+  };
+  watchTarget =
+    (if builtins.elemAt parts 1 == "arm64" then "aarch64" else "x86_64")
+    + (if builtins.elemAt parts 0 == "linux" then "-unknown-linux-musl" else "-apple-darwin");
+  watchArchive = pkgs.fetchurl {
+    url = "https://github.com/watchexec/watchexec/releases/download/v${sources.watchexec.version}/watchexec-${sources.watchexec.version}-${watchTarget}.tar.xz";
+    sha256 = sources.watchexec.hashes.${target};
   };
 in
 pkgs.buildGoModule.override { go = pkgs.go_latest; } {
@@ -29,6 +31,10 @@ pkgs.buildGoModule.override { go = pkgs.go_latest; } {
     tar -xzf ${archive} -C "$TMPDIR" process-compose LICENSE
     install -m755 "$TMPDIR/process-compose" "$out/bin/process-compose"
     install -m644 "$TMPDIR/LICENSE" "$out/share/licenses/process-compose/LICENSE"
+    mkdir -p "$TMPDIR/watch" "$out/share/licenses/watchexec"
+    tar -xJf ${watchArchive} -C "$TMPDIR/watch" --strip-components=1
+    install -m755 "$TMPDIR/watch/watchexec" "$out/bin/watchexec"
+    install -m644 "$TMPDIR/watch/LICENSE" "$out/share/licenses/watchexec/LICENSE"
     mkdir -p "$out/share/licenses/golang.org-x-sys"
     install -m644 vendor/golang.org/x/sys/LICENSE "$out/share/licenses/golang.org-x-sys/LICENSE"
   '';

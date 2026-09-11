@@ -41,6 +41,7 @@ type Service struct {
 	Shutdown     int      `json:"shutdown_seconds"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
 	Container *Container `json:"container,omitempty"`
+	Watch     *Watch     `json:"watch,omitempty"`
 }
 type Container struct {
 	Engine         string `json:"engine"`
@@ -53,6 +54,8 @@ type Plan struct {
 	Root          string             `json:"root"`
 	State         string             `json:"state"`
 	Backend       string             `json:"backend"`
+	Watcher       string             `json:"watcher,omitempty"`
+	Licenses      map[string]string  `json:"licenses,omitempty"`
 	Fingerprint   string             `json:"fingerprint"`
 	Services      map[string]Service `json:"services"`
 	Requested     []string           `json:"requested"`
@@ -238,9 +241,17 @@ func backend(p Plan, args ...string) ([]byte, error) {
 	if e != nil {
 		return nil, e
 	}
-	base := []string{"--use-uds", "--unix-socket", socket, "--log-file", filepath.Join(p.State, "client.log")}
+	base := []string{"--use-uds", "--unix-socket", socket, "--log-file", os.DevNull}
 	cmd := exec.CommandContext(ctx, p.Backend, append(base, args...)...)
 	out, err := cmd.Output()
+	if err != nil {
+		var failure *exec.ExitError
+		detail := ""
+		if errors.As(err, &failure) {
+			detail = strings.TrimSpace(string(failure.Stderr))
+		}
+		return out, fmt.Errorf("Process Compose %s: %w %s", strings.Join(args, " "), err, detail)
+	}
 	return out, err
 }
 func socketPath(p Plan) (string, error) {
@@ -352,6 +363,16 @@ func ordered(p Plan, names []string) ([]string, error) {
 func configuration(p Plan, self string) error {
 	processes := map[string]any{}
 	for n, s := range p.Services {
+		if s.Watch != nil {
+			if e := watchStopping(p, n, false); e != nil {
+				return e
+			}
+			// Invalidate readiness before Process Compose can launch any probes.
+			// Removing it inside the watcher leaves a stale-readiness startup race.
+			if e := os.Remove(filepath.Join(p.State, n+".built.json")); e != nil && !os.IsNotExist(e) {
+				return e
+			}
+		}
 		spec := filepath.Join(p.State, n+".command.json")
 		if e := atomic(spec, s); e != nil {
 			return e
@@ -374,7 +395,10 @@ func configuration(p Plan, self string) error {
 		}
 		processes[n] = d
 	}
-	return atomic(filepath.Join(p.State, "compose.json"), map[string]any{"version": "0.5", "processes": processes})
+	return atomic(filepath.Join(p.State, "compose.json"), map[string]any{
+		"version": "0.5", "processes": processes, "log_location": "services.log", "log_length": 500,
+		"log_configuration": map[string]any{"rotation": map[string]any{"max_size_mb": 10, "max_backups": 3, "max_age_days": 7}},
+	})
 }
 func start(p Plan, self string) error {
 	if e := configuration(p, self); e != nil {
@@ -383,7 +407,7 @@ func start(p Plan, self string) error {
 	if e := atomic(filepath.Join(p.State, "plan.json"), p); e != nil {
 		return e
 	}
-	log, e := os.OpenFile(filepath.Join(p.State, "controller.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
+	log, e := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if e != nil {
 		return e
 	}
@@ -392,8 +416,9 @@ func start(p Plan, self string) error {
 	if e != nil {
 		return e
 	}
-	args := []string{"--use-uds", "--unix-socket", socket, "--log-file", filepath.Join(p.State, "backend.log"), "--ordered-shutdown", "up", "--config", filepath.Join(p.State, "compose.json"), "--disable-dotenv", "--tui=false", "--keep-project"}
+	args := []string{"--use-uds", "--unix-socket", socket, "--log-file", os.DevNull, "--ordered-shutdown", "up", "--config", filepath.Join(p.State, "compose.json"), "--disable-dotenv", "--tui=false", "--keep-project"}
 	cmd := exec.Command(p.Backend, append(args, p.Requested...)...)
+	cmd.Dir = p.State
 	cmd.Env = append(os.Environ(), "CHAINMAN_CONTROL_EXECUTABLE="+self, "CHAINMAN_CONTROL_STATE="+p.State)
 	cmd.Stdout = log
 	cmd.Stderr = log
@@ -423,7 +448,7 @@ func start(p Plan, self string) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("Process Compose failed to start; see %s", filepath.Join(p.State, "controller.log"))
+	return fmt.Errorf("Process Compose failed to start (%v); service output: %s", e, filepath.Join(p.State, "services.log"))
 }
 func ready(p Plan, names []string) error {
 	// Probe execution, thresholds and dependency state are owned by Process Compose.
@@ -436,7 +461,12 @@ func ready(p Plan, names []string) error {
 	}
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	for time.Now().Before(deadline) {
+		unlock, e := watchGates(p, names)
+		if e != nil {
+			return e
+		}
 		ps, e := states(p)
+		unlock()
 		if e != nil {
 			return fmt.Errorf("service controller lost: %w", e)
 		}
@@ -594,6 +624,9 @@ func bindEngines(p *Plan) error {
 	containers := []*Container{p.TaskContainer}
 	for _, s := range p.Services {
 		containers = append(containers, s.Container)
+		if s.Watch != nil {
+			containers = append(containers, s.Watch.Container)
+		}
 	}
 	for _, c := range containers {
 		if c == nil {
@@ -692,6 +725,13 @@ func releaseUnused(p Plan, force bool) error {
 		return e
 	}
 	live := controller(p).alive()
+	for _, n := range ordered {
+		if !used[n] && p.Services[n].Watch != nil {
+			if e = watchStopping(p, n, true); e != nil {
+				return e
+			}
+		}
+	}
 	for i := len(ordered) - 1; i >= 0; i-- {
 		n := ordered[i]
 		if used[n] {
@@ -744,13 +784,18 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 	if e != nil {
 		return nil, "", e
 	}
+	if e = expandWatches(&p, self); e != nil {
+		return nil, "", e
+	}
 	var previous Plan
+	previousUsers := map[string]bool{}
 	e = readJSON(filepath.Join(p.State, "plan.json"), &previous)
 	if e == nil {
 		if previous.State != p.State || previous.Root != p.Root {
 			return nil, "", fmt.Errorf("saved service scope does not match this project")
 		}
 		used, err := active(previous)
+		previousUsers = used
 		if err != nil {
 			return nil, "", err
 		}
@@ -796,20 +841,8 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 			return cleanup(e)
 		}
 	} else {
-		ps, e := states(p)
-		if e != nil {
+		if e = startMissing(p, selected, previousUsers); e != nil {
 			return cleanup(e)
-		}
-		running := map[string]bool{}
-		for _, s := range ps {
-			running[s.Name] = s.Running
-		}
-		for _, n := range selected {
-			if !running[n] {
-				if _, e = backend(p, "process", "start", n); e != nil {
-					return cleanup(e)
-				}
-			}
 		}
 	}
 	if e = ready(p, selected); e != nil {
@@ -826,8 +859,20 @@ func persistTools(p *Plan) (string, error) {
 	if e = private(assets); e != nil {
 		return "", e
 	}
+	for name, body := range p.Licenses {
+		if !validName.MatchString(name) || len(body) > 1<<20 {
+			return "", fmt.Errorf("invalid license asset")
+		}
+		if e = os.WriteFile(filepath.Join(assets, name+"-LICENSE"), []byte(body), 0600); e != nil {
+			return "", e
+		}
+	}
 	installed := []string{}
-	for _, source := range []string{self, p.Backend} {
+	sources := []string{self, p.Backend}
+	if p.Watcher != "" {
+		sources = append(sources, p.Watcher)
+	}
+	for _, source := range sources {
 		f, e := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if e != nil {
 			return "", e
@@ -879,6 +924,9 @@ func persistTools(p *Plan) (string, error) {
 		installed = append(installed, destination)
 	}
 	p.Backend = installed[1]
+	if p.Watcher != "" {
+		p.Watcher = installed[2]
+	}
 	return installed[0], nil
 }
 func owned(state, name string, probe bool) int {
@@ -909,6 +957,9 @@ func owned(state, name string, probe bool) int {
 	}
 	if probe {
 		return exitCode(cmd.Run())
+	}
+	if strings.HasSuffix(name, watchSuffix) {
+		_ = os.Remove(filepath.Join(state, strings.TrimSuffix(name, watchSuffix)+".built.json"))
 	}
 	// Keep the identity anchor alive even after the application's direct process
 	// exits. Foreground service descendants inherit this process group.
@@ -1021,6 +1072,12 @@ func mainAction(args []string) (result int) {
 		fmt.Fprintln(os.Stderr, "usage: chainman-control run|up PLAN; status|stop STATE")
 		return 2
 	}
+	if args[0] == "build" || args[0] == "built" {
+		if len(args) != 3 || !validName.MatchString(args[2]) {
+			return 2
+		}
+		return watchAction(args[0], args[1], args[2])
+	}
 	if args[0] == "exec" || args[0] == "probe" {
 		if len(args) != 3 {
 			return 2
@@ -1064,7 +1121,7 @@ func mainAction(args []string) (result int) {
 			return 1
 		}
 		ps, backendError := states(p)
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "recovery_required": backendError != nil && len(used) > 0})
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0})
 		return 0
 	}
 	if args[0] != "run" && args[0] != "up" {
@@ -1084,7 +1141,7 @@ func mainAction(args []string) (result int) {
 			return exitCode(e)
 		}
 	}
-	lease, path, e := acquire(p, args[0] == "up")
+	lease, _, e := acquire(p, args[0] == "up")
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
@@ -1107,11 +1164,18 @@ func mainAction(args []string) (result int) {
 			return
 		}
 		lease.Close()
-		_ = os.Remove(path)
 		lock, err := locked(filepath.Join(p.State, "gate"), false)
 		if err == nil {
 			defer lock.Close()
-			if err = releaseUnused(p, false); err != nil {
+			var saved Plan
+			err = readJSON(filepath.Join(p.State, "plan.json"), &saved)
+			if err == nil && saved.State != p.State {
+				err = fmt.Errorf("saved service scope changed")
+			}
+			if err == nil {
+				err = releaseUnused(saved, false)
+			}
+			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				if result == 0 {
 					result = 1
@@ -1144,7 +1208,18 @@ func mainAction(args []string) (result int) {
 		if err == nil {
 			selected, orderErr := ordered(p, p.Requested)
 			if orderErr == nil {
-				err = atomic(path, Lease{Services: selected, Container: p.TaskContainer, Task: &identity})
+				// Keep the locked inode: replacing it would disconnect inherited
+				// descriptor leases from the receipt observed by other clients.
+				_, err = lease.Seek(0, 0)
+				if err == nil {
+					err = lease.Truncate(0)
+				}
+				if err == nil {
+					err = json.NewEncoder(lease).Encode(Lease{Services: selected, Container: p.TaskContainer, Task: &identity})
+				}
+				if err == nil {
+					err = lease.Sync()
+				}
 			} else {
 				err = orderErr
 			}

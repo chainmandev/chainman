@@ -40,6 +40,7 @@ def main():
         os.environ,
         CHAINMAN_TEST_CONTROL=package + "/bin/chainman-control",
         CHAINMAN_TEST_PROCESS_COMPOSE=package + "/bin/process-compose",
+        CHAINMAN_TEST_WATCHEXEC=package + "/bin/watchexec",
     )
     subprocess.run(
         [

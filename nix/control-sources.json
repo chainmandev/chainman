@@ -1,0 +1,25 @@
+{
+  "minimum_age_days": 30,
+  "process-compose": {
+    "version": "1.122.0",
+    "published": "2026-08-17T23:01:55Z",
+    "release": "https://github.com/F1bonacc1/process-compose/releases/tag/v1.122.0",
+    "hashes": {
+      "linux-arm64": "52fa7d5a2d5e0db470faec5976204fc215ed7e3d13689e930cf522becfb63778",
+      "linux-amd64": "9b6dbc38324c0b0481f1cd1dd828ffdc78117129ec797678f4bf8c4023311281",
+      "darwin-arm64": "eaa1238a1d6c300e928ef855d36a3d95aab8da64997104d74ea73d91d3cb6c60",
+      "darwin-amd64": "b4f76e881759e13f7913a5b2fed16a0e75275c04d3a61e656d40448921f1c3ec"
+    }
+  },
+  "watchexec": {
+    "version": "2.5.1",
+    "published": "2026-03-30T06:34:36Z",
+    "release": "https://github.com/watchexec/watchexec/releases/tag/v2.5.1",
+    "hashes": {
+      "linux-arm64": "c073887583d502fa0b393a8b847bb4460a111b3b0a199d1f70dafd5d89e71a2f",
+      "linux-amd64": "9efabd08de720c1ee7e57b487fe11904f0966828e76146e2b5ea5deee90626be",
+      "darwin-arm64": "c5e405dd1109940b2510398d2182990c1be59063b94e11d7ace9c7b435cb1df1",
+      "darwin-amd64": "bb74bf33286ff7f31dd8e763e017fbc0418360d88baefd35bc57d662d28394e2"
+    }
+  }
+}

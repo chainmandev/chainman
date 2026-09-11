@@ -105,3 +105,13 @@ Development tests, examples, templates and authoring utilities belong to the sou
 archive. The consumer generator verifies both products and their shared file
 identities; every generated consumer bundles only the runtime archive at `vendor/chainman/chainman.tar.gz`. Remove that optional file
 and its lock field only after its pinned public URL is available.
+
+`just release` builds a local candidate; it does not authorize publication.
+`just control-release-check` enforces at least 30 days of maturity for the native
+backend inputs recorded in `nix/control-sources.json`. Process Compose 1.122.0 is
+the candidate because it fixes stopping processes waiting on dependencies; its
+publication gate opens on 2026-09-16 at 23:01:55 UTC. Qualification may run before
+that date, but publication must not bypass the gate. `just control-test` exercises
+the actual pinned backend and cross-compiles the ownership adapter for all four
+targets. Cross-compilation does not substitute for execution on each supported OS
+and engine.

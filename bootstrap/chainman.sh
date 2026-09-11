@@ -35,7 +35,9 @@ control_dispatch() {
         *) fail 'Unsupported native service-controller platform.' ;;
     esac
     control_engine=
-    for candidate in "${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-docker}}" podman; do
+    control_candidates=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
+    if [ -z "$control_candidates" ]; then control_candidates='docker podman'; fi
+    for candidate in $control_candidates; do
         case "$candidate" in docker | podman) ;; *) fail 'Unsupported container engine.' ;; esac
         if command -v "$candidate" > /dev/null 2>&1; then
             control_engine=$(command -v "$candidate")

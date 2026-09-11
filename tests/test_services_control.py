@@ -13,6 +13,7 @@ import unittest
 
 CONTROL = os.environ.get("CHAINMAN_TEST_CONTROL")
 BACKEND = os.environ.get("CHAINMAN_TEST_PROCESS_COMPOSE")
+WATCHER = os.environ.get("CHAINMAN_TEST_WATCHEXEC")
 
 
 @unittest.skipUnless(
@@ -109,9 +110,200 @@ while True:time.sleep(.1)
             self.assertLess(time.monotonic(), deadline, str(path))
             time.sleep(0.05)
 
+    def wait_until(self, predicate):
+        deadline = time.monotonic() + 20
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.05)
+
+    @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
+    def test_stop_during_build_is_bounded_and_cannot_restart_service(self):
+        source = self.root / "src"
+        source.mkdir()
+        (source / "input").write_text("good")
+        self.plan["watcher"] = WATCHER
+        self.plan["services"]["worker"]["watch"] = {
+            "build": self.command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; from pathlib import Path; value=Path('src/input').read_text(); Path('building').touch() if value=='slow' else None; time.sleep(120 if value=='slow' else .1)",
+                ]
+            ),
+            "paths": [str(source)],
+            "ignore": [],
+            "debounce_ms": 100,
+            "startup_seconds": 5,
+        }
+        self.run_control("up", check=0)
+        pid = self.pid()
+        (source / "input").write_text("slow")
+        self.wait_file(self.root / "building")
+        started = time.monotonic()
+        self.run_control("stop", check=0, timeout=15)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertFalse(self.alive(pid))
+        self.assertFalse(
+            json.loads(self.run_control("status", check=0).stdout)["running"]
+        )
+
+    @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
+    def test_stale_success_cannot_admit_service_before_failed_initial_build(self):
+        (self.state / "worker.built.json").write_text('{"finished":"old"}')
+        (self.root / "ready").touch()
+        self.plan["watcher"] = WATCHER
+        self.plan["services"]["worker"]["watch"] = {
+            "build": self.command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(1); raise SystemExit(3)",
+                ]
+            ),
+            "paths": [str(self.root / "worker.py")],
+            "ignore": [],
+            "debounce_ms": 100,
+            "startup_seconds": 2,
+        }
+        result = self.run_control("run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / "pid").exists())
+
+    @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
+    def test_queued_builds_preserve_working_service_on_failure(self):
+        source = self.root / "src"
+        source.mkdir()
+        current = source / "input"
+        current.write_text("good")
+        build = self.root / "build.py"
+        build.write_text("""import time
+from pathlib import Path
+text=Path('src/input').read_text()
+with Path('started').open('a') as out: out.write(text+'\\n')
+time.sleep(1)
+with Path('finished').open('a') as out: out.write(text+'\\n')
+if text=='bad': raise SystemExit(3)
+""")
+        self.plan["watcher"] = WATCHER
+        self.plan["services"]["worker"]["watch"] = {
+            "build": self.command([sys.executable, str(build)]),
+            "paths": [str(source)],
+            "ignore": [],
+            "debounce_ms": 100,
+            "startup_seconds": 10,
+        }
+        self.run_control("up", check=0)
+        pid = self.pid()
+        current.write_text("bad")
+        self.wait_until(
+            lambda: (self.root / "finished").read_text().splitlines()[-1] == "bad"
+        )
+        time.sleep(0.2)
+        self.assertTrue(self.alive(pid))
+        current.write_text("slow-good")
+        self.wait_until(
+            lambda: (self.root / "started").read_text().splitlines()[-1] == "slow-good"
+        )
+        for n in range(5):
+            current.write_text(f"queued-{n}")
+            time.sleep(0.05)
+        self.wait_until(
+            lambda: (self.root / "finished").read_text().splitlines()[-1] == "queued-4"
+        )
+        self.wait_until(lambda: self.pid() != pid)
+        self.assertEqual(
+            (self.root / "finished").read_text().splitlines(),
+            ["good", "bad", "slow-good", "queued-4"],
+        )
+        self.run_control("run", check=7)
+        self.assertTrue(self.alive(self.pid()))
+        self.run_control("stop", check=0)
+        self.assertFalse(self.alive(self.pid()))
+
+    def test_stop_while_dependency_is_pending_does_not_start_late_child(self):
+        self.plan["services"]["worker"]["readiness"]["command"] = self.command(
+            [shutil.which("test"), "-f", str(self.root / "allow")]
+        )
+        self.plan["services"]["worker"]["readiness"]["failure_threshold"] = 15
+        self.plan["services"]["dependent"] = {
+            "command": self.command(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('late-child').touch()",
+                ]
+            ),
+            "depends_on": ["worker"],
+            "restart": "no",
+            "shutdown_seconds": 1,
+        }
+        # First start only the dependency, then admit the dependent via the backend
+        # while its prerequisite remains unhealthy. The upstream stop must cancel it.
+        self.path.write_text(json.dumps(self.plan))
+        caller = subprocess.Popen(
+            [CONTROL, "up", str(self.path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.wait_file(self.root / "pid")
+            import hashlib
+
+            socket = (
+                Path("/tmp").resolve()
+                / f"chainman-control-{os.geteuid()}"
+                / (hashlib.sha256(str(self.state).encode()).hexdigest()[:24] + ".sock")
+            )
+            client = [
+                BACKEND,
+                "--use-uds",
+                "--unix-socket",
+                str(socket),
+                "--log-file",
+                os.devnull,
+                "process",
+            ]
+            subprocess.run(
+                [*client, "start", "dependent"],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+            subprocess.run(
+                [*client, "stop", "dependent"],
+                check=True,
+                capture_output=True,
+                timeout=5,
+            )
+            (self.root / "allow").touch()
+            self.assertEqual(caller.wait(timeout=15), 0)
+            time.sleep(0.4)
+            self.assertFalse((self.root / "late-child").exists())
+        finally:
+            if caller.poll() is None:
+                caller.kill()
+                caller.wait()
+
     def test_readiness_exit_status_and_cleanup(self):
         self.run_control("run", check=7)
         self.assertFalse(self.alive(self.pid()))
+
+    def test_descendant_descriptor_retains_lease_after_task_returns(self):
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import subprocess,sys; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'],pass_fds=(3,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); Path('descendant').write_text(str(p.pid)); raise SystemExit(7)",
+            ]
+        )
+        self.run_control("run", check=7)
+        pid = int((self.root / "descendant").read_text())
+        try:
+            self.assertTrue(self.alive(self.pid()))
+            status = json.loads(self.run_control("status", check=0).stdout)
+            self.assertTrue(status["leases"]["worker"])
+        finally:
+            os.kill(pid, signal.SIGTERM)
 
     def test_persistent_owner_is_reused_and_not_stopped_by_borrower(self):
         self.run_control("up", check=0)

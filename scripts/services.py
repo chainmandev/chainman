@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import secrets
-import shutil
 import subprocess
 
 import chainman
@@ -39,6 +38,7 @@ def declarations(root, cfg):
             "shutdown_seconds",
             "container",
             "setup",
+            "watch",
         }
         if set(spec) - allowed:
             raise ValueError(f"Unknown service fields: {sorted(set(spec) - allowed)}")
@@ -103,6 +103,35 @@ def declarations(root, cfg):
                 or values[0] * values[2] + values[1] > 600
             ):
                 raise ValueError("Readiness requires positive, bounded timeouts")
+        if "watch" in spec:
+            watch = spec["watch"]
+            if (
+                "container" in spec
+                or not isinstance(watch, dict)
+                or set(watch)
+                - {"task", "paths", "ignore", "debounce_ms", "startup_seconds"}
+            ):
+                raise ValueError("Invalid service watch declaration")
+            tasks = workflows.order(cfg.get("tasks", {}), [watch.get("task")])
+            if any(cfg["tasks"][task].get("services") for task in tasks):
+                raise ValueError(
+                    "A watched build task cannot acquire services recursively"
+                )
+            if not isinstance(watch.get("paths"), list) or not watch["paths"]:
+                raise ValueError("Watch requires explicit paths")
+            for path in watch["paths"]:
+                tc.contained(root, path)
+            if not isinstance(watch.get("ignore", []), list) or any(
+                not isinstance(p, str) or "\0" in p for p in watch.get("ignore", [])
+            ):
+                raise ValueError("Watch ignores require string patterns")
+            for key, default, maximum in (
+                ("debounce_ms", 100, 60000),
+                ("startup_seconds", 300, 599),
+            ):
+                value = watch.get(key, default)
+                if type(value) is not int or not 1 <= value <= maximum:
+                    raise ValueError(f"Invalid watch {key}")
     workflows.order(entries, list(entries))
     for spec in cfg.get("tasks", {}).values():
         workflows.order(entries, workflows.names(spec.get("services", [])))
@@ -129,13 +158,18 @@ def literal_environment(values, root):
 
 def config_fingerprint(root, cfg):
     declared = cfg.get("services", {})
+    build_tasks = workflows.order(
+        cfg.get("tasks", {}),
+        [spec["watch"]["task"] for spec in declared.values() if "watch" in spec],
+    )
+    workflow_specs = [*declared.values(), *(cfg["tasks"][task] for task in build_tasks)]
     profiles = sorted(
         {
             spec.get(
                 "profile", cfg.get("project", {}).get("default_profile", "default")
             )
-            for spec in declared.values()
-            if "command" in spec
+            for spec in workflow_specs
+            if "command" in spec or "commands" in spec
         }
     )
     material = [
@@ -144,6 +178,7 @@ def config_fingerprint(root, cfg):
         declared,
         cfg.get("environment", {}),
         cfg.get("container", {}),
+        cfg.get("tasks", {}),
     ]
     material += [
         chainman.profile_fingerprint(root, name, chainman.profile(root, name)[0])
@@ -151,7 +186,7 @@ def config_fingerprint(root, cfg):
     ]
     groups = workflows.order(
         cfg.get("setup", {}),
-        [group for spec in declared.values() for group in spec.get("setup", [])],
+        [group for spec in workflow_specs for group in spec.get("setup", [])],
     )
     material += [
         workflows.fingerprint(root, workflows.group_spec(cfg, name)) for name in groups
@@ -192,15 +227,11 @@ def export(root, arguments):
     package = Path(package)
     if not package.is_absolute() or not str(package).startswith("/nix/store/"):
         raise ValueError("Invalid native controller store output")
-    for name in ("chainman-control", "process-compose"):
+    for name in ("chainman-control", "process-compose", "watchexec"):
         source = package / "bin" / name
         if source.is_symlink() or not source.is_file():
             raise ValueError("Native controller output must be a regular executable")
         tc.atomic_bytes(destination / name, source.read_bytes(), mode=0o700)
-    shutil.copyfile(
-        package / "share/licenses/process-compose/LICENSE",
-        destination / "PROCESS-COMPOSE-LICENSE",
-    )
     mode = os.environ.get("CHAINMAN_MODE", "host-nix")
     key = hashlib.sha256((str(root) + "\0" + mode).encode()).hexdigest()[:24]
     state = str(Path(host_state) / key)
@@ -348,11 +379,40 @@ def export(root, arguments):
                 "failure_threshold": probe.get("failure_threshold", 30),
             }
         prepared[name] = value
+        if "watch" in spec:
+            watch = spec["watch"]
+            build = command(
+                [launcher, "_workflow-task", watch["task"], fingerprint], root
+            )
+            value["watch"] = {
+                "build": build,
+                "paths": [str(tc.contained(root, path)) for path in watch["paths"]],
+                "ignore": watch.get("ignore", []),
+                "debounce_ms": watch.get("debounce_ms", 100),
+                "startup_seconds": watch.get("startup_seconds", 300),
+            }
+            if mode == "container-nix":
+                build_owner = secrets.token_hex(16)
+                build_name = container_name + "-build"
+                build["environment"].update(
+                    CHAINMAN_CONTAINER_NAME=build_name,
+                    CHAINMAN_CONTAINER_OWNER=build_owner,
+                )
+                value["watch"]["container"] = {
+                    "engine": engine,
+                    "name": build_name,
+                    "token": build_owner,
+                }
     plan = {
         "schema": 1,
         "root": str(root),
         "state": state,
         "backend": str(destination / "process-compose"),
+        "watcher": str(destination / "watchexec"),
+        "licenses": {
+            path.parent.name.replace(".", "-"): path.read_text()
+            for path in (package / "share/licenses").glob("*/LICENSE")
+        },
         "fingerprint": fingerprint,
         "services": prepared,
         "requested": requested,
@@ -397,6 +457,17 @@ def execute_internal(root, action, extra):
             for service in cfg["tasks"][task].get("services", [])
         ]
         selected = workflows.order(entries, requested)
+        tasks = workflows.order(
+            cfg.get("tasks", {}),
+            [
+                *tasks,
+                *(
+                    entries[service]["watch"]["task"]
+                    for service in selected
+                    if "watch" in entries[service]
+                ),
+            ],
+        )
         groups = [
             group for task in tasks for group in cfg["tasks"][task].get("setup", [])
         ]
