@@ -143,6 +143,7 @@
     "template/.github/workflows/verify.yml",
     "template/README.md",
     "template/chainman.toml",
+    "template/flake.nix",
     "template/justfile",
     "template/modules/core.toml",
     "template/scripts/demo.py",

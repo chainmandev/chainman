@@ -1,5 +1,6 @@
 """Distribution identity and extraction behavior independently of the launcher."""
 
+import hashlib
 import io
 import json
 import os
@@ -16,6 +17,66 @@ import package
 
 
 class DistributionTests(unittest.TestCase):
+    def test_example_keeps_one_runtime_implementation_and_its_own_sdk_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = {
+                "bootstrap/chainman.sh": (b"#!/bin/sh\n", 0o755),
+                "bootstrap/fetch.nix": (b"verified fetcher", 0o644),
+                "nix/flake.lock": (b"consumer SDK lock", 0o644),
+                "nix/flake.nix": (b"shared SDK implementation", 0o644),
+                "nix/control/main.go": (b"shared controller", 0o644),
+                "dependencies.toml": (b"[nix]\n[docker]\n", 0o644),
+                "template/flake.nix": (b"import verified runtime", 0o644),
+            }
+            runtime = {
+                name: item
+                for name, item in source.items()
+                if not name.startswith("template/")
+            }
+            body = package.archive_bytes(runtime, "1.0.0")
+            source_body = package.archive_bytes(source, "1.0.0")
+            # Exercise archive verification/extraction without spawning Nix.
+            # Real host/container evaluation is an independent qualification.
+            metadata = {
+                "schema": 1,
+                "version": "1.0.0",
+                "revision": "a" * 40,
+                "url": "https://example.invalid/runtime.tar.gz",
+                "narHash": "digest",
+                "archive_sha256": hashlib.sha256(body).hexdigest(),
+                "source": {
+                    "filename": "chainman-source-1.0.0.tar.gz",
+                    "narHash": "digest",
+                    "archive_sha256": hashlib.sha256(source_body).hexdigest(),
+                },
+            }
+            (root / "chainman-1.0.0.tar.gz").write_bytes(body)
+            (root / metadata["source"]["filename"]).write_bytes(source_body)
+            manifest = root / "chainman-release.json"
+            manifest.write_text(json.dumps(metadata))
+            destination = root / "consumer"
+            with patch.object(
+                example.subprocess, "check_output", return_value="digest\n"
+            ):
+                example.create(destination, manifest)
+            self.assertFalse((destination / "nix").exists())
+            self.assertEqual(
+                (destination / "flake.lock").read_bytes(), b"consumer SDK lock"
+            )
+            self.assertEqual(
+                (destination / "flake.nix").read_bytes(), b"import verified runtime"
+            )
+            self.assertEqual(
+                (destination / "vendor/chainman/chainman.tar.gz").read_bytes(), body
+            )
+            self.assertEqual(
+                example.tomlkit.parse((destination / "dependencies.toml").read_text())[
+                    "nix"
+                ]["directory"],
+                ".",
+            )
+
     def test_release_reads_one_immutable_commit_when_head_moves(self):
         self.release_revision_case(replace=False)
 

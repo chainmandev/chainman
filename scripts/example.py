@@ -96,9 +96,12 @@ def create(destination: Path, metadata_path: Path):
     selected = {
         name: item
         for name, item in files.items()
-        if name.startswith(("examples/", "modules/", "nix/", "docs/"))
+        if name.startswith(("examples/", "modules/", "docs/"))
         or name in {".gitignore", "dependencies.toml", "sdk-versions.toml", "LICENSE"}
     }
+    # Consumer SDK profiles import the verified runtime. Do not export a second
+    # copy of its Nix implementation, native controller or backend source pins.
+    selected["flake.lock"] = files["nix/flake.lock"]
     selected.update(
         {
             name[len("template/") :]: item
@@ -125,6 +128,7 @@ def create(destination: Path, metadata_path: Path):
     # Container image updates belong to the managed bootstrap/runtime release.
     dependency_body, mode = selected["dependencies.toml"]
     dependencies = tomlkit.parse(dependency_body.decode())
+    dependencies["nix"]["directory"] = "."
     dependencies["docker"]["enabled"] = False
     dependencies["pins"] = [
         pin

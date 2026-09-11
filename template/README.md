@@ -22,10 +22,13 @@ Containerized Nix is the default. Select Podman with
 command is needed. `just --justfile '/path with spaces/project/justfile' verify`
 also works from another directory.
 
-The checked-in launcher verifies `chainman.lock` before installing the runtime under
-ignored `.chainman/`. The bundled `vendor/chainman/chainman.tar.gz` matches that pin
+The checked-in launcher verifies `chainman.lock` before executing the immutable
+runtime in the Nix store. The bundled `vendor/chainman/chainman.tar.gz` matches that pin
 and allows installation before its public URL is available. Keep the bootstrap
-companions unchanged; project extensions belong in `chainman.toml`, modules or
+companions unchanged. The root `flake.nix` imports SDK profiles from that same
+verified runtime using this project’s own `flake.lock`; the project does not copy
+Chainman’s Nix implementation or service controller. Project extensions belong in
+`chainman.toml`, modules or
 project-owned scripts. The intended upstream is github.com/chainmandev/chainman,
 with future public home chainman.dev. Publication is separate from local adoption.
 
@@ -39,18 +42,18 @@ with future public home chainman.dev. Publication is separate from local adoptio
 | `just build` / `just test` / `just verify` | Run selected module commands |
 | `just format` / `just format-check` | Format/check demo Python and regenerate/check its asset |
 | `just module NAME verify` | Exercise an optional module without enabling it globally |
-| `just deps-update --preview --skip-chainman` | Resolve and verify a disposable copy |
-| `just deps-update --skip-chainman` | Update project dependencies, verify, commit locally |
+| `just deps-update --preview` | Resolve and verify a disposable copy |
+| `just deps-update` | Update project dependencies, verify, commit locally |
 | `just deps-update --no-commit` | Leave a verified update for coordinated review |
-| `just deps-update --only-chainman` | Update the runtime, managed bootstrap and bundled archive |
+| `just chainman-update` | Update the runtime, managed bootstrap and bundled archive |
 | `just cache-status` / `just cache-prune` | Report disk use or prune stale managed build contexts |
 | `just clean` | Explicitly remove managed build contexts |
 | `just doctor` | Report selected project, runtime, mode and modules |
 | `just sdk-doctor apple` / `just sdk-doctor android` | Check explicit native SDK prerequisites |
 | `just ci-prune --module flutter` | Preview guarded disposable hosted-runner SDK cleanup |
 
-Until a public Chainman release exists, use `--skip-chainman` for project updates.
-An unavailable release source fails rather than silently skipping a requested update.
+Project updates retain the Chainman runtime pin. `just chainman-update` explicitly
+updates it; an unavailable release fails rather than silently skipping that request.
 Initialize and commit this directory as its own Git project before applying updates.
 A nested example refuses to adopt its enclosing repository. Preview performs real
 resolution and verification, discards the copy, and never commits to the original.

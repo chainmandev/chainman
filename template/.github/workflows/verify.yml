@@ -56,12 +56,12 @@ jobs:
         if: inputs.prune_hosted_sdks && runner.os == 'Linux'
         env:
           CHAINMAN_MODE: host-nix
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-prune --module "$MODULE" --apply --sudo
+        run: nix --extra-experimental-features 'nix-command flakes' run path:.#just -- ci-prune --module "$MODULE" --apply --sudo
       - name: Apple SDK preflight
         if: runner.os == 'macOS'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- sdk-doctor apple
+        run: nix --extra-experimental-features 'nix-command flakes' run path:.#just -- sdk-doctor apple
       - name: Verify using the local command
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module "$MODULE" verify
+        run: nix --extra-experimental-features 'nix-command flakes' run path:.#just -- module "$MODULE" verify
       - name: Report project cache use
         if: always()
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- cache-status
+        run: nix --extra-experimental-features 'nix-command flakes' run path:.#just -- cache-status

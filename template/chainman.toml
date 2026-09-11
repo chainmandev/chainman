@@ -8,24 +8,24 @@ default_profile = "core"
 format-check = [["python3", "scripts/demo.py", "format", "--check"]]
 
 [profiles.core]
-flake = "nix#core"
+flake = ".#core"
 [profiles.javascript]
-flake = "nix#javascript"
+flake = ".#javascript"
 [profiles.rust]
-flake = "nix#rust"
+flake = ".#rust"
 compiler_cache = true
 [profiles.python]
-flake = "nix#python"
+flake = ".#python"
 [profiles.go]
-flake = "nix#go"
+flake = ".#go"
 [profiles.flutter]
-flake = "nix#flutter"
+flake = ".#flutter"
 [profiles.swift]
-flake = "nix#swift"
+flake = ".#swift"
 [profiles.compose]
-flake = "nix#compose"
+flake = ".#compose"
 [profiles.browser]
-flake = "nix#browser"
+flake = ".#browser"
 
 [cache]
 build_limit_gib = 12
@@ -35,7 +35,7 @@ automatic_prune = true
 
 [updates]
 minimum_age_days = 30
-outputs = ["nix/flake.lock", ".github/workflows/verify.yml"]
+outputs = ["flake.lock", ".github/workflows/verify.yml"]
 
 [ci]
 disposable_sdks = ["android", "dotnet", "haskell"]
