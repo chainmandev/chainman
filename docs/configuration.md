@@ -156,6 +156,12 @@ ensures one group; `setup` ensures all declared groups. Setup groups also suppor
 `depends_on` and `profile`. Task and setup dependency cycles or unknown references
 fail before execution. Tasks request setup explicitly; inspection tasks can omit it.
 
+An artifact can be declared as `{ path = "build/variant.hash", digest = true }` to
+check its bytes as well as its existence. Setup records its SHA-256 after successful
+generation. A later change invalidates readiness even when source inputs are
+unchanged, for example when another build variant has replaced generated assets.
+If another task holds the setup lease, regeneration is refused until it finishes.
+
 Finite tasks can opt into owned child cleanup and a deadline:
 
 ```toml

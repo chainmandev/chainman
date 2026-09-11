@@ -107,10 +107,15 @@ def configuration(root):
                 for artifact in spec["artifacts"]:
                     if isinstance(artifact, str):
                         tc.contained(root, artifact)
-                    elif (
-                        isinstance(artifact, dict)
-                        and set(artifact) == {"path", "interpreter"}
-                        and artifact["interpreter"] == "python"
+                    elif isinstance(artifact, dict) and (
+                        (
+                            set(artifact) == {"path", "interpreter"}
+                            and artifact["interpreter"] == "python"
+                        )
+                        or (
+                            set(artifact) == {"path", "digest"}
+                            and artifact["digest"] is True
+                        )
                     ):
                         tc.contained(root, artifact["path"])
                     else:
@@ -207,8 +212,28 @@ def current(root, key, spec, env):
     return (
         isinstance(recorded, dict)
         and recorded.get("fingerprint") == fingerprint(root, spec)
-        and all(tc.artifact_ready(root, item, env) for item in spec["artifacts"])
+        and all(artifact_ready(root, item, env) for item in spec["artifacts"])
+        and recorded.get("artifact_digests", {}) == artifact_digests(root, spec)
     )
+
+
+def artifact_ready(root, item, env):
+    if isinstance(item, dict) and item.get("digest") is True:
+        return tc.contained(root, item["path"]).is_file()
+    return tc.artifact_ready(root, item, env)
+
+
+def artifact_digests(root, spec):
+    result = {}
+    for item in spec["artifacts"]:
+        if isinstance(item, dict) and item.get("digest") is True:
+            path = tc.contained(root, item["path"])
+            digest = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            result[item["path"]] = digest.hexdigest()
+    return result
 
 
 @contextmanager
@@ -254,7 +279,7 @@ def setup_use(root, cfg, requested, env):
                         pass_fds=(lease.fileno(),),
                     )
                 if not all(
-                    tc.artifact_ready(root, item, env) for item in spec["artifacts"]
+                    artifact_ready(root, item, env) for item in spec["artifacts"]
                 ):
                     raise ValueError(
                         f"Setup group {key} did not create its declared artifacts"
@@ -263,7 +288,13 @@ def setup_use(root, cfg, requested, env):
                     raise ValueError(
                         f"Setup inputs changed during installation of {key}; readiness was not recorded"
                     )
-                tc.atomic_json(stamp_path(root, key), {"fingerprint": expected})
+                tc.atomic_json(
+                    stamp_path(root, key),
+                    {
+                        "fingerprint": expected,
+                        "artifact_digests": artifact_digests(root, spec),
+                    },
+                )
             fcntl.flock(lease, fcntl.LOCK_SH)
         yield (lease.fileno(),)
 

@@ -90,6 +90,20 @@ commands=[["python3","task.py"]]
             ["two words", "", "$(literal)"],
         )
 
+    def test_changed_digest_artifact_rebuilds_even_when_all_inputs_are_unchanged(self):
+        self.body = self.body.replace(
+            'artifacts=["installed"]', 'artifacts=[{path="installed",digest=true}]'
+        )
+        self.write_config()
+        self.assertEqual(self.run_cli("run", "build").returncode, 0)
+        (self.root / "installed").write_text("another workflow's build variant")
+        result = self.run_cli("run", "build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "installed").read_text(), "one")
+        self.assertEqual((self.root / "install-count").read_text(), "2")
+        self.assertEqual(self.run_cli("run", "build").returncode, 0)
+        self.assertEqual((self.root / "install-count").read_text(), "2")
+
     def test_setup_group_can_be_requested_explicitly(self):
         result = self.run_cli("setup", "dependencies")
         self.assertEqual(result.returncode, 0, result.stderr)
