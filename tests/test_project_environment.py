@@ -12,6 +12,17 @@ import chainman
 
 
 class ProjectEnvironmentTests(unittest.TestCase):
+    def test_explicit_host_network_keeps_bindings_on_host_loopback(self):
+        values = pe.expand(
+            {"BIND": "{bind}", "HOST": "{host}"},
+            Path("/project"),
+            {
+                "CHAINMAN_MODE": "container-nix",
+                "CHAINMAN_CONTAINER_NETWORK_MODE": "host",
+            },
+        )
+        self.assertEqual(values, {"BIND": "127.0.0.1", "HOST": "127.0.0.1"})
+
     def test_profile_planning_does_not_execute_project_git_fsmonitor(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

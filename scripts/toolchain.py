@@ -205,7 +205,13 @@ def module(name: str, root: Path = ROOT) -> dict:
 
 def context_id() -> str:
     mode = os.environ.get("CHAINMAN_MODE", os.environ.get("TOOLCHAIN_MODE", "host-nix"))
-    return f"{mode}-{platform.system().lower()}-{platform.machine()}"
+    network = (
+        "-network-host"
+        if mode == "container-nix"
+        and os.environ.get("CHAINMAN_CONTAINER_NETWORK_MODE") == "host"
+        else ""
+    )
+    return f"{mode}-{platform.system().lower()}-{platform.machine()}{network}"
 
 
 def cache_root(root: Path = ROOT) -> Path:

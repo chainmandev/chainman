@@ -23,6 +23,14 @@ CHAINMAN_REQUEST_ACTION=${1:-doctor}
 CHAINMAN_REQUEST_TASK=${2:-}
 export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK
 control_dispatch() {
+    case "$1" in
+        services-status | services-stop) ;;
+        *)
+            if [ "$mode" = container-nix ] && [ "${CHAINMAN_CONTAINER_NETWORK_MODE:-bridge}" = host ]; then
+                fail 'Service workflows use owned network namespaces; the host-network override is for standalone tasks.'
+            fi
+            ;;
+    esac
     # Only the internal export operation mounts this private output directory.
     # It builds verified tooling and emits JSON; no consumer code executes there.
     control_output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-control.XXXXXXXX")
@@ -247,12 +255,18 @@ if [ "$engine" = docker ]; then
 $security_options
 EOF
 fi
-volume=chainman-nix-$uid
+volume=${CHAINMAN_NIX_VOLUME:-chainman-nix-$uid}
+case "$volume" in '' | *[!A-Za-z0-9_.-]*) fail 'CHAINMAN_NIX_VOLUME must be a container volume name.' ;; esac
+case "$volume" in [A-Za-z0-9]*) ;; *) fail 'CHAINMAN_NIX_VOLUME must start with a letter or number.' ;; esac
+export CHAINMAN_NIX_VOLUME="$volume"
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
 trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
 # Select an explicit architecture before initializing or evaluating in the image.
 # Its Nix store volume must not inherit the default architecture's profile links.
-platform=
+platform=${CHAINMAN_CONTAINER_PLATFORM:-}
+case "$platform" in '' | linux/amd64 | linux/arm64) ;; *) fail 'CHAINMAN_CONTAINER_PLATFORM must be linux/amd64 or linux/arm64.' ;; esac
+network_mode=${CHAINMAN_CONTAINER_NETWORK_MODE:-bridge}
+case "$network_mode" in host | bridge) ;; *) fail 'CHAINMAN_CONTAINER_NETWORK_MODE must be host or bridge.' ;; esac
 if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
     options_file=$CHAINMAN_CONTAINER_OPTIONS_FILE
     case "$options_file" in /*) ;; *) options_file=$root/$options_file ;; esac
@@ -267,11 +281,16 @@ if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
         IFS= read -r value || [ -n "$value" ] || fail 'Container option lacks a value.'
         if [ "$option" = --platform ]; then
             case "$value" in linux/amd64 | linux/arm64) ;; *) fail 'Container platform must be linux/amd64 or linux/arm64.' ;; esac
-            [ -z "$platform" ] || fail 'Container platform must be specified once.'
+            [ -z "$platform" ] || [ "$platform" = "$value" ] || fail 'Conflicting container platform selections.'
             platform=$value
+        elif [ "$option" = --network ]; then
+            case "$value" in host | bridge) ;; *) fail 'Explicit container network must be host or bridge.' ;; esac
+            [ -z "${CHAINMAN_CONTAINER_NETWORK_MODE:-}" ] || [ "$network_mode" = "$value" ] || fail 'Conflicting container network selections.'
+            network_mode=$value
         fi
     done < "$options_file"
 fi
+export CHAINMAN_CONTAINER_PLATFORM="$platform" CHAINMAN_CONTAINER_NETWORK_MODE="$network_mode"
 if [ -n "$platform" ]; then volume=$volume-${platform#linux/}; fi
 downloads_volume=${volume}-downloads
 run() {
@@ -313,7 +332,10 @@ if [ -n "${CHAINMAN_CONTAINER_NETWORK:-}" ]; then
     case "$CHAINMAN_CONTAINER_NETWORK" in *[!a-f0-9]*) fail 'Invalid owned network container identity.' ;; esac
     [ "${#CHAINMAN_CONTAINER_NETWORK}" = 64 ] || fail 'Invalid owned network container identity.'
     printf '%s\n' --network "container:$CHAINMAN_CONTAINER_NETWORK" >> "$temporary/options"
+else
+    printf '%s\n' --network "$network_mode" >> "$temporary/options"
 fi
+if [ -n "$platform" ]; then printf '%s\n' --platform "$platform" >> "$temporary/options"; fi
 env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' > "$temporary/names"
 printf '%s' "${CHAINMAN_FORWARD_ENV:-}" | tr ',' '\n' > "$temporary/patterns"
 printf '\n' >> "$temporary/patterns"
@@ -323,6 +345,8 @@ if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
         [ -n "$option" ] || continue
         case "$option" in --publish | -p | --mount | -v | --volume | --add-host | --hostname | --label | --name | --network | --platform) ;; *) fail "Unsupported container option: $option" ;; esac
         IFS= read -r value || fail 'Container option lacks a value.'
+        # These were normalized before planning and are already emitted above.
+        case "$option" in --platform | --network) continue ;; esac
         printf '%s\n%s\n' "$option" "$value" >> "$temporary/options"
     done < "$temporary/extra"
 fi
@@ -369,7 +393,11 @@ while IFS= read -r option; do
             set -- "$option" "$value" "$@"
             continue
             ;;
-        --publish | -p | --add-host | --hostname | --label | --name)
+        --publish | -p)
+            if [ "$network_mode" != host ]; then set -- "$option" "$value" "$@"; fi
+            continue
+            ;;
+        --add-host | --hostname | --label | --name)
             set -- "$option" "$value" "$@"
             continue
             ;;
@@ -480,6 +508,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --securi
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
+    --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME \
     --env 'NIX_CONFIG=build-users-group =' \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
     --env "TOOLCHAIN_GIT_POLICY_UNAVAILABLE=$policy_unavailable" --env CI --env TERM \

@@ -56,7 +56,13 @@ def volume_compatibility(root, volume):
 
 def command(argv, root, environment=None):
     workflows.commands([argv])
-    return {"argv": argv, "directory": str(root), "environment": environment or {}}
+    selected = dict(environment or {})
+    # Preserve architecture when a saved controller plan is restarted by a caller
+    # whose environment differs. The bootstrap validates the selected platform.
+    for key in ("CHAINMAN_CONTAINER_PLATFORM", "CHAINMAN_NIX_VOLUME"):
+        if os.environ.get(key):
+            selected[key] = os.environ[key]
+    return {"argv": argv, "directory": str(root), "environment": selected}
 
 
 def declarations(root, cfg):
@@ -265,6 +271,8 @@ def config_fingerprint(root, cfg):
     material = [
         str(chainman.RUNTIME),
         tc.context_id(),
+        os.environ.get("CHAINMAN_CONTAINER_PLATFORM", ""),
+        os.environ.get("CHAINMAN_NIX_VOLUME", ""),
         declared,
         cfg.get("environment", {}),
         cfg.get("container", {}),

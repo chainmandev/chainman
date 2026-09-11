@@ -108,7 +108,10 @@ def expand(values, root, env):
         variable(key)
         if not isinstance(value, str) or "\0" in value:
             raise ValueError("Environment values must be strings without NUL")
-    container = env.get("CHAINMAN_MODE", "host-nix") == "container-nix"
+    container = (
+        env.get("CHAINMAN_MODE", "host-nix") == "container-nix"
+        and env.get("CHAINMAN_CONTAINER_NETWORK_MODE", "bridge") != "host"
+    )
     paths = {
         "root": str(root),
         "cache": env.get(

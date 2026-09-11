@@ -37,6 +37,25 @@ A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.
+
+`CHAINMAN_CONTAINER_PLATFORM=linux/amd64|linux/arm64` explicitly selects the Nix
+container architecture, including planning and later service invocations. The
+engine must support that architecture. The selected architecture has its own Nix
+and download volumes, and saved service plans retain the selection. An explicit
+`--platform` in a container options file uses the same mechanism.
+`CHAINMAN_NIX_VOLUME` selects a dedicated Nix volume when an isolated cache is
+needed. The default remains shared by user; an architecture suffix is appended
+when selected, and the paired download volume adds `-downloads`. Use a volume
+reserved for Chainman, since its Nix directories and ownership are initialized.
+
+Standalone tasks can opt into `CHAINMAN_CONTAINER_NETWORK_MODE=host` on engines
+that support host networking. This is useful for an audit against a server bound
+only to host loopback. The default is `bridge`. In host network mode, `{host}` and
+`{bind}` both expand to `127.0.0.1`; published port mappings are omitted and the
+process's listening port is used directly. Setup fingerprints distinguish this
+mode. Service workflows use their declared, owned namespaces and reject a host
+network override. Host mode (`CHAINMAN_MODE=host-nix`) already uses host loopback.
+
 Git administrative mounts belong only to a repository whose root is the selected
 project, including linked worktrees. Nested unadopted examples receive global/system
 Git identity and signing policy without mounting or inheriting their enclosing repository.
