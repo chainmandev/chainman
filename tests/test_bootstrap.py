@@ -133,6 +133,51 @@ class BootstrapTests(unittest.TestCase):
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
 
+    def test_script_transport_preserves_code_and_literal_arguments(self):
+        script = self.root / "recipe with spaces"
+        body = "cat <<'EOF'\n$literal `data`\nEOF\n\n"
+        script.write_text(body)
+        argument = "a 'quote' $(not-a-command); *"
+        self.run_bootstrap("script", "--profile", "host", str(script), argument)
+        self.assertEqual(
+            self.records()[0]["argv"][2:],
+            [
+                "exec",
+                "--profile",
+                "host",
+                "--",
+                "bash",
+                "--noprofile",
+                "--norc",
+                "-eu",
+                "-o",
+                "pipefail",
+                "-c",
+                body,
+                str(script),
+                argument,
+            ],
+        )
+
+    def test_script_transport_rejects_invalid_inputs_before_nix(self):
+        script = self.root / "recipe"
+        script.write_text("true\n")
+        link = self.root / "linked recipe"
+        link.symlink_to(script)
+        for arguments in (
+            (),
+            ("--profile",),
+            ("--profile", "", str(script)),
+            (str(self.root / "missing"),),
+            (str(self.root),),
+            (str(link),),
+        ):
+            with self.subTest(arguments=arguments):
+                result = self.run_bootstrap("script", *arguments, check=False)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("script", result.stderr)
+        self.assertEqual(self.records(), [])
+
     def test_explicit_temporary_base_survives_bootstrap_and_runtime_entry(self):
         private = self.root / "private temporary files"
         private.mkdir(mode=0o700)

@@ -19,6 +19,29 @@ single_line "$root"
 helper=$script_dir/chainman-fetch.nix
 [ -f "$helper" ] || helper=$script_dir/fetch.nix
 [ -f "$helper" ] && [ ! -L "$helper" ] || fail 'Missing regular chainman-fetch.nix companion.'
+if [ "${1:-}" = script ]; then
+    shift
+    script_profile=
+    if [ "${1:-}" = --profile ]; then
+        [ "$#" -ge 3 ] || fail 'script --profile requires a profile and a Bash script.'
+        script_profile=$2
+        [ -n "$script_profile" ] || fail 'script --profile requires a nonempty profile.'
+        shift 2
+    fi
+    [ "$#" -ge 1 ] || fail 'script requires a Bash script and optional arguments.'
+    script_file=$1
+    shift
+    [ -f "$script_file" ] && [ ! -L "$script_file" ] || fail 'script requires a regular Bash script.'
+    # Just creates shebang scripts outside the project mount. Carry their code
+    # as one literal argument, retaining trailing newlines, $0, argv and stdin.
+    script_body=$(cat -- "$script_file" && printf '.') || fail 'Could not read Bash script.'
+    script_body=${script_body%.}
+    set -- exec -- bash --noprofile --norc -eu -o pipefail -c "$script_body" "$script_file" "$@"
+    if [ -n "$script_profile" ]; then
+        shift
+        set -- exec --profile "$script_profile" "$@"
+    fi
+fi
 CHAINMAN_REQUEST_ACTION=${1:-doctor}
 CHAINMAN_REQUEST_TASK=${2:-}
 export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK

@@ -145,3 +145,12 @@ that date, but publication must not bypass the gate. `just control-test` exercis
 the actual pinned backend and cross-compiles the ownership adapter for all four
 targets. Cross-compilation does not substitute for execution on each supported OS
 and engine.
+
+For Just shebang recipes, use
+`#!/usr/bin/env -S ./scripts/chainman.sh script` (optionally adding
+`--profile NAME`). The host launcher reads Just's temporary Bash script and
+passes its contents as a literal argument to Bash in the selected environment.
+It preserves script arguments, `$0` and the caller's stdin, so the container does
+not need a mount of the host's temporary directory. This uses the ordinary
+`exec` environment and operation lease; declare a named task for bounded child
+cleanup, setup dependencies or managed services.
