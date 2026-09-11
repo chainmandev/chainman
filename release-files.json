@@ -104,6 +104,7 @@
     "scripts/native_sdks.py",
     "scripts/package.py",
     "scripts/registry.py",
+    "scripts/resources.py",
     "scripts/sdk_versions.py",
     "scripts/source_artifact.py",
     "scripts/source_artifacts.py",
@@ -115,6 +116,7 @@
     "scripts/toolchain.py",
     "scripts/toolchain_build.py",
     "scripts/updates.py",
+    "scripts/workflows.py",
     "sdk-versions.toml",
     "template/.github/workflows/verify.yml",
     "template/README.md",
@@ -125,8 +127,8 @@
     "tests/test_bootstrap.py",
     "tests/test_cargo_resolution.py",
     "tests/test_chainman.py",
-    "tests/test_concurrency.py",
     "tests/test_ci_cleanup.py",
+    "tests/test_concurrency.py",
     "tests/test_dependency_api.py",
     "tests/test_distribution.py",
     "tests/test_ecosystem_updates.py",
@@ -136,6 +138,7 @@
     "tests/test_lock_adapters.py",
     "tests/test_module_updates.py",
     "tests/test_registry.py",
+    "tests/test_resources.py",
     "tests/test_runtime.py",
     "tests/test_sdk_versions.py",
     "tests/test_self_update.py",
@@ -144,6 +147,7 @@
     "tests/test_source_toolchain_pin.py",
     "tests/test_source_updates.py",
     "tests/test_updates.py",
+    "tests/test_workflows.py",
     "toolchain.toml"
   ],
   "runtime_files": [
@@ -168,6 +172,7 @@
     "scripts/module_updates.py",
     "scripts/native_sdks.py",
     "scripts/registry.py",
+    "scripts/resources.py",
     "scripts/sdk_versions.py",
     "scripts/source_artifact.py",
     "scripts/source_artifacts.py",
@@ -177,6 +182,7 @@
     "scripts/source_toolchain_pin.py",
     "scripts/source_updates.py",
     "scripts/toolchain.py",
-    "scripts/updates.py"
+    "scripts/updates.py",
+    "scripts/workflows.py"
   ]
 }

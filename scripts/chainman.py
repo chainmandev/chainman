@@ -179,6 +179,18 @@ def execute(
             )
         selected.pop(key, None)
     tc.runtime_nix_environment(selected)
+    resource_policy = {}
+    for settings in (
+        configuration(root).get("resources", {}),
+        spec.get("resources", {}),
+    ):
+        if not isinstance(settings, dict):
+            raise ValueError("Resource policies must be tables")
+        resource_policy.update(settings)
+    if resource_policy:
+        import resources
+
+        resources.apply(resource_policy, selected)
     token = profile_fingerprint(root, name, ref)
     active = (
         selected.get("CHAINMAN_ACTIVE_PROFILE") == name
@@ -231,6 +243,10 @@ def run_hook(root: Path, commands, *, name="default", extra=(), env=None):
 
 def run_project(root: Path, action: str, extra: list[str]):
     cfg = configuration(root)
+    if cfg["schema"] == 2:
+        import workflows
+
+        return workflows.run(root, action, extra)
     with tc.operation(
         root,
         exclusive=action == "setup" or action not in cfg.get("commands", {}),

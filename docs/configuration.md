@@ -126,3 +126,55 @@ Bootstrap controls are `CHAINMAN_MODE` (container-nix by default),
 directory are supported. Newlines and ambiguous container comma-paths are rejected.
 `CHAINMAN_ARCHIVE` selects a local archive override, but its contents must still
 match the committed lock hash. Mode changes inside an active shell are rejected.
+
+Schema 2 introduces named setup groups and tasks. Schema 1 remains accepted while
+initial consumers are converted. Inputs and artifacts are relative to the project;
+`directory` changes only the command working directory. For example:
+
+```toml
+schema = 2
+[project]
+default_profile = "default"
+[profiles.default]
+flake = "nix#default"
+[setup.javascript]
+inputs = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
+artifacts = ["node_modules/.pnpm/lock.yaml"]
+commands = [["pnpm", "install", "--frozen-lockfile"]]
+[tasks.build]
+setup = ["javascript"]
+commands = [["pnpm", "run", "build"]]
+[tasks.test]
+depends_on = ["build"]
+setup = ["javascript"]
+commands = [["pnpm", "test"]]
+```
+
+`run test` executes dependency tasks once, then the requested task. Extra arguments
+are appended literally to the final command of the requested task. `setup javascript`
+ensures one group; `setup` ensures all declared groups. Setup groups also support
+`depends_on` and `profile`. Task and setup dependency cycles or unknown references
+fail before execution. Tasks request setup explicitly; inspection tasks can omit it.
+
+Installed artifacts have shared use leases for task lifetimes. Reinstallation takes
+exclusive access and fails visibly while another task uses them. Child commands
+inherit those leases. Missing outputs or changed fingerprints require setup again;
+failed installation or inputs changed during installation never receive a fresh
+stamp. Setup commands should install from frozen inputs, with generation declared
+separately as project tasks. Service declarations remain gated on backend qualification.
+
+An optional project or profile `resources` table controls build-job hints:
+
+```toml
+[resources]
+job_variables = ["CARGO_BUILD_JOBS"]
+max_jobs = 4
+memory_per_job_gib = 3
+```
+
+Profile values override project values. Existing explicit positive job counts are
+preserved. Otherwise the budget is bounded by detected CPUs, configured maximum
+and memory per job; it is always at least one. Linux considers available memory,
+affinity and cgroup-v2 ancestor limits, with v1 memory-limit support. macOS uses
+available CPU count and physical memory. These are concurrency hints rather than
+memory isolation. Workflows without a resource declaration perform no resource probe.
