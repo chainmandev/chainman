@@ -14,6 +14,45 @@ import toolchain as tc
 import workflows
 
 
+def volume_compatibility(root, volume):
+    allowed = {"name", "target", "policy", "format", "inputs"}
+    if not isinstance(volume, dict) or set(volume) - allowed:
+        raise ValueError("Invalid service volume declaration")
+    if volume.get("policy", "preserve") not in {"preserve", "disposable"}:
+        raise ValueError("Volume policy must be preserve or disposable")
+    if not isinstance(volume.get("format"), str) or not volume["format"]:
+        raise ValueError("Persistent service volumes require an explicit data format")
+    inputs = volume.get("inputs", [])
+    if not isinstance(inputs, list) or any(
+        not isinstance(item, str) for item in inputs
+    ):
+        raise ValueError("Volume compatibility inputs must be path patterns")
+    digest = hashlib.sha256(json.dumps([1, volume["format"]]).encode())
+    selected = set()
+    for pattern in inputs:
+        tc.contained(root, pattern)
+        matches = list(root.glob(pattern))
+        if not matches:
+            raise ValueError(f"Volume compatibility input matched no files: {pattern}")
+        for path in matches:
+            tc.contained(root, path.relative_to(root).as_posix())
+            selected.update(path.rglob("*") if path.is_dir() else [path])
+    files = 0
+    for path in sorted(selected):
+        relative = path.relative_to(root).as_posix()
+        tc.contained(root, relative)
+        if path.is_file():
+            files += 1
+            digest.update(relative.encode() + b"\0")
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            digest.update(b"\0")
+    if inputs and not files:
+        raise ValueError("Volume compatibility inputs matched no regular files")
+    return digest.hexdigest()
+
+
 def command(argv, root, environment=None):
     workflows.commands([argv])
     return {"argv": argv, "directory": str(root), "environment": environment or {}}
@@ -191,6 +230,11 @@ def config_fingerprint(root, cfg):
     material += [
         workflows.fingerprint(root, workflows.group_spec(cfg, name)) for name in groups
     ]
+    material += [
+        volume_compatibility(root, volume)
+        for spec in declared.values()
+        for volume in spec.get("container", {}).get("volumes", [])
+    ]
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
@@ -260,6 +304,7 @@ def export(root, arguments):
     if not requested:
         raise ValueError(f"Task {task} has no declared services")
     prepared = {}
+    volumes = {}
     for name, spec in declared.items():
         owner = secrets.token_hex(16)
         container_name = "chainman-" + key + "-" + name
@@ -297,10 +342,7 @@ def export(root, arguments):
             ).items():
                 argv += ["--env", key_env + "=" + value]
             for volume in item.get("volumes", []):
-                if not isinstance(volume, dict) or set(volume) != {"name", "target"}:
-                    raise ValueError(
-                        "Service volumes require a declared name and target"
-                    )
+                compatibility = volume_compatibility(root, volume)
                 workflows.name(volume["name"])
                 target_path = volume["target"]
                 if (
@@ -314,6 +356,32 @@ def export(root, arguments):
                     "--mount",
                     f"type=volume,src=chainman-{key}-{volume['name']},dst={target_path}",
                 ]
+                declared_volume = {
+                    "engine": engine,
+                    "name": f"chainman-{key}-{volume['name']}",
+                    "scope": key,
+                    "compatibility": compatibility,
+                    "policy": volume.get("policy", "preserve"),
+                }
+                previous = volumes.get(declared_volume["name"])
+                if (
+                    previous
+                    and {
+                        key: value
+                        for key, value in previous.items()
+                        if key != "services"
+                    }
+                    != declared_volume
+                ):
+                    raise ValueError(
+                        "Conflicting declarations for a shared service volume"
+                    )
+                if previous:
+                    previous["services"].append(name)
+                else:
+                    volumes[declared_volume["name"]] = dict(
+                        declared_volume, services=[name]
+                    )
             argv += [item["image"], *item.get("command", [])]
             launch = command(argv, root, env)
             ownership = {"engine": engine, "name": container_name, "token": owner}
@@ -415,6 +483,7 @@ def export(root, arguments):
         },
         "fingerprint": fingerprint,
         "services": prepared,
+        "volumes": list(volumes.values()),
         "requested": requested,
         "prepare": command([launcher, "_workflow-prepare", task, fingerprint], root),
         "task": command(

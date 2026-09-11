@@ -289,3 +289,31 @@ services with incompatible inputs are rejected. Stale client records are reaped
 on the next controller operation. Shared scopes across worktrees and full
 backend/platform release qualification remain rollout gates;
 the API must not be represented as qualified for those behaviors yet.
+
+Persistent container volumes declare their data format and compatibility inputs:
+
+```toml
+[[services.database.container.volumes]]
+name = "database-data"
+target = "/var/lib/postgresql"
+format = "postgres-18-development-schema"
+inputs = ["server/migrations", "fixtures/seed.json"]
+policy = "preserve"
+```
+
+The engine volume carries scope and compatibility labels. Chainman creates only
+volumes needed by the selected service set. It refuses an existing volume owned by
+another scope, missing ownership labels, changed compatibility while users are
+active, or missing volumes during active use. Compatibility hashes relative file
+paths and bytes, including directory descendants; missing inputs and symlink
+escapes fail. Inputs must exist before launch. The project declares what defines
+data compatibility and still owns migration/seed completion and application
+readiness; a volume label does not certify successful application preparation.
+
+`preserve` is the default and refuses incompatible data. `disposable` explicitly
+permits recreation after users stop. Removal is unforced, so references from other
+containers still prevent it. Ordinary service stop preserves volumes. Chainman
+never adopts or deletes older project volumes merely because their names look
+similar. Image-specific UIDs remain declarations: for example, the qualified
+Postgres 18 image runs as `999:999` with all capabilities dropped, using the engine's
+normal image-to-volume initialization without a privileged preparation container.

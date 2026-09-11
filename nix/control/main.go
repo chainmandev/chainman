@@ -60,6 +60,7 @@ type Plan struct {
 	Licenses        map[string]string  `json:"licenses,omitempty"`
 	Fingerprint     string             `json:"fingerprint"`
 	Services        map[string]Service `json:"services"`
+	Volumes         []Volume           `json:"volumes,omitempty"`
 	Requested       []string           `json:"requested"`
 	Task            Command            `json:"task"`
 	Prepare         *Command           `json:"prepare,omitempty"`
@@ -651,6 +652,19 @@ func bindEngines(p *Plan) error {
 		}
 		c.EngineIdentity = identity
 	}
+	for index := range p.Volumes {
+		volume := &p.Volumes[index]
+		identity, ok := identities[volume.Engine]
+		if !ok {
+			var e error
+			identity, e = engineIdentity(volume.Engine)
+			if e != nil {
+				return e
+			}
+			identities[volume.Engine] = identity
+		}
+		volume.EngineIdentity = identity
+	}
 	if len(identities) > 0 {
 		data, e := json.Marshal(identities)
 		if e != nil {
@@ -833,6 +847,24 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 	}
 	selected, e := ordered(p, p.Requested)
 	if e != nil {
+		return nil, "", e
+	}
+	needed := []Volume{}
+	for _, volume := range p.Volumes {
+		for _, name := range selected {
+			found := false
+			for _, service := range volume.Services {
+				if service == name {
+					found = true
+				}
+			}
+			if found {
+				needed = append(needed, volume)
+				break
+			}
+		}
+	}
+	if e = ensureVolumes(needed, len(previousUsers) > 0); e != nil {
 		return nil, "", e
 	}
 	leasePath := filepath.Join(p.State, token()+".lease")
