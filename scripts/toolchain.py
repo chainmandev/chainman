@@ -590,6 +590,14 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         TOOLCHAIN_DOWNLOAD_CACHE=str(downloads),
     )
     pnpm_store_environment(env, {"PNPM_CONFIG_STORE_DIR": str(downloads / "pnpm")})
+    # Keep build JVMs within the command lifetime. Gradle may use a single-use
+    # daemon for JVM settings, but it exits after the build; Kotlin stays in it.
+    # Explicit project/profile options remain available through environment.
+    env.setdefault(
+        "GRADLE_OPTS",
+        "-Dorg.gradle.daemon=false "
+        "-Dorg.gradle.project.kotlin.compiler.execution.strategy=in-process",
+    )
     preserved = {}
     for name in config(root).get("cache", {}).get("preserve_environment", []):
         if name in {

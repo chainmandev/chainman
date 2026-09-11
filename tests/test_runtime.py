@@ -33,6 +33,20 @@ class RuntimeTests(unittest.TestCase):
             'schema=1\nmodules=["core"]\n[cache]\nbuild_limit_gib=0\nstale_hours=0\n'
         )
 
+    def test_gradle_defaults_bound_build_jvms_and_preserve_explicit_options(self):
+        with patch.dict(os.environ):
+            os.environ.pop("GRADLE_OPTS", None)
+            options = toolchain.environment(self.root)["GRADLE_OPTS"]
+            self.assertIn("-Dorg.gradle.daemon=false", options)
+            self.assertIn(
+                "-Dorg.gradle.project.kotlin.compiler.execution.strategy=in-process",
+                options,
+            )
+            os.environ["GRADLE_OPTS"] = "-Dfixture=explicit"
+            self.assertEqual(
+                toolchain.environment(self.root)["GRADLE_OPTS"], "-Dfixture=explicit"
+            )
+
     def cache_fixture(self):
         scripts = self.root / "scripts"
         scripts.mkdir()

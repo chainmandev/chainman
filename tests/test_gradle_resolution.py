@@ -7,17 +7,63 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import lock_adapters
+import toolchain
 
 
 @unittest.skipUnless(
     os.environ.get("CHAINMAN_TEST_GRADLE") == "1", "requires the pinned Gradle profile"
 )
 class GradleResolutionTests(unittest.TestCase):
+    def test_managed_defaults_end_the_build_jvm_after_completion(self):
+        with tempfile.TemporaryDirectory(
+            prefix="chainman gradle lifetime "
+        ) as directory:
+            root = Path(directory)
+            (root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
+            (root / "settings.gradle").write_text("rootProject.name='lifetime'\n")
+            (root / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx256m\n")
+            (root / "build.gradle").write_text(
+                "tasks.register('probe') { doLast {\n"
+                " assert project.property('kotlin.compiler.execution.strategy') == 'in-process'\n"
+                " file('build-jvm.pid').text = ProcessHandle.current().pid().toString()\n"
+                "} }\n"
+            )
+            env = toolchain.environment(root)
+            env["GRADLE_USER_HOME"] = str(root / "gradle-home")
+            result = subprocess.run(
+                [
+                    shutil.which("gradle"),
+                    "--offline",
+                    "--console=plain",
+                    "--max-workers=2",
+                    "probe",
+                ],
+                cwd=root,
+                env=env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=120,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout)
+            pid = int((root / "build-jvm.pid").read_text())
+            for _ in range(100):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail(
+                    f"Gradle build JVM {pid} survived its command: {result.stdout}"
+                )
+
     def test_composite_graph_binds_actual_sources_and_inspection_is_read_only(self):
         with tempfile.TemporaryDirectory(prefix="gradle composite ") as temporary:
             root = Path(temporary)

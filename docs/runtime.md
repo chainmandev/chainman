@@ -154,3 +154,11 @@ It preserves script arguments, `$0` and the caller's stdin, so the container doe
 not need a mount of the host's temporary directory. This uses the ordinary
 `exec` environment and operation lease; declare a named task for bounded child
 cleanup, setup dependencies or managed services.
+
+The default `GRADLE_OPTS` disables persistent Gradle daemons and selects Kotlin's
+in-process compiler. Gradle can still start a single-use JVM for project JVM
+settings; it exits after the build. This retains download and compilation caches
+without leaving an idle build process after setup or verification. Explicit
+project/profile environment options take precedence. See the upstream
+[Gradle daemon contract](https://docs.gradle.org/current/userguide/gradle_daemon.html)
+and [Kotlin execution strategies](https://kotlinlang.org/docs/compiler-execution-strategy.html).
