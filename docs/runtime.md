@@ -37,6 +37,17 @@ A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. Project outputs live separately under `.cache/toolchain/work`.
+Named workflows apply the shared age and size pruning policy before acquiring
+their setup artifacts, only when no managed operation is active. Set
+`cache.automatic_prune = false` to keep pruning explicit.
+
+`setup-status [GROUP...]` reports the same fingerprints and artifact readiness
+used by `setup`, returning 1 if any selected group is stale. It never installs
+dependencies or records unverified readiness. Use `setup [GROUP...]` to restore
+readiness after changing inputs or removing outputs.
+Setup groups may declare `exclude_inputs` glob patterns when broad manifest
+patterns would otherwise include installed dependencies or build directories.
+Exclusions affect only that group's fingerprint inputs, never its artifact checks.
 
 `CHAINMAN_CONTAINER_PLATFORM=linux/amd64|linux/arm64` explicitly selects the Nix
 container architecture, including planning and later service invocations. The

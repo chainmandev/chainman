@@ -333,6 +333,10 @@ def main(argv=None):
             return services.execute_internal(root, args.action, rest)
         elif args.action == "version":
             print((RUNTIME / "VERSION").read_text().strip())
+        elif args.action == "setup-status":
+            import workflows
+
+            return workflows.setup_status(root, rest)
         elif args.action in {"exec", "shell"}:
             reuse = rest[:1] == ["--reuse-operation"]
             if reuse:

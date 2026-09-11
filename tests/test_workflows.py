@@ -110,6 +110,49 @@ commands=[["python3","task.py"]]
         self.assertTrue((self.root / "installed").exists())
         self.assertFalse((self.root / "arguments.json").exists())
 
+    def test_setup_status_never_installs_or_blesses_stale_outputs(self):
+        result = self.run_cli("setup-status", "dependencies")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["groups"], {"dependencies": False})
+        self.assertFalse((self.root / "install-count").exists())
+        self.assertEqual(self.run_cli("setup").returncode, 0)
+        self.assertEqual(self.run_cli("setup-status").returncode, 0)
+        (self.root / "input.lock").write_text("changed")
+        result = self.run_cli("setup-status")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+        self.assertFalse(json.loads(result.stdout)["current"])
+
+    def test_setup_excludes_declared_generated_dependency_trees(self):
+        self.body = self.body.replace(
+            'inputs=["input.lock","install.py"]',
+            'inputs=["**/*.lock","install.py"]\nexclude_inputs=["node_modules/**"]',
+        )
+        self.write_config()
+        with (self.root / "install.py").open("a") as script:
+            script.write(
+                "Path('node_modules').mkdir(exist_ok=True)\nPath('node_modules/download.lock').write_text('generated')\n"
+            )
+        self.assertEqual(self.run_cli("setup").returncode, 0)
+        (self.root / "node_modules/download.lock").write_text("another download")
+        self.assertEqual(self.run_cli("setup-status").returncode, 0)
+        (self.root / "input.lock").write_text("source changed")
+        self.assertEqual(self.run_cli("setup-status").returncode, 1)
+
+    def test_automatic_prune_runs_only_without_active_work(self):
+        obsolete = self.root / ".cache/toolchain/work/old-context"
+        obsolete.mkdir(parents=True)
+        (obsolete / "output").write_text("disposable")
+        self.body += "\n[cache]\nbuild_limit_gib=0\nstale_hours=0\n"
+        self.write_config()
+        with tc.operation(self.root, exclusive=False):
+            result = self.run_cli("run", "build")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(obsolete.exists())
+        result = self.run_cli("run", "build")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(obsolete.exists())
+
     def test_reserved_setup_task_is_rejected_instead_of_silently_skipped(self):
         self.body += '\n[tasks.setup]\ncommands=[["false"]]\n'
         self.write_config()

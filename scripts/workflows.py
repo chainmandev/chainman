@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import fcntl
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -60,7 +61,7 @@ def configuration(root):
             if not isinstance(spec, dict):
                 raise ValueError(f"{section}.{key} must be a declaration")
             allowed = {"commands", "profile", "directory", "depends_on"} | (
-                {"inputs", "artifacts"}
+                {"inputs", "exclude_inputs", "artifacts"}
                 if section == "setup"
                 else {
                     "setup",
@@ -104,7 +105,9 @@ def configuration(root):
                     raise ValueError("Setup groups require explicit fingerprint inputs")
                 if not isinstance(spec.get("artifacts"), list) or not spec["artifacts"]:
                     raise ValueError("Setup groups require readiness artifacts")
-                for pattern in spec["inputs"]:
+                if not isinstance(spec.get("exclude_inputs", []), list):
+                    raise ValueError("Setup input exclusions must be path patterns")
+                for pattern in [*spec["inputs"], *spec.get("exclude_inputs", [])]:
                     if not isinstance(pattern, str):
                         raise ValueError("Setup input patterns must be strings")
                     tc.contained(root, pattern)
@@ -187,6 +190,18 @@ def group_spec(cfg, key):
     return spec
 
 
+def group_specs(root, cfg, requested):
+    specs = {
+        key: group_spec(cfg, key) for key in order(cfg.get("setup", {}), requested)
+    }
+    for spec in specs.values():
+        spec["dependency_fingerprints"] = {
+            dependency: fingerprint(root, specs[dependency])
+            for dependency in spec.get("depends_on", [])
+        }
+    return specs
+
+
 def fingerprint(root, spec):
     digest = hashlib.sha256(
         json.dumps([1, tc.context_id(), spec], sort_keys=True).encode()
@@ -198,6 +213,11 @@ def fingerprint(root, spec):
         paths.update(root.glob(pattern))
     for path in sorted(paths):
         relative = path.relative_to(root).as_posix()
+        if any(
+            fnmatch.fnmatchcase(relative, pattern)
+            for pattern in spec.get("exclude_inputs", [])
+        ):
+            continue
         tc.contained(root, relative)
         if path.is_file():
             digest.update(relative.encode() + b"\0" + path.read_bytes() + b"\0")
@@ -242,16 +262,10 @@ def artifact_digests(root, spec):
 
 @contextmanager
 def setup_use(root, cfg, requested, env):
-    selected = order(cfg.get("setup", {}), requested)
-    if not selected:
+    specs = group_specs(root, cfg, requested)
+    if not specs:
         yield ()
         return
-    specs = {key: group_spec(cfg, key) for key in selected}
-    for key, spec in specs.items():
-        spec["dependency_fingerprints"] = {
-            dependency: fingerprint(root, specs[dependency])
-            for dependency in spec.get("depends_on", [])
-        }
     # One installation lock protects overlapping physical outputs across groups.
     # Shared leases are inherited by task processes, including after parent exit.
     with tc.operation_file(root, "setup-use.lock") as lease:
@@ -303,6 +317,28 @@ def setup_use(root, cfg, requested, env):
         yield (lease.fileno(),)
 
 
+def setup_status(root, requested):
+    """Inspect the same readiness contract without installing or blessing outputs."""
+    cfg = configuration(root)
+    with tc.operation(root, exclusive=False, new_execution=True):
+        env = tc.environment(root)
+        specs = group_specs(root, cfg, requested or list(cfg.get("setup", {})))
+        with tc.operation_file(root, "setup-use.lock") as lease:
+            try:
+                fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError(
+                    "Another setup operation is installing project artifacts"
+                ) from None
+            result = {key: current(root, key, spec, env) for key, spec in specs.items()}
+            print(
+                json.dumps(
+                    {"schema": 1, "current": all(result.values()), "groups": result}
+                )
+            )
+            return 0 if all(result.values()) else 1
+
+
 def run(root: Path, action: str, extra: list[str], *, service_context=False):
     cfg = configuration(root)
     task_names = order(cfg.get("tasks", {}), [action]) if action != "setup" else []
@@ -314,7 +350,10 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
             "Exclusive maintenance tasks cannot acquire or borrow services"
         )
     with tc.operation(
-        root, exclusive=exclusive, new_execution=True, automatic_prune=False
+        root,
+        exclusive=exclusive,
+        new_execution=True,
+        automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
     ):
         env = tc.environment(root)
         if action == "setup":
