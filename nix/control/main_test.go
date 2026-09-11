@@ -1,12 +1,63 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 )
+
+func TestContainerOutlivesClientDescriptorLease(t *testing.T) {
+	state := t.TempDir()
+	engine := filepath.Join(state, "engine")
+	owner := &Container{Engine: engine, Name: "chainman-fixture", Token: "0123456789abcdef0123456789abcdef"}
+	receipt := filepath.Join(state, "client.lease")
+	respond := func(running bool, label string) {
+		t.Helper()
+		data, _ := json.Marshal([]any{map[string]any{"Id": "immutable-fixture-id", "State": map[string]bool{"Running": running}, "Config": map[string]any{"Labels": map[string]string{"dev.chainman.owner": label}}}})
+		if e := os.WriteFile(engine, []byte("#!/bin/sh\nprintf '%s\\n' "+quote(string(data))+"\n"), 0700); e != nil {
+			t.Fatal(e)
+		}
+	}
+	respond(true, owner.Token)
+	if e := atomic(receipt, Lease{Services: []string{"database"}, Container: owner}); e != nil {
+		t.Fatal(e)
+	}
+	p := Plan{State: state}
+	used, e := active(p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !used["database"] {
+		t.Fatal("live task container lost its service lease")
+	}
+	respond(true, "replacement-token")
+	if _, e = active(p); e == nil {
+		t.Fatal("replacement container was accepted as the lease owner")
+	}
+	if _, e = os.Stat(receipt); e != nil {
+		t.Fatal("uncertain ownership discarded the lease")
+	}
+	if e = os.WriteFile(engine, []byte("#!/bin/sh\nexit 1\n"), 0700); e != nil {
+		t.Fatal(e)
+	}
+	if _, e = active(p); e == nil {
+		t.Fatal("engine outage discarded ownership")
+	}
+	respond(false, owner.Token)
+	used, e = active(p)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if used["database"] {
+		t.Fatal("finished task container retained its lease")
+	}
+	if _, e = os.Stat(receipt); !os.IsNotExist(e) {
+		t.Fatal("stale lease was not collected")
+	}
+}
 
 func TestKernelIdentityAndGroupInventory(t *testing.T) {
 	identity, err := identify(os.Getpid())
@@ -32,6 +83,26 @@ func TestKernelIdentityAndGroupInventory(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("kernel group inventory omitted the caller")
+	}
+}
+
+func TestChangedEngineContextCannotInspectOrStopContainers(t *testing.T) {
+	root := t.TempDir()
+	engine := filepath.Join(root, "docker")
+	marker := filepath.Join(root, "container-action")
+	body := "#!/bin/sh\nif [ \"$1\" = info ]; then printf '%s\\n' changed-daemon; else touch " + quote(marker) + "; fi\n"
+	if e := os.WriteFile(engine, []byte(body), 0700); e != nil {
+		t.Fatal(e)
+	}
+	owner := &Container{Engine: engine, Name: "chainman-fixture", Token: "0123456789abcdef0123456789abcdef", EngineIdentity: "original-daemon"}
+	if _, e := inspectContainer(owner); e == nil {
+		t.Fatal("changed daemon accepted")
+	}
+	if e := stopContainer(owner, 1); e == nil {
+		t.Fatal("changed daemon accepted during stop")
+	}
+	if _, e := os.Stat(marker); !os.IsNotExist(e) {
+		t.Fatal("a container command reached the changed daemon")
 	}
 }
 func TestScopeCannotFollowSymlink(t *testing.T) {

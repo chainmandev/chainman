@@ -192,7 +192,7 @@ while True:time.sleep(.1)
             [
                 sys.executable,
                 "-c",
-                "import time; from pathlib import Path; Path('task-ready').touch(); time.sleep(30)",
+                "import os,time; from pathlib import Path; os.close(3); Path('task-ready').touch(); time.sleep(30)",
             ]
         )
         self.path.write_text(json.dumps(self.plan))
@@ -235,6 +235,13 @@ while True:time.sleep(.1)
         self.assertTrue(json.loads(result.stdout)["running"])
         self.run_control("stop", check=0)
         self.assertFalse(self.alive(self.pid()))
+
+    def test_explicit_stop_recovers_services_despite_a_corrupt_client_receipt(self):
+        self.run_control("up", check=0)
+        pid = self.pid()
+        (self.state / "invalid.lease").write_text("incomplete JSON")
+        self.run_control("stop", check=0)
+        self.assertFalse(self.alive(pid))
 
 
 if __name__ == "__main__":

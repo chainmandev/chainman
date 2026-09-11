@@ -205,6 +205,14 @@ is killed. After an abrupt controller failure, explicit stop recovers owned
 process groups and labeled containers; it never signals an unrelated reused PID.
 Project containers receive neither controller state nor an engine socket.
 
+Task leases also record the task process birth identity and, in container mode,
+its labeled container. They survive shells that close inherited descriptors and
+the death of a host engine client while its task container continues running.
+Container inspection and cleanup verify the selected engine identity and ownership
+label before addressing an immutable container ID. Engine errors or a changed
+daemon fail closed; restore the original engine context to recover those services.
+Explicit stop can recover service ownership even if a client lease is corrupt.
+
 The initial service scope is one canonical worktree and execution mode. Live
 services with incompatible inputs are rejected. Stale client records are reaped
 on the next controller operation. Shared scopes across worktrees, build/watch

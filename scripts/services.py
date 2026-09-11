@@ -361,6 +361,18 @@ def export(root, arguments):
             [launcher, "_workflow-task", task, fingerprint, *task_args], root
         ),
     }
+    if mode == "container-nix" and action != "services-up":
+        owner = secrets.token_hex(16)
+        task_container = {
+            "engine": engine,
+            "name": "chainman-" + key + "-task-" + owner[:8],
+            "token": owner,
+        }
+        plan["task_container"] = task_container
+        plan["task"]["environment"].update(
+            CHAINMAN_CONTAINER_NAME=task_container["name"],
+            CHAINMAN_CONTAINER_OWNER=owner,
+        )
     tc.atomic_json(destination / "plan.json", plan)
     return 0
 

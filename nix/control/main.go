@@ -43,20 +43,22 @@ type Service struct {
 	Container *Container `json:"container,omitempty"`
 }
 type Container struct {
-	Engine string `json:"engine"`
-	Name   string `json:"name"`
-	Token  string `json:"token"`
+	Engine         string `json:"engine"`
+	Name           string `json:"name"`
+	Token          string `json:"token"`
+	EngineIdentity string `json:"engine_identity,omitempty"`
 }
 type Plan struct {
-	Schema      int                `json:"schema"`
-	Root        string             `json:"root"`
-	State       string             `json:"state"`
-	Backend     string             `json:"backend"`
-	Fingerprint string             `json:"fingerprint"`
-	Services    map[string]Service `json:"services"`
-	Requested   []string           `json:"requested"`
-	Task        Command            `json:"task"`
-	Prepare     *Command           `json:"prepare,omitempty"`
+	Schema        int                `json:"schema"`
+	Root          string             `json:"root"`
+	State         string             `json:"state"`
+	Backend       string             `json:"backend"`
+	Fingerprint   string             `json:"fingerprint"`
+	Services      map[string]Service `json:"services"`
+	Requested     []string           `json:"requested"`
+	Task          Command            `json:"task"`
+	Prepare       *Command           `json:"prepare,omitempty"`
+	TaskContainer *Container         `json:"task_container,omitempty"`
 }
 type Identity struct {
 	PID   int    `json:"pid"`
@@ -67,8 +69,10 @@ type Owner struct {
 	Container *Container `json:"container,omitempty"`
 }
 type Lease struct {
-	Services   []string `json:"services"`
-	Persistent bool     `json:"persistent"`
+	Services   []string   `json:"services"`
+	Persistent bool       `json:"persistent"`
+	Container  *Container `json:"container,omitempty"`
+	Task       *Identity  `json:"task,omitempty"`
 }
 type Process struct {
 	Name    string `json:"name"`
@@ -479,10 +483,20 @@ func active(p Plan) (map[string]bool, error) {
 		if err == nil {
 			f.Close()
 			if !l.Persistent {
-				if e = os.Remove(path); e != nil {
-					return nil, e
+				present := l.Task != nil && l.Task.alive()
+				if !present && l.Container != nil {
+					info, err := inspectContainer(l.Container)
+					if err != nil {
+						return nil, err
+					}
+					present = info != nil && info.Running
 				}
-				continue
+				if !present {
+					if e = os.Remove(path); e != nil {
+						return nil, e
+					}
+					continue
+				}
 			}
 		} else if !errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, err
@@ -493,42 +507,133 @@ func active(p Plan) (map[string]bool, error) {
 	}
 	return result, nil
 }
-func stopContainer(c *Container, seconds int) error {
-	if c == nil {
-		return nil
+
+type ContainerState struct {
+	ID      string
+	Running bool
+}
+
+func inspectContainer(c *Container) (*ContainerState, error) {
+	if e := checkEngine(c); e != nil {
+		return nil, e
 	}
 	// The random owner label and immutable ID prevent deletion of a replacement
 	// container that happens to reuse a friendly name.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+15)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	out, e := exec.CommandContext(ctx, c.Engine, "container", "inspect", c.Name).Output()
 	if e != nil {
 		// An engine outage is not evidence of absence. A separate list must succeed.
 		list, err := exec.CommandContext(ctx, c.Engine, "container", "ls", "-aq", "--filter", "name=^/"+c.Name+"$").Output()
 		if err != nil {
-			return fmt.Errorf("cannot inspect owned container: %w", err)
+			return nil, fmt.Errorf("cannot inspect owned container: %w", err)
 		}
 		if len(strings.TrimSpace(string(list))) == 0 {
-			return nil
+			return nil, nil
 		}
-		return e
+		return nil, e
 	}
 	var entries []struct {
-		ID     string `json:"Id"`
+		ID    string `json:"Id"`
+		State struct {
+			Running *bool `json:"Running"`
+		} `json:"State"`
 		Config struct {
 			Labels map[string]string `json:"Labels"`
 		} `json:"Config"`
 	}
 	if e = json.Unmarshal(out, &entries); e != nil {
-		return e
+		return nil, e
 	}
 	if len(entries) != 1 || entries[0].Config.Labels["dev.chainman.owner"] != c.Token {
-		return fmt.Errorf("container ownership changed: %s", c.Name)
+		return nil, fmt.Errorf("container ownership changed: %s", c.Name)
+	}
+	if entries[0].State.Running == nil {
+		return nil, fmt.Errorf("engine omitted container liveness")
 	}
 	id := entries[0].ID
 	if id == "" {
-		return fmt.Errorf("missing immutable container ID")
+		return nil, fmt.Errorf("missing immutable container ID")
 	}
+	return &ContainerState{id, *entries[0].State.Running}, nil
+}
+func engineIdentity(engine string) (string, error) {
+	format := "{{.ID}}"
+	if filepath.Base(engine) == "podman" {
+		format = "{{.Host.Hostname}} {{.Store.GraphRoot}} {{.Host.Security.Rootless}}"
+	} else if filepath.Base(engine) != "docker" {
+		return "", fmt.Errorf("unsupported host engine")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	data, e := exec.CommandContext(ctx, engine, "info", "--format", format).Output()
+	if e != nil {
+		return "", e
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" || strings.Contains(value, "<no value>") {
+		return "", fmt.Errorf("host engine did not supply an identity")
+	}
+	return value, nil
+}
+func checkEngine(c *Container) error {
+	if c == nil || c.EngineIdentity == "" {
+		return nil
+	}
+	current, e := engineIdentity(c.Engine)
+	if e != nil {
+		return e
+	}
+	if current != c.EngineIdentity {
+		return fmt.Errorf("selected engine context differs from the owner of %s; restore that context before recovery", c.Name)
+	}
+	return nil
+}
+func bindEngines(p *Plan) error {
+	identities := map[string]string{}
+	containers := []*Container{p.TaskContainer}
+	for _, s := range p.Services {
+		containers = append(containers, s.Container)
+	}
+	for _, c := range containers {
+		if c == nil {
+			continue
+		}
+		identity, ok := identities[c.Engine]
+		if !ok {
+			var e error
+			identity, e = engineIdentity(c.Engine)
+			if e != nil {
+				return e
+			}
+			identities[c.Engine] = identity
+		}
+		c.EngineIdentity = identity
+	}
+	if len(identities) > 0 {
+		data, e := json.Marshal(identities)
+		if e != nil {
+			return e
+		}
+		hash := sha256.Sum256(data)
+		p.Fingerprint += "/" + hex.EncodeToString(hash[:])
+	}
+	return nil
+}
+func stopContainer(c *Container, seconds int) error {
+	if c == nil {
+		return nil
+	}
+	info, e := inspectContainer(c)
+	if e != nil {
+		return e
+	}
+	if info == nil {
+		return nil
+	}
+	id := info.ID
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+15)*time.Second)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Engine, "container", "stop", "--time", fmt.Sprint(seconds), id)
 	if b, e := cmd.CombinedOutput(); e != nil {
 		return fmt.Errorf("owned container stop: %w: %s", e, b)
@@ -569,12 +674,13 @@ func stopOwner(p Plan, n string) error {
 	return e
 }
 func releaseUnused(p Plan, force bool) error {
-	used, e := active(p)
-	if e != nil {
-		return e
-	}
-	if force {
-		used = map[string]bool{}
+	used := map[string]bool{}
+	var e error
+	if !force {
+		used, e = active(p)
+		if e != nil {
+			return e
+		}
 	}
 	all := make([]string, 0, len(p.Services))
 	for n := range p.Services {
@@ -620,6 +726,9 @@ func releaseUnused(p Plan, force bool) error {
 	return nil
 }
 func acquire(p Plan, persistent bool) (*os.File, string, error) {
+	if e := bindEngines(&p); e != nil {
+		return nil, "", e
+	}
 	if e := validate(p); e != nil {
 		return nil, "", e
 	}
@@ -669,7 +778,7 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 		return nil, "", e
 	}
 	leasePath := filepath.Join(p.State, token()+".lease")
-	if e = atomic(leasePath, Lease{selected, persistent}); e != nil {
+	if e = atomic(leasePath, Lease{Services: selected, Persistent: persistent, Container: p.TaskContainer}); e != nil {
 		return nil, "", e
 	}
 	lease, e := locked(leasePath, false)
@@ -779,6 +888,10 @@ func owned(state, name string, probe bool) int {
 	}
 	var s Service
 	if e := readJSON(filepath.Join(state, name+".command.json"), &s); e != nil {
+		fmt.Fprintln(os.Stderr, e)
+		return 1
+	}
+	if e := checkEngine(s.Container); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
 	}
@@ -982,6 +1095,17 @@ func mainAction(args []string) (result int) {
 		return 0
 	}
 	defer func() {
+		// Docker/Podman clients do not carry descriptors into their daemon's
+		// containers. Stop an owned task before releasing its service lease;
+		// if this client is killed outright, active() uses the container receipt.
+		if err := stopContainer(p.TaskContainer, 10); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if result == 0 {
+				result = 1
+			}
+			lease.Close()
+			return
+		}
 		lease.Close()
 		_ = os.Remove(path)
 		lock, err := locked(filepath.Join(p.State, "gate"), false)
@@ -1012,6 +1136,23 @@ func mainAction(args []string) (result int) {
 	defer signal.Stop(signals)
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
+	}
+	// A foreground Nix/shell entry may close inherited descriptors. Its kernel
+	// identity is a second lease witness until the complete task returns.
+	if identity, err := identify(cmd.Process.Pid); err == nil {
+		gate, err := locked(filepath.Join(p.State, "gate"), false)
+		if err == nil {
+			selected, orderErr := ordered(p, p.Requested)
+			if orderErr == nil {
+				err = atomic(path, Lease{Services: selected, Container: p.TaskContainer, Task: &identity})
+			} else {
+				err = orderErr
+			}
+			gate.Close()
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "task ownership receipt:", err)
+		}
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
