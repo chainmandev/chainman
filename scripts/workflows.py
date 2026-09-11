@@ -53,6 +53,10 @@ def configuration(root):
             raise ValueError(f"{section} must contain named declarations")
         for key, spec in entries.items():
             name(key)
+            if section == "tasks" and key == "setup":
+                raise ValueError(
+                    "Task name 'setup' is reserved for setup groups; choose another task name"
+                )
             if not isinstance(spec, dict):
                 raise ValueError(f"{section}.{key} must be a declaration")
             allowed = {"commands", "profile", "directory", "depends_on"} | (

@@ -110,6 +110,15 @@ commands=[["python3","task.py"]]
         self.assertTrue((self.root / "installed").exists())
         self.assertFalse((self.root / "arguments.json").exists())
 
+    def test_reserved_setup_task_is_rejected_instead_of_silently_skipped(self):
+        self.body += '\n[tasks.setup]\ncommands=[["false"]]\n'
+        self.write_config()
+        for args in [("run", "setup"), ("setup",)]:
+            result = self.run_cli(*args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Task name 'setup' is reserved", result.stderr)
+            self.assertFalse((self.root / "installed").exists())
+
     def test_aggregate_task_runs_dependencies_once_without_a_noop_command(self):
         self.body += '\n[tasks.all]\ndepends_on=["build"]\n'
         self.write_config()
