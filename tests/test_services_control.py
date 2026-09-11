@@ -442,6 +442,46 @@ if text=='bad': raise SystemExit(3)
         self.run_control("run", check=7)
         self.assertFalse(self.alive(self.pid()))
 
+    def waiting_task(self):
+        self.plan.update(wait_for_services=True, own_task=True, task_shutdown_seconds=1)
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import os,time; from pathlib import Path; Path('waiting').write_text(str(os.getpid())); time.sleep(120)",
+            ]
+        )
+        self.path.write_text(json.dumps(self.plan))
+        parent = subprocess.Popen(
+            [CONTROL, "run", str(self.path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.wait_file(self.root / "waiting")
+        return parent
+
+    def test_waiting_task_reports_service_failure_and_cleans_its_command(self):
+        parent = self.waiting_task()
+        try:
+            os.kill(self.pid(), signal.SIGKILL)
+            self.assertEqual(parent.wait(timeout=15), 1)
+            self.assertFalse(self.alive(int((self.root / "waiting").read_text())))
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+
+    def test_explicit_stop_ends_waiting_task_successfully(self):
+        parent = self.waiting_task()
+        try:
+            self.run_control("stop", check=0)
+            self.assertEqual(parent.wait(timeout=15), 0)
+            self.assertFalse(self.alive(int((self.root / "waiting").read_text())))
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+
     def test_descendant_descriptor_retains_lease_after_task_returns(self):
         self.plan["task"] = self.command(
             [

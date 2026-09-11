@@ -52,18 +52,21 @@ type Container struct {
 	EngineIdentity string `json:"engine_identity,omitempty"`
 }
 type Plan struct {
-	Schema        int                `json:"schema"`
-	Root          string             `json:"root"`
-	State         string             `json:"state"`
-	Backend       string             `json:"backend"`
-	Watcher       string             `json:"watcher,omitempty"`
-	Licenses      map[string]string  `json:"licenses,omitempty"`
-	Fingerprint   string             `json:"fingerprint"`
-	Services      map[string]Service `json:"services"`
-	Requested     []string           `json:"requested"`
-	Task          Command            `json:"task"`
-	Prepare       *Command           `json:"prepare,omitempty"`
-	TaskContainer *Container         `json:"task_container,omitempty"`
+	Schema          int                `json:"schema"`
+	Root            string             `json:"root"`
+	State           string             `json:"state"`
+	Backend         string             `json:"backend"`
+	Watcher         string             `json:"watcher,omitempty"`
+	Licenses        map[string]string  `json:"licenses,omitempty"`
+	Fingerprint     string             `json:"fingerprint"`
+	Services        map[string]Service `json:"services"`
+	Requested       []string           `json:"requested"`
+	Task            Command            `json:"task"`
+	Prepare         *Command           `json:"prepare,omitempty"`
+	TaskContainer   *Container         `json:"task_container,omitempty"`
+	WaitForServices bool               `json:"wait_for_services,omitempty"`
+	OwnTask         bool               `json:"own_task,omitempty"`
+	TaskShutdown    int                `json:"task_shutdown_seconds,omitempty"`
 }
 type Identity struct {
 	PID   int    `json:"pid"`
@@ -403,6 +406,9 @@ func configuration(p Plan, self string) error {
 	})
 }
 func start(p Plan, self string) error {
+	if e := os.Remove(filepath.Join(p.State, "stop-request.json")); e != nil && !os.IsNotExist(e) {
+		return e
+	}
 	if e := configuration(p, self); e != nil {
 		return e
 	}
@@ -709,6 +715,11 @@ func stopOwner(p Plan, n string) error {
 	return e
 }
 func releaseUnused(p Plan, force bool) error {
+	if force {
+		if e := atomic(filepath.Join(p.State, "stop-request.json"), true); e != nil {
+			return e
+		}
+	}
 	used := map[string]bool{}
 	var e error
 	if !force {
@@ -1221,7 +1232,23 @@ func mainAction(args []string) (result int) {
 			}
 		}
 	}()
-	cmd, e := child(p.Task)
+	task := p.Task
+	if p.OwnTask {
+		if p.TaskShutdown < 1 || p.TaskShutdown > 300 {
+			return exitCode(fmt.Errorf("invalid task shutdown timeout"))
+		}
+		path := filepath.Join(p.State, token()+".task.json")
+		if e = atomic(path, TaskCommands{Commands: []Command{task}, Shutdown: p.TaskShutdown}); e != nil {
+			return exitCode(e)
+		}
+		defer os.Remove(path)
+		self, e := os.Executable()
+		if e != nil {
+			return exitCode(e)
+		}
+		task = Command{Argv: []string{self, "command", path}, Directory: p.Root, Environment: map[string]string{"CHAINMAN_SERVICE_LEASE_FDS": "[3]"}}
+	}
+	cmd, e := child(task)
 	if e != nil {
 		return exitCode(e)
 	}
@@ -1233,6 +1260,9 @@ func mainAction(args []string) (result int) {
 	defer signal.Stop(signals)
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
+	}
+	if p.WaitForServices {
+		fmt.Fprintln(os.Stderr, "Services ready; logs:", filepath.Join(p.State, "services.log"))
 	}
 	// A foreground Nix/shell entry may close inherited descriptors. Its kernel
 	// identity is a second lease witness until the complete task returns.
@@ -1264,11 +1294,21 @@ func mainAction(args []string) (result int) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	monitorContext, cancelMonitor := context.WithCancel(context.Background())
+	defer cancelMonitor()
+	var failed <-chan error
+	if p.WaitForServices {
+		failed = monitorServices(monitorContext, p)
+	}
 	select {
 	case e = <-done:
 	case sig := <-signals:
-		_ = cmd.Process.Signal(sig)
-		e = <-done
+		e = cancelTask(cmd, done, sig, p.TaskShutdown)
+	case e = <-failed:
+		_ = cancelTask(cmd, done, syscall.SIGTERM, p.TaskShutdown)
+		if errors.Is(e, servicesStopped) {
+			return 0
+		}
 	}
 	return exitCode(e)
 }

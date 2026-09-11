@@ -420,6 +420,13 @@ def export(root, arguments):
         "task": command(
             [launcher, "_workflow-task", task, fingerprint, *task_args], root
         ),
+        "wait_for_services": any(
+            cfg["tasks"][name].get("wait_for_services", False) for name in task_order
+        ),
+        "own_task": True,
+        "task_shutdown_seconds": max(
+            cfg["tasks"][name].get("shutdown_seconds", 10) for name in task_order
+        ),
     }
     if mode == "container-nix" and action != "services-up":
         owner = secrets.token_hex(16)

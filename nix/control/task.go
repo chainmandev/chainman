@@ -23,6 +23,12 @@ type TaskCommands struct {
 // its command sequence, remapping descriptor numbers allocated by os/exec.
 func forwardLeases(cmd *exec.Cmd) error {
 	ancestors := []int{}
+	serviceLeases := []int{}
+	if value := os.Getenv("CHAINMAN_SERVICE_LEASE_FDS"); value != "" {
+		if e := json.Unmarshal([]byte(value), &serviceLeases); e != nil {
+			return e
+		}
+	}
 	if value := os.Getenv("TOOLCHAIN_ANCESTOR_FDS"); value != "" {
 		if e := json.Unmarshal([]byte(value), &ancestors); e != nil {
 			return e
@@ -40,6 +46,9 @@ func forwardLeases(cmd *exec.Cmd) error {
 	}
 	selected := map[int]bool{}
 	for _, fd := range ancestors {
+		selected[fd] = true
+	}
+	for _, fd := range serviceLeases {
 		selected[fd] = true
 	}
 	for _, fd := range vars {
@@ -71,7 +80,7 @@ func forwardLeases(cmd *exec.Cmd) error {
 	for _, value := range cmd.Env {
 		name, _, _ := strings.Cut(value, "=")
 		_, remapped := vars[name]
-		if !remapped && name != "TOOLCHAIN_ANCESTOR_FDS" && name != "TOOLCHAIN_OPERATION_ID" {
+		if !remapped && name != "TOOLCHAIN_ANCESTOR_FDS" && name != "TOOLCHAIN_OPERATION_ID" && name != "CHAINMAN_SERVICE_LEASE_FDS" {
 			env = append(env, value)
 		}
 	}
@@ -82,11 +91,21 @@ func forwardLeases(cmd *exec.Cmd) error {
 	for i, fd := range ancestors {
 		ancestors[i] = remap[fd]
 	}
+	for i, fd := range serviceLeases {
+		serviceLeases[i] = remap[fd]
+	}
+	if len(serviceLeases) > 0 {
+		data, e := json.Marshal(serviceLeases)
+		if e != nil {
+			return e
+		}
+		cmd.Env = append(cmd.Env, "CHAINMAN_SERVICE_LEASE_FDS="+string(data))
+	}
 	data, e := json.Marshal(ancestors)
 	if e != nil {
 		return e
 	}
-	if len(ordered) > 0 {
+	if len(vars)+len(ancestors) > 0 {
 		cmd.Env = append(cmd.Env, "TOOLCHAIN_ANCESTOR_FDS="+string(data), "TOOLCHAIN_OPERATION_ID="+os.Getenv("TOOLCHAIN_OPERATION_ID"))
 		if owner := os.Getenv("CHAINMAN_COMPILER_OWNER"); owner != "" {
 			cmd.Env = append(cmd.Env, "CHAINMAN_COMPILER_OWNER="+owner)
@@ -123,6 +142,16 @@ func taskCommand(action, path string) int {
 			if e = forwardLeases(cmd); e != nil {
 				return exitCode(e)
 			}
+			// The native anchor owns service leases through the whole command.
+			// Do not advertise host control descriptors through Nix or an engine
+			// daemon, which may close them before entering project code.
+			env := cmd.Env[:0]
+			for _, value := range cmd.Env {
+				if !strings.HasPrefix(value, "CHAINMAN_SERVICE_LEASE_FDS=") {
+					env = append(env, value)
+				}
+			}
+			cmd.Env = env
 			e = cmd.Run()
 			closeForwarded(cmd)
 			if e != nil {

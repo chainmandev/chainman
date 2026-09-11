@@ -63,13 +63,18 @@ def configuration(root):
                     "cleanup_children",
                     "timeout_seconds",
                     "shutdown_seconds",
+                    "wait_for_services",
                 }
             )
             if set(spec) - allowed:
                 raise ValueError(
                     f"Unknown fields in {section}.{key}: {', '.join(sorted(set(spec) - allowed))}"
                 )
-            commands(spec.get("commands"))
+            if section == "tasks" and spec.get("wait_for_services") is True:
+                if spec.get("commands", []) != []:
+                    commands(spec["commands"])
+            else:
+                commands(spec.get("commands"))
             names(spec.get("depends_on", []))
             tc.contained(root, spec.get("directory", "."))
             chainman.profile(
@@ -103,6 +108,8 @@ def configuration(root):
                 names(spec.get("services", []))
                 if type(spec.get("cleanup_children", False)) is not bool:
                     raise ValueError("cleanup_children must be a boolean")
+                if type(spec.get("wait_for_services", False)) is not bool:
+                    raise ValueError("wait_for_services must be a boolean")
                 for field, default, lower, upper in (
                     ("timeout_seconds", 0, 0, 86400),
                     ("shutdown_seconds", 10, 1, 300),
@@ -113,6 +120,11 @@ def configuration(root):
         order(entries, list(entries))
     for spec in cfg.get("tasks", {}).values():
         order(cfg.get("setup", {}), spec.get("setup", []))
+    for key, spec in cfg.get("tasks", {}).items():
+        if spec.get("wait_for_services") and not any(
+            cfg["tasks"][name].get("services") for name in order(cfg["tasks"], [key])
+        ):
+            raise ValueError("wait_for_services requires a service-bearing task")
     return cfg
 
 
@@ -261,11 +273,16 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                     "profile", cfg.get("project", {}).get("default_profile", "default")
                 )
                 with tc.compiler_cache(profile, env, root) as selected:
-                    arguments = [list(argv) for argv in spec["commands"]]
-                    if key == action:
+                    arguments = [list(argv) for argv in spec.get("commands", [])]
+                    if key == action and extra and not arguments:
+                        raise ValueError(
+                            "A service-wait task without commands takes no arguments"
+                        )
+                    if key == action and arguments:
                         arguments[-1] += extra
-                    if spec.get("cleanup_children", False) or spec.get(
-                        "timeout_seconds", 0
+                    if arguments and (
+                        spec.get("cleanup_children", False)
+                        or spec.get("timeout_seconds", 0)
                     ):
                         import native_tasks
 
@@ -278,19 +295,35 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                                 cwd=tc.contained(root, spec.get("directory", ".")),
                                 pass_fds=descriptors,
                             )
-                        continue
-                    for index, argv in enumerate(spec["commands"]):
-                        suffix = (
-                            extra
-                            if key == action and index == len(spec["commands"]) - 1
-                            else []
-                        )
-                        chainman.execute(
-                            root,
-                            profile,
-                            [*argv, *suffix],
-                            env=selected,
-                            cwd=tc.contained(root, spec.get("directory", ".")),
-                            pass_fds=descriptors,
-                        )
+                    else:
+                        for argv in arguments:
+                            chainman.execute(
+                                root,
+                                profile,
+                                argv,
+                                env=selected,
+                                cwd=tc.contained(root, spec.get("directory", ".")),
+                                pass_fds=descriptors,
+                            )
+                    if spec.get("wait_for_services", False):
+                        wait_for_services()
     return 0
+
+
+def wait_for_services():
+    """Retain project/setup leases while the host observes backend availability."""
+    import signal
+
+    def stopped(number, _frame):
+        raise SystemExit(128 + number)
+
+    previous = {
+        number: signal.signal(number, stopped)
+        for number in (signal.SIGINT, signal.SIGTERM)
+    }
+    try:
+        while True:
+            signal.pause()
+    finally:
+        for number, handler in previous.items():
+            signal.signal(number, handler)

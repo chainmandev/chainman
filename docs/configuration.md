@@ -230,6 +230,26 @@ is killed. After an abrupt controller failure, explicit stop recovers owned
 process groups and labeled containers; it never signals an unrelated reused PID.
 Project containers receive neither controller state nor an engine socket.
 
+For a foreground development stack, declare `wait_for_services = true` on its
+task. `commands` may be omitted, or can run application preparation after services
+are ready. The task then keeps its setup and service leases until interrupted,
+explicitly stopped, or a selected service/controller fails. `services-stop` ends
+that waiting task successfully; a service failure cancels it with a nonzero exit.
+Inspection and stop still work with broken project configuration. For example:
+
+```toml
+[tasks.dev]
+services = ["server", "frontend"]
+wait_for_services = true
+```
+
+Service-bearing task commands also run under the native process-group owner, so
+cancelling the client cleans up its foreground command descendants. The native
+anchor retains service descriptors across Nix entry; container ownership receipts
+cover a surviving daemon-side task as well. Waiting tasks report the log path when
+services are ready. `services-up` starts the services and setup only, without
+running the task's application preparation commands.
+
 Task leases also record the task process birth identity and, in container mode,
 its labeled container. They survive shells that close inherited descriptors and
 the death of a host engine client while its task container continues running.
