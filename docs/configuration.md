@@ -176,6 +176,12 @@ of the owned process group. Commands must not detach into another session.
 Setup and operation leases survive the extra process boundary and remain held by
 the command's identity anchor if its caller dies.
 
+An optional `timeout_env = "APP_TEST_TIMEOUT_SECONDS"` selects an explicit caller
+override for that task's deadline. It resolves through the same environment
+precedence as the command and requires an integer from 1 to 86400. An unset
+variable retains the declared `timeout_seconds`; malformed overrides fail before
+the task starts. Declare the variable in `environment.pass` for container callers.
+
 This option materializes only the native ownership helper in the selected host or
 container environment. It does not start Process Compose, require a host engine
 adapter, or fetch the service/watch backend binaries. Ordinary finite tasks omit
@@ -333,3 +339,56 @@ never adopts or deletes older project volumes merely because their names look
 similar. Image-specific UIDs remain declarations: for example, the qualified
 Postgres 18 image runs as `999:999` with all capabilities dropped, using the engine's
 normal image-to-volume initialization without a privileged preparation container.
+
+Project environment handling is shared by tasks, services and direct execution:
+
+```toml
+[environment]
+pass = ["APP_*", "CI"]
+files = [
+  { path = "environments/local.env" },
+  { path = "environments/images.env", required = true, override = true },
+]
+[environment.defaults]
+APP_HOST = "{host}"
+APP_BIND = "{bind}"
+[environment.values]
+APP_ROOT = "{root}"
+APP_TOOL_CACHE = "{cache}/app-sdk"
+[environment.modes.container-nix.values]
+APP_CONTAINERIZED = "1"
+```
+
+Files contain literal `NAME=value` lines, blank lines and comments. Quotes,
+dollar expressions and braces in file values are retained literally; files are
+never sourced as shell programs. Duplicate names, invalid names, missing required
+files and paths escaping the project fail. Ordered files fill unset variables;
+`override = true` explicitly makes that file authoritative. Defaults then fill
+remaining unset names, with mode defaults overriding project defaults. Project
+values, mode values, profile environment and task/service environment apply in
+that order. Existing explicit caller values therefore beat defaults, while fixed
+values deliberately beat callers. Managed runtime and compiler ownership variables
+cannot be replaced through these declarations.
+
+Declared TOML values support `{root}`, `{cache}` (shared download cache), `{work}`
+(the selected build context), `{host}`, `{bind}` and `{env:VARIABLE}` references.
+References within a table resolve independently of key order; missing references
+and cycles fail. `{host}` is loopback in host mode and `host.docker.internal` in
+container mode. `{bind}` is loopback in host mode and `0.0.0.0` inside a container.
+Use `container.host_access = true` to add the host gateway alias when a project
+container needs a declared host service. It does not mount an engine socket.
+
+Each task or command service may have its own `transport` table with `ports`,
+`mounts` and `host_access`. Port mappings explicitly bind host loopback. These
+options apply only to that task's or service's Nix container; a verification task
+does not inherit a frontend service's published ports. Data containers use their
+own `container` declaration instead. Project-wide container options remain additive.
+
+Controller planning receives host environment as bounded NUL-separated data in its
+private temporary export directory. It selects only `environment.pass` matches;
+those values are never installed in the trusted planner's process environment.
+Effective project values affect worktree service compatibility, and resolved data
+container values affect shared resource compatibility. Environment-file bytes also
+participate in the planning/execution guard. Status and stop remain independent of
+current environment-file validity. Plans containing service credentials stay in the
+user's private host state outside project-container mounts.

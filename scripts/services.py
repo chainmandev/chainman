@@ -12,6 +12,7 @@ import subprocess
 import chainman
 import toolchain as tc
 import workflows
+import project_environment
 
 
 def volume_compatibility(root, volume):
@@ -79,12 +80,18 @@ def declarations(root, cfg):
             "setup",
             "watch",
             "scope",
+            "transport",
         }
         if set(spec) - allowed:
             raise ValueError(f"Unknown service fields: {sorted(set(spec) - allowed)}")
         if ("command" in spec) == ("container" in spec):
             raise ValueError(
                 "A service requires exactly one command or container declaration"
+            )
+        project_environment.transport(spec.get("transport", {}))
+        if "container" in spec and spec.get("transport"):
+            raise ValueError(
+                "Data containers declare ports and volumes in their container table"
             )
         scope = spec.get("scope", "worktree")
         if scope not in {"worktree", "repository"}:
@@ -97,7 +104,10 @@ def declarations(root, cfg):
                 raise ValueError(
                     "Repository services require self-contained data containers"
                 )
-            if "{root}" in json.dumps(spec):
+            if any(
+                binding in json.dumps(spec)
+                for binding in ("{root}", "{work}", "{cache}", "{host}", "{bind}")
+            ):
                 raise ValueError("Repository services cannot bind a worktree path")
         if "command" in spec:
             workflows.commands([spec["command"]])
@@ -197,22 +207,8 @@ def declarations(root, cfg):
     return entries
 
 
-def literal_environment(values, root):
-    import re
-
-    if not isinstance(values, dict):
-        raise ValueError("Service environment must be a table")
-    result = {}
-    for key, value in values.items():
-        if (
-            not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
-            or key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
-            or not isinstance(value, str)
-            or "\0" in value
-        ):
-            raise ValueError("Invalid service environment variable")
-        result[key] = value.replace("{root}", str(root))
-    return result
+def literal_environment(values, root, env=None):
+    return project_environment.expand(values, root, os.environ if env is None else env)
 
 
 def config_fingerprint(root, cfg):
@@ -238,6 +234,7 @@ def config_fingerprint(root, cfg):
         cfg.get("environment", {}),
         cfg.get("container", {}),
         cfg.get("tasks", {}),
+        project_environment.file_fingerprint(root, cfg.get("environment", {})),
     ]
     material += [
         chainman.profile_fingerprint(root, name, chainman.profile(root, name)[0])
@@ -352,6 +349,19 @@ def export(root, arguments):
     if action in {"services-status", "services-stop"}:
         return 0
     cfg = workflows.configuration(root)
+    input_env = project_environment.host_inputs(destination, cfg.get("environment", {}))
+    planning_env = dict(input_env, CHAINMAN_MODE=mode)
+    for name in ("TOOLCHAIN_DOWNLOAD_CACHE", "XDG_CACHE_HOME"):
+        if name in os.environ:
+            planning_env[name] = os.environ[name]
+    planning_env = project_environment.apply(
+        root, cfg.get("environment", {}), planning_env
+    )
+    forwarded = {
+        name: value
+        for name, value in planning_env.items()
+        if not name.startswith(("CHAINMAN_", "TOOLCHAIN_")) and name != "XDG_CACHE_HOME"
+    }
     declared = declarations(root, cfg)
     fingerprint = config_fingerprint(root, cfg)
     task = (
@@ -390,7 +400,14 @@ def export(root, arguments):
         )
         owner = secrets.token_hex(16)
         container_name = "chainman-" + service_key + "-" + name
-        env = literal_environment(spec.get("environment", {}), root)
+        env = (
+            dict(
+                forwarded,
+                **literal_environment(spec.get("environment", {}), root, planning_env),
+            )
+            if name not in shared_names
+            else {}
+        )
         if "container" in spec:
             if not engine:
                 raise ValueError(
@@ -420,7 +437,7 @@ def export(root, arguments):
                     raise ValueError("Service ports must explicitly bind loopback")
                 argv += ["--publish", port]
             for key_env, value in literal_environment(
-                item.get("environment", {}), root
+                item.get("environment", {}), root, planning_env
             ).items():
                 argv += ["--env", key_env + "=" + value]
             for volume in item.get("volumes", []):
@@ -567,15 +584,19 @@ def export(root, arguments):
             path.parent.name.replace(".", "-"): path.read_text()
             for path in (package / "share/licenses").glob("*/LICENSE")
         },
-        "fingerprint": fingerprint,
+        "fingerprint": hashlib.sha256(
+            json.dumps([fingerprint, forwarded], sort_keys=True).encode()
+        ).hexdigest(),
         "services": {
             name: spec for name, spec in prepared.items() if name not in shared_names
         },
         "volumes": [volume for volume in volumes.values() if volume["scope"] == key],
         "requested": [name for name in closure if name not in shared_names],
-        "prepare": command([launcher, "_workflow-prepare", task, fingerprint], root),
+        "prepare": command(
+            [launcher, "_workflow-prepare", task, fingerprint], root, forwarded
+        ),
         "task": command(
-            [launcher, "_workflow-task", task, fingerprint, *task_args], root
+            [launcher, "_workflow-task", task, fingerprint, *task_args], root, forwarded
         ),
         "wait_for_services": any(
             cfg["tasks"][name].get("wait_for_services", False) for name in task_order
@@ -594,7 +615,22 @@ def export(root, arguments):
                 "state": str(Path(host_state) / shared_key),
                 "backend": plan["backend"],
                 "licenses": plan["licenses"],
-                "fingerprint": shared_fingerprint,
+                "fingerprint": hashlib.sha256(
+                    json.dumps(
+                        [
+                            shared_fingerprint,
+                            {
+                                name: literal_environment(
+                                    declared[name]["container"].get("environment", {}),
+                                    root,
+                                    planning_env,
+                                )
+                                for name in shared_names
+                            },
+                        ],
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest(),
                 "services": {
                     name: spec
                     for name, spec in prepared.items()
@@ -680,6 +716,7 @@ def execute_internal(root, action, extra):
                     profile,
                     spec["command"],
                     env=selected,
+                    overrides=spec.get("environment", {}),
                     cwd=tc.contained(root, spec.get("directory", ".")),
                     pass_fds=descriptors,
                     check=False,

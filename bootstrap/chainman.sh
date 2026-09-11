@@ -27,6 +27,12 @@ control_dispatch() {
     # It builds verified tooling and emits JSON; no consumer code executes there.
     control_output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-control.XXXXXXXX")
     trap 'rm -rf -- "$control_output"' EXIT HUP INT TERM
+    # Serialized data, never installed in the planner process environment. The
+    # trusted planner selects only declared environment.pass names from it.
+    (
+        umask 077
+        env -0 > "$control_output/host-environment"
+    )
     case "$(uname -s):$(uname -m)" in
         Linux:aarch64 | Linux:arm64) control_target=linux-arm64 ;;
         Linux:x86_64) control_target=linux-amd64 ;;
@@ -45,7 +51,7 @@ control_dispatch() {
         fi
     done
     printf '%s\n%s\n' --mount "type=bind,src=$control_output,dst=$control_output" > "$control_output/mounts"
-    CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts "$self" _control-export "$control_output" "$control_target" \
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts "$self" _control-export "$control_output" "$control_target" \
         "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" "$control_engine" "$self" "$@"
     case "$1" in
         services-status | services-stop)

@@ -104,6 +104,16 @@ commands=[["python3","task.py"]]
         self.assertEqual(result.stdout.strip(), "42")
         self.assertFalse((self.root / "installed").exists())
 
+    def test_invalid_deadline_override_refuses_to_start_the_task(self):
+        self.body += '\n[tasks.bounded]\ntimeout_seconds=600\ntimeout_env="APP_TEST_TIMEOUT"\ncommands=[["python3","-c","from pathlib import Path; Path(\\"started\\").touch()"]]\n'
+        self.write_config()
+        for value in ("0", "-1", "1.5", "86401", "unlimited"):
+            with patch.dict(os.environ, APP_TEST_TIMEOUT=value):
+                result = self.run_cli("run", "bounded")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("APP_TEST_TIMEOUT must be an integer", result.stderr)
+            self.assertFalse((self.root / "started").exists())
+
     def test_reinstall_is_refused_while_another_task_uses_outputs(self):
         workflows.run(self.root, "build", [])
         cfg = workflows.configuration(self.root)

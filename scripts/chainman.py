@@ -39,6 +39,8 @@ def flake_reference(root: Path, location: Path, attribute: str) -> str:
             tracked = subprocess.run(
                 [
                     "git",
+                    "-c",
+                    "core.fsmonitor=false",
                     "--literal-pathspecs",
                     "-C",
                     str(root),
@@ -124,6 +126,7 @@ def execute(
     argv: list[str],
     *,
     env=None,
+    overrides=None,
     check=True,
     cwd: Path | None = None,
     **kwargs,
@@ -146,25 +149,13 @@ def execute(
         CHAINMAN_RUNTIME=str(RUNTIME),
         TOOLCHAIN_MODE=selected.get("CHAINMAN_MODE", "host-nix"),
     )
-    for values in (
-        configuration(root).get("environment", {}).get("values", {}),
-        spec.get("environment", {}),
-    ):
-        expanded = {}
-        for key, value in values.items():
-            if key == "CHAINMAN_TEMP_BASE":
-                raise ValueError(
-                    "Configure TMPDIR instead of internal temporary routing"
-                )
-            if key == "CHAINMAN_RUNTIME_NIX_BIN":
-                raise ValueError("Cannot override the internal runtime Nix binding")
-            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or not isinstance(
-                value, str
-            ):
-                raise ValueError(
-                    "Environment entries require variable names and strings"
-                )
-            expanded[key] = value.replace("{root}", str(root))
+    import project_environment
+
+    selected = project_environment.apply(
+        root, configuration(root).get("environment", {}), selected
+    )
+    for values in (spec.get("environment", {}), overrides or {}):
+        expanded = project_environment.expand(values, root, selected)
         selected.update(expanded)
         tc.pnpm_store_environment(selected, expanded)
     for key in configuration(root).get("environment", {}).get("unset", []):

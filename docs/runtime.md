@@ -4,8 +4,8 @@ For an adopted repository, project shells use the local Git flake source: tracke
 working-tree edits are visible, while untracked package downloads and build caches
 stay out of the Nix store. Add new flake inputs to Git before importing them. Copies
 without their own Git repository use a path source and never borrow a parent
-repository as their project. Installed runtimes execute from verified project-local
-source generations, separate from project code and rehashed before each launch.
+repository as their project. Installed runtimes execute from verified Nix-store
+sources, separate from project code and rehashed before each launch.
 
 The checked-in launcher, companion Nix expression, lock and selected Nix/container
 bootstrap are the trust base. The lock identifies a version and source revision,

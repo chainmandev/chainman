@@ -11,6 +11,7 @@ import re
 
 import chainman
 import toolchain as tc
+import project_environment
 
 
 def name(value):
@@ -62,14 +63,21 @@ def configuration(root):
                     "services",
                     "cleanup_children",
                     "timeout_seconds",
+                    "timeout_env",
                     "shutdown_seconds",
                     "wait_for_services",
+                    "environment",
+                    "transport",
                 }
             )
             if set(spec) - allowed:
                 raise ValueError(
                     f"Unknown fields in {section}.{key}: {', '.join(sorted(set(spec) - allowed))}"
                 )
+            if section == "tasks":
+                project_environment.transport(spec.get("transport", {}))
+                if "timeout_env" in spec:
+                    project_environment.variable(spec["timeout_env"])
             if section == "tasks" and spec.get("wait_for_services") is True:
                 if spec.get("commands", []) != []:
                     commands(spec["commands"])
@@ -268,7 +276,23 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
         )
         with setup_use(root, cfg, groups, env) as descriptors:
             for key in task_names:
-                spec = cfg["tasks"][key]
+                spec = dict(cfg["tasks"][key])
+                if "timeout_env" in spec:
+                    configured = project_environment.apply(
+                        root, cfg.get("environment", {}), env
+                    )
+                    configured.update(
+                        project_environment.expand(
+                            spec.get("environment", {}), root, configured
+                        )
+                    )
+                    value = configured.get(spec["timeout_env"])
+                    if value is not None:
+                        if not value.isdecimal() or not 1 <= int(value) <= 86400:
+                            raise ValueError(
+                                f"{spec['timeout_env']} must be an integer between 1 and 86400"
+                            )
+                        spec["timeout_seconds"] = int(value)
                 profile = spec.get(
                     "profile", cfg.get("project", {}).get("default_profile", "default")
                 )
@@ -292,6 +316,7 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                                 profile,
                                 argv,
                                 env=selected,
+                                overrides=spec.get("environment", {}),
                                 cwd=tc.contained(root, spec.get("directory", ".")),
                                 pass_fds=descriptors,
                             )
@@ -302,6 +327,7 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                                 profile,
                                 argv,
                                 env=selected,
+                                overrides=spec.get("environment", {}),
                                 cwd=tc.contained(root, spec.get("directory", ".")),
                                 pass_fds=descriptors,
                             )

@@ -82,14 +82,35 @@ let
         "--mount"
         "type=bind,src=${absolute},dst=${target}${if item.read_only or true then ",readonly" else ""}"
       ];
-  options =
-    b.concatMap pattern (config.environment.pass or [ ])
-    ++ b.concatMap mount (config.container.mounts or [ ])
+  request = b.getEnv "CHAINMAN_REQUEST_ACTION";
+  requestedName = b.getEnv "CHAINMAN_REQUEST_TASK";
+  transport =
+    if request == "_workflow-service" then
+      config.services.${requestedName}.transport or { }
+    else if request == "_workflow-task" || request == "run" then
+      config.tasks.${requestedName}.transport or { }
+    else
+      config.tasks.${request}.transport or { };
+  containerOptions =
+    item:
+    b.concatMap mount (item.mounts or [ ])
     ++ b.concatMap (port: [
       "--publish"
       (line port)
-    ]) (config.container.ports or [ ]);
-  request = b.getEnv "CHAINMAN_REQUEST_ACTION";
+    ]) (item.ports or [ ])
+    ++ (
+      if item.host_access or false then
+        [
+          "--add-host"
+          "host.docker.internal:host-gateway"
+        ]
+      else
+        [ ]
+    );
+  options =
+    b.concatMap pattern (config.environment.pass or [ ])
+    ++ containerOptions (config.container or { })
+    ++ containerOptions transport;
   requestedTask = if request == "run" then b.getEnv "CHAINMAN_REQUEST_TASK" else request;
   hasServices =
     visited: name:
