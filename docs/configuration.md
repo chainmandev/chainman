@@ -156,6 +156,31 @@ ensures one group; `setup` ensures all declared groups. Setup groups also suppor
 `depends_on` and `profile`. Task and setup dependency cycles or unknown references
 fail before execution. Tasks request setup explicitly; inspection tasks can omit it.
 
+Finite tasks can opt into owned child cleanup and a deadline:
+
+```toml
+[tasks.desktop-e2e]
+setup = ["javascript"]
+commands = [["./scripts/desktop-e2e.sh"]]
+cleanup_children = true
+timeout_seconds = 600
+shutdown_seconds = 10
+```
+
+The timeout applies to that task's complete command sequence after its profile has
+been realized. Dependency tasks have their own declared lifetimes. Commands run
+in order; the first failure stops the sequence and retains its exit status.
+A timeout implies child cleanup and returns 124. Cleanup also runs after success
+or cancellation, with a bounded grace period before terminating remaining members
+of the owned process group. Commands must not detach into another session.
+Setup and operation leases survive the extra process boundary and remain held by
+the command's identity anchor if its caller dies.
+
+This option materializes only the native ownership helper in the selected host or
+container environment. It does not start Process Compose, require a host engine
+adapter, or fetch the service/watch backend binaries. Ordinary finite tasks omit
+the option and keep the existing lightweight path.
+
 Installed artifacts have shared use leases for task lifetimes. Reinstallation takes
 exclusive access and fails visibly while another task uses them. Child commands
 inherit those leases. Missing outputs or changed fingerprints require setup again;

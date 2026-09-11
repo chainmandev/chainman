@@ -55,7 +55,15 @@ def configuration(root):
             if not isinstance(spec, dict):
                 raise ValueError(f"{section}.{key} must be a declaration")
             allowed = {"commands", "profile", "directory", "depends_on"} | (
-                {"inputs", "artifacts"} if section == "setup" else {"setup", "services"}
+                {"inputs", "artifacts"}
+                if section == "setup"
+                else {
+                    "setup",
+                    "services",
+                    "cleanup_children",
+                    "timeout_seconds",
+                    "shutdown_seconds",
+                }
             )
             if set(spec) - allowed:
                 raise ValueError(
@@ -93,6 +101,15 @@ def configuration(root):
             else:
                 names(spec.get("setup", []))
                 names(spec.get("services", []))
+                if type(spec.get("cleanup_children", False)) is not bool:
+                    raise ValueError("cleanup_children must be a boolean")
+                for field, default, lower, upper in (
+                    ("timeout_seconds", 0, 0, 86400),
+                    ("shutdown_seconds", 10, 1, 300),
+                ):
+                    value = spec.get(field, default)
+                    if type(value) is not int or not lower <= value <= upper:
+                        raise ValueError(f"Invalid task {field}")
         order(entries, list(entries))
     for spec in cfg.get("tasks", {}).values():
         order(cfg.get("setup", {}), spec.get("setup", []))
@@ -244,6 +261,24 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                     "profile", cfg.get("project", {}).get("default_profile", "default")
                 )
                 with tc.compiler_cache(profile, env, root) as selected:
+                    arguments = [list(argv) for argv in spec["commands"]]
+                    if key == action:
+                        arguments[-1] += extra
+                    if spec.get("cleanup_children", False) or spec.get(
+                        "timeout_seconds", 0
+                    ):
+                        import native_tasks
+
+                        with native_tasks.command(root, arguments, spec) as argv:
+                            chainman.execute(
+                                root,
+                                profile,
+                                argv,
+                                env=selected,
+                                cwd=tc.contained(root, spec.get("directory", ".")),
+                                pass_fds=descriptors,
+                            )
+                        continue
                     for index, argv in enumerate(spec["commands"]):
                         suffix = (
                             extra

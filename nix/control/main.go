@@ -40,8 +40,10 @@ type Service struct {
 	Restart      string   `json:"restart"`
 	Shutdown     int      `json:"shutdown_seconds"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
-	Container *Container `json:"container,omitempty"`
-	Watch     *Watch     `json:"watch,omitempty"`
+	Container     *Container `json:"container,omitempty"`
+	Watch         *Watch     `json:"watch,omitempty"`
+	Timeout       int        `json:"timeout_seconds,omitempty"`
+	ForwardLeases bool       `json:"forward_leases,omitempty"`
 }
 type Container struct {
 	Engine         string `json:"engine"`
@@ -955,6 +957,12 @@ func owned(state, name string, probe bool) int {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
 	}
+	if s.ForwardLeases {
+		if e = forwardLeases(cmd); e != nil {
+			return exitCode(e)
+		}
+		defer closeForwarded(cmd)
+	}
 	if probe {
 		return exitCode(cmd.Run())
 	}
@@ -991,8 +999,24 @@ func owned(state, name string, probe bool) int {
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
+	var timeout <-chan time.Time
+	if s.Timeout > 0 {
+		timer := time.NewTimer(time.Duration(s.Timeout) * time.Second)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+	timedOut := false
 	select {
 	case e = <-done:
+	case <-timeout:
+		timedOut = true
+		_ = syscall.Kill(-id.PID, syscall.SIGTERM)
+		select {
+		case e = <-done:
+		case <-time.After(time.Duration(s.Shutdown) * time.Second):
+			killMembers(id.PID, syscall.SIGKILL)
+			e = <-done
+		}
 	case sig := <-signals:
 		_ = syscall.Kill(-id.PID, sig.(syscall.Signal))
 		select {
@@ -1031,6 +1055,9 @@ func owned(state, name string, probe bool) int {
 		}
 	}
 	_ = os.Remove(path)
+	if timedOut {
+		return 124
+	}
 	return exitCode(e)
 }
 func killMembers(group int, sig syscall.Signal) {
@@ -1071,6 +1098,12 @@ func mainAction(args []string) (result int) {
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: chainman-control run|up PLAN; status|stop STATE")
 		return 2
+	}
+	if args[0] == "command" || args[0] == "sequence" {
+		if len(args) != 2 {
+			return 2
+		}
+		return taskCommand(args[0], args[1])
 	}
 	if args[0] == "build" || args[0] == "built" {
 		if len(args) != 3 || !validName.MatchString(args[2]) {

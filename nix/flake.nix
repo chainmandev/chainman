@@ -159,11 +159,20 @@
           just = pkgs.just;
         }
         // builtins.listToAttrs (
-          map
-            (target: {
-              name = "control-${target}";
-              value = import ./control.nix { inherit pkgs target; };
-            })
+          builtins.concatMap
+            (target: [
+              {
+                name = "control-${target}";
+                value = import ./control.nix { inherit pkgs target; };
+              }
+              {
+                name = "task-${target}";
+                value = import ./control.nix {
+                  inherit pkgs target;
+                  withBackends = false;
+                };
+              }
+            ])
             [
               "linux-arm64"
               "linux-amd64"

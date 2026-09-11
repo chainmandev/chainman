@@ -1,6 +1,7 @@
 """Native ownership contracts against the actual Process Compose backend."""
 
 import json
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -82,6 +83,159 @@ while True:time.sleep(.1)
         if check is not None:
             self.assertEqual(result.returncode, check, result.stdout + result.stderr)
         return result
+
+    def run_commands(self, commands, timeout=0):
+        path = self.base / "commands.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "commands": [self.command(argv) for argv in commands],
+                    "timeout_seconds": timeout,
+                    "shutdown_seconds": 1,
+                }
+            )
+        )
+        return subprocess.run(
+            [CONTROL, "command", str(path)], capture_output=True, text=True, timeout=15
+        )
+
+    def test_owned_command_sequence_preserves_arguments_and_failure_status(self):
+        result = self.run_commands(
+            [
+                [
+                    sys.executable,
+                    "-c",
+                    "import json,sys; from pathlib import Path; Path('args').write_text(json.dumps(sys.argv[1:]))",
+                    "two words",
+                    "",
+                    "$(literal)",
+                ],
+                [sys.executable, "-c", "raise SystemExit(7)"],
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('unexpected').touch()",
+                ],
+            ]
+        )
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertEqual(
+            json.loads((self.root / "args").read_text()),
+            ["two words", "", "$(literal)"],
+        )
+        self.assertFalse((self.root / "unexpected").exists())
+
+    def test_owned_command_cleans_descendants_after_success(self):
+        result = self.run_commands(
+            [
+                [
+                    sys.executable,
+                    "-c",
+                    "import subprocess,sys; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(120)']); Path('descendant').write_text(str(p.pid))",
+                ]
+            ]
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.alive(int((self.root / "descendant").read_text())))
+
+    def test_owned_command_timeout_kills_signal_resistant_descendants(self):
+        code = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('timeout-pid').write_text(str(os.getpid())); time.sleep(120)"
+        started = time.monotonic()
+        result = self.run_commands([[sys.executable, "-c", code]], timeout=1)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertLess(time.monotonic() - started, 6)
+        self.assertFalse(self.alive(int((self.root / "timeout-pid").read_text())))
+
+    def test_owned_command_retains_setup_lease_after_client_is_killed(self):
+        path = self.base / "commands.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "commands": [
+                        self.command(
+                            [
+                                sys.executable,
+                                "-c",
+                                "import time; from pathlib import Path; Path('task-ready').touch(); time.sleep(2)",
+                            ]
+                        )
+                    ],
+                    "timeout_seconds": 10,
+                    "shutdown_seconds": 1,
+                }
+            )
+        )
+        lock = self.base / "setup.lock"
+        descriptor = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+        }
+        env.update(
+            TOOLCHAIN_LOCK_FD=str(descriptor),
+            TOOLCHAIN_OPERATION_ID="123456789abc",
+            TOOLCHAIN_ANCESTOR_FDS="[]",
+        )
+        parent = subprocess.Popen(
+            [CONTROL, "command", str(path)],
+            pass_fds=(descriptor,),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.wait_file(self.root / "task-ready")
+            os.close(descriptor)
+            descriptor = None
+            parent.kill()
+            parent.wait(timeout=5)
+            with lock.open("rb") as observer:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(observer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+                def released():
+                    try:
+                        fcntl.flock(observer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        return True
+                    except BlockingIOError:
+                        return False
+
+                self.wait_until(released)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+
+    def test_owned_command_cancellation_cleans_signal_resistant_child(self):
+        path = self.base / "commands.json"
+        code = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('cancel-pid').write_text(str(os.getpid())); time.sleep(120)"
+        path.write_text(
+            json.dumps(
+                {
+                    "commands": [self.command([sys.executable, "-c", code])],
+                    "timeout_seconds": 0,
+                    "shutdown_seconds": 1,
+                }
+            )
+        )
+        parent = subprocess.Popen(
+            [CONTROL, "command", str(path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            self.wait_file(self.root / "cancel-pid")
+            parent.terminate()
+            self.assertNotEqual(parent.wait(timeout=6), 0)
+            self.assertFalse(self.alive(int((self.root / "cancel-pid").read_text())))
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
 
     def cleanup(self):
         result = self.run_control("stop")
