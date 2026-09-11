@@ -69,6 +69,8 @@ type Plan struct {
 	WaitForServices bool               `json:"wait_for_services,omitempty"`
 	OwnTask         bool               `json:"own_task,omitempty"`
 	TaskShutdown    int                `json:"task_shutdown_seconds,omitempty"`
+	Resources       []Plan             `json:"resources,omitempty"`
+	Generation      string             `json:"generation,omitempty"`
 }
 type Identity struct {
 	PID   int    `json:"pid"`
@@ -83,6 +85,7 @@ type Lease struct {
 	Persistent bool       `json:"persistent"`
 	Container  *Container `json:"container,omitempty"`
 	Task       *Identity  `json:"task,omitempty"`
+	Parent     *LeaseRef  `json:"parent,omitempty"`
 }
 type Process struct {
 	Name    string `json:"name"`
@@ -277,6 +280,9 @@ func socketPath(p Plan) (string, error) {
 	return filepath.Join(directory, hex.EncodeToString(key[:12])+".sock"), nil
 }
 func states(p Plan) ([]Process, error) {
+	if len(p.Services) == 0 {
+		return []Process{}, nil
+	}
 	b, e := backend(p, "process", "list", "-o", "json")
 	if e != nil {
 		return nil, e
@@ -299,6 +305,17 @@ func validate(p Plan) error {
 	}
 	if len(p.Services) > 128 {
 		return fmt.Errorf("too many services")
+	}
+	if len(p.Resources) > 1 {
+		return fmt.Errorf("only one repository resource pool is supported")
+	}
+	for _, resource := range p.Resources {
+		if len(resource.Resources) > 0 || resource.State == p.State || filepath.Dir(resource.State) != filepath.Dir(p.State) {
+			return fmt.Errorf("invalid repository resource scope")
+		}
+		if e := validate(resource); e != nil {
+			return e
+		}
 	}
 	_, e := ordered(p, p.Requested)
 	if e != nil {
@@ -369,7 +386,7 @@ func ordered(p Plan, names []string) ([]string, error) {
 }
 func configuration(p Plan, self string) error {
 	processes := map[string]any{}
-	generation := token()
+	generation := p.Generation
 	for n, s := range p.Services {
 		s.Generation = generation
 		if s.Watch != nil {
@@ -419,6 +436,12 @@ func configuration(p Plan, self string) error {
 	})
 }
 func start(p Plan, self string) error {
+	admission, e := locked(filepath.Join(p.State, "controller.admission"), false)
+	if e != nil {
+		return e
+	}
+	defer admission.Close()
+	p.Generation = token()
 	if e := os.Remove(filepath.Join(p.State, "stop-request.json")); e != nil && !os.IsNotExist(e) {
 		return e
 	}
@@ -428,12 +451,13 @@ func start(p Plan, self string) error {
 	if e := atomic(filepath.Join(p.State, "plan.json"), p); e != nil {
 		return e
 	}
+	admission.Close()
 	log, e := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if e != nil {
 		return e
 	}
 	defer log.Close()
-	cmd := exec.Command(self, "controller", filepath.Join(p.State, "plan.json"))
+	cmd := exec.Command(self, "controller", filepath.Join(p.State, "plan.json"), p.Generation)
 	cmd.Dir = p.State
 	cmd.Env = append(os.Environ(), "CHAINMAN_CONTROL_EXECUTABLE="+self, "CHAINMAN_CONTROL_STATE="+p.State)
 	cmd.Stdout = log
@@ -519,6 +543,22 @@ func active(p Plan) (map[string]bool, error) {
 		var l Lease
 		if e = readJSON(path, &l); e != nil {
 			return nil, e
+		}
+		if l.Parent != nil {
+			present, err := parentAlive(p, *l.Parent)
+			if err != nil {
+				return nil, err
+			}
+			if !present {
+				if e = os.Remove(path); e != nil {
+					return nil, e
+				}
+				continue
+			}
+			for _, n := range l.Services {
+				result[n] = true
+			}
+			continue
 		}
 		f, err := locked(path, true)
 		if err == nil {
@@ -731,15 +771,21 @@ func stopOwner(p Plan, n string) error {
 	return e
 }
 func releaseUnused(p Plan, force bool) error {
-	if force {
-		if e := atomic(filepath.Join(p.State, "stop-request.json"), true); e != nil {
-			return e
-		}
-	}
 	used := map[string]bool{}
 	var e error
 	if !force {
 		used, e = active(p)
+		if e != nil {
+			return e
+		}
+	}
+	if force || (len(used) == 0 && !hasLeases(p)) {
+		admission, e := locked(filepath.Join(p.State, "controller.admission"), false)
+		if e != nil {
+			return e
+		}
+		e = atomic(filepath.Join(p.State, "stop-request.json"), true)
+		admission.Close()
 		if e != nil {
 			return e
 		}
@@ -797,9 +843,9 @@ func releaseUnused(p Plan, force bool) error {
 			}
 		}
 	}
-	return nil
+	return pruneResources(p)
 }
-func acquire(p Plan, persistent bool) (*os.File, string, error) {
+func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error) {
 	if e := bindEngines(&p); e != nil {
 		return nil, "", e
 	}
@@ -823,6 +869,7 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 	}
 	var previous Plan
 	previousUsers := map[string]bool{}
+	previousClients := false
 	e = readJSON(filepath.Join(p.State, "plan.json"), &previous)
 	if e == nil {
 		if previous.State != p.State || previous.Root != p.Root {
@@ -833,16 +880,17 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
-		if len(used) > 0 && previous.Fingerprint != p.Fingerprint {
+		previousClients = len(used) > 0 || hasLeases(previous)
+		if previousClients && previous.Fingerprint != p.Fingerprint {
 			return nil, "", fmt.Errorf("active services have incompatible inputs; stop their users before replacing them")
 		}
-		if len(used) == 0 && previous.Fingerprint != p.Fingerprint {
+		if !previousClients && previous.Fingerprint != p.Fingerprint {
 			if e = releaseUnused(previous, true); e != nil {
 				return nil, "", e
 			}
 		}
-		if !controller(previous).alive() {
-			if len(used) > 0 {
+		if len(previous.Services) > 0 && !controller(previous).alive() {
+			if previousClients {
 				return nil, "", fmt.Errorf("service controller crashed while clients still hold leases; stop/status can recover it")
 			}
 			if e = releaseUnused(previous, true); e != nil {
@@ -871,11 +919,17 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 			}
 		}
 	}
-	if e = ensureVolumes(needed, len(previousUsers) > 0); e != nil {
-		return nil, "", e
+	for _, volume := range needed {
+		inUse := false
+		for _, name := range volume.Services {
+			inUse = inUse || previousUsers[name]
+		}
+		if e = ensureVolumes([]Volume{volume}, inUse); e != nil {
+			return nil, "", e
+		}
 	}
 	leasePath := filepath.Join(p.State, token()+".lease")
-	if e = atomic(leasePath, Lease{Services: selected, Persistent: persistent, Container: p.TaskContainer}); e != nil {
+	if e = atomic(leasePath, Lease{Services: selected, Persistent: persistent, Container: p.TaskContainer, Parent: parent}); e != nil {
 		return nil, "", e
 	}
 	lease, e := locked(leasePath, false)
@@ -888,7 +942,31 @@ func acquire(p Plan, persistent bool) (*os.File, string, error) {
 		_ = releaseUnused(p, false)
 		return nil, "", err
 	}
-	if !controller(p).alive() {
+	// Persist resource intent before acquiring anything in another scope. Recovery
+	// can then reap its parent-linked claims even if this client dies during start.
+	if controller(p).alive() {
+		previous.Resources = mergeResources(previous.Resources, p.Resources)
+		if e = atomic(filepath.Join(p.State, "plan.json"), previous); e != nil {
+			return cleanup(e)
+		}
+	} else if e = atomic(filepath.Join(p.State, "plan.json"), p); e != nil {
+		return cleanup(e)
+	}
+	for _, resource := range p.Resources {
+		if len(resource.Requested) == 0 {
+			continue
+		}
+		claim, _, err := acquire(resource, false, &LeaseRef{State: p.State, File: filepath.Base(leasePath)})
+		if err != nil {
+			return cleanup(err)
+		}
+		claim.Close()
+	}
+	if len(p.Services) == 0 {
+		if e = os.Remove(filepath.Join(p.State, "stop-request.json")); e != nil && !os.IsNotExist(e) {
+			return cleanup(e)
+		}
+	} else if !controller(p).alive() {
 		if e = start(p, self); e != nil {
 			return cleanup(e)
 		}
@@ -1177,8 +1255,8 @@ func mainAction(args []string) (result int) {
 		}
 		return taskCommand(args[0], args[1])
 	}
-	if args[0] == "controller" && len(args) == 2 {
-		return controllerExec(args[1])
+	if args[0] == "controller" && len(args) == 3 {
+		return controllerExec(args[1], args[2])
 	}
 	if args[0] == "build" || args[0] == "built" {
 		if len(args) != 3 || !validName.MatchString(args[2]) {
@@ -1233,7 +1311,11 @@ func mainAction(args []string) (result int) {
 			return 1
 		}
 		ps, backendError := states(p)
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0})
+		resources, resourceError := resourceStatus(p)
+		if resourceError != nil {
+			return exitCode(resourceError)
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "resources": resources, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0})
 		return 0
 	}
 	if args[0] != "run" && args[0] != "up" {
@@ -1253,7 +1335,7 @@ func mainAction(args []string) (result int) {
 			return exitCode(e)
 		}
 	}
-	lease, _, e := acquire(p, args[0] == "up")
+	lease, _, e := acquire(p, args[0] == "up", nil)
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1

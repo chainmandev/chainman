@@ -68,6 +68,149 @@ while True:time.sleep(.1)
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
 
+    def shared_resource(self):
+        resource = json.loads(json.dumps(self.plan))
+        resource["state"] = str(self.base / "repository-state")
+        resource.pop("task")
+        self.plan["services"] = {}
+        self.plan["requested"] = []
+        self.plan["resources"] = [resource]
+        first = self.state
+        second = self.base / "second-worktree-state"
+        second.mkdir(mode=0o700)
+        self.addCleanup(
+            lambda: subprocess.run(
+                [CONTROL, "stop", str(second)], capture_output=True, timeout=30
+            )
+        )
+        self.addCleanup(
+            lambda: subprocess.run(
+                [CONTROL, "stop", str(first)], capture_output=True, timeout=30
+            )
+        )
+        return first, second, Path(resource["state"])
+
+    def select_scope(self, state):
+        self.state = state
+        self.plan["state"] = str(state)
+
+    def test_worktree_stop_releases_only_its_repository_claim(self):
+        first, second, shared = self.shared_resource()
+        self.run_control("up", check=0)
+        pid = int((self.root / "pid").read_text())
+        controller = (shared / "controller.json").read_bytes()
+        self.select_scope(second)
+        self.run_control("up", check=0)
+        self.assertEqual((shared / "controller.json").read_bytes(), controller)
+        self.select_scope(first)
+        self.run_control("stop", check=0)
+        self.assertTrue(self.alive(pid))
+        self.select_scope(second)
+        self.run_control("run", check=7)
+        self.assertTrue(self.alive(pid))
+        status = json.loads(self.run_control("status", check=0).stdout)
+        self.assertTrue(status["resources"][0]["running"])
+        self.run_control("stop", check=0)
+        self.wait_until(lambda: not self.alive(pid))
+
+    def test_incompatible_shared_inputs_refuse_while_another_worktree_uses_them(self):
+        first, second, _ = self.shared_resource()
+        self.run_control("up", check=0)
+        pid = int((self.root / "pid").read_text())
+        self.select_scope(second)
+        self.plan["resources"][0]["fingerprint"] = "changed-data"
+        result = self.run_control("up")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("incompatible", result.stderr)
+        self.assertTrue(self.alive(pid))
+        self.select_scope(first)
+        self.run_control("stop", check=0)
+        self.select_scope(second)
+        self.run_control("up", check=0)
+        self.run_control("stop", check=0)
+
+    def test_shared_resource_retains_surviving_tasks_parent_lease(self):
+        first, second, shared = self.shared_resource()
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import time; from pathlib import Path; Path('shared-task').touch(); time.sleep(3)",
+            ]
+        )
+        self.plan["own_task"] = True
+        self.plan["task_shutdown_seconds"] = 1
+        self.path.write_text(json.dumps(self.plan))
+        client = subprocess.Popen(
+            [CONTROL, "run", str(self.path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: client.poll() is None and client.kill())
+        self.wait_file(self.root / "shared-task")
+        pid = int((self.root / "pid").read_text())
+        client.kill()
+        client.wait(timeout=5)
+        self.select_scope(second)
+        self.plan["task"] = self.command([sys.executable, "-c", "raise SystemExit(7)"])
+        self.run_control("run", check=7)
+        self.assertTrue(self.alive(pid))
+        time.sleep(3)
+        self.run_control("run", check=7)
+        self.wait_until(lambda: not self.alive(pid))
+
+    def test_waiting_worktree_reports_shared_resource_failure(self):
+        _, _, shared = self.shared_resource()
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import time; from pathlib import Path; Path('shared-task').touch(); time.sleep(120)",
+            ]
+        )
+        self.plan.update(wait_for_services=True, own_task=True, task_shutdown_seconds=1)
+        self.path.write_text(json.dumps(self.plan))
+        client = subprocess.Popen(
+            [CONTROL, "run", str(self.path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: client.poll() is None and client.kill())
+        self.wait_file(self.root / "shared-task")
+        os.kill(int((self.root / "pid").read_text()), signal.SIGTERM)
+        _, error = client.communicate(timeout=15)
+        self.assertEqual(client.returncode, 1, error)
+        self.assertIn("worker ended", error)
+
+    def test_borrower_exit_does_not_end_waiter_with_only_shared_services(self):
+        self.shared_resource()
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import time; from pathlib import Path; Path('shared-task').touch(); time.sleep(120)",
+            ]
+        )
+        self.plan.update(wait_for_services=True, own_task=True, task_shutdown_seconds=1)
+        self.path.write_text(json.dumps(self.plan))
+        client = subprocess.Popen(
+            [CONTROL, "run", str(self.path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(lambda: client.poll() is None and client.kill())
+        self.wait_file(self.root / "shared-task")
+        self.plan["wait_for_services"] = False
+        self.plan["task"] = self.command([sys.executable, "-c", "raise SystemExit(7)"])
+        self.run_control("run", check=7)
+        time.sleep(1.1)
+        self.assertIsNone(client.poll())
+        self.run_control("stop", check=0)
+        _, error = client.communicate(timeout=15)
+        self.assertEqual(client.returncode, 0, error)
+
     def test_backend_registers_before_exec_and_recovers_abandoned_start(self):
         backend = self.base / "backend"
         backend.write_text(
@@ -109,6 +252,7 @@ while True:time.sleep(.1)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(owner.read_text(), "{}")
         self.assertFalse((self.root / "pid").exists())
+
         owner.unlink()
         (self.state / "worker.stopping").write_text("true")
         result = subprocess.run(
@@ -119,6 +263,24 @@ while True:time.sleep(.1)
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / "pid").exists())
+
+    def test_old_controller_generation_cannot_replace_current_receipt(self):
+        self.plan["generation"] = "new"
+        path = self.state / "plan.json"
+        path.write_text(json.dumps(self.plan))
+        receipt = self.state / "controller.json"
+        receipt.write_text("{}")
+        result = subprocess.run(
+            [CONTROL, "controller", str(path), "old"],
+            start_new_session=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generation changed", result.stderr)
+        self.assertEqual(receipt.read_text(), "{}")
+        receipt.unlink()
 
     def run_control(self, action, check=None, timeout=30):
         self.path.write_text(json.dumps(self.plan))

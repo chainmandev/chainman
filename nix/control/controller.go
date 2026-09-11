@@ -9,10 +9,22 @@ import (
 
 // The child registers itself before exec, so killing the acquiring client at any
 // point cannot leave a started backend without a kernel identity receipt.
-func controllerExec(path string) int {
+func controllerExec(path, generation string) int {
+	state := filepath.Dir(path)
+	if e := private(state); e != nil {
+		return exitCode(e)
+	}
+	admission, e := locked(filepath.Join(state, "controller.admission"), false)
+	if e != nil {
+		return exitCode(e)
+	}
+	defer admission.Close()
 	var p Plan
 	if e := readJSON(path, &p); e != nil {
 		return exitCode(e)
+	}
+	if p.State != state || generation == "" || generation != p.Generation {
+		return exitCode(fmt.Errorf("controller generation changed before admission"))
 	}
 	if e := private(p.State); e != nil {
 		return exitCode(e)

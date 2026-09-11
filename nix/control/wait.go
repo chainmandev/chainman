@@ -22,10 +22,16 @@ func monitorServices(ctx context.Context, p Plan) <-chan error {
 			result <- e
 			return
 		}
-		selected, e := ordered(saved, p.Requested)
-		if e != nil {
-			result <- e
-			return
+		pools := []Plan{saved}
+		pools[0].Requested = p.Requested
+		for _, resource := range p.Resources {
+			var pool Plan
+			if e := readJSON(filepath.Join(resource.State, "plan.json"), &pool); e != nil {
+				result <- e
+				return
+			}
+			pool.Requested = resource.Requested
+			pools = append(pools, pool)
 		}
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -39,30 +45,44 @@ func monitorServices(ctx context.Context, p Plan) <-chan error {
 				result <- servicesStopped
 				return
 			}
-			unlock, e := watchGates(saved, selected)
-			if e != nil {
-				result <- e
-				return
-			}
-			ps, e := states(saved)
-			unlock()
-			if e != nil {
-				result <- fmt.Errorf("service controller lost: %w", e)
-				return
-			}
-			wanted := map[string]bool{}
-			for _, name := range selected {
-				wanted[name] = true
-			}
-			for _, process := range ps {
-				if wanted[process.Name] && (process.Status == "Error" || process.Status == "Completed" || process.Status == "Skipped") {
-					result <- fmt.Errorf("service %s ended: %s", process.Name, process.Status)
+			for _, pool := range pools {
+				if e := serviceOutcome(pool); e != nil {
+					result <- e
 					return
 				}
 			}
 		}
 	}()
 	return result
+}
+
+func serviceOutcome(p Plan) error {
+	selected, e := ordered(p, p.Requested)
+	if e != nil {
+		return e
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	unlock, e := watchGates(p, selected)
+	if e != nil {
+		return e
+	}
+	ps, e := states(p)
+	unlock()
+	if e != nil {
+		return fmt.Errorf("service controller lost: %w", e)
+	}
+	wanted := map[string]bool{}
+	for _, name := range selected {
+		wanted[name] = true
+	}
+	for _, process := range ps {
+		if wanted[process.Name] && (process.Status == "Error" || process.Status == "Completed" || process.Status == "Skipped") {
+			return fmt.Errorf("service %s ended: %s", process.Name, process.Status)
+		}
+	}
+	return nil
 }
 
 func cancelTask(cmd *exec.Cmd, done <-chan error, sig os.Signal, seconds int) error {

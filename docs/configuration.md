@@ -284,11 +284,27 @@ and keeps 500 lines per process in memory. Duplicate console and internal debug
 logs are discarded. The private build-result receipts record the last build
 completion or error; application containers cannot rewrite these receipts.
 
-The initial service scope is one canonical worktree and execution mode. Live
-services with incompatible inputs are rejected. Stale client records are reaped
-on the next controller operation. Shared scopes across worktrees and full
-backend/platform release qualification remain rollout gates;
-the API must not be represented as qualified for those behaviors yet.
+The default service scope is one canonical worktree, execution mode and host user
+cache domain. Declare `scope = "repository"` on self-contained, digest-pinned data
+containers to share them across linked worktrees and host/container execution modes.
+The canonical Git common directory identifies the repository. Repository services
+cannot run worktree commands, bind `{root}`, use worktree setup groups, or depend
+on worktree services. Worktree services may depend on repository services; the
+shared resource pool becomes ready before local services start.
+
+Each worktree has its own claims on the shared pool. Stopping a worktree removes
+only those claims; another worktree's task or persistent `services-up` claim keeps
+its resources alive. Shared claims reference the parent task's existing descriptor,
+kernel identity and labeled-container witnesses. There is no heartbeat or separate
+task daemon. Resource intent is saved before acquisition so interrupted startup can
+be recovered through the originating worktree's stop command. Status includes the
+shared pool's processes, log path and recovery state.
+
+Shared compatibility covers the verified runtime, data service declarations and
+declared volume inputs, independent of worktree path and Nix mode. Incompatible
+live users block replacement. The host engine identity is checked before reuse
+and cleanup. Stale client records are reaped on the next controller operation.
+Full backend/platform release qualification remains a rollout gate.
 
 Persistent container volumes declare their data format and compatibility inputs:
 

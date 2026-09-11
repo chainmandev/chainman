@@ -78,6 +78,7 @@ def declarations(root, cfg):
             "container",
             "setup",
             "watch",
+            "scope",
         }
         if set(spec) - allowed:
             raise ValueError(f"Unknown service fields: {sorted(set(spec) - allowed)}")
@@ -85,6 +86,19 @@ def declarations(root, cfg):
             raise ValueError(
                 "A service requires exactly one command or container declaration"
             )
+        scope = spec.get("scope", "worktree")
+        if scope not in {"worktree", "repository"}:
+            raise ValueError("Service scope must be worktree or repository")
+        if scope == "repository":
+            if "container" not in spec or any(
+                spec.get(field)
+                for field in ("setup", "watch", "environment", "directory")
+            ):
+                raise ValueError(
+                    "Repository services require self-contained data containers"
+                )
+            if "{root}" in json.dumps(spec):
+                raise ValueError("Repository services cannot bind a worktree path")
         if "command" in spec:
             workflows.commands([spec["command"]])
             chainman.profile(
@@ -172,6 +186,12 @@ def declarations(root, cfg):
                 if type(value) is not int or not 1 <= value <= maximum:
                     raise ValueError(f"Invalid watch {key}")
     workflows.order(entries, list(entries))
+    for spec in entries.values():
+        if spec.get("scope") == "repository" and any(
+            entries[dependency].get("scope") != "repository"
+            for dependency in spec.get("depends_on", [])
+        ):
+            raise ValueError("Repository services cannot depend on worktree services")
     for spec in cfg.get("tasks", {}).values():
         workflows.order(entries, workflows.names(spec.get("services", [])))
     return entries
@@ -238,6 +258,55 @@ def config_fingerprint(root, cfg):
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
+def scope_key(host_state, root, mode):
+    # The host's private cache domain is stable across host/container UID mapping
+    # and keeps distinct OS users from claiming the same rootful engine names.
+    return hashlib.sha256(
+        json.dumps([str(host_state), str(root), mode]).encode()
+    ).hexdigest()[:24]
+
+
+def repository_scope(root, host_state, declared):
+    shared = {
+        name: spec
+        for name, spec in declared.items()
+        if spec.get("scope") == "repository"
+    }
+    if not shared:
+        return None
+    common = Path(
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    ).resolve(strict=True)
+    if not common.is_dir():
+        raise ValueError("Repository services require a canonical Git common directory")
+    material = [
+        str(chainman.RUNTIME),
+        shared,
+        [
+            volume_compatibility(root, volume)
+            for spec in shared.values()
+            for volume in spec["container"].get("volumes", [])
+        ],
+    ]
+    return (
+        common,
+        scope_key(host_state, common, "repository"),
+        hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest(),
+    )
+
+
 def export(root, arguments):
     if len(arguments) < 6:
         raise ValueError("Invalid internal controller export request")
@@ -277,7 +346,7 @@ def export(root, arguments):
             raise ValueError("Native controller output must be a regular executable")
         tc.atomic_bytes(destination / name, source.read_bytes(), mode=0o700)
     mode = os.environ.get("CHAINMAN_MODE", "host-nix")
-    key = hashlib.sha256((str(root) + "\0" + mode).encode()).hexdigest()[:24]
+    key = scope_key(host_state, root, mode)
     state = str(Path(host_state) / key)
     tc.atomic_bytes(destination / "state", (state + "\n").encode())
     if action in {"services-status", "services-stop"}:
@@ -303,11 +372,24 @@ def export(root, arguments):
     )
     if not requested:
         raise ValueError(f"Task {task} has no declared services")
+    closure = workflows.order(declared, requested)
+    shared_names = {
+        name for name, spec in declared.items() if spec.get("scope") == "repository"
+    }
+    shared_requested = [name for name in closure if name in shared_names]
+    shared_scope = (
+        repository_scope(root, host_state, declared) if shared_requested else None
+    )
     prepared = {}
     volumes = {}
     for name, spec in declared.items():
+        if name in shared_names and not shared_requested:
+            continue
+        service_root, service_key = (
+            (shared_scope[0], shared_scope[1]) if name in shared_names else (root, key)
+        )
         owner = secrets.token_hex(16)
-        container_name = "chainman-" + key + "-" + name
+        container_name = "chainman-" + service_key + "-" + name
         env = literal_environment(spec.get("environment", {}), root)
         if "container" in spec:
             if not engine:
@@ -354,12 +436,12 @@ def export(root, arguments):
                     raise ValueError("Invalid service volume target")
                 argv += [
                     "--mount",
-                    f"type=volume,src=chainman-{key}-{volume['name']},dst={target_path}",
+                    f"type=volume,src=chainman-{service_key}-{volume['name']},dst={target_path}",
                 ]
                 declared_volume = {
                     "engine": engine,
-                    "name": f"chainman-{key}-{volume['name']}",
-                    "scope": key,
+                    "name": f"chainman-{service_key}-{volume['name']}",
+                    "scope": service_key,
                     "compatibility": compatibility,
                     "policy": volume.get("policy", "preserve"),
                 }
@@ -383,7 +465,7 @@ def export(root, arguments):
                         declared_volume, services=[name]
                     )
             argv += [item["image"], *item.get("command", [])]
-            launch = command(argv, root, env)
+            launch = command(argv, service_root, env)
             ownership = {"engine": engine, "name": container_name, "token": owner}
         else:
             profile = spec.get(
@@ -403,7 +485,11 @@ def export(root, arguments):
                 ownership = {"engine": engine, "name": container_name, "token": owner}
         value = {
             "command": launch,
-            "depends_on": spec.get("depends_on", []),
+            "depends_on": [
+                dependency
+                for dependency in spec.get("depends_on", [])
+                if (dependency in shared_names) == (name in shared_names)
+            ],
             "restart": spec.get("restart", "no"),
             "shutdown_seconds": spec.get("shutdown_seconds", 10),
         }
@@ -441,7 +527,7 @@ def export(root, arguments):
                     *probe["command"],
                 ]
             value["readiness"] = {
-                "command": command(probe_command, root, env),
+                "command": command(probe_command, service_root, env),
                 "period_seconds": probe.get("period_seconds", 1),
                 "timeout_seconds": probe.get("timeout_seconds", 2),
                 "failure_threshold": probe.get("failure_threshold", 30),
@@ -482,9 +568,11 @@ def export(root, arguments):
             for path in (package / "share/licenses").glob("*/LICENSE")
         },
         "fingerprint": fingerprint,
-        "services": prepared,
-        "volumes": list(volumes.values()),
-        "requested": requested,
+        "services": {
+            name: spec for name, spec in prepared.items() if name not in shared_names
+        },
+        "volumes": [volume for volume in volumes.values() if volume["scope"] == key],
+        "requested": [name for name in closure if name not in shared_names],
         "prepare": command([launcher, "_workflow-prepare", task, fingerprint], root),
         "task": command(
             [launcher, "_workflow-task", task, fingerprint, *task_args], root
@@ -497,6 +585,29 @@ def export(root, arguments):
             cfg["tasks"][name].get("shutdown_seconds", 10) for name in task_order
         ),
     }
+    if shared_scope:
+        common, shared_key, shared_fingerprint = shared_scope
+        plan["resources"] = [
+            {
+                "schema": 1,
+                "root": str(common),
+                "state": str(Path(host_state) / shared_key),
+                "backend": plan["backend"],
+                "licenses": plan["licenses"],
+                "fingerprint": shared_fingerprint,
+                "services": {
+                    name: spec
+                    for name, spec in prepared.items()
+                    if name in shared_names
+                },
+                "volumes": [
+                    volume
+                    for volume in volumes.values()
+                    if volume["scope"] == shared_key
+                ],
+                "requested": shared_requested,
+            }
+        ]
     if mode == "container-nix" and action != "services-up":
         owner = secrets.token_hex(16)
         task_container = {
