@@ -82,6 +82,15 @@ commands=[["python3","task.py"]]
             workflows.run(self.root, "build", [])
             self.assertEqual((self.root / "install-count").read_text(), str(iteration))
 
+    def test_exclusive_service_access_requires_services_and_a_boolean(self):
+        for value in ("true", '"yes"'):
+            with self.subTest(value=value):
+                self.body += f"\nexclusive_services={value}\n"
+                self.write_config()
+                with self.assertRaisesRegex(ValueError, "exclusive_services"):
+                    workflows.configuration(self.root)
+                self.body = self.body.rsplit("\nexclusive_services=", 1)[0]
+
     def test_public_run_preserves_literal_arguments(self):
         result = self.run_cli("run", "build", "--", "two words", "", "$(literal)")
         self.assertEqual(result.returncode, 0, result.stderr)

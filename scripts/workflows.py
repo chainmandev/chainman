@@ -74,6 +74,7 @@ def configuration(root):
                     "environment",
                     "transport",
                     "exclusive",
+                    "exclusive_services",
                     "network_service",
                 }
             )
@@ -132,6 +133,8 @@ def configuration(root):
                 names(spec.get("services", []))
                 if type(spec.get("exclusive", False)) is not bool:
                     raise ValueError("exclusive must be a boolean")
+                if type(spec.get("exclusive_services", False)) is not bool:
+                    raise ValueError("exclusive_services must be a boolean")
                 if type(spec.get("cleanup_children", False)) is not bool:
                     raise ValueError("cleanup_children must be a boolean")
                 if type(spec.get("wait_for_services", False)) is not bool:
@@ -158,6 +161,10 @@ def configuration(root):
             cfg["tasks"][name].get("services") for name in order(cfg["tasks"], [key])
         ):
             raise ValueError("wait_for_services requires a service-bearing task")
+        if spec.get("exclusive_services") and not any(
+            task.get("services") for task in graph
+        ):
+            raise ValueError("exclusive_services requires a service-bearing task")
     return cfg
 
 

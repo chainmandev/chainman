@@ -323,6 +323,16 @@ live users block replacement. The host engine identity is checked before reuse
 and cleanup. Stale client records are reaped on the next controller operation.
 Full backend/platform release qualification remains a rollout gate.
 
+For tests or maintenance that mutate service data, declare `exclusive_services =
+true` on the task. It reserves the selected services and their dependencies for
+that task's existing lease, including repository pools. Acquisition fails visibly
+if another user already holds any of them; ordinary users likewise cannot borrow
+an exclusively held service. Unrelated services remain available. Dead clients
+are recovered through the same descriptors, process identities and container
+receipts as ordinary service users, without a second lock or timeout protocol.
+This does not grant access to undeclared resources or make application mutations
+transactional. `exclusive` still denotes project-wide cleanup without services.
+
 Persistent container volumes declare their data format and compatibility inputs:
 
 ```toml

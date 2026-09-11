@@ -652,6 +652,9 @@ def export(root, arguments):
         "wait_for_services": any(
             cfg["tasks"][name].get("wait_for_services", False) for name in task_order
         ),
+        "exclusive_services": any(
+            cfg["tasks"][name].get("exclusive_services", False) for name in task_order
+        ),
         "own_task": True,
         "task_shutdown_seconds": max(
             cfg["tasks"][name].get("shutdown_seconds", 10) for name in task_order
@@ -693,6 +696,7 @@ def export(root, arguments):
                     if volume["scope"] == shared_key
                 ],
                 "requested": shared_requested,
+                "exclusive_services": plan["exclusive_services"],
             }
         ]
     if mode == "container-nix" and action != "services-up":

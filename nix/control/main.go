@@ -68,6 +68,7 @@ type Plan struct {
 	Prepare            *Command           `json:"prepare,omitempty"`
 	TaskContainer      *Container         `json:"task_container,omitempty"`
 	WaitForServices    bool               `json:"wait_for_services,omitempty"`
+	ExclusiveServices  bool               `json:"exclusive_services,omitempty"`
 	OwnTask            bool               `json:"own_task,omitempty"`
 	TaskShutdown       int                `json:"task_shutdown_seconds,omitempty"`
 	Resources          []Plan             `json:"resources,omitempty"`
@@ -83,11 +84,12 @@ type Owner struct {
 	Container *Container `json:"container,omitempty"`
 }
 type Lease struct {
-	Services   []string   `json:"services"`
-	Persistent bool       `json:"persistent"`
-	Container  *Container `json:"container,omitempty"`
-	Task       *Identity  `json:"task,omitempty"`
-	Parent     *LeaseRef  `json:"parent,omitempty"`
+	Services          []string   `json:"services"`
+	ExclusiveServices bool       `json:"exclusive_services,omitempty"`
+	Persistent        bool       `json:"persistent"`
+	Container         *Container `json:"container,omitempty"`
+	Task              *Identity  `json:"task,omitempty"`
+	Parent            *LeaseRef  `json:"parent,omitempty"`
 }
 type Process struct {
 	Name    string `json:"name"`
@@ -928,6 +930,11 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 	if e != nil {
 		return nil, "", e
 	}
+	// active() has already removed dead claims under this scope's gate. Compare
+	// the remaining claims before volume preparation or any service mutation.
+	if e = checkServiceAccess(p, selected); e != nil {
+		return nil, "", e
+	}
 	needed := []Volume{}
 	for _, volume := range p.Volumes {
 		for _, name := range selected {
@@ -953,7 +960,7 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 		}
 	}
 	leasePath := filepath.Join(p.State, token()+".lease")
-	if e = atomic(leasePath, Lease{Services: selected, Persistent: persistent, Container: p.TaskContainer, Parent: parent}); e != nil {
+	if e = atomic(leasePath, Lease{Services: selected, ExclusiveServices: p.ExclusiveServices, Persistent: persistent, Container: p.TaskContainer, Parent: parent}); e != nil {
 		return nil, "", e
 	}
 	lease, e := locked(leasePath, false)
@@ -1488,7 +1495,7 @@ func mainAction(args []string) (result int) {
 					err = lease.Truncate(0)
 				}
 				if err == nil {
-					err = json.NewEncoder(lease).Encode(Lease{Services: selected, Container: p.TaskContainer, Task: &identity})
+					err = json.NewEncoder(lease).Encode(Lease{Services: selected, ExclusiveServices: p.ExclusiveServices, Container: p.TaskContainer, Task: &identity})
 				}
 				if err == nil {
 					err = lease.Sync()

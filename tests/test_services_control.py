@@ -138,6 +138,88 @@ while True:time.sleep(.1)
         self.run_control("stop", check=0)
         self.wait_until(lambda: not self.alive(pid))
 
+    def test_exclusive_service_access_refuses_both_directions_without_stopping_owner(
+        self,
+    ):
+        for first, second in ((False, True), (True, False), (True, True)):
+            with self.subTest(first=first, second=second):
+                self.plan["exclusive_services"] = first
+                self.run_control("up", check=0)
+                pid = int((self.root / "pid").read_text())
+                self.plan["exclusive_services"] = second
+                result = self.run_control("run")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("exclusive access", result.stderr)
+                self.assertTrue(self.alive(pid))
+                self.run_control("stop", check=0)
+                self.run_control("run", check=7)
+
+    def test_exclusive_repository_claim_survives_rejected_worktree_acquisition(self):
+        first, second, _ = self.shared_resource()
+        for first_exclusive, second_exclusive in ((True, False), (False, True)):
+            with self.subTest(first_exclusive=first_exclusive):
+                self.select_scope(first)
+                self.plan["resources"][0]["exclusive_services"] = first_exclusive
+                self.run_control("up", check=0)
+                pid = int((self.root / "pid").read_text())
+                self.select_scope(second)
+                self.plan["resources"][0]["exclusive_services"] = second_exclusive
+                result = self.run_control("run")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("exclusive access", result.stderr)
+                self.assertTrue(self.alive(pid))
+                self.select_scope(first)
+                self.run_control("stop", check=0)
+                self.select_scope(second)
+                self.run_control("run", check=7)
+
+    def test_exclusive_access_does_not_block_unrelated_services(self):
+        self.plan["services"]["other"] = {
+            "command": self.command(
+                [sys.executable, "-c", "import time; time.sleep(60)"]
+            ),
+            "depends_on": [],
+            "restart": "no",
+            "shutdown_seconds": 1,
+        }
+        self.plan["exclusive_services"] = True
+        self.run_control("up", check=0)
+        pid = int((self.root / "pid").read_text())
+        self.plan["requested"] = ["other"]
+        self.plan["exclusive_services"] = False
+        self.run_control("run", check=7)
+        self.assertTrue(self.alive(pid))
+        self.run_control("stop", check=0)
+
+    def test_exclusive_task_identity_keeps_access_reserved_until_completion(self):
+        self.plan["exclusive_services"] = True
+        self.plan["own_task"] = True
+        self.plan["task_shutdown_seconds"] = 1
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import time; from pathlib import Path; Path('task-ready').touch(); "
+                "exec(\"while not Path('finish-task').exists(): time.sleep(.05)\")",
+            ]
+        )
+        self.path.write_text(json.dumps(self.plan))
+        client = subprocess.Popen(
+            [CONTROL, "run", str(self.path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(lambda: client.poll() is None and client.kill())
+        self.wait_file(self.root / "task-ready")
+        self.plan["exclusive_services"] = False
+        result = self.run_control("up")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("exclusive access", result.stderr)
+        (self.root / "finish-task").touch()
+        self.assertEqual(client.wait(timeout=20), 0)
+        self.run_control("up", check=0)
+        self.run_control("stop", check=0)
+
     def test_incompatible_shared_inputs_refuse_while_another_worktree_uses_them(self):
         first, second, _ = self.shared_resource()
         self.run_control("up", check=0)
