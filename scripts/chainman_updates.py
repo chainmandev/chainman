@@ -29,6 +29,54 @@ def managed_state(root: Path, name: str) -> tuple[bytes, int] | None:
     return tc.regular_input(root, name), stat.S_IMODE(path.stat().st_mode)
 
 
+def managed_paths(root: Path) -> dict[str, str]:
+    """Map declared identical runtime copies to their root-owned source files."""
+    names = ["chainman.lock", "scripts/chainman.sh", "scripts/chainman-fetch.nix"]
+    if (root / "chainman.lock").exists():
+        bundle = json.loads(tc.regular_input(root, "chainman.lock")).get(
+            "bundled_archive"
+        )
+        if bundle:
+            if not isinstance(bundle, str) or bundle in names:
+                raise ValueError("Bundled archive overlaps a managed bootstrap input")
+            tc.contained(root, bundle)
+            names.append(bundle)
+    cfg = (
+        tc.config(root).get("runtime", {})
+        if (root / "chainman.toml").exists() or (root / "toolchain.toml").exists()
+        else {}
+    )
+    if not isinstance(cfg, dict) or set(cfg) - {"copies"}:
+        raise ValueError("Runtime declarations support only copies")
+    copies = cfg.get("copies", [])
+    if not isinstance(copies, list) or any(
+        not isinstance(item, str) for item in copies
+    ):
+        raise ValueError("Runtime copies must be relative project directories")
+    result = {name: name for name in names}
+    directories = set()
+    for value in copies:
+        path = tc.contained(root, value)
+        if path == root or not path.is_dir() or ".git" in Path(value).parts:
+            raise ValueError(
+                "Runtime copies require ordinary contained project directories"
+            )
+        relative = path.relative_to(root).as_posix()
+        if relative in directories:
+            raise ValueError("Runtime copy directories must be distinct")
+        directories.add(relative)
+        for source in names:
+            target = f"{relative}/{source}"
+            tc.contained(root, target)
+            if target in result or any(
+                target.startswith(existing + "/") or existing.startswith(target + "/")
+                for existing in result
+            ):
+                raise ValueError("Runtime copies overlap managed files")
+            result[target] = source
+    return result
+
+
 class ManagedFiles:
     """Restore only our still-identical managed outputs after a failed candidate."""
 
@@ -238,6 +286,17 @@ def runtime_candidate(
         if name in inputs or name == "chainman.lock":
             raise ValueError("Bundled archive overlaps a managed bootstrap input")
         inputs[name] = managed_state(root, name)
+    copies = {}
+    source_states = {"chainman.lock": lock_before, **inputs}
+    for target, source in managed_paths(root).items():
+        if target == source:
+            continue
+        before = managed_state(root, target)
+        if before is None or before != source_states[source]:
+            raise ValueError(
+                f"Managed runtime copy was locally modified; reconcile it explicitly: {target}"
+            )
+        copies[target] = (source, before)
     selected = registry.select(
         "github",
         registry.github_releases("chainmandev/chainman"),
@@ -300,6 +359,8 @@ def runtime_candidate(
         lock_before,
         ((json.dumps(candidate, indent=2) + "\n").encode(), 0o644),
     )
+    for target, (source, before) in copies.items():
+        prepared[target] = (before, prepared[source][1])
     publication = managed if managed is not None else ManagedFiles(root)
     try:
         for name, (before, after) in prepared.items():

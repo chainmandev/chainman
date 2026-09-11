@@ -71,6 +71,51 @@ commands=[["true"]]
             subject.finalize(self.root, self.stage)
         return json.loads(stream.getvalue())
 
+    def add_runtime_copy(self):
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                'outputs=["dependency.lock"]',
+                'outputs=["dependency.lock", "templates/**"]',
+            )
+            + '\n[runtime]\ncopies=["templates/common"]\n'
+        )
+        path = self.root / "templates/common/scripts/chainman.sh"
+        path.parent.mkdir(parents=True)
+        path.write_text("old copy")
+        updates.git(self.root, "add", ".")
+        updates.git(
+            self.root,
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            "Declare runtime copy",
+        )
+        self.before = updates.snapshot(self.root)
+
+    def test_dependency_resolver_cannot_modify_declared_runtime_copy(self):
+        self.add_runtime_copy()
+        self.prepare()
+        (self.candidate / "templates/common/scripts/chainman.sh").write_text(
+            "changed copy"
+        )
+        with self.assertRaisesRegex(ValueError, "must not change the runtime"):
+            subject.inspect(self.root, self.stage)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_runtime_copy_is_in_the_original_transaction_output_boundary(self):
+        self.add_runtime_copy()
+        self.prepare("--only-chainman")
+        relative = "templates/common/scripts/chainman.sh"
+        (self.candidate / relative).write_text("verified copy")
+        subject.inspect(self.root, self.stage)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+        result = self.finish()
+        self.assertEqual(result["changed"], [relative])
+        self.assertEqual((self.root / relative).read_text(), "verified copy")
+        self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
+
     def test_apply_only_after_verification_and_commit_exact_candidate(self):
         self.update()
         self.assertEqual(

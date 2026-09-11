@@ -531,3 +531,19 @@ Runtime releases are qualified in the Chainman source project. Consumer runtime
 upgrades validate the candidate configuration and run the declared project verifier
 using the candidate runtime; they do not run Chainman's development test suite.
 The consumer archive consequently does not need to ship those tests.
+
+## Runtime copies in generated projects
+
+A repository that embeds the same runtime in templates or example projects can
+list their relative roots under `[runtime]`, for example
+`copies = ["templates/common", "examples/demo"]`. Each copy must contain identical
+lock, launcher, fetch helper and optional bundled archive bytes and modes, using
+the same relative paths as the root. Customized or missing copies are rejected
+before replacement; reconcile their ownership explicitly.
+
+`chainman-update` prepares every declared copy from the verified runtime in the
+same candidate transaction. The normal project gate verifies the complete change
+before any original files are applied. The original declaration fixes the output
+boundary, and ordinary dependency resolvers cannot change these runtime files.
+Only the runtime distribution files are copied; project configuration and source
+remain owned by their project or generator.

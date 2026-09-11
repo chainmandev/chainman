@@ -225,6 +225,62 @@ class SelfUpdateTests(unittest.TestCase):
         )
         self.assertTrue(self.previous.is_dir())
 
+    def add_copy(self):
+        with (self.root / "chainman.toml").open("a") as config:
+            config.write('\n[runtime]\ncopies=["templates/common"]\n')
+        for name in self.before:
+            target = self.root / "templates/common" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.root / name, target)
+        return self.root / "templates/common"
+
+    def test_declared_runtime_copies_update_and_restore_together(self):
+        copy = self.add_copy()
+
+        def reject(*_):
+            for name in self.before:
+                self.assertEqual(
+                    subject.managed_state(copy, name),
+                    subject.managed_state(self.root, name),
+                )
+            raise ValueError("candidate rejected")
+
+        with self.assertRaisesRegex(ValueError, "candidate rejected"):
+            self.run_apply(reject)
+        for name, before in self.before.items():
+            self.assertEqual(subject.managed_state(copy, name), before)
+        self.run_apply(lambda *_: None)
+        self.assertEqual(
+            json.loads((copy / "chainman.lock").read_text())["version"], "2.0.0"
+        )
+        self.assertEqual((copy / "bundle.tar.gz").read_bytes(), self.body)
+
+    def test_modified_runtime_copy_is_preserved_before_root_changes(self):
+        copy = self.add_copy()
+        (copy / "scripts/chainman.sh").write_text("operator changes")
+        with self.assertRaisesRegex(ValueError, "copy was locally modified"):
+            self.run_apply(lambda *_: self.fail("candidate executed"))
+        self.assertEqual(self.managed(), self.before)
+        self.assertEqual((copy / "scripts/chainman.sh").read_text(), "operator changes")
+
+    def test_runtime_copies_reject_symlinks_duplicates_and_project_escape(self):
+        copy = self.add_copy()
+        config = self.root / "chainman.toml"
+        for paths in (
+            ["."],
+            ["../outside"],
+            ["templates/common", "templates/common"],
+            [".git"],
+            ["absent"],
+        ):
+            config.write_text("schema=1\n[runtime]\ncopies=" + json.dumps(paths))
+            with self.assertRaises(ValueError):
+                subject.managed_paths(self.root)
+        (self.root / "linked").symlink_to(copy, target_is_directory=True)
+        config.write_text('schema=1\n[runtime]\ncopies=["linked"]')
+        with self.assertRaises(ValueError):
+            subject.managed_paths(self.root)
+
     def test_concurrent_managed_bytes_and_mode_changes_are_preserved(self):
         def reject(*_):
             (self.root / "chainman.lock").write_text("concurrent pin")

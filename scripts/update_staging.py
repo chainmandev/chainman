@@ -41,16 +41,8 @@ def export_bootstrap(runtime, target):
 def patterns(root, policy):
     result = [
         *policy.get("outputs", []),
-        "chainman.lock",
-        "scripts/chainman.sh",
-        "scripts/chainman-fetch.nix",
+        *runtime_files(root),
     ]
-    if (root / "chainman.lock").exists():
-        bundle = json.loads(tc.regular_input(root, "chainman.lock")).get(
-            "bundled_archive"
-        )
-        if bundle:
-            result.append(bundle)
     if not policy.get("resolver") and not policy.get("steps"):
         result += [
             p
@@ -62,14 +54,7 @@ def patterns(root, policy):
 
 
 def runtime_files(root):
-    result = ["chainman.lock", "scripts/chainman.sh", "scripts/chainman-fetch.nix"]
-    if (root / "chainman.lock").exists():
-        bundle = json.loads(tc.regular_input(root, "chainman.lock")).get(
-            "bundled_archive"
-        )
-        if bundle:
-            result.append(bundle)
-    return result
+    return list(runtime_updates.managed_paths(root))
 
 
 def verification(root, policy):
