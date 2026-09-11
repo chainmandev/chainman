@@ -81,6 +81,7 @@ def declarations(root, cfg):
             "watch",
             "scope",
             "transport",
+            "network_service",
         }
         if set(spec) - allowed:
             raise ValueError(f"Unknown service fields: {sorted(set(spec) - allowed)}")
@@ -204,6 +205,40 @@ def declarations(root, cfg):
             raise ValueError("Repository services cannot depend on worktree services")
     for spec in cfg.get("tasks", {}).values():
         workflows.order(entries, workflows.names(spec.get("services", [])))
+    for section in (entries, cfg.get("tasks", {})):
+        for key, spec in section.items():
+            peer = spec.get("network_service")
+            if peer is None:
+                continue
+            workflows.name(peer)
+            selected = workflows.order(
+                entries,
+                spec.get("depends_on", [])
+                if section is entries
+                else [
+                    service
+                    for task in workflows.order(cfg.get("tasks", {}), [key])
+                    for service in cfg["tasks"][task].get("services", [])
+                ],
+            )
+            if peer not in selected:
+                raise ValueError(
+                    "network_service must be a declared service dependency"
+                )
+            provider = entries[peer]
+            if provider.get("network_service") or provider.get("restart", "no") != "no":
+                raise ValueError(
+                    "Network owners cannot borrow or automatically restart"
+                )
+            transport = spec.get("container", spec.get("transport", {}))
+            if transport.get("ports") or spec.get("transport", {}).get("host_access"):
+                raise ValueError("A borrowed network publishes ports only on its owner")
+            if cfg.get("container", {}).get("ports") or cfg.get("container", {}).get(
+                "host_access"
+            ):
+                raise ValueError(
+                    "Borrowed networks cannot combine global ports or host aliases"
+                )
     return entries
 
 
@@ -510,6 +545,13 @@ def export(root, arguments):
             "restart": spec.get("restart", "no"),
             "shutdown_seconds": spec.get("shutdown_seconds", 10),
         }
+        if spec.get("network_service") and ownership:
+            peer = declared[spec["network_service"]]
+            if mode != "container-nix" and "container" not in peer:
+                raise ValueError(
+                    "A data container cannot borrow a host command's network"
+                )
+            value["network_service"] = spec["network_service"]
         if ownership:
             value["container"] = ownership
         if "readiness" in spec:
@@ -645,6 +687,17 @@ def export(root, arguments):
             }
         ]
     if mode == "container-nix" and action != "services-up":
+        networks = {
+            cfg["tasks"][name]["network_service"]
+            for name in task_order
+            if cfg["tasks"][name].get("network_service")
+        }
+        if len(networks) > 1:
+            raise ValueError(
+                "Tasks in one execution must select the same network service"
+            )
+        if networks:
+            plan["task_network_service"] = networks.pop()
         owner = secrets.token_hex(16)
         task_container = {
             "engine": engine,

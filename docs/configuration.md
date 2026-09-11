@@ -384,6 +384,18 @@ options apply only to that task's or service's Nix container; a verification tas
 does not inherit a frontend service's published ports. Data containers use their
 own `container` declaration instead. Project-wide container options remain additive.
 
+When a local stack relies on loopback between processes, a task or service may
+declare `network_service = "database"`. In container mode it joins that acquired
+service's ordinary engine network namespace. Host mode already shares host
+loopback. This keeps browsers, emulators and frontends on the same local addresses
+without exposing an engine socket, adding a proxy, or selecting host networking.
+The owner must be in the task's service set or the service's dependency closure,
+cannot itself borrow a network, and cannot automatically restart. Publish all
+ports on that owner; borrowers cannot also publish ports or add host aliases.
+The host adapter verifies the saved owner label and engine identity, then joins
+its immutable container ID. A replaced or stopped owner is refused. Different
+network owners cannot be combined within one task graph.
+
 Controller planning receives host environment as bounded NUL-separated data in its
 private temporary export directory. It selects only `environment.pass` matches;
 those values are never installed in the trusted planner's process environment.

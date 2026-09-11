@@ -252,6 +252,11 @@ if grep -q -- '^--controller$' "$temporary/options"; then
 fi
 
 # A selected name is passed to the engine without its value in the argument list.
+if [ -n "${CHAINMAN_CONTAINER_NETWORK:-}" ]; then
+    case "$CHAINMAN_CONTAINER_NETWORK" in *[!a-f0-9]*) fail 'Invalid owned network container identity.' ;; esac
+    [ "${#CHAINMAN_CONTAINER_NETWORK}" = 64 ] || fail 'Invalid owned network container identity.'
+    printf '%s\n' --network "container:$CHAINMAN_CONTAINER_NETWORK" >> "$temporary/options"
+fi
 env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' > "$temporary/names"
 printf '%s' "${CHAINMAN_FORWARD_ENV:-}" | tr ',' '\n' > "$temporary/patterns"
 printf '\n' >> "$temporary/patterns"
@@ -292,7 +297,13 @@ while IFS= read -r option; do
             case "$remainder" in "$target" | "$target:ro" | "$target:rw") ;; *) fail 'Unsupported volume option.' ;; esac
             ;;
         --network)
-            case "$value" in host | bridge) ;; *) fail 'Container network must be host or bridge.' ;; esac
+            case "$value" in
+                host | bridge) ;;
+                container:*)
+                    [ -n "${CHAINMAN_CONTAINER_NETWORK:-}" ] && [ "$value" = "container:$CHAINMAN_CONTAINER_NETWORK" ] || fail 'Container network is not an owned service namespace.'
+                    ;;
+                *) fail 'Container network must be host, bridge or a verified service namespace.' ;;
+            esac
             set -- "$option" "$value" "$@"
             continue
             ;;

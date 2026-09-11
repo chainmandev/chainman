@@ -40,11 +40,12 @@ type Service struct {
 	Restart      string   `json:"restart"`
 	Shutdown     int      `json:"shutdown_seconds"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
-	Container     *Container `json:"container,omitempty"`
-	Watch         *Watch     `json:"watch,omitempty"`
-	Timeout       int        `json:"timeout_seconds,omitempty"`
-	ForwardLeases bool       `json:"forward_leases,omitempty"`
-	Generation    string     `json:"generation,omitempty"`
+	Container      *Container `json:"container,omitempty"`
+	Watch          *Watch     `json:"watch,omitempty"`
+	Timeout        int        `json:"timeout_seconds,omitempty"`
+	ForwardLeases  bool       `json:"forward_leases,omitempty"`
+	Generation     string     `json:"generation,omitempty"`
+	NetworkService string     `json:"network_service,omitempty"`
 }
 type Container struct {
 	Engine         string `json:"engine"`
@@ -53,24 +54,25 @@ type Container struct {
 	EngineIdentity string `json:"engine_identity,omitempty"`
 }
 type Plan struct {
-	Schema          int                `json:"schema"`
-	Root            string             `json:"root"`
-	State           string             `json:"state"`
-	Backend         string             `json:"backend"`
-	Watcher         string             `json:"watcher,omitempty"`
-	Licenses        map[string]string  `json:"licenses,omitempty"`
-	Fingerprint     string             `json:"fingerprint"`
-	Services        map[string]Service `json:"services"`
-	Volumes         []Volume           `json:"volumes,omitempty"`
-	Requested       []string           `json:"requested"`
-	Task            Command            `json:"task"`
-	Prepare         *Command           `json:"prepare,omitempty"`
-	TaskContainer   *Container         `json:"task_container,omitempty"`
-	WaitForServices bool               `json:"wait_for_services,omitempty"`
-	OwnTask         bool               `json:"own_task,omitempty"`
-	TaskShutdown    int                `json:"task_shutdown_seconds,omitempty"`
-	Resources       []Plan             `json:"resources,omitempty"`
-	Generation      string             `json:"generation,omitempty"`
+	Schema             int                `json:"schema"`
+	Root               string             `json:"root"`
+	State              string             `json:"state"`
+	Backend            string             `json:"backend"`
+	Watcher            string             `json:"watcher,omitempty"`
+	Licenses           map[string]string  `json:"licenses,omitempty"`
+	Fingerprint        string             `json:"fingerprint"`
+	Services           map[string]Service `json:"services"`
+	Volumes            []Volume           `json:"volumes,omitempty"`
+	Requested          []string           `json:"requested"`
+	Task               Command            `json:"task"`
+	Prepare            *Command           `json:"prepare,omitempty"`
+	TaskContainer      *Container         `json:"task_container,omitempty"`
+	WaitForServices    bool               `json:"wait_for_services,omitempty"`
+	OwnTask            bool               `json:"own_task,omitempty"`
+	TaskShutdown       int                `json:"task_shutdown_seconds,omitempty"`
+	Resources          []Plan             `json:"resources,omitempty"`
+	Generation         string             `json:"generation,omitempty"`
+	TaskNetworkService string             `json:"task_network_service,omitempty"`
 }
 type Identity struct {
 	PID   int    `json:"pid"`
@@ -1088,6 +1090,17 @@ func owned(state, name string, probe bool, generation string) int {
 		}
 		command = s.Readiness.Command
 	}
+	if !probe && s.NetworkService != "" {
+		var plan Plan
+		if e := readJSON(filepath.Join(state, "plan.json"), &plan); e != nil {
+			return exitCode(e)
+		}
+		var e error
+		command, e = joinNetwork(plan, s.NetworkService, s.Container, command)
+		if e != nil {
+			return exitCode(e)
+		}
+	}
 	cmd, e := child(command)
 	if e != nil {
 		fmt.Fprintln(os.Stderr, e)
@@ -1383,6 +1396,17 @@ func mainAction(args []string) (result int) {
 		}
 	}()
 	task := p.Task
+	if p.TaskNetworkService != "" {
+		// Read the saved plan: compatible reuse keeps the original service tokens.
+		var saved Plan
+		if e = readJSON(filepath.Join(p.State, "plan.json"), &saved); e != nil {
+			return exitCode(e)
+		}
+		task, e = joinNetwork(saved, p.TaskNetworkService, p.TaskContainer, task)
+		if e != nil {
+			return exitCode(e)
+		}
+	}
 	if p.OwnTask {
 		if p.TaskShutdown < 1 || p.TaskShutdown > 300 {
 			return exitCode(fmt.Errorf("invalid task shutdown timeout"))

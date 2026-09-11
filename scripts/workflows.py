@@ -69,6 +69,7 @@ def configuration(root):
                     "environment",
                     "transport",
                     "exclusive",
+                    "network_service",
                 }
             )
             if set(spec) - allowed:
