@@ -7,6 +7,7 @@ import fcntl
 import fnmatch
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
@@ -61,7 +62,7 @@ def configuration(root):
             if not isinstance(spec, dict):
                 raise ValueError(f"{section}.{key} must be a declaration")
             allowed = {"commands", "profile", "directory", "depends_on"} | (
-                {"inputs", "exclude_inputs", "artifacts"}
+                {"inputs", "exclude_inputs", "environment_inputs", "artifacts"}
                 if section == "setup"
                 else {
                     "setup",
@@ -102,6 +103,13 @@ def configuration(root):
                 ),
             )
             if section == "setup":
+                environment_inputs = spec.get("environment_inputs", [])
+                if not isinstance(environment_inputs, list):
+                    raise ValueError("Setup environment inputs must be variable names")
+                for key in environment_inputs:
+                    project_environment.variable(key)
+                if len(set(environment_inputs)) != len(environment_inputs):
+                    raise ValueError("Setup environment inputs must be unique")
                 if not isinstance(spec.get("inputs"), list) or not spec["inputs"]:
                     raise ValueError("Setup groups require explicit fingerprint inputs")
                 if not isinstance(spec.get("artifacts"), list) or not spec["artifacts"]:
@@ -197,23 +205,33 @@ def group_spec(cfg, key):
     return spec
 
 
-def group_specs(root, cfg, requested):
+def group_specs(root, cfg, requested, env=None):
     specs = {
         key: group_spec(cfg, key) for key in order(cfg.get("setup", {}), requested)
     }
     for spec in specs.values():
         spec["dependency_fingerprints"] = {
-            dependency: fingerprint(root, specs[dependency])
+            dependency: fingerprint(root, specs[dependency], env)
             for dependency in spec.get("depends_on", [])
         }
     return specs
 
 
-def fingerprint(root, spec):
+def fingerprint(root, spec, env=None):
     digest = hashlib.sha256(
         json.dumps([1, tc.context_id(), spec], sort_keys=True).encode()
     )
-    ref, _ = chainman.profile(root, spec["profile"])
+    ref, profile = chainman.profile(root, spec["profile"])
+    if spec.get("environment_inputs"):
+        selected = chainman.profile_environment(
+            root, profile, os.environ if env is None else env
+        )
+        digest.update(
+            json.dumps(
+                {key: selected.get(key) for key in spec["environment_inputs"]},
+                sort_keys=True,
+            ).encode()
+        )
     digest.update(chainman.profile_fingerprint(root, spec["profile"], ref).encode())
     paths = set()
     for pattern in spec["inputs"]:
@@ -242,7 +260,7 @@ def current(root, key, spec, env):
         return False
     return (
         isinstance(recorded, dict)
-        and recorded.get("fingerprint") == fingerprint(root, spec)
+        and recorded.get("fingerprint") == fingerprint(root, spec, env)
         and all(artifact_ready(root, item, env) for item in spec["artifacts"])
         and recorded.get("artifact_digests", {}) == artifact_digests(root, spec)
     )
@@ -269,7 +287,7 @@ def artifact_digests(root, spec):
 
 @contextmanager
 def setup_use(root, cfg, requested, env):
-    specs = group_specs(root, cfg, requested)
+    specs = group_specs(root, cfg, requested, env)
     if not specs:
         yield ()
         return
@@ -293,7 +311,7 @@ def setup_use(root, cfg, requested, env):
             for key, spec in specs.items():
                 if current(root, key, spec, env):
                     continue
-                expected = fingerprint(root, spec)
+                expected = fingerprint(root, spec, env)
                 for argv in spec["commands"]:
                     chainman.execute(
                         root,
@@ -309,7 +327,7 @@ def setup_use(root, cfg, requested, env):
                     raise ValueError(
                         f"Setup group {key} did not create its declared artifacts"
                     )
-                if fingerprint(root, spec) != expected:
+                if fingerprint(root, spec, env) != expected:
                     raise ValueError(
                         f"Setup inputs changed during installation of {key}; readiness was not recorded"
                     )
@@ -329,7 +347,7 @@ def setup_status(root, requested):
     cfg = configuration(root)
     with tc.operation(root, exclusive=False, new_execution=True):
         env = tc.environment(root)
-        specs = group_specs(root, cfg, requested or list(cfg.get("setup", {})))
+        specs = group_specs(root, cfg, requested or list(cfg.get("setup", {})), env)
         with tc.operation_file(root, "setup-use.lock") as lease:
             try:
                 fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)

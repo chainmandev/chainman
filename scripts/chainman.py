@@ -120,6 +120,32 @@ def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
     return digest.hexdigest()
 
 
+def profile_environment(root, spec, inherited, overrides=None):
+    """Resolve declared environment identically for execution and input hashing."""
+    import project_environment
+
+    selected = dict(inherited)
+    selected = project_environment.apply(
+        root, configuration(root).get("environment", {}), selected
+    )
+    for values in (spec.get("environment", {}), overrides or {}):
+        expanded = project_environment.expand(values, root, selected)
+        selected.update(expanded)
+        tc.pnpm_store_environment(selected, expanded)
+    for key in configuration(root).get("environment", {}).get("unset", []):
+        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            raise ValueError("Environment unset entries must be variable names")
+        if key.startswith(("CHAINMAN_", "TOOLCHAIN_")) or key in {
+            "SCCACHE_SERVER_UDS",
+            "RUSTC_WRAPPER",
+        }:
+            raise ValueError(
+                "Cannot unset managed runtime and cache lifecycle variables"
+            )
+        selected.pop(key, None)
+    return selected
+
+
 def execute(
     root: Path,
     name: str,
@@ -149,26 +175,7 @@ def execute(
         CHAINMAN_RUNTIME=str(RUNTIME),
         TOOLCHAIN_MODE=selected.get("CHAINMAN_MODE", "host-nix"),
     )
-    import project_environment
-
-    selected = project_environment.apply(
-        root, configuration(root).get("environment", {}), selected
-    )
-    for values in (spec.get("environment", {}), overrides or {}):
-        expanded = project_environment.expand(values, root, selected)
-        selected.update(expanded)
-        tc.pnpm_store_environment(selected, expanded)
-    for key in configuration(root).get("environment", {}).get("unset", []):
-        if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
-            raise ValueError("Environment unset entries must be variable names")
-        if key.startswith(("CHAINMAN_", "TOOLCHAIN_")) or key in {
-            "SCCACHE_SERVER_UDS",
-            "RUSTC_WRAPPER",
-        }:
-            raise ValueError(
-                "Cannot unset managed runtime and cache lifecycle variables"
-            )
-        selected.pop(key, None)
+    selected = profile_environment(root, spec, selected, overrides)
     tc.runtime_nix_environment(selected)
     resource_policy = {}
     for settings in (
@@ -327,7 +334,15 @@ def main(argv=None):
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
-        if args.action in {"_workflow-task", "_workflow-service", "_workflow-prepare"}:
+        if args.action == "_service-prepare":
+            import services
+
+            return services.prepare_requested(root, rest)
+        elif args.action in {
+            "_workflow-task",
+            "_workflow-service",
+            "_workflow-prepare",
+        }:
             import services
 
             return services.execute_internal(root, args.action, rest)

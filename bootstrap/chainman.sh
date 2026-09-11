@@ -54,6 +54,19 @@ control_dispatch() {
             fi
             ;;
     esac
+    case "$1" in
+        services-status | services-stop) ;;
+        *)
+            # Setup may produce application data identities used by volume
+            # compatibility. Run it before planning, in the ordinary project
+            # environment, without the private controller export mount.
+            case "$1" in
+                run | services-run | services-up) control_task=${2:-} ;;
+                *) control_task=$1 ;;
+            esac
+            "$self" _service-prepare "$control_task" >&2
+            ;;
+    esac
     # Only the internal export operation mounts this private output directory.
     # It builds verified tooling and emits JSON; no consumer code executes there.
     control_output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-control.XXXXXXXX")

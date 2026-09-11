@@ -5,9 +5,46 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import services
+import workflows
 
 
 class VolumeCompatibilityTests(unittest.TestCase):
+    def test_setup_can_produce_a_volume_identity_before_planning(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "seed-input").write_text("canonical seed")
+            (root / "prepare.py").write_text(
+                "from pathlib import Path\n"
+                "Path('seed-identity').write_text(Path('seed-input').read_text())\n"
+            )
+            (root / "chainman.toml").write_text("""schema=2
+[project]
+default_profile="host"
+[setup.identity]
+inputs=["seed-input", "prepare.py"]
+artifacts=[{path="seed-identity",digest=true}]
+commands=[["python3","prepare.py"]]
+[services.database.container]
+image="example.invalid/database@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+volumes=[{name="data",target="/data",format="v1",inputs=["seed-identity"]}]
+[tasks.database]
+setup=["identity"]
+services=["database"]
+commands=[["true"]]
+""")
+            cfg = workflows.configuration(root)
+            with self.assertRaisesRegex(ValueError, "matched no files"):
+                services.config_fingerprint(root, cfg)
+            self.assertEqual(services.prepare_requested(root, ["database"]), 0)
+            expected = services.config_fingerprint(root, cfg)
+            self.assertEqual((root / "seed-identity").read_text(), "canonical seed")
+            services.execute_internal(root, "_workflow-prepare", ["database", expected])
+            (root / "seed-identity").write_text("concurrent alteration")
+            with self.assertRaisesRegex(ValueError, "changed after planning"):
+                services.execute_internal(
+                    root, "_workflow-prepare", ["database", expected]
+                )
+
     def test_content_identity_is_independent_of_worktree_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

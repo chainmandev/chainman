@@ -82,6 +82,91 @@ commands=[["python3","task.py"]]
             workflows.run(self.root, "build", [])
             self.assertEqual((self.root / "install-count").read_text(), str(iteration))
 
+    def test_declared_environment_inputs_invalidate_setup_and_dependents(self):
+        self.body = self.body.replace(
+            "[setup.dependencies]",
+            '[setup.dependencies]\nenvironment_inputs=["FIXTURE_SEED"]',
+        )
+        self.body += '\n[setup.downstream]\ndepends_on=["dependencies"]\ninputs=["input.lock"]\nartifacts=["dependent"]\ncommands=[["python3","-c","from pathlib import Path; p=Path(\\"dependent\\"); p.write_text(str(int(p.read_text())+1 if p.exists() else 1))"]]\n'
+        self.write_config()
+        for index, value in enumerate((None, "", "literal $(seed) secret"), 1):
+            if value is None:
+                os.environ.pop("FIXTURE_SEED", None)
+            else:
+                os.environ["FIXTURE_SEED"] = value
+            result = self.run_cli("setup", "downstream")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((self.root / "install-count").read_text(), str(index))
+            self.assertEqual((self.root / "dependent").read_text(), str(index))
+            self.assertEqual(self.run_cli("setup-status", "downstream").returncode, 0)
+            os.environ["UNDECLARED_SEED"] = str(index)
+            self.assertEqual(self.run_cli("setup", "downstream").returncode, 0)
+            self.assertEqual((self.root / "install-count").read_text(), str(index))
+        for stamp in (self.root / ".cache/toolchain/setup-groups").glob("*.json"):
+            self.assertNotIn("literal $(seed) secret", stamp.read_text())
+
+    def test_environment_fingerprint_uses_effective_values_and_unset(self):
+        self.body = self.body.replace(
+            "[setup.dependencies]",
+            '[setup.dependencies]\nenvironment_inputs=["FIXTURE_SEED", "FIXTURE_UNSET"]',
+        )
+        self.body += '\n[environment]\nfiles=[{path="project.env",override=true}]\nunset=["FIXTURE_UNSET"]\n[environment.defaults]\nFIXTURE_DEFAULT="default"\n[environment.values]\nFIXTURE_SEED="{env:FIXTURE_DEFAULT}"\n'
+        (self.root / "project.env").write_text("FIXTURE_DEFAULT=from file\n")
+        with (self.root / "install.py").open("a") as script:
+            script.write(
+                "import os\nPath('effective').write_text(os.environ['FIXTURE_SEED'])\nassert 'FIXTURE_UNSET' not in os.environ\n"
+            )
+        self.write_config()
+        for value in ("one", "two"):
+            os.environ.update(FIXTURE_SEED=value, FIXTURE_UNSET=value)
+            result = self.run_cli("setup")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((self.root / "install-count").read_text(), "1")
+            self.assertEqual((self.root / "effective").read_text(), "from file")
+        (self.root / "project.env").write_text("FIXTURE_DEFAULT=changed\n")
+        self.assertEqual(self.run_cli("setup-status").returncode, 1)
+        self.assertEqual(self.run_cli("setup").returncode, 0)
+        self.assertEqual((self.root / "effective").read_text(), "changed")
+
+    def test_setup_fingerprint_and_execution_share_profile_environment_resolution(self):
+        self.body = self.body.replace(
+            "[setup.dependencies]",
+            '[setup.dependencies]\nenvironment_inputs=["FIXTURE_SEED"]',
+        )
+        self.write_config()
+        with (self.root / "install.py").open("a") as script:
+            script.write(
+                "import os\nPath('effective').write_text(os.environ['FIXTURE_SEED'])\n"
+            )
+        for index, value in enumerate(("profile one", "profile two"), 1):
+            with patch(
+                "chainman.profile",
+                return_value=(None, {"environment": {"FIXTURE_SEED": value}}),
+            ):
+                workflows.run(self.root, "setup", [])
+                self.assertEqual((self.root / "effective").read_text(), value)
+                self.assertEqual((self.root / "install-count").read_text(), str(index))
+                workflows.run(self.root, "setup", [])
+                self.assertEqual((self.root / "install-count").read_text(), str(index))
+
+    def test_environment_inputs_reject_patterns_duplicates_and_internal_names(self):
+        for value in (
+            '"NAME"',
+            '["NAME", "NAME"]',
+            '["NAME_*"]',
+            "[1]",
+            '["CHAINMAN_ROOT"]',
+        ):
+            with self.subTest(value=value):
+                (self.root / "chainman.toml").write_text(
+                    self.body.replace(
+                        "[setup.dependencies]",
+                        f"[setup.dependencies]\nenvironment_inputs={value}",
+                    )
+                )
+                with self.assertRaises(ValueError):
+                    workflows.configuration(self.root)
+
     def test_exclusive_service_access_requires_services_and_a_boolean(self):
         for value in ("true", '"yes"'):
             with self.subTest(value=value):

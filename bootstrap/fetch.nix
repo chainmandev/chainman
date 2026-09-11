@@ -137,6 +137,7 @@ let
         "_workflow-task"
         "_workflow-service"
         "_workflow-prepare"
+        "_service-prepare"
         "exec"
         "shell"
         "version"

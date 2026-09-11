@@ -195,7 +195,13 @@ the option and keep the existing lightweight path.
 
 Installed artifacts have shared use leases for task lifetimes. Reinstallation takes
 exclusive access and fails visibly while another task uses them. Child commands
-inherit those leases. Missing outputs or changed fingerprints require setup again;
+inherit those leases. A setup group may list explicit `environment_inputs`, such
+as `["DEV_SEED_SUFFIX"]`, when its outputs depend on environment values. Chainman
+hashes their effective project/profile values (distinguishing unset from empty),
+propagates changes through dependent setup groups, and stores only the digest.
+Declare host-provided variables in `environment.pass` for container parity. Inputs
+must come from the declared environment, rather than changes made by shell hooks.
+Missing outputs or changed fingerprints require setup again;
 failed installation or inputs changed during installation never receive a fresh
 stamp. Setup commands should install from frozen inputs, with generation declared
 separately as project tasks.
@@ -352,6 +358,13 @@ paths and bytes, including directory descendants; missing inputs and symlink
 escapes fail. Inputs must exist before launch. The project declares what defines
 data compatibility and still owns migration/seed completion and application
 readiness; a volume label does not certify successful application preparation.
+
+Requested setup groups run before service planning, so a volume input may be a
+declared setup artifact containing application-specific compatibility data. Setup
+runs in the ordinary project environment, without the private controller export
+mount. Planning then records the resulting input hashes. Admission checks them
+again before acquiring services; concurrent changes fail visibly. Status and stop
+continue to skip project setup and configuration.
 
 `preserve` is the default and refuses incompatible data. `disposable` explicitly
 permits recreation after users stop. Removal is unforced, so references from other
