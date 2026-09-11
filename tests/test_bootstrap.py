@@ -210,6 +210,53 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(path.stat().st_uid, os.getuid())
             self.assertEqual(path.stat().st_gid, os.getgid())
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") == "docker",
+        "requires Docker for the capability-free UID-0 image regression",
+    )
+    def test_stock_image_builds_read_only_owned_outputs_without_capabilities(self):
+        image = (SOURCE / "nix/container-image.txt").read_text().strip()
+        command = """chmod 0555 /
+mkdir -p "$HOME"
+SHELL=$(readlink -f "$(command -v sh)")
+export SHELL
+nix --extra-experimental-features nix-command build --no-link --impure --print-out-paths --expr '
+  derivation {
+    name = "chainman-stock-nix-owned-output";
+    system = builtins.currentSystem;
+    builder = builtins.getEnv "SHELL";
+    PATH = builtins.getEnv "PATH";
+    args = [ "-eu" "-c" "mkdir -p $out/owned; echo fixture > $out/owned/value; chmod 0555 $out/owned $out" ];
+  }'
+"""
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--user",
+                "0:0",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--env",
+                "NIX_CONFIG=build-users-group =",
+                "--env",
+                "HOME=/tmp/chainman-home",
+                image,
+                "sh",
+                "-eu",
+                "-c",
+                command,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(result.stdout.strip().startswith("/nix/store/"))
+
     def test_failed_docker_identity_probe_stops_before_container_execution(self):
         binary = self.root / "mock engine"
         binary.mkdir()
