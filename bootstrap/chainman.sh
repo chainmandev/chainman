@@ -51,13 +51,22 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     else
         command -v nix > /dev/null 2>&1 || fail 'Host mode requires Nix; no host-language fallback is used.'
     fi
+    case "$nix_bin" in /*) ;; *) nix_bin=$(command -v "$nix_bin") ;; esac
+    case "$nix_bin" in /*) ;; *) nix_bin=$(CDPATH='' cd -- "$(dirname -- "$nix_bin")" && pwd)/$(basename -- "$nix_bin") ;; esac
+    # Probe the evaluator, not a vendor-specific --version display string.
+    "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --raw --expr '
+      if builtins.compareVersions builtins.nixVersion "2.24" >= 0
+      then "compatible" else throw "Chainman requires Nix >= 2.24"
+    ' > /dev/null || fail 'Nix compatibility check failed; update the selected host/image Nix. Chainman does not replace it.'
+    CHAINMAN_RUNTIME_NIX_BIN=$(dirname -- "$nix_bin")
+    export CHAINMAN_RUNTIME_NIX_BIN
     nix_eval() {
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=$1 \
             "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression"
     }
     metadata=$(nix_eval metadata)
     {
-        IFS= read -r content_id
+        IFS= read -r _content_id
         IFS= read -r nar_hash
         IFS= read -r archive
     } << EOF
@@ -77,6 +86,8 @@ EOF
         export CHAINMAN_ARCHIVE
     fi
     store=$(nix_eval fetch)
+    actual=$("$nix_bin" --extra-experimental-features nix-command hash path "$store")
+    [ "$actual" = "$nar_hash" ] || fail 'Runtime store source failed NAR verification.'
     # Archives are source distributions: symlinks are excluded before evaluating
     # even the verified flake, so extraction cannot introduce an outside path.
     [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
@@ -86,59 +97,14 @@ EOF
     unset IN_NIX_SHELL CHAINMAN_ACTIVE_PROFILE CHAINMAN_ACTIVE_FINGERPRINT
     exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file \
         --command python3 -c '
-import fcntl, os, pathlib, shutil, stat, subprocess, sys, tempfile
-root, content_id, expected, store, *args = sys.argv[1:]
-nix = os.path.join(os.environ["CHAINMAN_RUNTIME_NIX_BIN"], "nix")
-cache = pathlib.Path(root) / ".chainman"
-try:
-    cache.mkdir(mode=0o700, exist_ok=True)
-    directory = os.open(cache, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    lock = os.open(".bootstrap.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
-    if not stat.S_ISREG(os.fstat(lock).st_mode):
-        raise ValueError("bootstrap lock is not a regular file")
-    fcntl.flock(lock, fcntl.LOCK_EX)
-    def verify_directory():
-        a, b = os.stat(cache, follow_symlinks=False), os.fstat(directory)
-        if (a.st_dev, a.st_ino) != (b.st_dev, b.st_ino):
-            raise ValueError("runtime directory changed during bootstrap")
-    verify_directory()
-    # Relative filesystem operations stay attached to the open real directory,
-    # even if another process renames its former pathname during installation.
-    os.fchdir(directory)
-    runtime = pathlib.Path(content_id)
-    def verify(path):
-        if path.is_symlink() or not path.is_dir():
-            raise ValueError("runtime must be a real directory")
-        actual = subprocess.check_output([nix, "--extra-experimental-features", "nix-command", "hash", "path", str(path)], text=True).strip()
-        if actual != expected:
-            raise ValueError("installed runtime failed NAR verification")
-    if not os.path.lexists(runtime):
-        stage = pathlib.Path(tempfile.mkdtemp(prefix=".install-", dir="."))
-        try:
-            shutil.copytree(store, stage, dirs_exist_ok=True, symlinks=True)
-            verify(stage)
-            os.rename(stage, runtime)
-        finally:
-            if stage.exists():
-                for current, dirs, files in os.walk(stage):
-                    os.chmod(current, 0o700)
-                shutil.rmtree(stage)
-    verify(runtime)
-    verify_directory()
-    runtime = cache / content_id
-    os.close(lock)
-    os.close(directory)
-    os.chdir(root)
-    os.environ.update(CHAINMAN_RUNTIME=str(runtime), CHAINMAN_ROOT=root, CHAINMAN_PROJECT_ROOT=root,
-                      PYTHONDONTWRITEBYTECODE="1")
-    # The current interpreter/environment came from the same verified archive.
-    # Keep them while executing the rehashed project-local source generation;
-    # entering an identical second bootstrap shell adds no integrity check.
-    os.execv(sys.executable, [sys.executable,
-        str(runtime / "scripts/chainman.py"), "--root", root, *args])
-except (OSError, ValueError, subprocess.CalledProcessError) as error:
-    sys.exit("Chainman bootstrap: " + str(error))
-' "$root" "$content_id" "$nar_hash" "$store" "$@"
+import os, sys
+root, store, *args = sys.argv[1:]
+os.chdir(root)
+os.environ.update(CHAINMAN_RUNTIME=store, CHAINMAN_ROOT=root, CHAINMAN_PROJECT_ROOT=root,
+                  PYTHONDONTWRITEBYTECODE="1")
+os.execv(sys.executable, [sys.executable,
+    store + "/scripts/chainman.py", "--root", root, *args])
+' "$root" "$store" "$@"
 fi
 
 engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}

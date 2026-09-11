@@ -18,6 +18,11 @@ command -v nix > /dev/null 2>&1 || {
 if [ -n "${TMPDIR:-}" ]; then
     export CHAINMAN_TEMP_BASE="$TMPDIR"
 fi
+# Keep the installed host Nix through project profiles; never provision a replacement.
+nix_bin=${CHAINMAN_NIX_BIN:-$(command -v nix)}
+case "$nix_bin" in /*) ;; *) nix_bin=$(CDPATH='' cd -- "$(dirname -- "$nix_bin")" && pwd)/$(basename -- "$nix_bin") ;; esac
+CHAINMAN_RUNTIME_NIX_BIN=$(dirname -- "$nix_bin")
+export CHAINMAN_RUNTIME_NIX_BIN
 inputs=$(cksum "$root/nix/flake.nix" "$root/nix/flake.lock")
 if [ "${TOOLCHAIN_ACTIVE_PROFILE:-}" = "$profile" ] && [ "${TOOLCHAIN_ACTIVE_ROOT:-}" = "$root" ] && [ "${TOOLCHAIN_ACTIVE_INPUTS:-}" = "$inputs" ] && [ "${TOOLCHAIN_FRESH:-0}" != 1 ]; then
     cd "$root"
@@ -26,4 +31,4 @@ fi
 export TOOLCHAIN_ACTIVE_ROOT="$root" TOOLCHAIN_ACTIVE_INPUTS="$inputs" TOOLCHAIN_MODE=host-nix
 unset IN_NIX_SHELL TOOLCHAIN_FRESH
 cd "$root/nix"
-exec nix --extra-experimental-features 'nix-command flakes' develop "path:.#$profile" --no-write-lock-file --command sh -eu -c 'cd "$1"; shift; exec "$@"' sh "$root" "$@"
+exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:.#$profile" --no-write-lock-file --command sh -eu -c 'cd "$1"; shift; exec "$@"' sh "$root" "$@"

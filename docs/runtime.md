@@ -16,14 +16,11 @@ release-authority input, not a signature or a separate transparency service.
 
 Nix verifies the archive before its flake or Python code runs. A bundled archive or
 `CHAINMAN_ARCHIVE` override must match the same pin. Source archives contain regular
-files only; symlinks are rejected. Bootstrap stores source generations under
-`.chainman/<sha256-of-NAR-SRI>`, rehashes them on every launch and refuses local edits.
-A bootstrap lock and staging directory protect concurrent/repeated installation.
-Only a complete verified directory is renamed into place. Previous generations are
-retained; no mutable current pointer is followed. The filesystem assumptions are
-ordinary local POSIX directories, atomic same-filesystem rename and cooperating
-process locks. Hard power-loss durability of every downloaded byte is not claimed;
-a later launch rechecks identity and fails on corrupt state.
+files only; symlinks are rejected. Bootstrap rehashes the fetched Nix-store source
+before evaluation and executes it directly. There is no second project-local runtime
+installation or mutable current pointer. Concurrent fetching and atomic store
+installation are Nix responsibilities. Existing project-local generations are not
+executed; they can be removed after stopping old sessions.
 
 The container maps project commands to the calling user's ownership: rootful Docker
 uses the caller's UID/GID, rootless Docker uses its mapped `0:0`, and Podman uses
@@ -78,24 +75,18 @@ their own tools. Source development continues to use the full `core` profile.
 After verifying the installed generation, the launcher reuses that same pinned
 bootstrap interpreter instead of entering a duplicate bootstrap environment.
 
-After bootstrap, the verified runtime shell supplies the Nix executable family ahead
-of project tools, including after shell refreshes. Other languages still come from
-the selected project shell. `CHAINMAN_NIX_BIN` selects the initial bootstrap only;
-`CHAINMAN_RUNTIME_NIX_BIN` is internal and cannot be set in project configuration.
-Bootstrap entry invalidates a previous project-profile token, so nested launchers reload
-the actual project shell. The runtime includes Nix's CLI and Linux namespace helper;
-Nix's combined development package and generated manuals are excluded from the
-consumer shell.
-The pinned Nix 2.34.8 includes a narrow patch for renaming read-only owned output
-directories as capability-free root. It preserves fresh-inode copying, hash checks
-and original modes, including restoration on rename failure. Updating Nix requires
-reviewing or retiring that version-bounded patch; it is never applied speculatively
-to a new version. In the Chainman source checkout, run `just verify-nix` on the
-host to repeat the full patched Nix package build and its upstream unit/functional
-gates after changing either the patch or pin. A fresh store without a cached patched
-build compiles Nix and needs its build dependencies, even with the small consumer
-bootstrap profile. Host and container stores are separate; published binary-cache
-coverage would reduce this first-entry cost without changing the runtime pin.
+Host mode retains the installed host Nix; container mode retains the pinned upstream
+image's Nix. `CHAINMAN_NIX_BIN` explicitly selects an absolute host executable.
+Bootstrap checks Nix >= 2.24 using the evaluator version, so vendor-specific version
+strings do not determine compatibility. Failure stops before runtime evaluation;
+Chainman never installs a replacement Nix. Supported platform qualification is a
+separate release gate, not implied by passing that minimum-version check.
+
+The selected executable family remains ahead of project tools after shell refreshes.
+`CHAINMAN_RUNTIME_NIX_BIN` is internal routing for that selection, not a separately
+packaged Nix. Bootstrap invalidates inherited project-profile tokens. Project language
+and SDK versions remain pinned by their own flakes. There is no Chainman Nix patch.
+The upstream container image is pinned by digest and updated deliberately.
 
 Cache reporting distinguishes project builds, shared downloads and free disk bytes.
 Limits and stale age live in `cache`; automatic pruning removes only old declared

@@ -22,10 +22,6 @@ test:
 verify:
     @./scripts/enter.sh core python3 scripts/toolchain.py verify
 
-# Full patched Nix unit/functional qualification; run when its patch or pin changes.
-verify-nix:
-    @./scripts/enter.sh core sh -eu -c 'system=$(nix --extra-experimental-features nix-command eval --impure --raw --expr builtins.currentSystem); exec nix --extra-experimental-features "nix-command flakes" build --no-link --no-write-lock-file "path:./nix#checks.$system.nix-upstream"'
-
 format:
     @./scripts/enter.sh core python3 scripts/toolchain.py format
 

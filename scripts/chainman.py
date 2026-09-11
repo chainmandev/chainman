@@ -131,6 +131,14 @@ def execute(
         raise ValueError("Commands must be nonempty argument arrays")
     ref, spec = profile(root, name)
     selected = dict(os.environ if env is None else env)
+    # Library callers can enter without the shell launcher. Capture their selected
+    # Nix before a project flake refreshes PATH, just as bootstrap does.
+    if not selected.get("CHAINMAN_RUNTIME_NIX_BIN"):
+        executable = shutil.which(tc.nix_command(selected), path=selected.get("PATH"))
+        if executable:
+            selected["CHAINMAN_RUNTIME_NIX_BIN"] = str(
+                Path(executable).absolute().parent
+            )
     selected.update(
         CHAINMAN_ROOT=str(root),
         CHAINMAN_PROJECT_ROOT=str(root),

@@ -1,5 +1,6 @@
 """Bootstrap qualification uses real Nix and neutral temporary runtime archives."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -24,13 +25,13 @@ class BootstrapTests(unittest.TestCase):
         (cls.tree / "scripts").mkdir(parents=True)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
-            "import json, os, pathlib, subprocess, sys, tempfile, time\n"
+            "import json, os, pathlib, shutil, subprocess, sys, tempfile, time\n"
             "root = pathlib.Path(sys.argv[2])\n"
             "record = dict(argv=sys.argv[1:], runtime=os.environ['CHAINMAN_RUNTIME'], "
             "root=os.environ['CHAINMAN_ROOT'], cwd=os.getcwd(), "
             "forward=os.environ.get('CHAINMAN_TEST_VALUE'), "
             "demo=os.environ.get('DEMO_TEST_VALUE'), container=os.environ.get('TOOLCHAIN_CONTAINER'))\n"
-            "record.update(uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
+            "record.update(nix=shutil.which('nix'), uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
             "record.update(active_profile=os.environ.get('CHAINMAN_ACTIVE_PROFILE'), active_fingerprint=os.environ.get('CHAINMAN_ACTIVE_FINGERPRINT'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['no_new_privs'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('NoNewPrivs:'))\n"
@@ -205,7 +206,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(record["uid"], expected_uid)
         self.assertEqual(record["no_new_privs"], "1")
         self.assertEqual(int(record["cap_eff"], 16), 0)
-        for path in [*self.root.glob("record-*.json"), self.root / ".chainman"]:
+        for path in self.root.glob("record-*.json"):
             self.assertEqual(path.stat().st_uid, os.getuid())
             self.assertEqual(path.stat().st_gid, os.getgid())
 
@@ -281,7 +282,9 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(first["root"], str(self.root))
         self.assertEqual(first["cwd"], str(self.root))
         runtime = Path(first["runtime"])
-        self.assertEqual(runtime.parent, self.root / ".chainman")
+        self.assertEqual(runtime.parent, Path("/nix/store"))
+        self.assertFalse((self.root / ".chainman").exists())
+        self.assertEqual(Path(first["nix"]).resolve(), Path(NIX).resolve())
         self.assertFalse(runtime.is_symlink())
         self.run_bootstrap("status")
         self.assertEqual(
@@ -327,17 +330,24 @@ class BootstrapTests(unittest.TestCase):
         self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
         self.assertEqual(list(outside.iterdir()), [])
 
-    def test_cached_bytes_and_executable_mode_are_reverified(self):
-        self.run_bootstrap()
-        runtime = Path(self.records()[0]["runtime"])
-        target = runtime / "scripts/chainman.py"
-        original = target.read_bytes()
-        target.chmod(0o755)
-        self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
-        target.chmod(0o644)
-        target.write_bytes(original + b"\n# changed\n")
-        self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
-        self.assertEqual(len(self.records()), 1)
+    def test_project_local_runtime_shadow_is_never_executed(self):
+        content_id = hashlib.sha256(self.nar_hash.encode()).hexdigest()
+        shadow = self.root / ".chainman" / content_id / "scripts"
+        shadow.mkdir(parents=True)
+        (shadow / "chainman.py").write_text("raise SystemExit(97)\n")
+        self.run_bootstrap("status")
+        self.assertEqual(Path(self.records()[0]["runtime"]).parent, Path("/nix/store"))
+
+    def test_selected_nix_compatibility_failure_does_not_dispatch(self):
+        fake = self.root / "unsupported nix"
+        fake.write_text("#!/bin/sh\nexit 42\n")
+        fake.chmod(0o755)
+        result = self.run_bootstrap(
+            check=False, env=dict(self.env, CHAINMAN_NIX_BIN=str(fake))
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("Nix compatibility check failed", result.stderr)
+        self.assertFalse(self.records())
 
     def test_concurrent_first_install_is_atomic(self):
         commands = [

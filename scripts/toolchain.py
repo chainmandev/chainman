@@ -31,7 +31,7 @@ _ancestor_fds: tuple[int, ...] = ()
 
 
 def nix_command(env=None) -> str:
-    """The verified core shell owns Nix after bootstrap, including legacy tools."""
+    """Retain the host/image Nix selected by the launcher across project shells."""
     selected = os.environ if env is None else env
     directory = selected.get("CHAINMAN_RUNTIME_NIX_BIN")
     return (

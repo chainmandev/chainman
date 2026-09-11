@@ -2,8 +2,8 @@
 
 Chainman keeps shared development machinery behind a project's `just` commands.
 Developers install `just`, Git, and either Docker/Podman or Nix. A checked-in launcher
-fetches a pinned source archive, verifies its SHA-256 NAR hash through Nix, and places
-the runtime in an ignored `.chainman/` directory. Python and development languages
+fetches a pinned source archive, verifies its SHA-256 NAR hash through Nix, and executes
+the runtime directly from its verified Nix-store source. Python and development languages
 come from Nix. There is no global Chainman installation.
 
 The intended public home is **chainman.dev**, with source at
@@ -37,7 +37,7 @@ verification.
 
 An existing project keeps its `justfile`, flake, workspace organization and application
 commands. Copy `bootstrap/chainman.sh` to `scripts/chainman.sh` and `bootstrap/fetch.nix`
-to `scripts/chainman-fetch.nix`, adopt a release lock, ignore `.chainman/`, and call
+to `scripts/chainman-fetch.nix`, adopt a release lock, and call
 `./scripts/chainman.sh exec --profile default -- COMMAND...` from its existing adapter.
 See [configuration](docs/configuration.md) and [dependency updates](docs/updates.md).
 The bootstrap and helper are managed release files; custom behavior belongs in the

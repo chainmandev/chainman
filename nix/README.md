@@ -1,13 +1,10 @@
-# Nix runtime patch
+# Nix execution
 
-`capless-root-move-path.patch` modifies Nix 2.34.8's `movePath` helper to retain
-ordinary filesystem behavior for owned directories when UID 0 lacks capabilities.
-The change also restores the source mode if rename fails. The patch was added on
-2026-09-08. It does not change Nix's fresh-copy or artifact-hash checks.
+Chainman uses the installed host Nix in host mode and the pinned upstream image's
+Nix in container mode. The launcher checks Nix >= 2.24 using the evaluator version;
+platform qualification remains a separate release gate. The selected executable
+family survives project shell refreshes. No replacement Nix package or source
+patch is included in the Chainman runtime.
 
-The patch includes code from [Nix 2.34.8](https://github.com/NixOS/nix/tree/2.34.8),
-whose store library is licensed under LGPL-2.1-or-later. The patch and its
-modifications use that same license; see [the complete license](NIX-LICENSE).
-Chainman's MIT license applies to its own tooling, not to this upstream-derived
-patch. The pinned package input supplies the complete corresponding Nix source;
-`flake.nix` applies this exact patch to it without modifying the source in place.
+Project flake locks continue to pin language tools independently of this choice.
+The container image is pinned by digest in the bootstrap and updated explicitly.
