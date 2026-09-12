@@ -85,6 +85,13 @@ variables cannot be unset. `cache.preserve_environment` preserves specifically n
 caller cache settings. `profiles.NAME.compiler_cache=true` opts a Rust-capable custom
 profile into the managed foreground sccache lifecycle; the profile must supply sccache.
 
+Compiler-cache profiles retain the realized Nix environment through a temporary
+standard Nix profile for the complete compiler lifetime. The shared native task
+owner contains the foreground cache server and its Nix launcher. Startup and stop
+failures terminate that owned group; cleanup still requires released kernel leases
+and the original socket identity before removing an endpoint. A failed cache stop
+remains an error even when bounded termination succeeds.
+
 An explicit `TMPDIR` remains the temporary base across bootstrap and profile
 refreshes, including project/profile overrides. Without one, Chainman retains
 Nix's first scoped temporary directory. This prevents repeated shell entries from

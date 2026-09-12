@@ -155,6 +155,7 @@ def execute(
     overrides=None,
     check=True,
     cwd: Path | None = None,
+    gc_root: Path | None = None,
     **kwargs,
 ):
     if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
@@ -202,7 +203,9 @@ def execute(
     else:
         selected.pop("CHAINMAN_TEMP_BASE", None)
     command = argv
-    if ref and (not active or selected.get("TOOLCHAIN_FRESH") == "1"):
+    if ref and (
+        gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
+    ):
         command = [
             tc.nix_command(selected),
             "--extra-experimental-features",
@@ -210,6 +213,7 @@ def execute(
             "develop",
             ref,
             "--no-write-lock-file",
+            *(["--profile", str(gc_root)] if gc_root is not None else []),
             "--command",
             "sh",
             "-eu",

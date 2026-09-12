@@ -15,9 +15,22 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import toolchain
+import native_tasks
 
 
 class RuntimeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Keep provisioning outside bounded child-command assertions, and retain
+        # the actual native package while those subprocesses are being tested.
+        runtime = toolchain.contextlib.ExitStack()
+        cls.addClassCleanup(runtime.close)
+        runtime.enter_context(
+            native_tasks.command(
+                Path(__file__).resolve().parents[1], [["true"]], {"shutdown_seconds": 1}
+            )
+        )
+
     def setUp(self):
         # Each fixture is an independent project. Its raw subprocesses must not
         # advertise the outer test runner's FD without inheriting that descriptor.
@@ -156,18 +169,12 @@ class RuntimeTests(unittest.TestCase):
 
     def test_dead_launcher_does_not_authorize_unlinking_a_live_compiler_socket(self):
         env = self.cache_fixture()
-        (self.root / "scripts/enter.sh").write_text(
-            "#!/bin/sh\nshift\n"
-            'if [ "$#" = 1 ] && [ "$1" = sccache ]; then\n'
-            '  "$@" &\n  echo "$!" > compiler-pid\n  wait\n'
-            'else exec "$@"; fi\n'
-        )
         real_popen = subprocess.Popen
         launchers = []
 
         def launch(argv, **kwargs):
             process = real_popen(argv, **kwargs)
-            if argv[-1] == "sccache":
+            if kwargs.get("env", {}).get("SCCACHE_START_SERVER") == "1":
                 launchers.append(process)
             return process
 
@@ -185,9 +192,11 @@ class RuntimeTests(unittest.TestCase):
                     endpoint.exists(), "A surviving compiler owns this endpoint"
                 )
             finally:
-                pid_file = self.root / "compiler-pid"
-                if pid_file.exists():
-                    os.kill(int(pid_file.read_text()), signal.SIGTERM)
+                subprocess.run(
+                    [str(self.root / "scripts/sccache"), "--stop-server"],
+                    env=env,
+                    check=True,
+                )
                 # The compiler is a child of the killed launcher. Its inherited
                 # lease, rather than parentage, establishes completion here.
                 deadline = time.monotonic() + 5
@@ -288,7 +297,7 @@ class RuntimeTests(unittest.TestCase):
         with toolchain.operation(self.root):
             self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
 
-    def test_cache_stop_failure_preserves_command_error_and_active_lock(self):
+    def test_cache_stop_failure_preserves_command_error_and_reaps_owned_group(self):
         env = self.cache_fixture()
         env["FAIL_STOP"] = "1"
         original_popen = subprocess.Popen
@@ -314,21 +323,33 @@ class RuntimeTests(unittest.TestCase):
                         toolchain.run_commands(spec, "verify", env, self.root)
             self.assertEqual(raised.exception.returncode, 23)
             self.assertIn("cleanup also failed", raised.exception.__notes__[0])
-            with self.assertRaisesRegex(ValueError, "active"):
-                with toolchain.operation(self.root):
-                    self.fail("Failed cleanup released a live server's lock")
+            with toolchain.operation(self.root):
+                self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
         finally:
-            env.pop("FAIL_STOP")
-            subprocess.run(
-                [str(self.root / "scripts/sccache"), "--stop-server"],
-                env=env,
-                check=True,
-            )
             for process in processes:
                 process.wait(timeout=5)
-            Path(env["SCCACHE_SERVER_UDS"]).unlink()
+
+    def test_slow_server_startup_is_terminated_and_releases_its_lifetime(self):
+        env = self.cache_fixture()
+        server = self.root / "scripts/sccache"
+        body = server.read_text().replace(
+            'os.fstat(int(os.environ["TOOLCHAIN_LOCK_FD"]))',
+            'os.fstat(int(os.environ["TOOLCHAIN_LOCK_FD"]))\n    Path("starting-server").write_text(str(os.getpid()))\n    time.sleep(30)',
+        )
+        server.write_text(body)
+        with (
+            toolchain.operation(self.root),
+            patch.object(toolchain, "_COMPILER_STARTUP_SECONDS", 1),
+        ):
+            with self.assertRaisesRegex(ValueError, "startup timed out"):
+                with toolchain.compiler_cache("rust", env, self.root):
+                    self.fail("Unready compiler entered work")
+        self.assertTrue((self.root / "starting-server").exists())
         with toolchain.operation(self.root):
             self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
+            self.assertEqual(
+                list((self.root / ".cache/toolchain").glob("compiler-*.lock")), []
+            )
 
     def test_cache_preserves_endpoint_replaced_during_shutdown(self):
         env = self.cache_fixture()

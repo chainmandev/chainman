@@ -28,6 +28,7 @@ _operation_gate_fd: int | None = None
 _operation_id = ""
 _operation_compat_fd: int | None = None
 _ancestor_fds: tuple[int, ...] = ()
+_COMPILER_STARTUP_SECONDS = 120
 
 
 def nix_command(env=None) -> str:
@@ -652,15 +653,46 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         SCCACHE_IDLE_TIMEOUT="0",
         CHAINMAN_COMPILER_OWNER=str(root),
     )
-    # Realizing a cold Nix closure can take longer than a server readiness
-    # deadline. Finish it synchronously before starting the owned server clock.
-    managed_run(
-        [*prefix, "sh", "-eu", "-c", "command -v sccache >/dev/null"],
-        cwd=root,
-        env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
-        check=True,
-        stdout=sys.stderr,
-    )
+    import native_tasks
+
+    # The same standard Nix profile roots the preflight closure throughout the
+    # server's lifetime. A successful preflight alone leaves a GC race before
+    # the second entry that starts sccache.
+    with tempfile.TemporaryDirectory(prefix="chainman-compiler-") as directory:
+        if (root / "chainman.toml").is_file():
+            import chainman
+
+            chainman.execute(
+                root,
+                profile,
+                ["sh", "-eu", "-c", "command -v sccache >/dev/null"],
+                env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
+                gc_root=Path(directory) / "profile",
+                stdout=sys.stderr,
+            )
+        else:
+            managed_run(
+                [*prefix, "sh", "-eu", "-c", "command -v sccache >/dev/null"],
+                cwd=root,
+                env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
+                check=True,
+                stdout=sys.stderr,
+            )
+        # The shared native command owner contains both the Nix launcher and
+        # foreground compiler. Failed startup uses the same bounded cleanup as
+        # ordinary finite tasks, including children of an intermediate launcher.
+        with native_tasks.command(
+            root, [[*prefix, "sccache"]], {"shutdown_seconds": 5}
+        ) as command:
+            with owned_compiler_cache(root, env, prefix, server_env, command):
+                yield dict(
+                    env, RUSTC_WRAPPER="sccache", CHAINMAN_COMPILER_OWNER=str(root)
+                )
+
+
+@contextlib.contextmanager
+def owned_compiler_cache(root, env, prefix, server_env, command):
+    endpoint = Path(env["SCCACHE_SERVER_UDS"])
     lifecycle_name = "compiler-" + uuid.uuid4().hex + ".lock"
     # Keep a distinct lifetime lease in the actual compiler process and every
     # intermediate launcher. Reaping only the launcher does not prove its child
@@ -668,7 +700,7 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
     with operation_file(root, lifecycle_name, unique=True) as lifecycle:
         acquire_operation(lifecycle.fileno())
         server = subprocess.Popen(
-            [*prefix, "sccache"],
+            command,
             **managed_options(
                 {
                     "cwd": root,
@@ -678,7 +710,8 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
                 }
             ),
         )
-    deadline = time.monotonic() + 120
+    deadline = time.monotonic() + _COMPILER_STARTUP_SECONDS
+    owned_socket = None
     try:
         while True:
             if server.poll() is not None:
@@ -692,14 +725,18 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
                 break
             except (FileNotFoundError, ConnectionRefusedError):
                 if time.monotonic() >= deadline:
-                    raise ValueError(
-                        "Compiler cache startup timed out; its inherited operation lock remains until the server exits"
-                    )
+                    raise ValueError("Compiler cache startup timed out")
                 time.sleep(0.05)
-    except BaseException:
-        # A still-starting child retains the lock; never announce successful cleanup.
-        if server.poll() is not None:
-            server.wait()
+    except BaseException as failure:
+        try:
+            stop_owned_compiler(server)
+            release_compiler_lifetime(root, lifecycle_name, endpoint, owned_socket)
+        except BaseException as cleanup:
+            failure.add_note(f"Compiler cache startup cleanup also failed: {cleanup}")
+            print(
+                f"Compiler cache startup cleanup also failed: {cleanup}",
+                file=sys.stderr,
+            )
         raise
     primary = None
     try:
@@ -734,31 +771,54 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
                 raise ValueError(
                     "Compiler cache shutdown timed out; the server retains the operation lock until it exits"
                 ) from None
-            with operation_file(root, lifecycle_name, create=False) as lifecycle:
-                try:
-                    fcntl.flock(lifecycle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    raise ValueError(
-                        "Compiler cache process is still active after its launcher exited; its endpoint was preserved"
-                    ) from None
-                contained(root, f".cache/toolchain/{lifecycle_name}").unlink()
-            if endpoint.exists() or endpoint.is_symlink():
-                current = endpoint.lstat()
-                if not stat.S_ISSOCK(current.st_mode) or (
-                    current.st_dev,
-                    current.st_ino,
-                ) != (owned_socket.st_dev, owned_socket.st_ino):
-                    raise ValueError(
-                        "Compiler cache endpoint changed; it was preserved"
-                    )
-                endpoint.unlink()
+            release_compiler_lifetime(root, lifecycle_name, endpoint, owned_socket)
             if status:
                 raise ValueError(f"Compiler cache server exited with status {status}")
         except BaseException as cleanup:
+            if server.poll() is None:
+                try:
+                    stop_owned_compiler(server)
+                    release_compiler_lifetime(
+                        root, lifecycle_name, endpoint, owned_socket
+                    )
+                except BaseException as forced_cleanup:
+                    cleanup.add_note(
+                        f"Owned compiler termination also failed: {forced_cleanup}"
+                    )
             if primary is None:
                 raise
             primary.add_note(f"Compiler cache cleanup also failed: {cleanup}")
             print(f"Compiler cache cleanup also failed: {cleanup}", file=sys.stderr)
+
+
+def stop_owned_compiler(server):
+    if server.poll() is None:
+        server.terminate()
+    try:
+        server.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        raise ValueError(
+            "Compiler owner did not finish cleanup; its operation lease remains authoritative"
+        ) from None
+
+
+def release_compiler_lifetime(root, lifecycle_name, endpoint, owned_socket):
+    with operation_file(root, lifecycle_name, create=False) as lifecycle:
+        try:
+            fcntl.flock(lifecycle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(
+                "Compiler cache process is still active after its launcher exited; its endpoint was preserved"
+            ) from None
+        contained(root, f".cache/toolchain/{lifecycle_name}").unlink()
+    if owned_socket is not None and (endpoint.exists() or endpoint.is_symlink()):
+        current = endpoint.lstat()
+        if not stat.S_ISSOCK(current.st_mode) or (
+            current.st_dev,
+            current.st_ino,
+        ) != (owned_socket.st_dev, owned_socket.st_ino):
+            raise ValueError("Compiler cache endpoint changed; it was preserved")
+        endpoint.unlink()
 
 
 def fingerprint(spec: dict, root: Path = ROOT) -> str:
