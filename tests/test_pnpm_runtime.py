@@ -53,6 +53,16 @@ class PnpmRuntimeTests(unittest.TestCase):
                     timeout=60,
                 )
 
+            prior_layout = dict(env)
+            toolchain.pnpm_environment(
+                prior_layout, {"PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE": "true"}
+            )
+            installed = run("install", "--offline", selected=prior_layout)
+            self.assertEqual(
+                installed.returncode, 0, installed.stdout + installed.stderr
+            )
+            # Migrate an existing global layout through explicit installation,
+            # with captured stdio and no terminal or blanket CI environment.
             installed = run("install", "--offline")
             self.assertEqual(
                 installed.returncode, 0, installed.stdout + installed.stderr

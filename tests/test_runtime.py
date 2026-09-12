@@ -422,7 +422,7 @@ class RuntimeTests(unittest.TestCase):
         with patch.dict(os.environ, unsafe):
             env = toolchain.environment(self.root)
         for aliases, value in zip(
-            toolchain.PNPM_SETTING_VARIABLES[1:], ("false", "error")
+            toolchain.PNPM_SETTING_VARIABLES[1:], ("false", "error", "false")
         ):
             for name in aliases:
                 self.assertEqual(env[name], value)

@@ -525,6 +525,11 @@ PNPM_SETTING_VARIABLES = (
         "pnpm_config_verify_deps_before_run",
         "npm_config_verify_deps_before_run",
     ),
+    (
+        "PNPM_CONFIG_CONFIRM_MODULES_PURGE",
+        "pnpm_config_confirm_modules_purge",
+        "npm_config_confirm_modules_purge",
+    ),
 )
 
 
@@ -613,6 +618,9 @@ def environment(root: Path = ROOT) -> dict[str, str]:
             "PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE": "false",
             # Frozen installation belongs to setup; run/exec may only check it.
             "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "error",
+            # Explicit installation owns its module tree, including migrations
+            # from pnpm's previous default layout, without a terminal prompt.
+            "PNPM_CONFIG_CONFIRM_MODULES_PURGE": "false",
         },
     )
     # Keep build JVMs within the command lifetime. Gradle may use a single-use
