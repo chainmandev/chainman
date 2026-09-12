@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import chainman
+import dependency_api
 import update_staging as subject
 import updates
 
@@ -81,6 +83,54 @@ commands=[["true"]]
         with contextlib.redirect_stdout(io.StringIO()) as stream:
             subject.finalize(self.root, self.stage)
         return json.loads(stream.getvalue())
+
+    def test_secondary_policy_cannot_choose_reconciliation_before_inspection(self):
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                "[updates]", '[updates]\npolicy_file="policy.toml"'
+            )
+        )
+        (self.root / "policy.toml").write_text('reconcile_tasks=["verify"]\n')
+        updates.git(self.root, "add", ".")
+        updates.git(self.root, "commit", "-m", "Declare secondary policy")
+        self.prepare()
+        (self.candidate / "policy.toml").write_text('reconcile_tasks=["privileged"]\n')
+        with patch.dict(
+            os.environ, CHAINMAN_ENTRY_AUTHORITY=str(self.stage / "original-bootstrap")
+        ):
+            self.assertEqual(
+                dependency_api.policy(self.candidate)["reconcile_tasks"], ["verify"]
+            )
+        with self.assertRaises(ValueError):
+            subject.inspect(self.root, self.stage)
+
+    def test_nested_administration_is_rejected_before_git_can_run_filters(self):
+        nested = self.root / "nested input"
+        nested.mkdir()
+        updates.git(nested, "init", "-b", "main")
+        updates.git(nested, "config", "user.name", "Test")
+        updates.git(nested, "config", "user.email", "test@example.invalid")
+        (nested / "value").write_text("old\n")
+        updates.git(nested, "add", ".")
+        updates.git(nested, "-c", "commit.gpgsign=false", "commit", "-m", "Input")
+        updates.git(self.root, "add", "nested input")
+        updates.git(self.root, "commit", "-m", "Add frozen input")
+        self.prepare()
+        state = json.loads((self.stage / "control/state.json").read_text())
+        self.assertEqual(set(state["candidate_git"]), {".git", "nested input/.git"})
+        self.assertEqual(
+            (self.stage / "original-bootstrap/git-directories").read_text(),
+            ".git\nnested input/.git\n",
+        )
+        metadata = self.candidate / "nested input/.git"
+        with (metadata / "config").open("a") as stream:
+            stream.write('\n[filter "probe"]\nclean = "touch filter-executed; cat"\n')
+        (metadata / "info/attributes").write_text("value filter=probe\n")
+        (self.candidate / "nested input/value").write_text("new\n")
+        with self.assertRaisesRegex(ValueError, "Git administration"):
+            subject.inspect(self.root, self.stage)
+        self.assertFalse((self.candidate / "nested input/filter-executed").exists())
 
     def add_runtime_copy(self):
         config = self.root / "chainman.toml"
@@ -191,7 +241,7 @@ commands=[["true"]]
     def test_candidate_cannot_stage_or_commit_during_verification(self):
         self.update()
         updates.git(self.candidate, "add", "dependency.lock")
-        with self.assertRaisesRegex(ValueError, "Git HEAD or index"):
+        with self.assertRaisesRegex(ValueError, "candidate Git"):
             self.finish()
         self.assertEqual(updates.snapshot(self.root), self.before)
 

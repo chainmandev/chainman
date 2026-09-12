@@ -176,6 +176,12 @@ class BootstrapTests(unittest.TestCase):
         ):
             shutil.copy2(source, authority / name)
         (authority / "authority-root").write_text(str(self.root) + "\n")
+        (authority / "git-directories").write_text(".git\nnested input/.git\n")
+        subprocess.run(
+            ["git", "init", str(self.root / "nested input")],
+            check=True,
+            capture_output=True,
+        )
         (authority / "chainman.toml").write_text(original)
         # Neither a replacement pin nor new host mount authority may influence
         # the next launch after a resolver has edited the writable candidate.
@@ -203,7 +209,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(cfg["tasks"]["probe"]["commands"], [["true"]])
         if container:
             probe = """import os, pathlib
-for path in (pathlib.Path(os.environ['CHAINMAN_ENTRY_AUTHORITY']) / 'chainman.lock', pathlib.Path('.git/config')):
+for path in (pathlib.Path(os.environ['CHAINMAN_ENTRY_AUTHORITY']) / 'chainman.lock', pathlib.Path('.git/config'), pathlib.Path('nested input/.git/config')):
     try: path.write_text('must remain protected')
     except OSError: pass
     else: raise AssertionError(str(path) + ' was writable')

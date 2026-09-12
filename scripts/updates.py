@@ -57,6 +57,7 @@ def preview_git_environment():
             GIT_CONFIG_KEY_1="core.hooksPath",
             GIT_CONFIG_VALUE_1=os.devnull,
             GIT_TERMINAL_PROMPT="0",
+            GIT_OPTIONAL_LOCKS="0",
         )
         yield
     finally:
@@ -187,13 +188,7 @@ def submodule_state(root: Path, name: str, identity: str) -> dict:
             raise ValueError("Submodule input has hidden index flags")
     expected = tree_entries(path, identity)
     if (
-        git(
-            path,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            "--ignore-submodules=none",
-        )
+        git(path, "ls-files", "--others", "--exclude-standard", "-z")
         or staged_entries(path) != expected
         or raw_entries(path, expected) != expected
     ):

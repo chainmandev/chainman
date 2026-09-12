@@ -208,7 +208,7 @@ update_candidate() (
         unset "$update_git"
     done
     exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=2 \
-        GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null GIT_TERMINAL_PROMPT=0 \
+        GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
         CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
 )
 expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) {
@@ -739,9 +739,17 @@ policy_unavailable=0
 if [ "$authority" != "$root" ]; then
     # Candidates have a self-contained, frozen Git directory. Never ask their
     # mutable metadata to select host administrative mounts or signing policy.
-    [ -d "$root/.git" ] && [ ! -L "$root/.git" ] || fail 'Candidate requires a real local Git directory.'
-    set -- --mount "type=bind,src=$root/.git,dst=$root/.git,readonly" \
-        --env GIT_CONFIG_GLOBAL=/dev/null --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 --env GIT_OPTIONAL_LOCKS=0 "$@"
+    [ -f "$authority/git-directories" ] && [ ! -L "$authority/git-directories" ] || fail 'Missing frozen Git directory inventory.'
+    while IFS= read -r git_relative; do
+        single_line "$git_relative"
+        case "$git_relative" in '' | /* | *','* | *'/../'* | '../'* | *'/..') fail 'Unsafe frozen Git directory.' ;; esac
+        case "$git_relative" in .git | */.git) ;; *) fail 'Expected a Git administrative directory.' ;; esac
+        git_directory=$root/$git_relative
+        [ -d "$git_directory" ] && [ ! -L "$git_directory" ] || fail 'Candidate requires real local Git directories.'
+        [ "$(CDPATH='' cd -P -- "$git_directory" && pwd)" = "$git_directory" ] || fail 'Candidate Git directory contains a symlink.'
+        set -- --mount "type=bind,src=$git_directory,dst=$git_directory,readonly" "$@"
+    done < "$authority/git-directories"
+    set -- --env GIT_CONFIG_GLOBAL=/dev/null --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 --env GIT_OPTIONAL_LOCKS=0 "$@"
     count=2
     set -- --env GIT_CONFIG_KEY_0=core.fsmonitor --env GIT_CONFIG_VALUE_0=false --env GIT_CONFIG_KEY_1=core.hooksPath --env GIT_CONFIG_VALUE_1=/dev/null "$@"
 elif command -v git > /dev/null 2>&1; then

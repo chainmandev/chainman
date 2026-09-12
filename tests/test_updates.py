@@ -126,6 +126,15 @@ class TransactionTests(unittest.TestCase):
     def test_initialized_submodule_commits_and_noop_with_no_fetch(self):
         self.unchanged_submodule(True)
 
+    def test_submodule_raw_inspection_does_not_execute_clean_filters(self):
+        path, identity, _ = self.submodule()
+        updates.git(path, "config", "filter.probe.clean", "touch filter-executed; cat")
+        (path / ".git/info/attributes").write_text("input.txt filter=probe\n")
+        (path / "input.txt").write_text("changed input")
+        with updates.preview_git_environment(), self.assertRaises(ValueError):
+            updates.submodule_state(self.root, "vendor source", identity)
+        self.assertFalse((path / "filter-executed").exists())
+
     def test_uninitialized_submodule_commits_and_noop_with_no_fetch(self):
         self.unchanged_submodule(False)
 

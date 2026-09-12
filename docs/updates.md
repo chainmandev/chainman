@@ -516,6 +516,14 @@ Clean-source updates preserve the current commit identity and branch in a shallo
 copy, so version checks see the same baseline revision. Previews may include dirty
 sources and create a disposable baseline commit instead. Neither copies remotes,
 hooks or older history.
+Before candidate code runs, entry authority freezes the main configuration,
+secondary dependency policy, runtime pin and archive outside the writable checkout.
+Reconciliation task selection and its transports use those frozen inputs. Candidate
+Git administration, including every initialized nested submodule, is frozen as raw
+bytes and mounted read-only in containers. Trusted inspection checks that complete
+metadata inventory before invoking Git, and compares source bytes without executing
+Git clean filters. A changed policy or administrative file cannot authorize its own
+inspection or broader host access.
 Re-audit reconstructs the baseline from immutable Git blobs, including deleted
 files, and obtains fresh dependency eligibility evidence before resuming acceptance.
 Staged formatting restores excluded paths before verification, so the checked

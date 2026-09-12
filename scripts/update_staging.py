@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import hashlib
 import os
+import stat
 import tempfile
 import sys
 from pathlib import Path
@@ -40,15 +42,30 @@ def export_bootstrap(runtime, target):
         )
 
 
-def export_authority(root, candidate, target, *, pin_root=None):
+def export_authority(
+    root, candidate, target, *, pin_root=None, git_directories=(".git",)
+):
     """Keep entry policy and runtime selection outside the writable candidate.
 
     The launcher mounts this directory read-only. It contains no transaction
     state or original Git metadata. Relative declarations still use candidate.
     """
     pin_root = pin_root or root
+    git_directories = list(git_directories)
+    if any(any(character in name for character in "\r\n,") for name in git_directories):
+        raise ValueError(
+            "Candidate Git directory paths must be single-line mount paths"
+        )
     tc.atomic_bytes(target / "authority-root", (str(candidate) + "\n").encode())
     tc.atomic_bytes(target / "chainman.toml", tc.regular_input(root, "chainman.toml"))
+    policy_file = tc.config(root).get("updates", {}).get("policy_file")
+    if policy_file:
+        tc.atomic_bytes(
+            target / "dependency-policy.toml", tc.regular_input(root, policy_file)
+        )
+    tc.atomic_bytes(
+        target / "git-directories", ("\n".join(git_directories) + "\n").encode()
+    )
     pin = json.loads(tc.regular_input(pin_root, "chainman.lock"))
     if pin.get("bundled_archive"):
         tc.atomic_bytes(
@@ -205,10 +222,19 @@ def prepare(root, destination, args, *, source=False):
                 for name in state["candidate_before"]
                 if (candidate / name).is_file() and not (candidate / name).is_symlink()
             }
+            state["candidate_git"] = {
+                name: administration(candidate, name)
+                for name in git_directories(candidate)
+            }
         unchanged(root, state)
         if not source:
             export_bootstrap(chainman.RUNTIME, destination / "original-bootstrap")
-            export_authority(root, candidate, destination / "original-bootstrap")
+            export_authority(
+                root,
+                candidate,
+                destination / "original-bootstrap",
+                git_directories=state["candidate_git"],
+            )
         tc.atomic_json(control / "state.json", state)
         tc.atomic_bytes(control / "at", (state["at"] + "\n").encode())
 
@@ -352,7 +378,43 @@ def reaudit(root, at, args):
                         )
 
 
+def git_directories(root, prefix=""):
+    """Discover administration only while the newly copied input is trusted."""
+    yield prefix + ".git"
+    for name in updates.gitlinks(root):
+        nested = tc.contained(root, name)
+        if (nested / ".git").exists():
+            yield from git_directories(nested, prefix + name + "/")
+
+
+def administration(root, name):
+    """Read frozen candidate metadata as bytes, before invoking Git against it."""
+    relative = Path(name)
+    if relative.name != ".git":
+        raise ValueError("Expected a frozen Git administrative directory")
+    base = tc.contained(root, str(relative.parent)) / relative.name
+    if not base.is_dir() or base.is_symlink():
+        raise ValueError("Candidate Git administration must remain a real directory")
+    digest = hashlib.sha256()
+    for path in [base, *sorted(base.rglob("*"))]:
+        info = path.lstat()
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            raise ValueError(
+                "Candidate Git administration contains a non-regular entry"
+            )
+        digest.update(os.fsencode(str(path.relative_to(base))) + b"\0")
+        digest.update(str(info.st_mode & 0o177777).encode() + b"\0")
+        if stat.S_ISREG(info.st_mode):
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
 def candidate_unchanged(candidate, state):
+    if any(
+        administration(candidate, name) != expected
+        for name, expected in state["candidate_git"].items()
+    ):
+        raise ValueError("Updater or verifier changed candidate Git administration")
     if (
         list(updates.repository(candidate, clean=False)) != state["candidate_identity"]
         or index(candidate) != state["candidate_index"]
@@ -479,7 +541,11 @@ def inspect(root, destination):
             runtime = verified_runtime(candidate)
             export_bootstrap(runtime, destination / "candidate-bootstrap")
             export_authority(
-                root, candidate, destination / "candidate-bootstrap", pin_root=candidate
+                root,
+                candidate,
+                destination / "candidate-bootstrap",
+                pin_root=candidate,
+                git_directories=state["candidate_git"],
             )
         state.update(updated=updated, paths=paths)
         control = destination / "control"

@@ -32,7 +32,15 @@ def merge(base: dict, extra: dict) -> dict:
 def policy(root: Path) -> dict:
     result = deepcopy(tc.config(root).get("updates", {}))
     if result.get("policy_file"):
-        declared = tomllib.loads(tc.regular_input(root, result["policy_file"]).decode())
+        authority = tc.configuration_root(root)
+        declared = tomllib.loads(
+            tc.regular_input(
+                authority,
+                "dependency-policy.toml"
+                if authority != root
+                else result["policy_file"],
+            ).decode()
+        )
         result = merge(result, declared)
     registry.minimum_age(result)
     return result
