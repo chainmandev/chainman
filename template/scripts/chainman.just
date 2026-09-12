@@ -174,4 +174,5 @@ verify *args:
 verify-lite *args:
     #!/bin/sh
     set -eu
-    exec ./scripts/chainman.sh run verify "$@"
+    ./scripts/chainman.sh run format-check
+    exec ./scripts/chainman.sh run test "$@"

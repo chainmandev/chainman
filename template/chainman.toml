@@ -75,7 +75,7 @@ generate = ["generate-artifacts"]
 format-write = ["format-write"]
 format-check = ["format-check"]
 verify = ["verify"]
-verify-lite = ["verify"]
+verify-lite = ["format-check", "test"]
 
 [[dependencies.exclusions]]
 pattern = "examples/**"
