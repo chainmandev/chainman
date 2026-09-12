@@ -160,6 +160,24 @@ extends="base"
             workflows.run(root, "build", [])
             self.assertEqual((root / "result").read_text(), "executed\n")
 
+    def test_recovery_projection_does_not_compile_broken_declarations(self):
+        import bootstrap_plan
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "chainman.toml").write_text(
+                'schema=3\n[templates.tasks.broken]\nextends="missing"\n'
+            )
+            for action in ("services-status", "services-stop"):
+                self.assertEqual(
+                    bootstrap_plan.plan(root, action, ""), (True, ["--controller", "1"])
+                )
+            self.assertEqual(
+                bootstrap_plan.plan(root, "_control-export", ""), (False, [])
+            )
+            with self.assertRaises(ValueError):
+                bootstrap_plan.plan(root, "run", "test")
+
     def test_schema_three_keeps_full_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

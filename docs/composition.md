@@ -116,3 +116,8 @@ planning. Record cold/warm cache conditions alongside measurements; do not sum
 overlapping parent/child phases or treat unpaired records as completed work.
 Normal application output continues to use its usual streams independently of
 the timing records.
+
+Recovery commands (`services-status` and `services-stop`) use saved ownership state.
+They and their nested native-tool export bypass declaration compilation, so a
+semantic error such as an unknown template parent cannot block service cleanup.
+Ordinary task entry and configuration validation still reject that error.

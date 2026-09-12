@@ -364,6 +364,17 @@ def main(argv=None):
             import services
 
             return services.export(root, args.arguments)
+        if args.action == "_bootstrap-options":
+            import bootstrap_plan
+
+            if len(args.arguments) != 2:
+                raise ValueError(
+                    "Bootstrap options require the original action and task"
+                )
+            _, options = bootstrap_plan.plan(root, args.arguments[0], args.arguments[1])
+            if options:
+                print("\n".join(map(bootstrap_plan.line, options)))
+            return 0
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
@@ -382,16 +393,6 @@ def main(argv=None):
             return services.execute_internal(root, args.action, rest)
         elif args.action == "version":
             print((RUNTIME / "VERSION").read_text().strip())
-        elif args.action == "_bootstrap-options":
-            import bootstrap_plan
-
-            if len(rest) != 2:
-                raise ValueError(
-                    "Bootstrap options require the original action and task"
-                )
-            _, options = bootstrap_plan.plan(root, rest[0], rest[1])
-            if options:
-                print("\n".join(map(bootstrap_plan.line, options)))
         elif args.action in {"config", "explain"}:
             import config_inspection
 

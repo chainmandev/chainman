@@ -185,6 +185,45 @@ class BootstrapTests(unittest.TestCase):
         self.write_lock()
         return runtime
 
+    def schema_three_recovery(self, mode):
+        self.use_real_runtime()
+        config = self.root / "chainman.toml"
+        config.write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n[tasks.probe]\nservices=["worker"]\ncommands=[["true"]]\n[services.worker]\ncommand=["sleep","600"]\nshutdown_seconds=2\n'
+        )
+        cache = tempfile.TemporaryDirectory(prefix="chainman recovery host state ")
+        self.addCleanup(cache.cleanup)
+        env = dict(self.env, CHAINMAN_MODE=mode, XDG_CACHE_HOME=cache.name)
+        if mode == "container-nix":
+            env["CHAINMAN_CONTAINER_ENGINE"] = os.environ["CHAINMAN_TEST_CONTAINER"]
+        try:
+            self.run_bootstrap("services-up", "probe", env=env)
+            with config.open("a") as stream:
+                stream.write('\n[templates.tasks.invalid]\nextends="missing"\n')
+            self.assertNotEqual(
+                self.run_bootstrap(
+                    "config", "validate", env=env, check=False
+                ).returncode,
+                0,
+            )
+            status = json.loads(self.run_bootstrap("services-status", env=env).stdout)
+            self.assertTrue(status["running"])
+            self.run_bootstrap("services-stop", env=env)
+            status = json.loads(self.run_bootstrap("services-status", env=env).stdout)
+            self.assertFalse(status["running"])
+        finally:
+            self.run_bootstrap("services-stop", env=env)
+
+    def test_schema_three_host_recovery_ignores_broken_templates(self):
+        self.schema_three_recovery("host-nix")
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires real container engine",
+    )
+    def test_schema_three_container_recovery_ignores_broken_templates(self):
+        self.schema_three_recovery("container-nix")
+
     def test_schema_three_actual_host_compilation_and_command(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text(

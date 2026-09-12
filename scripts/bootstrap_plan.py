@@ -80,6 +80,12 @@ def transport(root, spec):
 
 
 def plan(root, request, name):
+    # Recovery consumes saved ownership state, never current declarations. Keep
+    # nested native-tool export available through the same read-only transport.
+    if request in {"services-status", "services-stop"}:
+        return True, ["--controller", "1"]
+    if request == "_control-export":
+        return False, []
     cfg = config_inspection.validated(root)
     task = name if request == "run" else request
     controller = request in CONTROLLER or (
@@ -92,8 +98,6 @@ def plan(root, request, name):
         )
     )
     options = ["--controller", "1"] if controller else []
-    if request in {"_control-export", "services-status", "services-stop"}:
-        return controller, options
     patterns = list(cfg.get("environment", {}).get("pass", []))
     for spec in cfg.get("tasks", {}).values():
         patterns += list(spec.get("context_environment", {}))
