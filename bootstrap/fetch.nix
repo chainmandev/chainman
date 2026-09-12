@@ -109,6 +109,12 @@ let
     );
   options =
     b.concatMap pattern (config.environment.pass or [ ])
+    # Context values originate in checked-in task declarations. Their names must
+    # also cross subsequent service/build container entries, without forwarding
+    # an undeclared wildcard or installing host inputs in the planner process.
+    ++ b.concatMap (task: b.concatMap pattern (b.attrNames (task.context_environment or { }))) (
+      b.attrValues (config.tasks or { })
+    )
     ++ containerOptions (config.container or { })
     ++ containerOptions transport;
   requestedTask = if request == "run" then b.getEnv "CHAINMAN_REQUEST_TASK" else request;

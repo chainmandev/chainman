@@ -391,14 +391,17 @@ def export(root, arguments):
     if action in {"services-status", "services-stop"}:
         return 0
     cfg = workflows.configuration(root)
+    task = (
+        extra[0]
+        if action in {"run", "services-run", "services-up", "services-reset"} and extra
+        else action
+    )
     input_env = project_environment.host_inputs(destination, cfg.get("environment", {}))
     planning_env = dict(input_env, CHAINMAN_MODE=mode)
     for name in ("TOOLCHAIN_DOWNLOAD_CACHE", "XDG_CACHE_HOME"):
         if name in os.environ:
             planning_env[name] = os.environ[name]
-    planning_env = project_environment.apply(
-        root, cfg.get("environment", {}), planning_env
-    )
+    planning_env = workflows.context_environment(root, cfg, task, planning_env)
     forwarded = {
         name: value
         for name, value in planning_env.items()
@@ -406,11 +409,6 @@ def export(root, arguments):
     }
     declared = declarations(root, cfg)
     fingerprint = config_fingerprint(root, cfg, env=dict(os.environ, **planning_env))
-    task = (
-        extra[0]
-        if action in {"run", "services-run", "services-up", "services-reset"} and extra
-        else action
-    )
     task_args = (
         extra[1:]
         if action in {"run", "services-run", "services-up", "services-reset"}
@@ -606,7 +604,9 @@ def export(root, arguments):
         if "watch" in spec:
             watch = spec["watch"]
             build = command(
-                [launcher, "_workflow-task", watch["task"], fingerprint], root
+                [launcher, "_workflow-task", watch["task"], fingerprint],
+                root,
+                forwarded,
             )
             value["watch"] = {
                 "build": build,
@@ -733,14 +733,15 @@ def prepare_requested(root, arguments):
         raise ValueError("Service preparation requires one task")
     cfg = workflows.configuration(root)
     entries = declarations(root, cfg)
-    expected = config_fingerprint(root, cfg, include_volume_inputs=False)
-    result = prepare_setup(root, cfg, entries, arguments[0])
-    if config_fingerprint(root, cfg, include_volume_inputs=False) != expected:
+    env = workflows.context_environment(root, cfg, arguments[0], tc.environment(root))
+    expected = config_fingerprint(root, cfg, include_volume_inputs=False, env=env)
+    result = prepare_setup(root, cfg, entries, arguments[0], env=env)
+    if config_fingerprint(root, cfg, include_volume_inputs=False, env=env) != expected:
         raise ValueError("Service configuration changed during preparation")
     return result
 
 
-def prepare_setup(root, cfg, entries, name):
+def prepare_setup(root, cfg, entries, name, *, env=None):
     tasks = workflows.order(cfg.get("tasks", {}), [name])
     requested = [
         service for task in tasks for service in cfg["tasks"][task].get("services", [])
@@ -761,7 +762,11 @@ def prepare_setup(root, cfg, entries, name):
     groups += [
         group for service in selected for group in entries[service].get("setup", [])
     ]
-    return workflows.run(root, "setup", list(dict.fromkeys(groups))) if groups else 0
+    return (
+        workflows.run(root, "setup", list(dict.fromkeys(groups)), env=env)
+        if groups
+        else 0
+    )
 
 
 def execute_internal(root, action, extra):

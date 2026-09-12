@@ -163,6 +163,18 @@ ensures one group; `setup` ensures all declared groups. Setup groups also suppor
 `depends_on` and `profile`. Task and setup dependency cycles or unknown references
 fail before execution. Tasks request setup explicitly; inspection tasks can omit it.
 
+A task can declare `context_environment = { APP_WORKERS = "false" }` for values
+shared by its setup groups, dependency tasks, services, readiness probes, and watch
+builds. These values replace caller inputs; explicit project values and per-profile,
+service, or command overrides retain their normal precedence. Ordinary task
+`environment` still applies only to that task's command. A dependency closure with
+conflicting context declarations is rejected before setup or service acquisition.
+Context values use the same literal expansion and reserved-variable checks as other
+environment declarations. They participate in setup fingerprints when declared as
+`environment_inputs`, and in service reuse compatibility. Container entries forward
+only the names explicitly declared by the project. The trusted controller planner
+never installs those values in its own process environment.
+
 An artifact can be declared as `{ path = "build/variant.hash", digest = true }` to
 check its bytes as well as its existence. Setup records its SHA-256 after successful
 generation. A later change invalidates readiness even when source inputs are

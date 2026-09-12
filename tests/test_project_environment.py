@@ -151,7 +151,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
                 )
             )
             (root / "chainman.toml").write_text(
-                'schema=2\n[container]\nhost_access=true\n[services.frontend.transport]\nports=["127.0.0.1:8080:8080"]\n[services.api.transport]\nports=["127.0.0.1:9090:9090"]\n[tasks.verify]\ncommands=[["true"]]\n'
+                'schema=2\n[container]\nhost_access=true\n[services.frontend.transport]\nports=["127.0.0.1:8080:8080"]\n[services.api.transport]\nports=["127.0.0.1:9090:9090"]\n[tasks.verify]\ncontext_environment={APP_CONTEXT="selected"}\ncommands=[["true"]]\n'
             )
             helper = Path(__file__).resolve().parents[1] / "bootstrap/fetch.nix"
 
@@ -177,6 +177,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
             frontend = options("_workflow-service", "frontend")
             self.assertIn("127.0.0.1:8080:8080", frontend)
+            self.assertIn("--env-pattern\nAPP_CONTEXT\n", frontend)
             self.assertNotIn("9090", frontend)
             self.assertNotIn("--publish", options("_workflow-task", "verify"))
             self.assertEqual(options("_control-export", "ignored"), "")

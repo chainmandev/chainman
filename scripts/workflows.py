@@ -73,6 +73,7 @@ def configuration(root):
                     "shutdown_seconds",
                     "wait_for_services",
                     "environment",
+                    "context_environment",
                     "transport",
                     "exclusive",
                     "exclusive_services",
@@ -85,6 +86,15 @@ def configuration(root):
                     f"Unknown fields in {section}.{key}: {', '.join(sorted(set(spec) - allowed))}"
                 )
             if section == "tasks":
+                context_values = spec.get("context_environment", {})
+                if not isinstance(context_values, dict):
+                    raise ValueError("Task context_environment must be a table")
+                for variable, value in context_values.items():
+                    project_environment.variable(variable)
+                    if not isinstance(value, str) or "\0" in value:
+                        raise ValueError(
+                            "Task context values must be strings without NUL"
+                        )
                 project_environment.transport(spec.get("transport", {}))
                 if "timeout_env" in spec:
                     project_environment.variable(spec["timeout_env"])
@@ -398,7 +408,27 @@ def serial_use(root, spec):
         yield (lease.fileno(),)
 
 
-def run(root: Path, action: str, extra: list[str], *, service_context=False):
+def context_environment(root, cfg, task, inherited):
+    """Select graph-wide inherited values without changing the planner process.
+
+    All tasks in one dependency closure share one graph. Conflicting declarations
+    are rejected instead of depending on task execution order.
+    """
+    values = {}
+    for key in order(cfg.get("tasks", {}), [task]):
+        for variable, value in cfg["tasks"][key].get("context_environment", {}).items():
+            if variable in values and values[variable] != value:
+                raise ValueError(f"Conflicting task context value: {variable}")
+            values[variable] = value
+    spec = cfg.get("environment", {})
+    configured = project_environment.apply(root, spec, inherited)
+    expanded = project_environment.expand(values, root, configured)
+    # The context replaces caller inputs; explicit project and profile policy
+    # still has the same precedence as it does for a normal caller environment.
+    return project_environment.apply(root, spec, dict(inherited, **expanded))
+
+
+def run(root: Path, action: str, extra: list[str], *, service_context=False, env=None):
     cfg = configuration(root)
     task_names = order(cfg.get("tasks", {}), [action]) if action != "setup" else []
     exclusive = any(cfg["tasks"][key].get("exclusive", False) for key in task_names)
@@ -414,7 +444,9 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
         new_execution=True,
         automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
     ):
-        env = tc.environment(root)
+        env = dict(tc.environment(root) if env is None else env)
+        if action != "setup":
+            env = context_environment(root, cfg, action, env)
         if action == "setup":
             with setup_use(root, cfg, extra or list(cfg.get("setup", {})), env):
                 return 0

@@ -149,6 +149,63 @@ commands=[["python3","task.py"]]
                 workflows.run(self.root, "setup", [])
                 self.assertEqual((self.root / "install-count").read_text(), str(index))
 
+    def test_context_reaches_setup_and_dependencies_without_process_mutation(self):
+        self.body = self.body.replace(
+            "[setup.dependencies]",
+            '[setup.dependencies]\nenvironment_inputs=["FIXTURE_SEED"]',
+        )
+        with (self.root / "install.py").open("a") as script:
+            script.write(
+                "import os\nPath('effective').write_text(os.environ['FIXTURE_SEED'])\n"
+            )
+        self.body += '\n[tasks.test]\ndepends_on=["build"]\ncontext_environment={FIXTURE_SEED="literal $(not-a-shell)"}\ncommands=[["python3","-c","import os; from pathlib import Path; Path(\\"task-context\\").write_text(os.environ[\\"FIXTURE_SEED\\"])"]]\n'
+        self.write_config()
+        os.environ["FIXTURE_SEED"] = "caller"
+        workflows.run(self.root, "test", [])
+        self.assertEqual(
+            (self.root / "effective").read_text(), "literal $(not-a-shell)"
+        )
+        self.assertEqual(
+            (self.root / "task-context").read_text(), "literal $(not-a-shell)"
+        )
+        self.assertEqual(os.environ["FIXTURE_SEED"], "caller")
+        workflows.run(self.root, "test", [])
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+        workflows.run(self.root, "build", [])
+        self.assertEqual((self.root / "effective").read_text(), "caller")
+        self.assertEqual((self.root / "install-count").read_text(), "2")
+
+    def test_context_conflicts_fail_before_setup_and_project_policy_wins(self):
+        self.body += 'context_environment={FIXTURE_SEED="dependency"}\n[tasks.test]\ndepends_on=["build"]\ncontext_environment={FIXTURE_SEED="different"}\n'
+        self.write_config()
+        with self.assertRaisesRegex(ValueError, "Conflicting task context"):
+            workflows.run(self.root, "test", [])
+        self.assertFalse((self.root / "installed").exists())
+        self.body = self.body.replace(
+            'FIXTURE_SEED="different"', 'FIXTURE_SEED="dependency"'
+        )
+        self.body += '\n[environment.values]\nFIXTURE_SEED="project policy"\n'
+        self.write_config()
+        cfg = workflows.configuration(self.root)
+        selected = workflows.context_environment(
+            self.root, cfg, "test", {"FIXTURE_SEED": "caller"}
+        )
+        self.assertEqual(selected["FIXTURE_SEED"], "project policy")
+
+    def test_context_rejects_managed_variables_and_nonliteral_values(self):
+        for value in (
+            "[]",
+            '{CHAINMAN_ROOT="bad"}',
+            '{RUSTC_WRAPPER="bad"}',
+            "{FIXTURE_SEED=4}",
+        ):
+            with self.subTest(value=value):
+                (self.root / "chainman.toml").write_text(
+                    self.body + "context_environment=" + value + "\n"
+                )
+                with self.assertRaises(ValueError):
+                    workflows.configuration(self.root)
+
     def test_environment_inputs_reject_patterns_duplicates_and_internal_names(self):
         for value in (
             '"NAME"',
