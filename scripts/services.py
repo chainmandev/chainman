@@ -573,26 +573,16 @@ def export(root, arguments):
                     "exec",
                     container_name,
                     launcher,
-                    "exec",
-                    "--profile",
-                    spec.get(
-                        "profile",
-                        cfg.get("project", {}).get("default_profile", "default"),
-                    ),
-                    "--",
-                    *probe["command"],
+                    "_workflow-probe",
+                    name,
+                    fingerprint,
                 ]
             else:
                 probe_command = [
                     launcher,
-                    "exec",
-                    "--profile",
-                    spec.get(
-                        "profile",
-                        cfg.get("project", {}).get("default_profile", "default"),
-                    ),
-                    "--",
-                    *probe["command"],
+                    "_workflow-probe",
+                    name,
+                    fingerprint,
                 ]
             value["readiness"] = {
                 "command": command(probe_command, service_root, env),
@@ -798,6 +788,21 @@ def execute_internal(root, action, extra):
             profile = spec.get(
                 "profile", cfg.get("project", {}).get("default_profile", "default")
             )
+            if action == "_workflow-probe":
+                if "readiness" not in spec:
+                    raise ValueError("Service has no readiness command")
+                # The application owns compiler lifetime. A readiness command
+                # uses its declared profile without starting another compiler.
+                return chainman.execute(
+                    root,
+                    profile,
+                    spec["readiness"]["command"],
+                    env=env,
+                    overrides=spec.get("environment", {}),
+                    cwd=tc.contained(root, spec.get("directory", ".")),
+                    pass_fds=descriptors,
+                    check=False,
+                ).returncode
             with tc.compiler_cache(profile, env, root) as selected:
                 return chainman.execute(
                     root,

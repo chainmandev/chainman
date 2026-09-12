@@ -57,6 +57,46 @@ commands=[["python3","task.py"]]
     def write_config(self):
         (self.root / "chainman.toml").write_text(self.body)
 
+    def test_readiness_uses_service_profile_without_starting_compiler_cache(self):
+        import services
+
+        self.body += """
+[profiles.host]
+compiler_cache=true
+[services.demo]
+profile="host"
+command=["false"]
+environment={FIXTURE_SERVICE="declared"}
+[services.demo.readiness]
+command=["python3","probe.py"]
+"""
+        self.write_config()
+        (self.root / "probe.py").write_text(
+            "import os; from pathlib import Path; "
+            "assert os.environ['FIXTURE_SERVICE']=='declared'; "
+            "Path('probed').touch()"
+        )
+        cfg = workflows.configuration(self.root)
+        fingerprint = services.config_fingerprint(self.root, cfg)
+        with (
+            patch.object(
+                tc,
+                "compiler_cache",
+                side_effect=AssertionError("probe started compiler"),
+            ),
+            patch.object(
+                services.chainman, "execute", wraps=services.chainman.execute
+            ) as execute,
+        ):
+            self.assertEqual(
+                services.execute_internal(
+                    self.root, "_workflow-probe", ["demo", fingerprint]
+                ),
+                0,
+            )
+        self.assertEqual(execute.call_args.args[1], "host")
+        self.assertTrue((self.root / "probed").is_file())
+
     def run_cli(self, *arguments):
         return subprocess.run(
             [

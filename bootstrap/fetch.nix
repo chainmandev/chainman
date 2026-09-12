@@ -113,7 +113,7 @@ let
   request = b.getEnv "CHAINMAN_REQUEST_ACTION";
   requestedName = b.getEnv "CHAINMAN_REQUEST_TASK";
   transport =
-    if request == "_workflow-service" then
+    if request == "_workflow-service" || request == "_workflow-probe" then
       config.services.${requestedName}.transport or { }
     else if request == "_workflow-task" || request == "run" then
       config.tasks.${requestedName}.transport or { }

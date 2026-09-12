@@ -430,7 +430,10 @@ func configuration(p Plan, self string) error {
 		}
 		if s.Readiness != nil {
 			r := s.Readiness
-			d["readiness_probe"] = map[string]any{"exec": map[string]string{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" probe \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation)}, "period_seconds": r.Period, "timeout_seconds": r.Timeout, "failure_threshold": r.Failures}
+			// The native owner enforces the command deadline and reaps descendants.
+			// Leave room for engine identity checks and bounded group cleanup before
+			// the backend's last-resort deadline can kill the identity anchor.
+			d["readiness_probe"] = map[string]any{"exec": map[string]string{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" probe \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation)}, "period_seconds": r.Period, "timeout_seconds": r.Timeout + 15, "failure_threshold": r.Failures}
 		}
 		processes[n] = d
 	}
@@ -490,12 +493,15 @@ func start(p Plan, self string) error {
 	return fmt.Errorf("Process Compose failed to start (%v); service output: %s", e, filepath.Join(p.State, "services.log"))
 }
 func ready(p Plan, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
 	// Probe execution, thresholds and dependency state are owned by Process Compose.
 	// This deadline only bounds a failed/lost controller, not a second probe loop.
 	seconds := 15
 	for _, n := range names {
 		if r := p.Services[n].Readiness; r != nil {
-			seconds += r.Period*r.Failures + r.Timeout
+			seconds += (r.Period + r.Timeout + 15) * r.Failures
 		}
 	}
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
@@ -747,7 +753,13 @@ func stopContainer(c *Container, seconds int) error {
 	return nil
 }
 func stopOwner(p Plan, n string) error {
-	path := filepath.Join(p.State, n+".owner.json")
+	if e := stopReceipt(p, n, n+".probe.owner.json", 1); e != nil {
+		return e
+	}
+	return stopReceipt(p, n, n+".owner.json", p.Services[n].Shutdown)
+}
+func stopReceipt(p Plan, n, receipt string, shutdown int) error {
+	path := filepath.Join(p.State, receipt)
 	var o Owner
 	e := readJSON(path, &o)
 	if os.IsNotExist(e) {
@@ -756,12 +768,11 @@ func stopOwner(p Plan, n string) error {
 	if e != nil {
 		return e
 	}
-	s := p.Services[n]
 	if o.Identity.alive() {
 		if e = syscall.Kill(-o.Identity.PID, syscall.SIGTERM); e != nil && e != syscall.ESRCH {
 			return e
 		}
-		deadline := time.Now().Add(time.Duration(s.Shutdown) * time.Second)
+		deadline := time.Now().Add(time.Duration(shutdown) * time.Second)
 		for o.Identity.alive() && time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
 		}
@@ -771,7 +782,7 @@ func stopOwner(p Plan, n string) error {
 			}
 		}
 	}
-	if e = stopContainer(o.Container, s.Shutdown); e != nil {
+	if e = stopContainer(o.Container, shutdown); e != nil {
 		return e
 	}
 	if e = os.Remove(path); os.IsNotExist(e) {
@@ -916,11 +927,13 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 			}
 		}
 		if len(previous.Services) > 0 && !controller(previous).alive() {
-			if previousClients {
+			if len(used) > 0 {
 				return nil, "", fmt.Errorf("service controller crashed while clients still hold leases; stop/status can recover it")
 			}
-			if e = releaseUnused(previous, true); e != nil {
-				return nil, "", e
+			if !previousClients {
+				if e = releaseUnused(previous, true); e != nil {
+					return nil, "", e
+				}
 			}
 		}
 	} else if !os.IsNotExist(e) {
@@ -993,7 +1006,7 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 		}
 		claim.Close()
 	}
-	if len(p.Services) == 0 {
+	if len(selected) == 0 {
 		if e = os.Remove(filepath.Join(p.State, "stop-request.json")); e != nil && !os.IsNotExist(e) {
 			return cleanup(e)
 		}
@@ -1142,10 +1155,13 @@ func owned(state, name string, probe bool, generation string) int {
 		defer closeForwarded(cmd)
 	}
 	if probe {
-		admission.Close()
-		return exitCode(cmd.Run())
+		// Probes have the same process-group ownership as services, with a
+		// distinct receipt so timeout or recovery cannot stop the application.
+		s.Timeout = s.Readiness.Timeout
+		s.Shutdown = 1
+		s.Container = nil
 	}
-	if strings.HasSuffix(name, watchSuffix) {
+	if !probe && strings.HasSuffix(name, watchSuffix) {
 		_ = os.Remove(filepath.Join(state, strings.TrimSuffix(name, watchSuffix)+".built.json"))
 	}
 	// Keep the identity anchor alive even after the application's direct process
@@ -1167,6 +1183,9 @@ func owned(state, name string, probe bool, generation string) int {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	path := filepath.Join(state, name+".owner.json")
+	if probe {
+		path = filepath.Join(state, name+".probe.owner.json")
+	}
 	if e = atomic(path, Owner{id, s.Container}); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1

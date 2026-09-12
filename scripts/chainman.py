@@ -345,6 +345,7 @@ def main(argv=None):
         elif args.action in {
             "_workflow-task",
             "_workflow-service",
+            "_workflow-probe",
             "_workflow-prepare",
         }:
             import services

@@ -265,6 +265,9 @@ argument-array `command` with a `profile`, or a digest-pinned `container`. Optio
 `setup` groups hold shared artifact leases for the entire service lifetime.
 `readiness.command` runs in that service's execution context; its positive
 `period_seconds`, `timeout_seconds`, and `failure_threshold` bound startup.
+Probes use the service profile without starting a compiler-cache server. Their
+command deadline includes bounded descendant cleanup before the backend's fallback
+deadline. Probe recovery uses a separate ownership receipt from the application.
 `restart` is `no`, `always`, or `on_failure`; `shutdown_seconds` bounds cleanup.
 Commands must stay in the foreground so the backend can own their lifetime.
 
@@ -276,6 +279,8 @@ owns readiness, process supervision, dependency ordering, and restart policy.
 Go and the pinned `golang.org/x/sys` dependency are build inputs, not required host
 installations. Container-only hosts build/materialize the controller through the
 stock Nix container and execute the resulting native binary on the host.
+Tasks that request only repository-scoped resources do not start a local service
+controller or any unrequested local services.
 
 `services-up TASK` retains the task's service set until an explicit
 `services-stop`. `services-status` and `services-stop` use saved ownership data;

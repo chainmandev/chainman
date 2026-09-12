@@ -138,6 +138,42 @@ while True:time.sleep(.1)
         self.run_control("stop", check=0)
         self.wait_until(lambda: not self.alive(pid))
 
+    def test_repository_only_task_does_not_start_unrequested_local_services(self):
+        self.shared_resource()
+        unused = json.loads(json.dumps(self.plan["resources"][0]["services"]["worker"]))
+        unused["command"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import time; Path('unexpected-local-start').touch(); time.sleep(120)",
+            ]
+        )
+        unused.pop("readiness")
+        self.plan["services"] = {"unused": unused}
+        self.run_control("up", check=0)
+        self.assertFalse((self.root / "unexpected-local-start").exists())
+        self.assertFalse((self.state / "controller.json").exists())
+        # The existing empty local lease is valid without a local controller.
+        self.run_control("run", check=7)
+        self.assertFalse((self.root / "unexpected-local-start").exists())
+        self.plan["requested"] = ["unused"]
+        self.run_control("up", check=0)
+        self.wait_until(lambda: (self.root / "unexpected-local-start").exists())
+        self.run_control("stop", check=0)
+
+    def test_probe_timeout_reaps_descendants_and_preserves_service(self):
+        child = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('probe-child').write_text(str(os.getpid())); time.sleep(120)"
+        parent = "import os,signal,subprocess,sys,time; from pathlib import Path;\nif Path('probe-child').exists(): sys.exit(0)\nsignal.signal(signal.SIGTERM,signal.SIG_IGN); Path('probe-parent').write_text(str(os.getpid())); subprocess.Popen([sys.executable,'-c',sys.argv[1]]); time.sleep(120)"
+        readiness = self.plan["services"]["worker"]["readiness"]
+        readiness["command"] = self.command([sys.executable, "-c", parent, child])
+        readiness["timeout_seconds"] = 1
+        readiness["failure_threshold"] = 5
+        self.run_control("up", check=0, timeout=12)
+        for name in ("probe-parent", "probe-child"):
+            self.assertFalse(self.alive(int((self.root / name).read_text())))
+        self.assertTrue(self.alive(int((self.root / "pid").read_text())))
+        self.run_control("stop", check=0)
+
     def test_exclusive_service_access_refuses_both_directions_without_stopping_owner(
         self,
     ):
