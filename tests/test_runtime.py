@@ -119,7 +119,7 @@ class RuntimeTests(unittest.TestCase):
         env["CACHE_DIAGNOSTICS"] = "1"
         (self.root / "scripts/enter.sh").write_text(
             "#!/bin/sh\nshift\n"
-            'if [ "${4:-}" = "command -v sccache >/dev/null" ]; then echo "cache setup"; fi\n'
+            'if [ "${5:-}" = "chainman-compiler" ]; then echo "cache setup"; fi\n'
             'exec "$@"\n'
         )
         wrapper = textwrap.dedent("""\
@@ -239,6 +239,20 @@ class RuntimeTests(unittest.TestCase):
                     self.assertEqual((self.root / "server-exited").read_text(), "yes")
                 self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
                 (self.root / "server-exited").unlink()
+
+    def test_cache_shutdown_does_not_reenter_the_environment(self):
+        env = self.cache_fixture()
+        with toolchain.operation(self.root):
+            with toolchain.compiler_cache("rust", env, self.root):
+                # Simulate an unavailable launcher after successful startup.
+                (self.root / "scripts/enter.sh").write_text("#!/bin/sh\nexit 37\n")
+            self.assertEqual((self.root / "server-exited").read_text(), "yes")
+            self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
+            self.assertEqual(
+                list((self.root / ".cache/toolchain").glob("compiler-*.lock")), []
+            )
+        with toolchain.operation(self.root):
+            pass
 
     def test_cache_refuses_existing_endpoint_without_mutating_it(self):
         env = self.cache_fixture()

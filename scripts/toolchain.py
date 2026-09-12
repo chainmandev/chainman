@@ -659,24 +659,43 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
     # server's lifetime. A successful preflight alone leaves a GC race before
     # the second entry that starts sccache.
     with tempfile.TemporaryDirectory(prefix="chainman-compiler-") as directory:
+        executable_file = Path(directory) / "executable"
+        resolve_command = [
+            "sh",
+            "-eu",
+            "-c",
+            'command -v sccache > "$1"',
+            "chainman-compiler",
+            str(executable_file),
+        ]
         if (root / "chainman.toml").is_file():
             import chainman
 
             chainman.execute(
                 root,
                 profile,
-                ["sh", "-eu", "-c", "command -v sccache >/dev/null"],
+                resolve_command,
                 env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                 gc_root=Path(directory) / "profile",
                 stdout=sys.stderr,
             )
         else:
             managed_run(
-                [*prefix, "sh", "-eu", "-c", "command -v sccache >/dev/null"],
+                [*prefix, *resolve_command],
                 cwd=root,
                 env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                 check=True,
                 stdout=sys.stderr,
+            )
+        executable = executable_file.read_text().removesuffix("\n")
+        if (
+            not Path(executable).is_absolute()
+            or "\n" in executable
+            or "\r" in executable
+            or not os.access(executable, os.X_OK)
+        ):
+            raise ValueError(
+                "Compiler cache executable must resolve to an absolute executable path"
             )
         # The shared native command owner contains both the Nix launcher and
         # foreground compiler. Failed startup uses the same bounded cleanup as
@@ -684,14 +703,14 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
         with native_tasks.command(
             root, [[*prefix, "sccache"]], {"shutdown_seconds": 5}
         ) as command:
-            with owned_compiler_cache(root, env, prefix, server_env, command):
+            with owned_compiler_cache(root, env, executable, server_env, command):
                 yield dict(
                     env, RUSTC_WRAPPER="sccache", CHAINMAN_COMPILER_OWNER=str(root)
                 )
 
 
 @contextlib.contextmanager
-def owned_compiler_cache(root, env, prefix, server_env, command):
+def owned_compiler_cache(root, env, executable, server_env, command):
     endpoint = Path(env["SCCACHE_SERVER_UDS"])
     lifecycle_name = "compiler-" + uuid.uuid4().hex + ".lock"
     # Keep a distinct lifetime lease in the actual compiler process and every
@@ -748,8 +767,10 @@ def owned_compiler_cache(root, env, prefix, server_env, command):
         try:
             if server.poll() is None:
                 try:
+                    # The preflight profile keeps this executable alive. Cleanup
+                    # must not queue another Nix evaluation behind a build or GC.
                     managed_run(
-                        [*prefix, "sccache", "--stop-server"],
+                        [executable, "--stop-server"],
                         cwd=root,
                         env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                         check=True,

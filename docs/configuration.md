@@ -91,6 +91,8 @@ owner contains the foreground cache server and its Nix launcher. Startup and sto
 failures terminate that owned group; cleanup still requires released kernel leases
 and the original socket identity before removing an endpoint. A failed cache stop
 remains an error even when bounded termination succeeds.
+The stop request calls the executable resolved during preflight directly, so
+shutdown does not require another Nix evaluation or wait behind garbage collection.
 
 An explicit `TMPDIR` remains the temporary base across bootstrap and profile
 refreshes, including project/profile overrides. Without one, Chainman retains
