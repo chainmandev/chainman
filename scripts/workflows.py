@@ -133,7 +133,16 @@ def configuration(root):
                             and artifact["digest"] is True
                         )
                     ):
-                        tc.contained(root, artifact["path"])
+                        if artifact.get("interpreter") == "python":
+                            path = Path(artifact["path"])
+                            if not path.name or path.name in {"..", ".git"}:
+                                raise ValueError("Invalid interpreter artifact path")
+                            # Virtual environments link to the selected Nix
+                            # Python. Parents remain confined; readiness below
+                            # requires the exact pinned interpreter target.
+                            tc.contained(root, str(path.parent))
+                        else:
+                            tc.contained(root, artifact["path"])
                     else:
                         raise ValueError("Invalid setup readiness artifact")
             else:

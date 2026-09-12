@@ -200,6 +200,12 @@ container environment. It does not start Process Compose, require a host engine
 adapter, or fetch the service/watch backend binaries. Ordinary finite tasks omit
 the option and keep the existing lightweight path.
 
+For a Python virtual environment, declare an artifact such as
+`{path=".venv/bin/python", interpreter="python"}`. Its final component may be a
+symlink, while all parent directories remain confined to the project. Readiness
+requires it to resolve to the selected pinned `UV_PYTHON`; an interpreter from a
+different environment is stale. Ordinary and digest artifacts still reject links.
+
 Installed artifacts have shared use leases for task lifetimes. Reinstallation takes
 exclusive access and fails visibly while another task uses them. Child commands
 inherit those leases. A setup group may list explicit `environment_inputs`, such

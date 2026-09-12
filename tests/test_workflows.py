@@ -198,6 +198,60 @@ commands=[["python3","task.py"]]
         self.assertEqual(self.run_cli("run", "build").returncode, 0)
         self.assertEqual((self.root / "install-count").read_text(), "2")
 
+    def test_declared_python_interpreter_remains_valid_after_setup(self):
+        self.body = self.body.replace(
+            'artifacts=["installed"]',
+            'artifacts=["installed",{path=".venv/bin/python",interpreter="python"}]',
+        )
+        with (self.root / "install.py").open("a") as script:
+            script.write(
+                "import os\np=Path('.venv/bin/python');p.parent.mkdir(parents=True,exist_ok=True)\np.unlink(missing_ok=True)\np.symlink_to(os.environ['UV_PYTHON'])\n"
+            )
+        self.write_config()
+        os.environ["UV_PYTHON"] = sys.executable
+        self.assertTrue(sys.executable.startswith("/nix/store/"))
+        for _ in range(2):
+            result = self.run_cli("run", "build")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.run_cli("setup-status").returncode, 0)
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+        interpreter = self.root / ".venv/bin/python"
+        interpreter.unlink()
+        interpreter.symlink_to(self.root / "input.lock")
+        self.assertEqual(self.run_cli("setup-status").returncode, 1)
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+        self.assertEqual(self.run_cli("run", "build").returncode, 0)
+        self.assertEqual((self.root / "install-count").read_text(), "2")
+        for declaration in (
+            '".venv/bin/python"',
+            '{path=".venv/bin/python",digest=true}',
+        ):
+            (self.root / "chainman.toml").write_text(
+                self.body.replace(
+                    '{path=".venv/bin/python",interpreter="python"}', declaration
+                )
+            )
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                workflows.configuration(self.root)
+        self.write_config()
+        interpreter.unlink()
+        interpreter.parent.rmdir()
+        interpreter.parent.symlink_to(self.root)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            workflows.configuration(self.root)
+
+    def test_interpreter_declarations_preserve_lexical_path_restrictions(self):
+        for path in ("", ".", "..", ".git", "a/..", "a/.git", "../outside", "/outside"):
+            with self.subTest(path=path):
+                artifact = "{path=" + json.dumps(path) + ',interpreter="python"}'
+                (self.root / "chainman.toml").write_text(
+                    self.body.replace(
+                        'artifacts=["installed"]', "artifacts=[" + artifact + "]"
+                    )
+                )
+                with self.assertRaises(ValueError):
+                    workflows.configuration(self.root)
+
     def test_setup_group_can_be_requested_explicitly(self):
         result = self.run_cli("setup", "dependencies")
         self.assertEqual(result.returncode, 0, result.stderr)
