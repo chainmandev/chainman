@@ -263,11 +263,22 @@ Schema 2 service workflows use the checked-in host launcher. A task's `services`
 array selects services and their declared dependencies. Each service declares one
 argument-array `command` with a `profile`, or a digest-pinned `container`. Optional
 `setup` groups hold shared artifact leases for the entire service lifetime.
-`readiness.command` runs in that service's execution context; its positive
+Readiness selects exactly one of `command` or `http_get`. `readiness.command`
+runs in that service's execution context; its positive
 `period_seconds`, `timeout_seconds`, and `failure_threshold` bound startup.
 Probes use the service profile without starting a compiler-cache server. Their
 command deadline includes bounded descendant cleanup before the backend's fallback
 deadline. Probe recovery uses a separate ownership receipt from the application.
+
+For simple HTTP endpoints, `readiness.http_get = { port = 4444, path = "/status" }`
+uses Process Compose's native HTTP checker directly, without a shell, interpreter,
+Nix evaluation or container exec for each probe. It connects to the host's
+`127.0.0.1`; container services must publish that port on loopback, including when
+another service owns their network namespace. `path` defaults to `/` and
+`status_code` to `200`; an explicit expected status must be between 200 and 299.
+The same startup bounds apply. Keep command probes for authentication, response
+body checks or endpoints that are only accessible inside a container.
+
 `restart` is `no`, `always`, or `on_failure`; `shutdown_seconds` bounds cleanup.
 Commands must stay in the foreground so the backend can own their lifetime.
 

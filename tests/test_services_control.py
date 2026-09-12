@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -885,6 +886,44 @@ if text=='bad': raise SystemExit(3)
     def test_readiness_exit_status_and_cleanup(self):
         self.run_control("run", check=7)
         self.assertFalse(self.alive(self.pid()))
+
+    def test_native_http_readiness_admits_only_the_expected_status(self):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        worker = self.root / "http-worker.py"
+        worker.write_text("""import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(int(Path('http-status').read_text()))
+        self.end_headers()
+Path('pid').write_text(str(os.getpid()))
+HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever()
+""")
+        service = self.plan["services"]["worker"]
+        service["command"] = self.command([sys.executable, str(worker), str(port)])
+        service["readiness"] = {
+            "http_get": {"port": port, "path": "/health", "status_code": 204},
+            "period_seconds": 1,
+            "timeout_seconds": 1,
+            "failure_threshold": 3,
+        }
+        self.plan["task"] = self.command(
+            [sys.executable, "-c", "from pathlib import Path; Path('task-ran').touch()"]
+        )
+        for status in (200, 204):
+            with self.subTest(status=status):
+                (self.root / "http-status").write_text(str(status))
+                self.run_control("run", check=0 if status == 204 else 1)
+                self.assertEqual((self.root / "task-ran").exists(), status == 204)
+                self.assertFalse(self.alive(self.pid()))
+                compose = json.loads((self.state / "compose.json").read_text())
+                probe = compose["processes"]["worker"]["readiness_probe"]
+                self.assertNotIn("exec", probe)
+                self.assertEqual(probe["http_get"]["host"], "127.0.0.1")
+                self.assertEqual(probe["timeout_seconds"], 1)
 
     def waiting_task(self, *, wait=True):
         self.plan.update(wait_for_services=wait, own_task=True, task_shutdown_seconds=1)

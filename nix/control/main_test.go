@@ -9,6 +9,31 @@ import (
 	"testing"
 )
 
+func TestHTTPReadinessRejectsInvalidPlans(t *testing.T) {
+	root := t.TempDir()
+	command := Command{Argv: []string{"/bin/true"}, Directory: root}
+	p := Plan{Schema: 1, Root: root, State: t.TempDir(), Backend: "/bin/true", Fingerprint: "fixture", Services: map[string]Service{}, Requested: []string{"web"}, Task: command}
+	for _, h := range []HTTPProbe{
+		{8080, "/health?ready=1", 204},
+		{0, "/", 200}, {65536, "/", 200},
+		{80, "//remote.example/", 200}, {80, "http://remote.example/", 200},
+		{80, "/health#fragment", 200}, {80, "/", 404},
+	} {
+		p.Services["web"] = Service{Command: command, Restart: "no", Shutdown: 1, Readiness: &Probe{HTTPGet: &h, Period: 1, Timeout: 1, Failures: 2}}
+		err := validate(p)
+		if (err == nil) != (h.Port == 8080) {
+			t.Fatalf("HTTP probe %+v: %v", h, err)
+		}
+	}
+	s := p.Services["web"]
+	s.Readiness.HTTPGet = &HTTPProbe{8080, "/", 200}
+	s.Readiness.Command = command
+	p.Services["web"] = s
+	if validate(p) == nil {
+		t.Fatal("ambiguous command and HTTP readiness accepted")
+	}
+}
+
 func TestContainerOutlivesClientDescriptorLease(t *testing.T) {
 	state := t.TempDir()
 	engine := filepath.Join(state, "engine")

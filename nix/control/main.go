@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -28,10 +29,16 @@ type Command struct {
 	Environment map[string]string `json:"environment,omitempty"`
 }
 type Probe struct {
-	Command  Command `json:"command"`
-	Period   int     `json:"period_seconds"`
-	Timeout  int     `json:"timeout_seconds"`
-	Failures int     `json:"failure_threshold"`
+	Command  Command    `json:"command"`
+	HTTPGet  *HTTPProbe `json:"http_get,omitempty"`
+	Period   int        `json:"period_seconds"`
+	Timeout  int        `json:"timeout_seconds"`
+	Failures int        `json:"failure_threshold"`
+}
+type HTTPProbe struct {
+	Port       int    `json:"port"`
+	Path       string `json:"path"`
+	StatusCode int    `json:"status_code"`
 }
 type Service struct {
 	Command      Command  `json:"command"`
@@ -349,7 +356,13 @@ func validate(p Plan) error {
 		}
 		if s.Readiness != nil {
 			r := s.Readiness
-			if _, e := child(r.Command); e != nil {
+			if r.HTTPGet != nil {
+				h := r.HTTPGet
+				u, err := url.ParseRequestURI(h.Path)
+				if len(r.Command.Argv) != 0 || r.Command.Directory != "" || len(r.Command.Environment) != 0 || h.Port < 1 || h.Port > 65535 || h.StatusCode < 200 || h.StatusCode > 299 || err != nil || u.IsAbs() || !strings.HasPrefix(h.Path, "/") || strings.HasPrefix(h.Path, "//") || strings.ContainsAny(h.Path, "# \t\r\n") {
+					return fmt.Errorf("invalid HTTP readiness declaration")
+				}
+			} else if _, e := child(r.Command); e != nil {
 				return e
 			}
 			if r.Period < 1 || r.Timeout < 1 || r.Failures < 1 || r.Period*r.Failures+r.Timeout > 600 {
@@ -443,6 +456,10 @@ func configuration(p Plan, self string) error {
 			// Leave room for engine identity checks and bounded group cleanup before
 			// the backend's last-resort deadline can kill the identity anchor.
 			d["readiness_probe"] = map[string]any{"exec": map[string]string{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" probe \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation)}, "period_seconds": r.Period, "timeout_seconds": r.Timeout + 15, "failure_threshold": r.Failures}
+			if r.HTTPGet != nil {
+				h := r.HTTPGet
+				d["readiness_probe"] = map[string]any{"http_get": map[string]any{"host": "127.0.0.1", "scheme": "http", "port": fmt.Sprint(h.Port), "path": h.Path, "status_code": h.StatusCode}, "period_seconds": r.Period, "timeout_seconds": r.Timeout, "failure_threshold": r.Failures}
+			}
 		}
 		processes[n] = d
 	}
@@ -1198,6 +1215,9 @@ func owned(state, name string, probe bool, generation string) int {
 	if probe {
 		if s.Readiness == nil {
 			return 0
+		}
+		if s.Readiness.HTTPGet != nil {
+			return exitCode(fmt.Errorf("HTTP readiness is evaluated by Process Compose"))
 		}
 		command = s.Readiness.Command
 	}

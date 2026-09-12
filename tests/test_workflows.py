@@ -111,6 +111,31 @@ command=["python3","probe.py"]
             timeout=20,
         )
 
+    def test_http_readiness_rejects_ambiguous_or_unbounded_declarations(self):
+        import services
+
+        cfg = {"services": {"web": {"command": ["true"]}}}
+        for probe in (
+            {},
+            {"command": ["true"], "http_get": {"port": 8080}},
+            {"http_get": {"port": True}},
+            {"http_get": {"port": 65536}},
+            {"http_get": {"port": 80, "host": "remote.example"}},
+            {"http_get": {"port": 80, "path": "//remote.example/"}},
+            {"http_get": {"port": 80, "path": "/health#fragment"}},
+            {"http_get": {"port": 80, "status_code": 404}},
+            {"http_get": {"port": 80}, "timeout_seconds": 601},
+        ):
+            with self.subTest(probe=probe), self.assertRaises(ValueError):
+                cfg["services"]["web"]["readiness"] = probe
+                services.declarations(self.root, cfg)
+        cfg["services"]["web"]["readiness"] = {"http_get": {"port": 8080}}
+        services.declarations(self.root, cfg)
+        self.assertEqual(
+            services.http_readiness({"port": 8080}),
+            {"port": 8080, "path": "/", "status_code": 200},
+        )
+
     def test_changed_inputs_and_missing_outputs_reinstall_before_task(self):
         for iteration, change in enumerate((None, "input", "output"), 1):
             if change == "input":

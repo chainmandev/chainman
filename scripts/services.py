@@ -8,11 +8,37 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+from urllib.parse import urlsplit
 
 import chainman
 import toolchain as tc
 import workflows
 import project_environment
+
+
+def http_readiness(value):
+    if not isinstance(value, dict) or set(value) - {"port", "path", "status_code"}:
+        raise ValueError("Invalid HTTP readiness declaration")
+    port, path, status = (
+        value.get("port"),
+        value.get("path", "/"),
+        value.get("status_code", 200),
+    )
+    if (
+        type(port) is not int
+        or not 1 <= port <= 65535
+        or type(status) is not int
+        or not 200 <= status <= 299
+        or not isinstance(path, str)
+        or not path.startswith("/")
+        or path.startswith("//")
+        or any(ord(c) <= 32 or ord(c) == 127 or c == "#" for c in path)
+        or urlsplit(path).netloc
+    ):
+        raise ValueError(
+            "HTTP readiness requires a loopback port, absolute path and 2xx status"
+        )
+    return {"port": port, "path": path, "status_code": status}
 
 
 def volume_compatibility(root, volume):
@@ -157,12 +183,20 @@ def declarations(root, cfg):
             probe = spec["readiness"]
             if not isinstance(probe, dict) or set(probe) - {
                 "command",
+                "http_get",
                 "period_seconds",
                 "timeout_seconds",
                 "failure_threshold",
             }:
                 raise ValueError("Invalid service readiness declaration")
-            workflows.commands([probe.get("command")])
+            if ("command" in probe) == ("http_get" in probe):
+                raise ValueError(
+                    "Readiness requires exactly one of command or http_get"
+                )
+            if "http_get" in probe:
+                http_readiness(probe["http_get"])
+            else:
+                workflows.commands([probe["command"]])
             values = [
                 probe.get("period_seconds", 1),
                 probe.get("timeout_seconds", 2),
@@ -612,7 +646,9 @@ def export(root, arguments):
             value["container"] = ownership
         if "readiness" in spec:
             probe = spec["readiness"]
-            if "container" in spec:
+            if "http_get" in probe:
+                prepared_probe = {"http_get": http_readiness(probe["http_get"])}
+            elif "container" in spec:
                 probe_command = [engine, "exec", container_name, *probe["command"]]
             elif mode == "container-nix":
                 probe_command = [
@@ -631,8 +667,10 @@ def export(root, arguments):
                     name,
                     fingerprint,
                 ]
+            if "http_get" not in probe:
+                prepared_probe = {"command": command(probe_command, service_root, env)}
             value["readiness"] = {
-                "command": command(probe_command, service_root, env),
+                **prepared_probe,
                 "period_seconds": probe.get("period_seconds", 1),
                 "timeout_seconds": probe.get("timeout_seconds", 2),
                 "failure_threshold": probe.get("failure_threshold", 30),
@@ -862,7 +900,7 @@ def execute_internal(root, action, extra):
                 "profile", cfg.get("project", {}).get("default_profile", "default")
             )
             if action == "_workflow-probe":
-                if "readiness" not in spec:
+                if "command" not in spec.get("readiness", {}):
                     raise ValueError("Service has no readiness command")
                 # The application owns compiler lifetime. A readiness command
                 # uses its declared profile without starting another compiler.
