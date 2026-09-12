@@ -161,7 +161,7 @@ def config(root: Path = ROOT) -> dict:
     data = tomllib.loads(contained(root, name).read_text())
     if name == "chainman.toml":
         data.setdefault("modules", ["project"])
-    schemas = (1, 2) if name == "chainman.toml" else (1,)
+    schemas = (1, 2, 3) if name == "chainman.toml" else (1,)
     if (
         type(data.get("schema")) is not int
         or data["schema"] not in schemas
@@ -170,6 +170,9 @@ def config(root: Path = ROOT) -> dict:
         raise ValueError(
             f"{name} requires a supported schema and a nonempty modules list"
         )
+    import configuration
+
+    data, _ = configuration.compile(data)
     cache = data.get("cache", {})
     for key, default in (
         ("build_limit_gib", 12),

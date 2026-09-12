@@ -99,22 +99,9 @@ def declarations(root, cfg):
         workflows.name(key)
         if not isinstance(spec, dict):
             raise ValueError(f"services.{key} must be a declaration")
-        allowed = {
-            "command",
-            "profile",
-            "directory",
-            "environment",
-            "depends_on",
-            "readiness",
-            "restart",
-            "shutdown_seconds",
-            "container",
-            "setup",
-            "watch",
-            "scope",
-            "transport",
-            "network_service",
-        }
+        from configuration import FIELDS
+
+        allowed = FIELDS["services"]
         if set(spec) - allowed:
             raise ValueError(f"Unknown service fields: {sorted(set(spec) - allowed)}")
         if ("command" in spec) == ("container" in spec):

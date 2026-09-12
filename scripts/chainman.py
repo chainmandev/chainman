@@ -252,7 +252,7 @@ def run_hook(root: Path, commands, *, name="default", extra=(), env=None):
 
 def run_project(root: Path, action: str, extra: list[str]):
     cfg = configuration(root)
-    if cfg["schema"] == 2:
+    if cfg["schema"] in (2, 3):
         import workflows
 
         return workflows.run(root, action, extra)
@@ -360,6 +360,10 @@ def main(argv=None):
             return services.execute_internal(root, args.action, rest)
         elif args.action == "version":
             print((RUNTIME / "VERSION").read_text().strip())
+        elif args.action in {"config", "explain"}:
+            import config_inspection
+
+            config_inspection.run(root, args.action, rest)
         elif args.action == "setup-status":
             import workflows
 

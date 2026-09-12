@@ -80,7 +80,7 @@ def verification(root, policy):
         if any(cfg["tasks"][name].get("wait_for_services") for name in order):
             raise ValueError("Update verification must be a finite task")
         return [argument for task in tasks for argument in ("run", task)]
-    if tc.config(root)["schema"] == 2 and not policy.get("verify"):
+    if tc.config(root)["schema"] in (2, 3) and not policy.get("verify"):
         raise ValueError("Schema 2 updates require updates.verify_task or verify_tasks")
     return ["_update-verify", "legacy"]
 

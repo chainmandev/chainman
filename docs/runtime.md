@@ -226,3 +226,6 @@ Container clients reserve `NIX_CONFIG` as well as the Nix connection variables.
 Chainman restores the standard daemon store setting after external flake shell
 hooks, because a `store` setting in `NIX_CONFIG` overrides `NIX_REMOTE`.
 Host Nix retains the operator's configuration.
+
+See [explicit composition and configuration inspection](composition.md) for reusable
+workflow declarations and the versioned generator/inspection contract.

@@ -47,8 +47,8 @@ def commands(value):
 
 def configuration(root):
     cfg = tc.config(root)
-    if cfg["schema"] != 2:
-        raise ValueError("Named workflows require configuration schema=2")
+    if cfg["schema"] not in (2, 3):
+        raise ValueError("Named workflows require configuration schema=2 or schema=3")
     for section in ("tasks", "setup"):
         entries = cfg.get(section, {})
         if not isinstance(entries, dict):
@@ -61,26 +61,9 @@ def configuration(root):
                 )
             if not isinstance(spec, dict):
                 raise ValueError(f"{section}.{key} must be a declaration")
-            allowed = {"commands", "profile", "directory", "depends_on"} | (
-                {"inputs", "exclude_inputs", "environment_inputs", "artifacts"}
-                if section == "setup"
-                else {
-                    "setup",
-                    "services",
-                    "cleanup_children",
-                    "timeout_seconds",
-                    "timeout_env",
-                    "shutdown_seconds",
-                    "wait_for_services",
-                    "environment",
-                    "context_environment",
-                    "transport",
-                    "exclusive",
-                    "exclusive_services",
-                    "serial_group",
-                    "network_service",
-                }
-            )
+            from configuration import FIELDS
+
+            allowed = FIELDS[section]
             if set(spec) - allowed:
                 raise ValueError(
                     f"Unknown fields in {section}.{key}: {', '.join(sorted(set(spec) - allowed))}"
