@@ -101,7 +101,7 @@ def budget(settings, cpus, memory):
     return jobs
 
 
-def apply(settings, env):
+def validate(settings):
     if not settings:
         return
     if not isinstance(settings, dict) or set(settings) - {
@@ -120,6 +120,15 @@ def apply(settings, env):
             or variable.startswith(("CHAINMAN_", "TOOLCHAIN_"))
         ):
             raise ValueError("Invalid resource job variable")
+    budget(settings, 1, None)
+
+
+def apply(settings, env):
+    validate(settings)
+    if not settings:
+        return
+    variables = settings["job_variables"]
+    for variable in variables:
         if variable in env and positive_integer(env[variable]) is None:
             raise ValueError(
                 f"{variable} must be a positive integer when explicitly configured"

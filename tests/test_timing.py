@@ -68,6 +68,8 @@ class TimingTests(unittest.TestCase):
                 ],
             )
             self.assertEqual(len({r["operation"] for r in records}), 1)
+            self.assertEqual(len({r["parent"] for r in records}), 1)
+            self.assertNotEqual(records[0]["operation"], records[0]["parent"])
             self.assertEqual(
                 sorted(r["monotonic_ns"] for r in records),
                 [r["monotonic_ns"] for r in records],

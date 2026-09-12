@@ -156,9 +156,23 @@ def atomic_bytes(path: Path, data: bytes, mode: int = 0o600) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def configuration_root(root: Path) -> Path:
+    authority = os.environ.get("CHAINMAN_ENTRY_AUTHORITY")
+    if authority:
+        selected = Path(authority)
+        if not selected.is_absolute():
+            raise ValueError("Entry authority requires an absolute path")
+        if regular_input(selected, "authority-root").decode().strip() == str(root):
+            return selected
+    return root
+
+
 def config(root: Path = ROOT) -> dict:
-    name = "chainman.toml" if (root / "chainman.toml").exists() else "toolchain.toml"
-    data = tomllib.loads(contained(root, name).read_text())
+    selected = configuration_root(root)
+    name = (
+        "chainman.toml" if (selected / "chainman.toml").exists() else "toolchain.toml"
+    )
+    data = tomllib.loads(regular_input(selected, name).decode())
     if name == "chainman.toml":
         data.setdefault("modules", ["project"])
     schemas = (1, 2, 3) if name == "chainman.toml" else (1,)

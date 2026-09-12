@@ -20,6 +20,26 @@ script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 self=$script_dir/$(basename -- "$0")
 root=$(CDPATH='' cd -P -- "${CHAINMAN_PROJECT_ROOT:-$script_dir/..}" && pwd)
 single_line "$root"
+# Transaction launchers carry frozen entry authority outside the writable tree.
+# A nested launch inherits it, but it applies only to its declared candidate.
+if [ -f "$script_dir/authority-root" ]; then CHAINMAN_ENTRY_AUTHORITY=$script_dir; fi
+authority=${CHAINMAN_ENTRY_AUTHORITY:-$root}
+if [ "$authority" != "$root" ]; then
+    single_line "$authority"
+    case "$authority" in /*) ;; *) fail 'Entry authority must be absolute.' ;; esac
+    [ -f "$authority/authority-root" ] && [ ! -L "$authority/authority-root" ] || fail 'Missing regular entry authority.'
+    IFS= read -r authority_project < "$authority/authority-root"
+    if [ "$authority_project" = "$root" ]; then
+        case "$authority/" in "$root/"*) fail 'Entry authority must be outside the candidate.' ;; esac
+        case "$root/" in "$authority/"*) fail 'Entry authority cannot contain the candidate.' ;; esac
+        CHAINMAN_ENTRY_AUTHORITY=$authority
+        export CHAINMAN_ENTRY_AUTHORITY
+        unset CHAINMAN_ARCHIVE
+    else
+        authority=$root
+        unset CHAINMAN_ENTRY_AUTHORITY
+    fi
+fi
 helper=$script_dir/chainman-fetch.nix
 [ -f "$helper" ] || helper=$script_dir/fetch.nix
 [ -f "$helper" ] && [ ! -L "$helper" ] || fail 'Missing regular chainman-fetch.nix companion.'
@@ -124,13 +144,31 @@ update_dispatch() {
     umask 077
     update_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates
     mkdir -p "$update_cache"
-    update_output=$(mktemp -d "$update_cache/candidate.XXXXXXXX")
+    update_resume=0
+    case "${1:-}" in
+        resume=*)
+            [ "$#" = 1 ] || fail 'Resume accepts only resume=/path/to/transaction.'
+            update_output=${1#resume=}
+            [ -d "$update_output/control" ] && [ ! -L "$update_output" ] || fail 'Missing real update transaction.'
+            update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
+            case "$update_output" in "$update_cache"/candidate.*) ;; *) fail 'Resume must select a retained update transaction.' ;; esac
+            update_resume=1
+            ;;
+        *) update_output=$(mktemp -d "$update_cache/candidate.XXXXXXXX") ;;
+    esac
     update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
-    trap 'printf "Chainman: update candidate preserved at %s\n" "$update_output/candidate" >&2' EXIT
-    mkdir "$update_output/candidate" "$update_output/control"
+    trap 'printf "Chainman: candidate preserved at %s/candidate; resume with: just deps-update resume=%s\n" "$update_output" "$update_output" >&2' EXIT
+    if [ "$update_resume" = 0 ]; then mkdir "$update_output/candidate" "$update_output/control"; fi
     printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
-    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
-        "$self" _update-prepare "$update_output" "$@" >&2
+    if [ "$update_resume" = 1 ]; then
+        CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+            "$self" _update-resume "$update_output" >&2
+        set --
+        while IFS= read -r update_argument; do set -- "$@" "$update_argument"; done < "$update_output/control/resume-arguments"
+    else
+        CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+            "$self" _update-prepare "$update_output" "$@" >&2
+    fi
     if [ -f "$update_output/control/help" ]; then
         rm -rf -- "$update_output"
         trap - EXIT
@@ -138,7 +176,16 @@ update_dispatch() {
     fi
     IFS= read -r update_at < "$update_output/control/at"
     update_launcher=$update_output/original-bootstrap/chainman.sh
-    update_candidate "$update_launcher" _update-resolve "$update_at" "$@" >&2
+    if [ "$update_resume" = 0 ]; then
+        update_candidate "$update_launcher" _update-resolve "$update_at" "$@" >&2
+    fi
+    update_candidate "$update_launcher" _update-tasks "$@" > "$update_output/control/tasks"
+    while IFS= read -r update_task; do
+        CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_launcher" run "$update_task" < /dev/null >&2
+    done < "$update_output/control/tasks"
+    if [ "$update_resume" = 1 ] || [ -s "$update_output/control/tasks" ]; then
+        update_candidate "$update_launcher" _update-reaudit "$update_at" "$@" >&2
+    fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-inspect "$update_output" >&2
     IFS= read -r update_changed < "$update_output/control/changed"
@@ -160,11 +207,14 @@ update_candidate() (
     for update_git in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
         unset "$update_git"
     done
-    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 \
+    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=2 \
+        GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null GIT_TERMINAL_PROMPT=0 \
         CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
 )
 expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) {
     root = builtins.getEnv "CHAINMAN_PROJECT_ROOT";
+    authority = let selected = builtins.getEnv "CHAINMAN_ENTRY_AUTHORITY";
+      in if selected == "" then builtins.getEnv "CHAINMAN_PROJECT_ROOT" else selected;
     archive = builtins.getEnv "CHAINMAN_ARCHIVE";
     action = builtins.getEnv "CHAINMAN_BOOTSTRAP_ACTION";
 }'
@@ -183,11 +233,27 @@ cd "$root"
 [ ! -L "$root/.chainman" ] || fail '.chainman must be a real directory.'
 
 case "$CHAINMAN_REQUEST_ACTION" in
-    deps-update | chainman-update)
+    deps-update | chainman-update | format)
         [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || fail 'Start updates through the host launcher so candidate verification can control its own services.'
         [ -z "${CHAINMAN_UPDATE_ACTIVE:-}" ] || fail 'An update hook must not recursively start another update.'
         shift
+        case "${1:-}" in resume=*) update_dispatch "$@" ;; esac
         if [ "$CHAINMAN_REQUEST_ACTION" = chainman-update ]; then set -- --only-chainman "$@"; fi
+        if [ "$CHAINMAN_REQUEST_ACTION" = format ]; then
+            for format_option in "$@"; do
+                if [ "$format_option" = commit=off ]; then
+                    [ "$#" = 1 ] || fail 'In-place format accepts only commit=off.'
+                    format_tasks=$("$self" _format-plan)
+                    while IFS= read -r format_task; do
+                        "$self" run "$format_task"
+                    done << EOF
+$format_tasks
+EOF
+                    exit 0
+                fi
+            done
+            set -- --format "$@"
+        fi
         update_dispatch "$@"
         ;;
 esac
@@ -465,6 +531,9 @@ validate_daemon
 "$engine" container start "$daemon_name" > /dev/null
 plan_options() {
     set --
+    if [ "$authority" != "$root" ]; then
+        set -- --mount "type=bind,src=$authority,dst=$authority,readonly" --env "CHAINMAN_ENTRY_AUTHORITY=$authority" "$@"
+    fi
     if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
         plan_archive=$CHAINMAN_ARCHIVE
         case "$plan_archive" in /*) ;; *) plan_archive=$root/$plan_archive ;; esac
@@ -636,6 +705,10 @@ while IFS= read -r option; do
     case "$target/" in *'/../'* | *'/./'* | *'//'*) fail 'Mount target must be normalized.' ;; esac
     case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
     case "$root/" in "$target/"*) fail 'Mount shadows the project through an ancestor.' ;; esac
+    if [ "$authority" != "$root" ]; then
+        case "$target/" in "$authority/"*) fail 'Mount shadows update entry authority.' ;; esac
+        case "$authority/" in "$target/"*) fail 'Mount shadows update entry authority.' ;; esac
+    fi
     if [ "$target" = /tmp/chainman-home ]; then
         case "$source" in "$root"/*) ;; *) fail 'Persistent container HOME must be a project-contained directory.' ;; esac
         [ -d "$source" ] || fail 'Persistent container HOME must be a directory.'
@@ -663,7 +736,15 @@ done < "$temporary/patterns"
 # checkout. Identity and signing policy cross the boundary as effective settings.
 count=0
 policy_unavailable=0
-if command -v git > /dev/null 2>&1; then
+if [ "$authority" != "$root" ]; then
+    # Candidates have a self-contained, frozen Git directory. Never ask their
+    # mutable metadata to select host administrative mounts or signing policy.
+    [ -d "$root/.git" ] && [ ! -L "$root/.git" ] || fail 'Candidate requires a real local Git directory.'
+    set -- --mount "type=bind,src=$root/.git,dst=$root/.git,readonly" \
+        --env GIT_CONFIG_GLOBAL=/dev/null --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 --env GIT_OPTIONAL_LOCKS=0 "$@"
+    count=2
+    set -- --env GIT_CONFIG_KEY_0=core.fsmonitor --env GIT_CONFIG_VALUE_0=false --env GIT_CONFIG_KEY_1=core.hooksPath --env GIT_CONFIG_VALUE_1=/dev/null "$@"
+elif command -v git > /dev/null 2>&1; then
     git_owner=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) || git_owner=
     if [ -n "$git_owner" ]; then
         git_owner=$(CDPATH='' cd -- "$git_owner" && pwd -P)
@@ -716,6 +797,10 @@ if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
     set -- --env "CHAINMAN_ARCHIVE=$archive" "$@"
 fi
 case "$self" in "$root"/*) ;; *) set -- --mount "type=bind,src=$script_dir,dst=$script_dir,readonly" "$@" ;; esac
+if [ "$authority" != "$root" ]; then
+    if [ "$authority" != "$script_dir" ]; then set -- --mount "type=bind,src=$authority,dst=$authority,readonly" "$@"; fi
+    set -- --env "CHAINMAN_ENTRY_AUTHORITY=$authority" "$@"
+fi
 if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
     case "$CHAINMAN_CONTAINER_NAME" in chainman-[A-Za-z0-9_-]*) ;; *) fail 'Invalid owned container name.' ;; esac
     case "${CHAINMAN_CONTAINER_OWNER:-}" in '' | *[!a-f0-9]*) fail 'Invalid container ownership token.' ;; esac
@@ -728,9 +813,9 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
-    --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" \
+    --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
-    --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME \
+    --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \

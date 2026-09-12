@@ -40,6 +40,17 @@ verify_task="verify"
 commands=[["true"]]
 """)
         (self.root / ".gitignore").write_text(".cache/\n")
+        (self.root / "chainman.lock").write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "version": "0.1.0",
+                    "revision": "test",
+                    "url": "https://example.invalid/runtime.tar.gz",
+                    "narHash": "sha256-" + "A" * 43 + "=",
+                }
+            )
+        )
         (self.root / "dependency.lock").write_text("old\n")
         (self.root / "source.txt").write_text("user source\n")
         updates.git(self.root, "init", "-b", "main")
@@ -226,10 +237,58 @@ commands=[["true"]]
         self.assertFalse((self.stage / "candidate-bootstrap").exists())
         self.assertEqual(self.finish()["verification"], "no changes")
 
+    def test_dependency_reaudit_uses_committed_blobs_after_edit_and_deletion(self):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        self.prepare()
+        (self.candidate / "dependency.lock").write_text("new\n")
+        (self.candidate / "source.txt").unlink()
+        seen = []
+
+        def snapshot(root, spec):
+            self.assertEqual((root / "dependency.lock").read_text(), "old\n")
+            self.assertEqual((root / "source.txt").read_text(), "user source\n")
+            return "original identities"
+
+        def audit(root, spec, before, policy, now):
+            self.assertEqual(before, "original identities")
+            self.assertEqual((root / "dependency.lock").read_text(), "new\n")
+            self.assertFalse((root / "source.txt").exists())
+            seen.append(now)
+
+        with (
+            patch.object(
+                subject.dependency_api,
+                "policy",
+                return_value={"steps": [{"resolve": "js"}]},
+            ),
+            patch.object(
+                subject.dependency_api,
+                "plan_steps",
+                return_value=([], {}, {"js": ({}, {})}),
+            ),
+            patch.object(
+                subject.dependency_api,
+                "implementation",
+                return_value=SimpleNamespace(snapshot=snapshot, audit=audit),
+            ),
+        ):
+            now = datetime.now(timezone.utc).isoformat()
+            subject.reaudit(self.candidate, now, [])
+            subject.resume(self.root, self.stage)
+            subject.reaudit(
+                self.candidate, (self.stage / "control/at").read_text().strip(), []
+            )
+        self.assertEqual(len(seen), 2)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
     def test_runtime_only_scope_does_not_include_dependency_outputs(self):
         self.prepare("--only-chainman")
         (self.candidate / "dependency.lock").write_text("unexpected")
-        with self.assertRaisesRegex(ValueError, "only managed runtime files"):
+        with self.assertRaisesRegex(
+            ValueError, "Unexpected update/verification output"
+        ):
             subject.inspect(self.root, self.stage)
 
     def test_modified_runtime_store_is_rejected_before_export(self):

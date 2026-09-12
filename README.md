@@ -39,7 +39,9 @@ An existing project keeps its `justfile`, flake, workspace organization and appl
 commands. Copy `bootstrap/chainman.sh` to `scripts/chainman.sh` and `bootstrap/fetch.nix`
 to `scripts/chainman-fetch.nix`, adopt a release lock, and call
 `./scripts/chainman.sh exec --profile default -- COMMAND...` from its existing adapter.
-See [configuration](docs/configuration.md) and [dependency updates](docs/updates.md).
+Import the generated `scripts/chainman.just` facade and declare the standard recipe
+bindings. See [project recipes](docs/recipes.md), [configuration](docs/configuration.md)
+and [dependency updates](docs/updates.md).
 The bootstrap and helper are managed release files; custom behavior belongs in the
 project adapter/configuration, so self-updates can check and replace them safely.
 
@@ -49,6 +51,11 @@ Chainman's own source development requires `just`, Git and host Nix. Its small s
 launcher enters the pinned core shell directly, avoiding a bootstrap dependency on
 an older release of itself. Consumer installation is exercised separately against
 real disposable archives and projects.
+
+Source `format` and `deps-update` use the same isolated candidate, verification and
+exact-commit machinery as consumers. `format commit=off` generates and formats in
+place; `format-write` only formats. Failed acceptance retains the candidate for
+inspection and `resume=...`, with the original checkout unchanged.
 
 ```sh
 just setup

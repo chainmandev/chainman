@@ -19,6 +19,25 @@ import bootstrap_plan
 
 
 class CompositionTests(unittest.TestCase):
+    def test_inspection_validates_environment_without_resolving_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = 'schema=3\n[project]\ndefault_profile="host"\n[tasks.check]\ncommands=[["true"]]\n'
+            path = root / "chainman.toml"
+            path.write_text(source + '[environment.values]\nSECRET="{env:MISSING}"\n')
+            doc = config_inspection.document(root, "explain", ["check"])
+            self.assertEqual(
+                doc["declarations"]["profiles"]["host"], {"execution": "host"}
+            )
+            for invalid in (
+                '[environment.modes.typo.values]\nA="b"',
+                '[environment]\nunset="A"',
+                '[environment.values]\nCHAINMAN_MODE="host-nix"',
+            ):
+                path.write_text(source + invalid)
+                with self.assertRaises(ValueError):
+                    config_inspection.document(root, "config", ["validate"])
+
     def test_bootstrap_and_explain_include_inherited_services_and_watched_setup(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -157,6 +157,9 @@
         pkgs:
         {
           just = pkgs.just;
+          audit-rust = pkgs.cargo-deny;
+          audit-go = pkgs.govulncheck;
+          audit-python = pkgs.pip-audit;
         }
         // builtins.listToAttrs (
           builtins.concatMap

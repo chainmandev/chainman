@@ -22,6 +22,7 @@ import lock_adapters
 import sdk_versions
 import registry
 from toolchain import (
+    atomic_bytes,
     ROOT,
     atomic_json,
     config,
@@ -50,7 +51,11 @@ def preview_git_environment():
             GIT_CONFIG_GLOBAL=os.devnull,
             GIT_CONFIG_SYSTEM=os.devnull,
             GIT_CONFIG_NOSYSTEM="1",
-            GIT_CONFIG_COUNT="0",
+            GIT_CONFIG_COUNT="2",
+            GIT_CONFIG_KEY_0="core.fsmonitor",
+            GIT_CONFIG_VALUE_0="false",
+            GIT_CONFIG_KEY_1="core.hooksPath",
+            GIT_CONFIG_VALUE_1=os.devnull,
             GIT_TERMINAL_PROMPT="0",
         )
         yield
@@ -116,7 +121,9 @@ def snapshot(root: Path) -> dict[str, str]:
         elif path.is_file():
             body = str(path.stat().st_mode & 0o777).encode() + b"\0" + path.read_bytes()
         elif not path.exists():
-            body = b"deleted"
+            # A deleted tracked file must have the same source identity before
+            # and after staging removes it from the index.
+            continue
         else:
             raise ValueError("Unexpected directory in project source inventory")
         result[name] = hashlib.sha256(body).hexdigest()
@@ -259,8 +266,10 @@ def preview_link(root: Path, path: Path) -> str:
     return value
 
 
-def copy_submodule(source: Path, target: Path, identity: str) -> None:
-    """Copy only the current commit and tree, with no history, remotes or hooks."""
+def copy_submodule(
+    source: Path, target: Path, identity: str, *, preserve_modes=True
+) -> None:
+    """Copy committed blobs, with no working edits, history, remotes or hooks."""
     target.mkdir(parents=True, exist_ok=True)
     git(
         target,
@@ -269,7 +278,10 @@ def copy_submodule(source: Path, target: Path, identity: str) -> None:
         "input",
         "--object-format=" + git(source, "rev-parse", "--show-object-format"),
     )
-    objects = {identity: "commit", git(source, "rev-parse", "HEAD^{tree}"): "tree"}
+    objects = {
+        identity: "commit",
+        git(source, "rev-parse", identity + "^{tree}"): "tree",
+    }
     for record in git(source, "ls-tree", "-r", "-t", "-z", identity).split("\0"):
         if record:
             metadata, _ = record.split("\t", 1)
@@ -310,14 +322,54 @@ def copy_submodule(source: Path, target: Path, identity: str) -> None:
             destination.mkdir()
             if state["initialized"]:
                 copy_submodule(original, destination, oid)
-        elif original.is_symlink():
-            destination.symlink_to(preview_link(source, original))
         else:
-            shutil.copy2(original, destination)
+            restore_blob(target, name, mode, oid)
+            if (
+                preserve_modes
+                and mode in {"100644", "100755"}
+                and original.is_file()
+                and not original.is_symlink()
+            ):
+                destination.chmod(original.stat().st_mode & 0o777)
     if raw_entries(target, tree_entries(source, identity)) != tree_entries(
         source, identity
     ):
         raise ValueError("Submodule preview does not reproduce its current source tree")
+
+
+def restore_blob(root: Path, name: str, mode: str, oid: str) -> None:
+    """Restore exact Git bytes without filters, executable hooks or checkout config."""
+    path = contained(root, str(Path(name).parent)) / Path(name).name
+    body = subprocess.run(
+        ["git", "cat-file", "blob", oid],
+        cwd=root,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ).stdout
+    if path.is_symlink():
+        path.unlink()
+    if mode == "120000":
+        path.unlink(missing_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(os.fsdecode(body))
+        preview_link(root, path)
+    elif mode in {"100644", "100755"}:
+        atomic_bytes(path, body, 0o755 if mode == "100755" else 0o644)
+    else:
+        raise ValueError("Cannot restore a non-file Git entry")
+
+
+def restore_paths(root: Path, identity: str, names: list[str], modes=None) -> None:
+    entries = tree_entries(root, identity)
+    for name in names:
+        if name in entries:
+            restore_blob(root, name, *entries[name])
+            if modes and name in modes:
+                contained(root, name).chmod(modes[name])
+        else:
+            path = contained(root, str(Path(name).parent)) / Path(name).name
+            path.unlink(missing_ok=True)
 
 
 def prepare_preview(root: Path, copy: Path, before: dict) -> None:
@@ -927,6 +979,7 @@ def perform(root: Path, now: datetime, selected: list[str]) -> None:
 def verify(root: Path, selected: list[str]) -> None:
     env = environment(root)
     env["TOOLCHAIN_FRESH"] = "1"
+    env["CHAINMAN_UPDATE_ACTIVE"] = "1"
     sdk_versions.synchronize(root, selected, check=True)
     manifests.configure_build_dependencies(root, selected, check=True)
     for name in selected:
@@ -958,40 +1011,17 @@ def preview(root: Path, now: datetime, selected: list[str]) -> dict:
 
 
 def main() -> int:
+    if "--resolve-at" not in sys.argv[1:]:
+        import source_workflow
+
+        source_workflow.run(ROOT, "deps-update", sys.argv[1:])
+        return 0
     parser = argparse.ArgumentParser(__doc__)
-    parser.add_argument("--preview", action="store_true")
-    parser.add_argument("--no-commit", action="store_true")
     parser.add_argument("--resolve-at", help=argparse.SUPPRESS)
     parser.add_argument("--modules", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        selected = config(ROOT)["modules"]
-        if args.resolve_at:
-            resolve(ROOT, registry.timestamp(args.resolve_at), args.modules.split(","))
-            return 0
-        now = datetime.now(timezone.utc)
-        with operation(ROOT):
-            if args.preview:
-                result = preview(ROOT, now, selected)
-            else:
-                policy = settings(ROOT)
-                patterns = policy["outputs"] + [
-                    p
-                    for n in selected
-                    for p in module(n, ROOT).get("update_outputs", [])
-                ]
-                result = transaction(
-                    ROOT,
-                    patterns,
-                    lambda: perform(ROOT, now, selected),
-                    lambda: verify(ROOT, selected),
-                    not args.no_commit,
-                )
-            atomic_json(
-                contained(ROOT, ".cache/toolchain/last-update.json"),
-                {"at": now.isoformat(), **result},
-            )
-            print(json.dumps(result, indent=2))
+        resolve(ROOT, registry.timestamp(args.resolve_at), args.modules.split(","))
         return 0
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
         print(

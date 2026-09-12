@@ -43,6 +43,21 @@ def instant() -> datetime:
     return registry.timestamp(value) if value else datetime.now(timezone.utc)
 
 
+def inspection_policy(root: Path) -> dict:
+    """Expose the same adapters used by optional module resolution to inspection."""
+    result = policy(root)
+    if result.get("adapters") or result.get("steps") or result.get("resolver"):
+        return result
+    import module_updates
+
+    result = updates.settings(root)
+    specs = module_updates.adapters(root, tc.config(root)["modules"], result)
+    nix = module_updates.nix_spec(result)
+    if nix is not None:
+        specs = {"nix": nix, **specs}
+    return dict(result, adapters=specs, steps=[{"resolve": name} for name in specs])
+
+
 @contextmanager
 def transaction_environment(root: Path, now: datetime):
     values = {

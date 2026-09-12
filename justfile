@@ -22,8 +22,17 @@ test:
 verify:
     @./scripts/enter.sh core python3 scripts/toolchain.py verify
 
-format:
-    @./scripts/enter.sh core python3 scripts/toolchain.py format
+generate:
+    @./scripts/enter.sh core python3 scripts/generate.py
+
+format *args:
+    @./scripts/enter.sh core python3 scripts/source_workflow.py format "$@"
+
+format-write:
+    @./scripts/enter.sh core python3 scripts/format.py
+
+format-staged:
+    @./scripts/enter.sh core python3 scripts/source_workflow.py format --staged
 
 format-check:
     @./scripts/enter.sh core python3 scripts/format.py --check
@@ -32,7 +41,7 @@ module name action="verify":
     @./scripts/enter.sh core python3 scripts/toolchain.py module "$@"
 
 deps-update *args:
-    @./scripts/enter.sh core python3 scripts/updates.py "$@"
+    @./scripts/enter.sh core python3 scripts/source_workflow.py deps-update "$@"
 
 cache-status:
     @./scripts/enter.sh core python3 scripts/toolchain.py cache-status

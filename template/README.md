@@ -38,13 +38,13 @@ with future public home chainman.dev. Publication is separate from local adoptio
 |---|---|
 | `just setup` | Prepare selected modules, reusing valid fingerprints and readiness artifacts |
 | `just exec COMMAND...` | Execute literal arguments in the project's core profile |
-| `just exec-in rust COMMAND...` / `just shell rust` | Select one language profile |
+| `just exec --profile rust -- COMMAND...` / `just shell --profile rust` | Select one language profile |
 | `just build` / `just test` / `just verify` | Run selected module commands |
-| `just format` / `just format-check` | Format/check demo Python and regenerate/check its asset |
+| `just format` / `just format-check` | Generate, format, check and commit / check formatting |
 | `just module NAME verify` | Exercise an optional module without enabling it globally |
-| `just deps-update --preview` | Resolve and verify a disposable copy |
+| `just deps-update mode=dry-run` | Resolve and verify a disposable copy |
 | `just deps-update` | Update project dependencies, verify, commit locally |
-| `just deps-update --no-commit` | Leave a verified update for coordinated review |
+| `just deps-update commit=off` | Leave a verified update for coordinated review |
 | `just chainman-update` | Update the runtime, managed bootstrap and bundled archive |
 | `just cache-status` / `just cache-prune` | Report disk use or prune stale managed build contexts |
 | `just clean` | Explicitly remove managed build contexts |
@@ -58,7 +58,7 @@ Initialize and commit this directory as its own Git project before applying upda
 A nested example refuses to adopt its enclosing repository. Preview performs real
 resolution and verification, discards the copy, and never commits to the original.
 Automatic commits require a clean repository, cover only declared verified files,
-preserve Git identity/signing and never push. See [update policy](../docs/updates.md).
+bypass hooks after verification, preserve Git identity/signing and never push. See [update policy](../docs/updates.md).
 
 ## Optional modules
 
@@ -105,3 +105,6 @@ Add command arrays, project profiles and explicit environment/mount declarations
 shown in [configuration](../docs/configuration.md). Keep architecture choices and native
 application shells in your project's requirements. The shared tooling supplies
 repeatable execution; the project owns its application behavior and acceptance.
+
+The shared [recipe contract](../docs/recipes.md) also supplies staged formatting,
+inspection, dependency coverage, vulnerability audits and service recovery.

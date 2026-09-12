@@ -1,11 +1,8 @@
-schema = 1
+schema = 3
 modules = ["core"]
 
 [project]
 default_profile = "core"
-
-[commands]
-format-check = [["python3", "scripts/demo.py", "format", "--check"]]
 
 [profiles.core]
 flake = ".#core"
@@ -36,6 +33,50 @@ automatic_prune = true
 [updates]
 minimum_age_days = 30
 outputs = ["flake.lock", ".github/workflows/verify.yml"]
+verify_task = "verify"
 
 [ci]
 disposable_sdks = ["android", "dotnet", "haskell"]
+
+[tasks.prepare]
+commands = [["./scripts/chainman.sh", "modules", "setup"]]
+profile = "host"
+exclusive = true
+
+[tasks.generate-artifacts]
+commands = [["python3", "scripts/demo.py", "generate"]]
+
+[tasks.format-write]
+commands = [["./scripts/chainman.sh", "modules", "format"]]
+profile = "host"
+exclusive = true
+
+[tasks.format-check]
+commands = [["python3", "scripts/demo.py", "format", "--check"]]
+
+[tasks.verify]
+commands = [["./scripts/chainman.sh", "modules", "verify"]]
+profile = "host"
+exclusive = true
+
+[tasks.build]
+commands = [["./scripts/chainman.sh", "modules", "build"]]
+profile = "host"
+exclusive = true
+
+[tasks.test]
+commands = [["./scripts/chainman.sh", "modules", "test"]]
+profile = "host"
+exclusive = true
+
+[recipes]
+setup = ["prepare"]
+generate = ["generate-artifacts"]
+format-write = ["format-write"]
+format-check = ["format-check"]
+verify = ["verify"]
+verify-lite = ["verify"]
+
+[[dependencies.exclusions]]
+pattern = "examples/**"
+reason = "Optional demonstration modules outside the default core consumer; enable and maintain the selected module explicitly."

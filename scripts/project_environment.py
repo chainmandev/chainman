@@ -81,6 +81,67 @@ def transport(spec):
             raise ValueError("Mount read_only must be boolean")
 
 
+def values(spec):
+    if not isinstance(spec, dict):
+        raise ValueError("Environment values must be a table")
+    for key, value in spec.items():
+        variable(key)
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError("Environment values must be strings without NUL")
+
+
+def validate(root, spec):
+    """Validate structure without reading files, secrets or live endpoints."""
+    if not isinstance(spec, dict) or set(spec) - {
+        "files",
+        "pass",
+        "unset",
+        "defaults",
+        "values",
+        "modes",
+    }:
+        raise ValueError("Unknown environment configuration fields")
+    for key in ("defaults", "values"):
+        values(spec.get(key, {}))
+    modes = spec.get("modes", {})
+    if not isinstance(modes, dict) or set(modes) - {"host-nix", "container-nix"}:
+        raise ValueError("Environment modes must be host-nix or container-nix")
+    for mode in modes.values():
+        if not isinstance(mode, dict) or set(mode) - {"defaults", "values"}:
+            raise ValueError("Environment modes support defaults and values")
+        for key in ("defaults", "values"):
+            values(mode.get(key, {}))
+    for key in ("pass", "unset"):
+        entries = spec.get(key, [])
+        if not isinstance(entries, list):
+            raise ValueError(f"Environment {key} must be an array")
+        for entry in entries:
+            if key == "unset":
+                variable(entry)
+            elif not isinstance(entry, str) or not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_*?]*", entry
+            ):
+                raise ValueError("Invalid environment forwarding pattern")
+    entries = spec.get("files", [])
+    if not isinstance(entries, list):
+        raise ValueError("Environment files must be an array")
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or "path" not in entry
+            or set(entry) - {"path", "required", "override", "when"}
+        ):
+            raise ValueError("Invalid environment file declaration")
+        tc.contained(root, entry["path"])
+        if any(
+            type(entry.get(key, False)) is not bool for key in ("required", "override")
+        ):
+            raise ValueError("Environment file flags must be boolean")
+        values(entry.get("when", {}))
+        if "when" in entry and not entry["when"]:
+            raise ValueError("Environment file when must be nonempty")
+
+
 def files(root, spec, inherited=None):
     result = []
     env = dict(inherited or {})
@@ -217,6 +278,7 @@ def expand(values, root, env):
 
 
 def apply(root, spec, inherited):
+    validate(root, spec)
     env = dict(inherited)
     for entry, _, values in files(root, spec, env):
         # File values are literal, including quotes, dollars and braces.

@@ -120,19 +120,18 @@ def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
     return digest.hexdigest()
 
 
-def profile_environment(root, spec, inherited, overrides=None):
+def profile_environment(root, spec, inherited, overrides=None, *, cfg=None):
     """Resolve declared environment identically for execution and input hashing."""
     import project_environment
 
     selected = dict(inherited)
-    selected = project_environment.apply(
-        root, configuration(root).get("environment", {}), selected
-    )
+    cfg = configuration(root) if cfg is None else cfg
+    selected = project_environment.apply(root, cfg.get("environment", {}), selected)
     for values in (spec.get("environment", {}), overrides or {}):
         expanded = project_environment.expand(values, root, selected)
         selected.update(expanded)
         tc.pnpm_environment(selected, expanded)
-    for key in configuration(root).get("environment", {}).get("unset", []):
+    for key in cfg.get("environment", {}).get("unset", []):
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise ValueError("Environment unset entries must be variable names")
         if key.startswith(("CHAINMAN_", "TOOLCHAIN_")) or key in {
@@ -160,7 +159,8 @@ def execute(
 ):
     if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
         raise ValueError("Commands must be nonempty argument arrays")
-    ref, spec = profile(root, name)
+    cfg = configuration(root)
+    ref, spec = profile(root, name, cfg=cfg)
     selected = dict(os.environ if env is None else env)
     # Library callers can enter without the shell launcher. Capture their selected
     # Nix before a project flake refreshes PATH, just as bootstrap does.
@@ -176,11 +176,11 @@ def execute(
         CHAINMAN_RUNTIME=str(RUNTIME),
         TOOLCHAIN_MODE=selected.get("CHAINMAN_MODE", "host-nix"),
     )
-    selected = profile_environment(root, spec, selected, overrides)
+    selected = profile_environment(root, spec, selected, overrides, cfg=cfg)
     tc.runtime_nix_environment(selected)
     resource_policy = {}
     for settings in (
-        configuration(root).get("resources", {}),
+        cfg.get("resources", {}),
         spec.get("resources", {}),
     ):
         if not isinstance(settings, dict):
@@ -320,12 +320,18 @@ def main(argv=None):
             "deps-query",
             "deps-resolve",
             "deps-check",
+            "deps-coverage",
+            "deps-policy-report",
+            "deps-audit",
             "nix-update",
             "_update-prepare",
             "_update-resolve",
             "_update-inspect",
             "_update-verify",
             "_update-finalize",
+            "_update-tasks",
+            "_update-resume",
+            "_update-reaudit",
         }:
             if any(
                 importlib.util.find_spec(name) is None
@@ -382,6 +388,21 @@ def main(argv=None):
             import services
 
             return services.prepare_requested(root, rest)
+        elif args.action == "_format-plan":
+            import recipes
+
+            declared = recipes.bindings(cfg)
+            if rest or not declared.get("format-write"):
+                raise ValueError("Declare recipes.format-write")
+            for task in (
+                declared.get("generate", [])
+                + declared["format-write"]
+                + declared.get("format-check", [])
+                + declared.get("format-hygiene", [])
+            ):
+                print(task)
+        elif args.action == "_recipe-required":
+            raise ValueError(f"Configure the required recipe: {' '.join(rest)}")
         elif args.action in {
             "_workflow-task",
             "_workflow-service",
@@ -433,10 +454,10 @@ def main(argv=None):
             )
         elif args.action == "deps-check":
             import dependency_api
+            import recipes
 
-            settings = dependency_api.policy(root)
-            if rest[:1] == ["--"]:
-                rest = rest[1:]
+            settings = dependency_api.inspection_policy(root)
+            rest = recipes.selection_options(rest)
             names, _, adapters = dependency_api.plan_steps(root, settings, rest)
             print(
                 json.dumps(
@@ -452,6 +473,14 @@ def main(argv=None):
                 else dependency_api.resolve_command(root, rest)
             )
             print(json.dumps(result, sort_keys=True))
+        elif args.action in {"deps-coverage", "deps-policy-report"}:
+            import dependency_reports
+
+            return dependency_reports.run(root, args.action, rest)
+        elif args.action == "deps-audit":
+            import dependency_audit
+
+            return dependency_audit.run(root, rest)
         elif args.action == "nix-update":
             if rest or os.environ.get("CHAINMAN_UPDATE_ACTIVE") != "1":
                 raise ValueError("nix-update is a resolver hook inside deps-update")
@@ -465,11 +494,23 @@ def main(argv=None):
                 before = source_updates.snapshot(root, spec)
                 source_updates.resolve(root, spec, policy, now)
                 source_updates.audit(root, spec, before, policy, now)
-        elif args.action == "module":
-            if len(rest) not in (1, 2):
+        elif args.action in {"module", "modules"}:
+            if args.action == "modules":
+                if len(rest) != 1 or rest[0] not in {
+                    "setup",
+                    "build",
+                    "test",
+                    "verify",
+                    "format",
+                }:
+                    raise ValueError(
+                        "modules requires setup, build, test, verify or format"
+                    )
+                selected, action = cfg["modules"], rest[0]
+            elif len(rest) not in (1, 2):
                 raise ValueError("module requires a name and optional action")
-            spec = tc.module(rest[0], root)
-            action = rest[1] if len(rest) == 2 else "verify"
+            else:
+                selected, action = [rest[0]], rest[1] if len(rest) == 2 else "verify"
             with tc.operation(
                 root,
                 exclusive=True,
@@ -477,10 +518,12 @@ def main(argv=None):
                 automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
             ):
                 env = tc.environment(root)
-                if action != "format":
-                    tc.setup(spec, env, root)
-                if action != "setup":
-                    tc.run_commands(spec, action, env, root)
+                for module_name in selected:
+                    spec = tc.module(module_name, root)
+                    if action != "format":
+                        tc.setup(spec, env, root)
+                    if action != "setup":
+                        tc.run_commands(spec, action, env, root)
         elif args.action in {"clean", "cache-prune"}:
             if any(a != "--all" for a in rest):
                 raise ValueError("cleanup accepts only --all")

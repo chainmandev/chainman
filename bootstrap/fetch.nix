@@ -1,6 +1,7 @@
 # Trusted bootstrap companion; it parses data without importing consumer code.
 {
   root,
+  authority ? root,
   action ? "fetch",
   archive ? "",
 }:
@@ -14,7 +15,7 @@ let
     else
       fail "expected a nonempty single-line string";
   lines = values: b.concatStringsSep "\n" (map line values) + "\n";
-  raw = b.fromJSON (b.readFile (root + "/chainman.lock"));
+  raw = b.fromJSON (b.readFile (authority + "/chainman.lock"));
   lock =
     if
       raw.schema or null != 1
@@ -49,10 +50,10 @@ let
     then
       fail "bundled_archive must be a contained consumer-relative file"
     else
-      root + "/" + bundled;
+      authority + "/" + bundled;
   config =
-    if b.pathExists (root + "/chainman.toml") then
-      b.fromTOML (b.readFile (root + "/chainman.toml"))
+    if b.pathExists (authority + "/chainman.toml") then
+      b.fromTOML (b.readFile (authority + "/chainman.toml"))
     else
       { };
   pattern =

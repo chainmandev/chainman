@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
+import tempfile
+import sys
 from pathlib import Path
 
 import chainman
@@ -38,6 +40,25 @@ def export_bootstrap(runtime, target):
         )
 
 
+def export_authority(root, candidate, target, *, pin_root=None):
+    """Keep entry policy and runtime selection outside the writable candidate.
+
+    The launcher mounts this directory read-only. It contains no transaction
+    state or original Git metadata. Relative declarations still use candidate.
+    """
+    pin_root = pin_root or root
+    tc.atomic_bytes(target / "authority-root", (str(candidate) + "\n").encode())
+    tc.atomic_bytes(target / "chainman.toml", tc.regular_input(root, "chainman.toml"))
+    pin = json.loads(tc.regular_input(pin_root, "chainman.lock"))
+    if pin.get("bundled_archive"):
+        tc.atomic_bytes(
+            target / "runtime.tar.gz",
+            tc.regular_input(pin_root, pin["bundled_archive"]),
+        )
+        pin["bundled_archive"] = "runtime.tar.gz"
+    tc.atomic_json(target / "chainman.lock", pin)
+
+
 def patterns(root, policy):
     result = [
         *policy.get("outputs", []),
@@ -54,7 +75,13 @@ def patterns(root, policy):
 
 
 def runtime_files(root):
-    return list(runtime_updates.managed_paths(root))
+    import recipes
+
+    if not (root / "chainman.toml").is_file():
+        return []  # The source repository builds Chainman; it does not pin itself.
+    return list(runtime_updates.managed_paths(root)) + [
+        str((path / recipes.FILE).relative_to(root)) for path in recipes.roots(root)
+    ]
 
 
 def verification(root, policy):
@@ -101,7 +128,7 @@ def unchanged(root, state):
         )
 
 
-def prepare(root, destination, args):
+def prepare(root, destination, args, *, source=False):
     candidate = directory(destination / "candidate")
     control = directory(destination / "control")
     try:
@@ -111,11 +138,28 @@ def prepare(root, destination, args):
             tc.atomic_bytes(control / "help", b"")
         raise
     with tc.operation(root):
-        identity = updates.repository(root, clean=not opts.preview)
+        identity = updates.repository(root, clean=not (opts.preview or opts.staged))
         before = updates.snapshot(root)
-        policy = dependency_api.policy(root)
+        policy = updates.settings(root) if source else dependency_api.policy(root)
+        if opts.format and not source:
+            import recipes
+
+            cfg = tc.config(root)
+            declared = recipes.bindings(cfg)
+            if not declared.get("format-write"):
+                raise ValueError("Declare recipes.format-write before running format")
+            policy = dict(
+                policy,
+                outputs=["*"],
+                verify_tasks=declared.get("format-check", [])
+                + declared.get("format-hygiene", []),
+            )
+            policy.pop("verify_task", None)
+            policy.pop("verify", None)
         if not policy:
             raise ValueError("Declare project updates and verification first")
+        if source and opts.format:
+            policy = dict(policy, outputs=["*"])
         verify = verification(root, policy)
         state = dict(
             schema=1,
@@ -124,14 +168,25 @@ def prepare(root, destination, args):
             identity=list(identity),
             before=before,
             index=index(root),
-            patterns=patterns(root, policy),
+            patterns=(runtime_files(root) + policy.get("reconcile_outputs", []))
+            if opts.only_chainman
+            else patterns(root, policy),
             options=vars(opts),
             runtime_files=runtime_files(root),
             verify=verify,
             at=datetime.now(timezone.utc).isoformat(),
+            source=source,
         )
+        if opts.staged:
+            staged = set(
+                updates.git(
+                    root, "diff", "--cached", "--name-only", "-z", "--diff-filter=ACM"
+                ).split("\0")
+            ) - {""}
+            unstaged = set(updates.git(root, "diff", "--name-only", "-z").split("\0"))
+            state["selected"] = sorted(staged - unstaged)
         with updates.preview_git_environment():
-            if opts.preview:
+            if opts.preview or opts.staged:
                 updates.prepare_preview(root, candidate, before)
             else:
                 # Keep clean-source revision metadata meaningful to project
@@ -145,8 +200,15 @@ def prepare(root, destination, args):
             state["candidate_identity"] = list(updates.repository(candidate))
             state["candidate_before"] = updates.snapshot(candidate)
             state["candidate_index"] = index(candidate)
+            state["candidate_modes"] = {
+                name: (candidate / name).stat().st_mode & 0o777
+                for name in state["candidate_before"]
+                if (candidate / name).is_file() and not (candidate / name).is_symlink()
+            }
         unchanged(root, state)
-        export_bootstrap(chainman.RUNTIME, destination / "original-bootstrap")
+        if not source:
+            export_bootstrap(chainman.RUNTIME, destination / "original-bootstrap")
+            export_authority(root, candidate, destination / "original-bootstrap")
         tc.atomic_json(control / "state.json", state)
         tc.atomic_bytes(control / "at", (state["at"] + "\n").encode())
 
@@ -155,6 +217,10 @@ def resolve(root, at, args):
     opts = runtime_updates.options(args)
     with updates.preview_git_environment(), tc.operation(root):
         updates.repository(root)
+        if opts.format:
+            # Host orchestration runs the ordinary declared task lanes, including
+            # service ownership. No project command executes in this phase.
+            return
         runtime_updates.perform(
             root,
             dependency_api.policy(root),
@@ -176,6 +242,114 @@ def read_state(root, destination):
     ):
         raise ValueError("Update transaction identity changed")
     return state, directory(state["candidate"])
+
+
+def resume(root, destination):
+    """Admit edited candidate sources without trusting previous verification."""
+    state, candidate = read_state(root, destination)
+    with tc.operation(root):
+        unchanged(root, state)
+    with updates.preview_git_environment(), tc.operation(candidate):
+        candidate_unchanged(candidate, state)
+    state["at"] = datetime.now(timezone.utc).isoformat()
+    opts = state["options"]
+    args = ["--message", opts["message"]]
+    for key, flag in (
+        ("format", "--format"),
+        ("staged", "--staged"),
+        ("only_chainman", "--only-chainman"),
+        ("preview", "--preview"),
+        ("no_commit", "--no-commit"),
+    ):
+        if opts.get(key):
+            args.append(flag)
+    if opts.get("extra"):
+        args += ["--", *opts["extra"]]
+    if any("\n" in value or "\r" in value for value in args):
+        raise ValueError("Resumed transaction arguments must be single-line values")
+    control = destination / "control"
+    tc.atomic_bytes(control / "resume-arguments", ("\n".join(args) + "\n").encode())
+    tc.atomic_json(control / "state.json", state)
+    tc.atomic_bytes(control / "at", (state["at"] + "\n").encode())
+
+
+def reaudit(root, at, args):
+    """Reconstruct original dependency identities from the unchanged Git commit."""
+    opts = runtime_updates.options(args)
+    if opts.format:
+        return
+    now = datetime.fromisoformat(at)
+    with (
+        updates.preview_git_environment(),
+        tempfile.TemporaryDirectory(prefix="chainman-reaudit-") as temporary,
+    ):
+        baseline = Path(temporary) / "original"
+        updates.copy_submodule(
+            root, baseline, updates.git(root, "rev-parse", "HEAD"), preserve_modes=False
+        )
+        declared = dependency_api.policy(baseline)
+        legacy_modules = not declared.get("steps") and not declared.get("resolver")
+        settings = dependency_api.inspection_policy(baseline)
+        if opts.only_chainman:
+            import registry
+
+            pin = json.loads(tc.regular_input(root, "chainman.lock"))
+            selected = registry.select(
+                "github",
+                [
+                    release
+                    for release in registry.github_releases("chainmandev/chainman")
+                    if release.version.lstrip("v") == pin["version"].lstrip("v")
+                ],
+                settings,
+                "chainmandev/chainman",
+                now,
+            )
+            metadata, body, revision = runtime_updates.release_assets(
+                selected, settings, now
+            )
+            if (
+                any(
+                    pin[key] != metadata[key]
+                    for key in ("version", "revision", "url", "narHash")
+                )
+                or pin["revision"] != revision
+            ):
+                raise ValueError(
+                    "Resumed runtime no longer matches its release evidence"
+                )
+            if (
+                pin.get("bundled_archive")
+                and tc.regular_input(root, pin["bundled_archive"]) != body
+            ):
+                raise ValueError(
+                    "Resumed runtime archive differs from release evidence"
+                )
+            return
+        if settings.get("resolver"):
+            raise ValueError(
+                "Re-audit requires declared adapters; an opaque resolver cannot certify an edited candidate"
+            )
+        _, _, adapters = dependency_api.plan_steps(baseline, settings, opts.extra)
+        with dependency_api.transaction_environment(root, now):
+            for spec, policy in adapters.values():
+                adapter = dependency_api.implementation(spec)
+                before = adapter.snapshot(baseline, spec)
+                adapter.audit(root, spec, before, policy, now)
+            if legacy_modules:
+                import module_updates
+                import source_updates
+
+                image_before = module_updates.image_snapshot(baseline, settings)
+                if image_before is not None:
+                    expected = source_updates.select_oci(
+                        image_before, {}, settings, now
+                    )
+                    actual = module_updates.image_snapshot(root, settings)
+                    if any(actual[key] != expected[key] for key in actual):
+                        raise ValueError(
+                            "Resumed runtime image differs from fresh eligibility evidence"
+                        )
 
 
 def candidate_unchanged(candidate, state):
@@ -241,6 +415,27 @@ def verified_runtime(candidate):
             runtime, "bootstrap/" + source
         ):
             raise ValueError("Candidate bootstrap differs from the verified runtime")
+    for destination, source in runtime_updates.managed_paths(candidate).items():
+        if runtime_updates.managed_state(
+            candidate, destination
+        ) != runtime_updates.managed_state(candidate, source):
+            raise ValueError(f"Candidate runtime copy differs: {destination}")
+    import recipes
+
+    for consumer in recipes.roots(candidate):
+        expected = tc.managed_run(
+            [
+                sys.executable,
+                str(runtime / "scripts/recipes.py"),
+                str(consumer),
+                "--render",
+            ],
+            cwd=candidate,
+            capture_output=True,
+            check=True,
+        ).stdout
+        if tc.regular_input(consumer, recipes.FILE) != expected:
+            raise ValueError(f"Candidate recipe facade differs: {consumer}")
     return runtime
 
 
@@ -252,25 +447,40 @@ def inspect(root, destination):
         candidate_unchanged(candidate, state)
         updated = updates.snapshot(candidate)
         paths = updates.changed(state["candidate_before"], updated)
+        if state["options"].get("staged"):
+            # Verification must see the exact effective working tree to be
+            # applied, including the original bytes of every excluded path.
+            updates.restore_paths(
+                candidate,
+                state["candidate_identity"][1],
+                [path for path in paths if path not in state["selected"]],
+                state["candidate_modes"],
+            )
+            updated = updates.snapshot(candidate)
+            paths = updates.changed(state["candidate_before"], updated)
         if set(paths) & (set(updates.gitlinks(candidate)) | {".gitmodules"}):
             raise ValueError(
                 "Submodule inputs and metadata require a separate transaction"
             )
         updates.allowed(paths, state["patterns"])
-        if state["options"]["only_chainman"]:
-            if set(paths) - set(state["runtime_files"]):
-                raise ValueError(
-                    "Runtime updates may change only managed runtime files"
-                )
-        elif set(paths) & set(state["runtime_files"]):
+        if not state["options"]["only_chainman"] and set(paths) & set(
+            state["runtime_files"]
+        ):
             raise ValueError(
                 "Dependency resolvers must not change the runtime; use chainman-update"
             )
         # Check all output kinds before starting potentially expensive verification.
         updates.expected_entries(candidate, state["candidate_identity"][1], paths)
-        if paths:
+        if tc.config(candidate) != tc.config(root) or dependency_api.policy(
+            candidate
+        ) != dependency_api.policy(root):
+            raise ValueError("Update must not change its workflow or dependency policy")
+        if paths and not state.get("source"):
             runtime = verified_runtime(candidate)
             export_bootstrap(runtime, destination / "candidate-bootstrap")
+            export_authority(
+                root, candidate, destination / "candidate-bootstrap", pin_root=candidate
+            )
         state.update(updated=updated, paths=paths)
         control = destination / "control"
         tc.atomic_json(control / "state.json", state)
@@ -322,6 +532,18 @@ def finalize(root, destination):
                 commit = updates.commit_verified(
                     root, *state["identity"], expected, state["paths"], opts["message"]
                 )
+            elif opts.get("staged"):
+                prior = index(root)
+                updates.git(root, "add", "--", *state["paths"])
+                after = index(root)
+                if any(
+                    prior.get(name) != after.get(name)
+                    for name in prior.keys() | after.keys()
+                    if name not in state["paths"]
+                ):
+                    raise ValueError(
+                        "Concurrent index changes during staged formatting; inspect the preserved index"
+                    )
         result = dict(
             schema=1,
             changed=state["paths"],
@@ -334,6 +556,26 @@ def finalize(root, destination):
 
 
 def run(root, action, args):
+    if action == "_update-reaudit" and args:
+        reaudit(root, args[0], args[1:])
+        return 0
+    if action == "_update-tasks":
+        opts = runtime_updates.options(args)
+        cfg = tc.config(root)
+        if opts.format:
+            import recipes
+
+            declared = recipes.bindings(cfg)
+            tasks = (
+                [] if opts.staged else declared.get("generate", [])
+            ) + declared.get("format-write", [])
+        else:
+            tasks = dependency_api.policy(root).get("reconcile_tasks", [])
+        workflows.names(tasks)
+        for task in tasks:
+            workflows.order(cfg.get("tasks", {}), [task])
+            print(task)
+        return 0
     if action == "_update-verify" and args == ["legacy"]:
         with updates.preview_git_environment():
             runtime_updates.verify_current(root)
@@ -346,6 +588,8 @@ def run(root, action, args):
     destination = directory(args[0])
     if action == "_update-prepare":
         prepare(root, destination, args[1:])
+    elif action == "_update-resume" and len(args) == 1:
+        resume(root, destination)
     elif action == "_update-inspect" and len(args) == 1:
         inspect(root, destination)
     elif action == "_update-finalize" and len(args) == 1:

@@ -160,6 +160,75 @@ class BootstrapTests(unittest.TestCase):
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
 
+    def authority_projection(self, *, container=False):
+        self.use_real_runtime()
+        subprocess.run(["git", "init", str(self.root)], check=True, capture_output=True)
+        original = 'schema=3\n[project]\ndefault_profile="host"\n[tasks.probe]\ncommands=[["true"]]\n'
+        (self.root / "chainman.toml").write_text(original)
+        exported = tempfile.TemporaryDirectory(prefix="chainman entry authority ")
+        self.addCleanup(exported.cleanup)
+        authority = Path(exported.name)
+        for source, name in (
+            (SOURCE / "bootstrap/chainman.sh", "chainman.sh"),
+            (SOURCE / "bootstrap/fetch.nix", "chainman-fetch.nix"),
+            (self.root / "chainman.lock", "chainman.lock"),
+            (self.root / "bundle.tar.gz", "bundle.tar.gz"),
+        ):
+            shutil.copy2(source, authority / name)
+        (authority / "authority-root").write_text(str(self.root) + "\n")
+        (authority / "chainman.toml").write_text(original)
+        # Neither a replacement pin nor new host mount authority may influence
+        # the next launch after a resolver has edited the writable candidate.
+        (self.root / "chainman.lock").write_text('{"schema":999}')
+        (self.root / "chainman.toml").write_text(
+            original
+            + '\n[container]\nmounts=[{source="/candidate-chosen-source",target="/original-write-access",read_only=false}]\n'
+        )
+        env = dict(self.env, CHAINMAN_PROJECT_ROOT=str(self.root))
+        if container:
+            env.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            )
+        result = subprocess.run(
+            [str(authority / "chainman.sh"), "config", "show", "--json"],
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        cfg = json.loads(result.stdout)["configuration"]
+        self.assertNotIn("container", cfg)
+        self.assertEqual(cfg["tasks"]["probe"]["commands"], [["true"]])
+        if container:
+            probe = """import os, pathlib
+for path in (pathlib.Path(os.environ['CHAINMAN_ENTRY_AUTHORITY']) / 'chainman.lock', pathlib.Path('.git/config')):
+    try: path.write_text('must remain protected')
+    except OSError: pass
+    else: raise AssertionError(str(path) + ' was writable')
+print('entry and Git authority are read-only')
+"""
+            checked = subprocess.run(
+                [str(authority / "chainman.sh"), "exec", "--", "python3", "-c", probe],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=180,
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            self.assertIn("entry and Git authority are read-only", checked.stdout)
+
+    def test_candidate_entry_uses_frozen_runtime_and_configuration(self):
+        self.authority_projection()
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"),
+        "explicit real container qualification",
+    )
+    def test_container_candidate_entry_uses_frozen_runtime_and_configuration(self):
+        self.authority_projection(container=True)
+
     def use_real_runtime(self):
         runtime = self.root / "real-runtime"
         inventory = json.loads((SOURCE / "release-files.json").read_text())[

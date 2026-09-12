@@ -138,6 +138,25 @@ class Pin:
         return self.prefix + self.operator + selected
 
 
+def manifest_paths(directory, spec, root_manifest, settings):
+    patterns = spec.get("manifests")
+    if patterns is None:
+        workspaces = settings.get("packages", root_manifest.get("workspaces", []))
+        if isinstance(workspaces, Mapping):
+            workspaces = workspaces.get("packages", [])
+        patterns = ["package.json", *[p + "/package.json" for p in workspaces]]
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        raise ValueError("JavaScript manifests must be a list of relative patterns")
+    included, excluded = {"package.json"}, set()
+    for pattern in patterns:
+        negative = pattern.startswith("!")
+        pattern = pattern.removeprefix("!")
+        tc.contained(directory, pattern)
+        found = {p.relative_to(directory).as_posix() for p in directory.glob(pattern)}
+        (excluded if negative else included).update(found)
+    return sorted(included - excluded)
+
+
 class Workspace:
     def __init__(self, root, spec):
         self.root, self.spec = root, spec
@@ -158,29 +177,9 @@ class Workspace:
             if self.manager == "pnpm" and workspace_path.exists()
             else {}
         )
-        patterns = spec.get("manifests")
-        if patterns is None:
-            workspaces = self.settings.get(
-                "packages", root_manifest.get("workspaces", [])
-            )
-            if isinstance(workspaces, Mapping):
-                workspaces = workspaces.get("packages", [])
-            patterns = ["package.json", *[p + "/package.json" for p in workspaces]]
-        if not isinstance(patterns, list) or not all(
-            isinstance(p, str) for p in patterns
-        ):
-            raise ValueError("JavaScript manifests must be a list of relative patterns")
-        included, excluded = {"package.json"}, set()
-        for pattern in patterns:
-            negative = pattern.startswith("!")
-            pattern = pattern.removeprefix("!")
-            tc.contained(self.directory, pattern)
-            found = {
-                p.relative_to(self.directory).as_posix()
-                for p in self.directory.glob(pattern)
-            }
-            (excluded if negative else included).update(found)
-        self.manifests = sorted(included - excluded)
+        self.manifests = manifest_paths(
+            self.directory, spec, root_manifest, self.settings
+        )
         if spec.get("retained_sources"):
             import javascript_sources
 

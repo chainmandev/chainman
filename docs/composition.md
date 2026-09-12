@@ -105,7 +105,7 @@ make the inspection unavailable; retry after that operation finishes.
 Set `CHAINMAN_TIMING=1` to emit local JSON records prefixed `CHAINMAN_TIMING ` on
 stderr. Records identify bootstrap, profile entry, command execution, setup
 validation and service readiness. They contain no argv, environment values or
-application output. Correlate Python start/end records by `operation`; unmatched
+application output. Correlate Python start/end records by `operation` and nested runtime calls by `parent`; unmatched
 records indicate interrupted entry/execution and are not successful timings.
 Go readiness records include their duration directly. Bootstrap uses portable
 whole-second shell timestamps and reports its one-second resolution. Other

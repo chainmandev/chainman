@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -13,6 +14,9 @@ def enabled(env=None):
 
 
 def emit(phase, event, operation, **values):
+    parent = os.environ.get("CHAINMAN_TIMING_PARENT", "")
+    if re.fullmatch(r"[0-9a-f-]{1,64}", parent):
+        values["parent"] = parent
     record = dict(
         schema=1,
         phase=phase,
@@ -50,21 +54,24 @@ def bootstrap():
     if not enabled():
         return
     started = os.environ.pop("CHAINMAN_TIMING_BOOTSTRAP_STARTED", "")
+    operation = uuid.uuid4().hex
     if started.isdecimal():
         # The pre-runtime POSIX shell has only whole-second portable timestamps.
         emit(
             "bootstrap",
             "end",
-            uuid.uuid4().hex,
+            operation,
             elapsed_ns=max(0, time.time_ns() - int(started) * 1_000_000_000),
             resolution_ns=1_000_000_000,
         )
+    os.environ["CHAINMAN_TIMING_PARENT"] = operation
 
 
 def command():
     operation, *argv = sys.argv[1:]
     emit("profile_entry", "end", operation)
     emit("command", "start", operation)
+    os.environ["CHAINMAN_TIMING_PARENT"] = operation
     os.execvpe(argv[0], argv, os.environ)
 
 

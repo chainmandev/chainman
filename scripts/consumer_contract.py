@@ -15,6 +15,11 @@ import toolchain as tc
 
 def check(root, release, baseline=None):
     cfg = config_inspection.validated(root)
+    if "recipes" in cfg:
+        import recipes
+
+        for consumer in recipes.roots(root):
+            recipes.sync(consumer, check=True)
     pin = json.loads(tc.regular_input(root, "chainman.lock"))
     for field in ("version", "revision", "url", "narHash"):
         if pin.get(field) != release[field]:

@@ -4,56 +4,19 @@ set shell := ["sh", "-eu", "-c"]
 default:
     @just --list
 
-setup:
-    @./scripts/chainman.sh setup
-
-exec +args:
-    @./scripts/chainman.sh exec -- "$@"
-
-exec-in profile +args:
-    @profile=$1; shift; ./scripts/chainman.sh exec --profile "$profile" -- "$@"
-
-shell profile="core":
-    @./scripts/chainman.sh shell --profile "$1"
+import 'scripts/chainman.just'
 
 build:
-    @./scripts/chainman.sh build
+    @./scripts/chainman.sh run build
 
 test:
-    @./scripts/chainman.sh test
-
-verify:
-    @./scripts/chainman.sh verify
-
-format:
-    @./scripts/chainman.sh format
-
-format-check:
-    @./scripts/chainman.sh run format-check
+    @./scripts/chainman.sh run test
 
 module name action="verify":
     @./scripts/chainman.sh module "$@"
 
-deps-update *args:
-    @./scripts/chainman.sh deps-update "$@"
-
-chainman-update *args:
-    @./scripts/chainman.sh chainman-update "$@"
-
-cache-status:
-    @./scripts/chainman.sh cache-status
-
-cache-prune *args:
-    @./scripts/chainman.sh cache-prune "$@"
-
-clean:
-    @./scripts/chainman.sh clean
-
-doctor:
-    @./scripts/chainman.sh doctor
+sdk-doctor platform:
+    @./scripts/chainman.sh sdk-doctor "$1"
 
 ci-prune *args:
     @./scripts/chainman.sh ci-prune "$@"
-
-sdk-doctor platform:
-    @./scripts/chainman.sh sdk-doctor "$1"

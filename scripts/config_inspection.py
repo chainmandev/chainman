@@ -9,15 +9,27 @@ import configuration
 import services
 import toolchain as tc
 import workflows
+import project_environment
+import resources
 
 
 def validated(root):
     cfg = tc.config(root)
+    project_environment.validate(root, cfg.get("environment", {}))
+    project_environment.transport(cfg.get("container", {}))
+    resources.validate(cfg.get("resources", {}))
     if cfg["schema"] in (2, 3):
         cfg = workflows.configuration(root)
         services.declarations(root, cfg)
     for profile in cfg.get("profiles", {}):
-        chainman.profile(root, profile, cfg=cfg)
+        _, spec = chainman.profile(root, profile, cfg=cfg)
+        project_environment.values(spec.get("environment", {}))
+        resources.validate({**cfg.get("resources", {}), **spec.get("resources", {})})
+    if "recipes" in cfg:
+        import recipes
+
+        recipes.bindings(cfg)
+        recipes.verification(cfg)
     return cfg
 
 
@@ -46,7 +58,7 @@ def document(root, action, arguments):
         "chainman.toml" if (root / "chainman.toml").exists() else "toolchain.toml"
     )
     _, origins = configuration.compile(
-        tomllib.loads(tc.regular_input(root, filename).decode())
+        tomllib.loads(tc.regular_input(tc.configuration_root(root), filename).decode())
     )
     result = {"schema": 1, "configuration_schema": cfg["schema"]}
     if action == "config":
@@ -116,12 +128,12 @@ def document(root, action, arguments):
             if "container" not in spec
         }
     )
-    declarations["profiles"] = {
-        name: cfg.get("profiles", {}).get(
-            name, {"runtime_profile": "core" if name == "default" else name}
+    declarations["profiles"] = {}
+    for name in profile_names:
+        ref, spec = chainman.profile(root, name, cfg=cfg)
+        declarations["profiles"][name] = dict(
+            spec, execution="host" if ref is None else "nix"
         )
-        for name in profile_names
-    }
     return dict(
         result,
         task=selected,

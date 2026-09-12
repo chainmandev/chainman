@@ -85,7 +85,12 @@ def command(argv, root, environment=None):
     selected = dict(environment or {})
     # Preserve architecture when a saved controller plan is restarted by a caller
     # whose environment differs. The bootstrap validates the selected platform.
-    for key in ("CHAINMAN_CONTAINER_PLATFORM", "CHAINMAN_NIX_VOLUME"):
+    for key in (
+        "CHAINMAN_CONTAINER_PLATFORM",
+        "CHAINMAN_NIX_VOLUME",
+        "CHAINMAN_ENTRY_AUTHORITY",
+        "CHAINMAN_UPDATE_ACTIVE",
+    ):
         if os.environ.get(key):
             selected[key] = os.environ[key]
     return {"argv": argv, "directory": str(root), "environment": selected}

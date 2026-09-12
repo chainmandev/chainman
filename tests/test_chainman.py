@@ -564,6 +564,18 @@ class UpdateHookTests(ConsumerFixture):
         self.write("deps.txt", "1.0\n")
         self.write("notes.txt", "Unrelated project intent\n")
         self.write(
+            "chainman.lock",
+            json.dumps(
+                {
+                    "schema": 1,
+                    "version": "fixture",
+                    "revision": "fixture",
+                    "url": "https://example.invalid/runtime.tar.gz",
+                    "narHash": "sha256-" + "A" * 43 + "=",
+                }
+            ),
+        )
+        self.write(
             "resolver.py",
             """import os,sys,subprocess
 from pathlib import Path
@@ -622,8 +634,8 @@ outputs=["deps.txt"]
         update_staging.prepare(root, self.stage, list(args))
         at = (self.stage / "control/at").read_text().strip()
         update_staging.resolve(self.copy, at, list(args))
-        # These hook fixtures have no distribution pin. Runtime authenticity has
-        # separate Nix/bootstrap tests; the transaction uses real Git and hooks.
+        # The neutral pin is not fetched here. Runtime authenticity has separate
+        # real Nix/bootstrap tests; this transaction uses real Git and hook commands.
         with patch.object(
             update_staging, "verified_runtime", return_value=chainman.RUNTIME
         ):
@@ -736,7 +748,7 @@ outputs=["deps.txt"]
         (nested / "chainman.toml").write_text((self.root / "chainman.toml").read_text())
         before = self.git("status", "--porcelain")
         with self.assertRaisesRegex(ValueError, "enclosing"):
-            self.update("--skip-chainman", root=nested)
+            self.update(root=nested)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.assertEqual(self.git("status", "--porcelain"), before)
 

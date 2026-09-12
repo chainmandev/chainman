@@ -361,6 +361,24 @@ def runtime_candidate(
     )
     for target, (source, before) in copies.items():
         prepared[target] = (before, prepared[source][1])
+    import recipes
+
+    for consumer in recipes.roots(root):
+        path = str((consumer / recipes.FILE).relative_to(root))
+        before = managed_state(root, path)
+        if before is None or before[0] != recipes.render(recipes.config(consumer)):
+            raise ValueError("Reconcile the declared recipe facade before updating")
+        rendered = tc.managed_run(
+            [
+                sys.executable,
+                str(runtime / "scripts/recipes.py"),
+                str(consumer),
+                "--render",
+            ],
+            capture_output=True,
+            check=True,
+        ).stdout
+        prepared[path] = (before, (rendered, 0o644))
     publication = managed if managed is not None else ManagedFiles(root)
     try:
         for name, (before, after) in prepared.items():
@@ -518,7 +536,12 @@ def verify_current(root: Path):
 
 
 def options(args: list[str]):
+    import recipes
+
+    args = recipes.options(args)
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--format", action="store_true")
+    parser.add_argument("--staged", action="store_true")
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--no-commit", action="store_true")
     parser.add_argument(
@@ -527,14 +550,20 @@ def options(args: list[str]):
         help="Write one schema-1 JSON result; send command output to stderr",
     )
     parser.add_argument("--message", default="chore: update dependencies")
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--only-chainman", action="store_true")
-    group.add_argument("--skip-chainman", action="store_true")
+    parser.add_argument("--only-chainman", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     opts = parser.parse_args(args)
+    if opts.staged:
+        if not opts.format or opts.preview:
+            raise ValueError("Staged formatting requires format without preview")
+        opts.no_commit = True
+    if opts.format:
+        if opts.only_chainman or opts.extra:
+            raise ValueError("Format does not select dependency targets")
+        if opts.message == "chore: update dependencies":
+            opts.message = "chore: format"
     # Runtime changes are an explicit operation, never an incidental part of
-    # updating application dependencies. Keep the old skip flag harmless while
-    # initial consumers migrate to the standardized command.
+    # updating application dependencies.
     opts.skip_chainman = not opts.only_chainman
     if opts.extra[:1] == ["--"]:
         opts.extra = opts.extra[1:]

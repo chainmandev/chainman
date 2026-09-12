@@ -12,12 +12,11 @@ not dependency eligibility auditing or application verification.
 a configurable 30-day maturity window. Resolution and verification run in a
 disposable checkout. The host launcher sequences preparation, resolution,
 inspection, verification and finalization; it needs neither host Python nor a
-container-engine socket inside project containers. `--preview` stops before applying
-the verified changes. `--no-commit` applies them without committing, for a coordinated
+container-engine socket inside project containers. `mode=dry-run` stops before applying
+the verified changes. `commit=off` applies them without committing, for a coordinated
 checkpoint. Project dependency updates retain the Chainman pin and never query
 Chainman releases. `just chainman-update` explicitly updates the runtime pin and
-managed bootstrap, followed by consumer verification. The transitional
-`--only-chainman` spelling does the same; `--skip-chainman` is now redundant.
+managed bootstrap and recipe facade, followed by consumer verification.
 A missing release source or eligibility date is an error, never an implicit exemption.
 
 Schema 2 consumers declare `updates.verify_task = "verify"` (or another finite
@@ -37,7 +36,12 @@ Update verification is noninteractive and receives closed input (`/dev/null`).
 Declare exactly one verification form.
 
 Resolvers and verifiers can write the disposable checkout, but only trusted runtime
-phases mount the private transaction metadata and original checkout. Inspection
+phases mount the private transaction metadata and original checkout. Candidate
+launches use a separate read-only export of the original configuration, runtime
+pin and archive. Resolution and reconciliation cannot replace the runtime,
+forwarded environment policy, host mounts or service declarations used by their
+next launch. The candidate Git directory is mounted read-only, and its metadata
+never selects host administrative mounts or signing policy. Inspection
 freezes the allowed candidate files before verification and exports a bootstrap from
 the verified runtime for host execution; it never executes the candidate's mutable
 bootstrap on the host. Finalization checks the original HEAD, index and raw source
@@ -118,7 +122,7 @@ targets = ["javascript", "assets"]
 commands = [["node", "scripts/generate-labels.mjs"]]
 ```
 
-`just deps-update --skip-chainman -- --targets javascript,assets` selects these
+`just deps-update targets=javascript,assets` selects these
 targets. For JavaScript, `--policy compatible` preserves original caret/tilde and
 complex dependency ranges, including their lower and `0.x` compatibility bounds.
 Simple exact versions are update templates bounded by the original version's caret
@@ -506,12 +510,16 @@ run; all required checks belong in verification.
 
 Each update copies visible project files into a disposable Git repository, rebinds the
 project root and executes the same update and verification path. Nested launchers
-verify/fetch the copied pin. Refreshed subprocesses bind that copied project
+verify/fetch the admitted entry pin. Refreshed subprocesses bind that copied project
 explicitly, even when their executable belongs to the original immutable runtime.
 Clean-source updates preserve the current commit identity and branch in a shallow
 copy, so version checks see the same baseline revision. Previews may include dirty
 sources and create a disposable baseline commit instead. Neither copies remotes,
 hooks or older history.
+Re-audit reconstructs the baseline from immutable Git blobs, including deleted
+files, and obtains fresh dependency eligibility evidence before resuming acceptance.
+Staged formatting restores excluded paths before verification, so the checked
+candidate is the exact partial change that will be applied.
 Source symlinks must be relative and remain within
 their copied project or submodule; absolute, escaping and cyclic links are rejected
 before update hooks execute. It preserves the original checkout, disables external
@@ -556,3 +564,6 @@ before any original files are applied. The original declaration fixes the output
 boundary, and ordinary dependency resolvers cannot change these runtime files.
 Only the runtime distribution files are copied; project configuration and source
 remain owned by their project or generator.
+
+See [standard recipes](recipes.md) for formatting, staged hooks, candidate resumption,
+coverage and vulnerability audits.
