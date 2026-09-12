@@ -1039,6 +1039,58 @@ if text=='bad': raise SystemExit(3)
         self.run_control("run", check=1, timeout=25)
         self.assertFalse(self.alive(self.pid()))
 
+    def interrupt_unready_startup(self, *, shared=False, interrupt=None):
+        self.plan["services"]["worker"]["readiness"].update(
+            command=self.command([sys.executable, "-c", "raise SystemExit(1)"]),
+            failure_threshold=120,
+        )
+        self.plan["task"] = self.command(
+            [sys.executable, "-c", "from pathlib import Path; Path('task-ran').touch()"]
+        )
+        if shared:
+            self.shared_resource()
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "startup.log").open("w") as log:
+            parent = subprocess.Popen(
+                [CONTROL, "run", str(self.path)], stdout=log, stderr=log
+            )
+            try:
+                self.wait_file(self.root / "pid")
+                started = time.monotonic()
+                if interrupt is None:
+                    self.run_control("stop", check=0, timeout=8)
+                    expected = 1
+                else:
+                    parent.send_signal(interrupt)
+                    expected = 128 + interrupt
+                self.assertEqual(parent.wait(timeout=8), expected)
+                self.assertLess(time.monotonic() - started, 8)
+                self.assertFalse(self.alive(self.pid()))
+                self.assertFalse((self.root / "task-ran").exists())
+                self.assertFalse(list(self.state.glob("*.lease")))
+            finally:
+                if parent.poll() is None:
+                    parent.kill()
+                    parent.wait(timeout=5)
+
+    def test_stop_interrupts_unready_local_service_startup(self):
+        self.interrupt_unready_startup()
+        self.plan["services"]["worker"]["readiness"]["command"] = self.command(
+            [shutil.which("test"), "-f", str(self.root / "ready")]
+        )
+        # A completed stop must not permanently fence later starts.
+        self.run_control("up", check=0)
+        self.assertTrue(self.alive(self.pid()))
+
+    def test_stop_interrupts_unready_repository_service_startup(self):
+        self.interrupt_unready_startup(shared=True)
+
+    def test_sigint_cleans_unready_local_service_startup(self):
+        self.interrupt_unready_startup(interrupt=signal.SIGINT)
+
+    def test_sigterm_cleans_unready_repository_service_startup(self):
+        self.interrupt_unready_startup(shared=True, interrupt=signal.SIGTERM)
+
     def test_argv_is_literal_through_backend_and_service_wrapper(self):
         arguments = ["two words", "", "$(touch injected)", "{{unknown}}", "'quoted'"]
         self.plan["services"]["worker"]["command"]["argv"] += arguments

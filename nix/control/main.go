@@ -501,7 +501,10 @@ func start(p Plan, self string) error {
 	}
 	return fmt.Errorf("Process Compose failed to start (%v); service output: %s", e, filepath.Join(p.State, "services.log"))
 }
-func ready(p Plan, names []string) error {
+func ready(p Plan, names []string, startup *startupGuard) error {
+	if e := startup.check(); e != nil {
+		return e
+	}
 	if len(names) == 0 {
 		return nil
 	}
@@ -515,6 +518,9 @@ func ready(p Plan, names []string) error {
 	}
 	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
 	for time.Now().Before(deadline) {
+		if e := startup.check(); e != nil {
+			return e
+		}
 		unlock, e := watchGates(p, names)
 		if e != nil {
 			return e
@@ -925,7 +931,7 @@ func releaseUnused(p Plan, force bool) error {
 	}
 	return nil
 }
-func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error) {
+func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (*os.File, string, error) {
 	if e := bindEngines(&p); e != nil {
 		return nil, "", e
 	}
@@ -935,7 +941,10 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 	if e := private(p.State); e != nil {
 		return nil, "", e
 	}
-	lock, e := locked(filepath.Join(p.State, "gate"), false)
+	if e := startup.observe(p.State); e != nil {
+		return nil, "", e
+	}
+	lock, e := startup.lock(filepath.Join(p.State, "gate"))
 	if e != nil {
 		return nil, "", e
 	}
@@ -1057,11 +1066,14 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 		if len(resource.Requested) == 0 && resource.Bridge == nil {
 			continue
 		}
-		claim, _, err := acquire(resource, false, &LeaseRef{State: p.State, File: filepath.Base(leasePath)})
+		claim, _, err := acquire(resource, false, &LeaseRef{State: p.State, File: filepath.Base(leasePath)}, startup)
 		if err != nil {
 			return cleanup(err)
 		}
 		claim.Close()
+	}
+	if e = startup.check(); e != nil {
+		return cleanup(e)
 	}
 	if len(selected) == 0 {
 		if e = os.Remove(filepath.Join(p.State, "stop-request.json")); e != nil && !os.IsNotExist(e) {
@@ -1076,7 +1088,7 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 			return cleanup(e)
 		}
 	}
-	if e = ready(p, selected); e != nil {
+	if e = ready(p, selected, startup); e != nil {
 		return cleanup(e)
 	}
 	return lease, leasePath, nil
@@ -1349,6 +1361,10 @@ func killMembers(group int, sig syscall.Signal) {
 	}
 }
 func exitCode(e error) int {
+	var interrupted *startupInterrupted
+	if errors.As(e, &interrupted) {
+		return 128 + int(interrupted.signal)
+	}
 	if e == nil {
 		return 0
 	}
@@ -1396,6 +1412,25 @@ func mainAction(args []string) (result int) {
 		if e := private(args[1]); e != nil {
 			fmt.Fprintln(os.Stderr, e)
 			return 1
+		}
+		if args[0] == "stop" {
+			stopping, e := locked(filepath.Join(args[1], "stop.admission"), false)
+			if e != nil {
+				return exitCode(e)
+			}
+			defer stopping.Close()
+			notice := stopNotice{Token: token(), Pending: true}
+			path := filepath.Join(args[1], "startup-stop.json")
+			if e = atomic(path, notice); e != nil {
+				return exitCode(e)
+			}
+			defer func() {
+				notice.Pending = false
+				if err := atomic(path, notice); err != nil {
+					fmt.Fprintln(os.Stderr, err)
+					result = 1
+				}
+			}()
 		}
 		lock, e := locked(filepath.Join(args[1], "gate"), false)
 		if e != nil {
@@ -1471,10 +1506,13 @@ func mainAction(args []string) (result int) {
 			return exitCode(e)
 		}
 	}
-	lease, _, e := acquire(p, args[0] == "up", nil)
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(signals)
+	startup := &startupGuard{signals: signals, stops: map[string]string{}}
+	lease, _, e := acquire(p, args[0] == "up", nil, startup)
 	if e != nil {
-		fmt.Fprintln(os.Stderr, e)
-		return 1
+		return exitCode(e)
 	}
 	if args[0] == "up" {
 		lease.Close()
@@ -1566,9 +1604,6 @@ func mainAction(args []string) (result int) {
 	// A task that survives its caller retains this resource lease. Process Compose
 	// deliberately receives no client lease, so dead clients cannot pin services.
 	cmd.ExtraFiles = []*os.File{lease}
-	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	defer signal.Stop(signals)
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
 	}

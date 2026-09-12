@@ -32,6 +32,13 @@ they do not install a Nix executable or retain every project SDK. Old source roo
 may be removed after all sessions using those versions stop. Nix then decides
 when to collect the unreferenced source. Runtime-cache directory symlinks are refused.
 
+A stop request announces a durable cancellation ticket before acquiring the
+service mutation lock. Startup checks that ticket while waiting for readiness,
+including waits in shared repository scopes; Ctrl-C and termination use the same
+cleanup path. A stop interrupted before acknowledgement remains pending until an
+explicit stop completes recovery. Later starts accept completed tickets. Process
+Compose remains responsible for the actual readiness probes and thresholds.
+
 Native task helpers have temporary GC roots for the duration of command execution.
 Controller export similarly retains its Nix package until the standalone binaries
 have been copied. The temporary directories, including their roots, are removed
