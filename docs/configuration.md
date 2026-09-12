@@ -294,6 +294,14 @@ label before addressing an immutable container ID. Engine errors or a changed
 daemon fail closed; restore the original engine context to recover those services.
 Explicit stop can recover service ownership even if a client lease is corrupt.
 
+Tasks may declare `serial_group = "development-data"` to exclude other command
+phases in that group within the same worktree, including across host and container
+execution. A busy group fails with a retry message. The kernel lease follows live
+children and is released before `wait_for_services`, allowing a maintenance task
+to borrow a running development graph without concurrent seed/reference-data
+mutations. Groups do not reserve repository-scoped services against other
+worktrees; use `exclusive_services` for tests that need that stronger isolation.
+
 Services can declare queued builds with the same task API:
 
 ```toml
@@ -386,6 +394,15 @@ never adopts or deletes older project volumes merely because their names look
 similar. Image-specific UIDs remain declarations: for example, the qualified
 Postgres 18 image runs as `999:999` with all capabilities dropped, using the engine's
 normal image-to-volume initialization without a privileged preparation container.
+
+`services-reset TASK --discard-data` explicitly removes the owned volumes needed
+by that task's services, including preserved volumes with an older compatibility
+hash. It requires current configuration/setup to resolve those declarations and
+refuses live users in the worktree or repository pool, a changed engine identity,
+foreign/unlabeled volumes, and external container references. Stop users first;
+reset does not cancel them. No services or task commands start during reset. The
+next service start creates empty volumes. A reset of multiple volumes is not an
+atomic engine transaction: an engine failure can leave earlier removals complete.
 
 Project environment handling is shared by tasks, services and direct execution:
 

@@ -76,6 +76,7 @@ def configuration(root):
                     "transport",
                     "exclusive",
                     "exclusive_services",
+                    "serial_group",
                     "network_service",
                 }
             )
@@ -148,6 +149,8 @@ def configuration(root):
             else:
                 names(spec.get("setup", []))
                 names(spec.get("services", []))
+                if "serial_group" in spec:
+                    name(spec["serial_group"])
                 if type(spec.get("exclusive", False)) is not bool:
                     raise ValueError("exclusive must be a boolean")
                 if type(spec.get("exclusive_services", False)) is not bool:
@@ -373,6 +376,28 @@ def setup_status(root, requested):
             return 0 if all(result.values()) else 1
 
 
+@contextmanager
+def serial_use(root, spec):
+    """Serialize a task's command phase using a worktree-local kernel lease.
+
+    The inherited descriptor protects live children even if their Python parent
+    dies. It is released before a development task waits on its services, so a
+    maintenance task can borrow those services and serialize only its mutation.
+    """
+    group = spec.get("serial_group")
+    if group is None:
+        yield ()
+        return
+    with tc.operation_file(root, f"task-{name(group)}.lock") as lease:
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(
+                f"Task group {group} is busy; retry after its current command finishes"
+            ) from None
+        yield (lease.fileno(),)
+
+
 def run(root: Path, action: str, extra: list[str], *, service_context=False):
     cfg = configuration(root)
     task_names = order(cfg.get("tasks", {}), [action]) if action != "setup" else []
@@ -427,38 +452,41 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False):
                     "profile", cfg.get("project", {}).get("default_profile", "default")
                 )
                 with tc.compiler_cache(profile, env, root) as selected:
-                    arguments = [list(argv) for argv in spec.get("commands", [])]
-                    if key == action and extra and not arguments:
-                        raise ValueError("A task without commands takes no arguments")
-                    if key == action and arguments:
-                        arguments[-1] += extra
-                    if arguments and (
-                        spec.get("cleanup_children", False)
-                        or spec.get("timeout_seconds", 0)
-                    ):
-                        import native_tasks
+                    with serial_use(root, spec) as serial_descriptors:
+                        arguments = [list(argv) for argv in spec.get("commands", [])]
+                        if key == action and extra and not arguments:
+                            raise ValueError(
+                                "A task without commands takes no arguments"
+                            )
+                        if key == action and arguments:
+                            arguments[-1] += extra
+                        if arguments and (
+                            spec.get("cleanup_children", False)
+                            or spec.get("timeout_seconds", 0)
+                        ):
+                            import native_tasks
 
-                        with native_tasks.command(root, arguments, spec) as argv:
-                            chainman.execute(
-                                root,
-                                profile,
-                                argv,
-                                env=selected,
-                                overrides=spec.get("environment", {}),
-                                cwd=tc.contained(root, spec.get("directory", ".")),
-                                pass_fds=descriptors,
-                            )
-                    else:
-                        for argv in arguments:
-                            chainman.execute(
-                                root,
-                                profile,
-                                argv,
-                                env=selected,
-                                overrides=spec.get("environment", {}),
-                                cwd=tc.contained(root, spec.get("directory", ".")),
-                                pass_fds=descriptors,
-                            )
+                            with native_tasks.command(root, arguments, spec) as argv:
+                                chainman.execute(
+                                    root,
+                                    profile,
+                                    argv,
+                                    env=selected,
+                                    overrides=spec.get("environment", {}),
+                                    cwd=tc.contained(root, spec.get("directory", ".")),
+                                    pass_fds=(*descriptors, *serial_descriptors),
+                                )
+                        else:
+                            for argv in arguments:
+                                chainman.execute(
+                                    root,
+                                    profile,
+                                    argv,
+                                    env=selected,
+                                    overrides=spec.get("environment", {}),
+                                    cwd=tc.contained(root, spec.get("directory", ".")),
+                                    pass_fds=(*descriptors, *serial_descriptors),
+                                )
                     if spec.get("wait_for_services", False):
                         wait_for_services()
     return 0

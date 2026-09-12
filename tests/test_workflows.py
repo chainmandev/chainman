@@ -444,6 +444,102 @@ commands=[["python3","task.py"]]
             parent.wait(timeout=5)
             parent.stderr.close()
 
+    def test_serial_group_excludes_peers_but_not_other_groups(self):
+        workflows.run(self.root, "setup", [])
+        self.body = self.body.replace(
+            "[tasks.build]", '[tasks.build]\nserial_group="data"'
+        )
+        self.write_config()
+        with workflows.serial_use(self.root, {"serial_group": "data"}):
+            result = self.run_cli("run", "build")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Task group data is busy", result.stderr)
+            with workflows.serial_use(self.root, {"serial_group": "other"}):
+                pass
+        self.assertEqual(self.run_cli("run", "build").returncode, 0)
+
+    def test_serial_group_released_before_wait_for_services(self):
+        self.body = self.body.replace(
+            "[tasks.build]",
+            '[tasks.build]\nserial_group="data"\nservices=["database"]\nwait_for_services=true',
+        )
+        self.write_config()
+
+        def waiting():
+            with workflows.serial_use(self.root, {"serial_group": "data"}):
+                pass
+
+        with patch.object(workflows, "wait_for_services", side_effect=waiting) as wait:
+            workflows.run(self.root, "build", [], service_context=True)
+        wait.assert_called_once()
+
+    def test_serial_group_child_retains_lease_after_parent_death(self):
+        self.body += (
+            '\n[tasks.hold]\nserial_group="data"\ncommands=[["python3","hold.py"]]\n'
+        )
+        self.body = self.body.replace(
+            "[tasks.build]", '[tasks.build]\nserial_group="data"'
+        )
+        self.write_config()
+        workflows.run(self.root, "setup", [])
+        (self.root / "hold.py").write_text(
+            'import time\nfrom pathlib import Path\nPath("ready").touch()\ntime.sleep(30)\n'
+        )
+        parent = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(workflows.__file__).with_name("chainman.py")),
+                "--root",
+                str(self.root),
+                "run",
+                "hold",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while (
+                not (self.root / "ready").exists()
+                and parent.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            self.assertTrue((self.root / "ready").exists())
+            parent.kill()
+            parent.wait(timeout=5)
+            result = self.run_cli("run", "build")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Task group data is busy", result.stderr)
+        finally:
+            try:
+                os.killpg(parent.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            parent.wait(timeout=5)
+            parent.stderr.close()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            result = self.run_cli("run", "build")
+            if result.returncode == 0:
+                break
+            time.sleep(0.02)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_serial_group_requires_a_safe_name(self):
+        for value in ('"../escape"', '""', "true"):
+            with self.subTest(value=value):
+                self.body = (
+                    self.body.split("[tasks.build]")[0]
+                    + '[tasks.build]\ncommands=[["true"]]\nserial_group='
+                    + value
+                    + "\n"
+                )
+                self.write_config()
+                with self.assertRaisesRegex(ValueError, "Workflow names"):
+                    workflows.configuration(self.root)
+
     def test_resource_budget_reaches_the_project_command(self):
         self.body += '\n[resources]\njob_variables=["CARGO_BUILD_JOBS"]\nmax_jobs=1\n'
         self.write_config()

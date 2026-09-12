@@ -1360,13 +1360,31 @@ func mainAction(args []string) (result int) {
 		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "resources": resources, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0})
 		return 0
 	}
-	if args[0] != "run" && args[0] != "up" {
+	if args[0] != "run" && args[0] != "up" && args[0] != "reset" {
 		return 2
 	}
 	var p Plan
 	if e := readJSON(args[1], &p); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
+	}
+	if args[0] == "reset" {
+		if len(args) != 3 || args[2] != "--discard-data" {
+			return 2
+		}
+		if e := bindEngines(&p); e != nil {
+			return exitCode(e)
+		}
+		for i := range p.Resources {
+			if e := bindEngines(&p.Resources[i]); e != nil {
+				return exitCode(e)
+			}
+		}
+		if e := resetVolumes(p); e != nil {
+			fmt.Fprintln(os.Stderr, e)
+			return 1
+		}
+		return 0
 	}
 	if p.Prepare != nil {
 		cmd, e := child(*p.Prepare)

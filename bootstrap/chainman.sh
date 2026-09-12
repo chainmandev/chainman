@@ -46,6 +46,9 @@ CHAINMAN_REQUEST_ACTION=${1:-doctor}
 CHAINMAN_REQUEST_TASK=${2:-}
 export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK
 control_dispatch() {
+    if [ "$1" = services-reset ]; then
+        [ "$#" = 3 ] && [ "$3" = --discard-data ] || fail 'usage: services-reset TASK --discard-data'
+    fi
     case "$1" in
         services-status | services-stop) ;;
         *)
@@ -61,7 +64,7 @@ control_dispatch() {
             # compatibility. Run it before planning, in the ordinary project
             # environment, without the private controller export mount.
             case "$1" in
-                run | services-run | services-up) control_task=${2:-} ;;
+                run | services-run | services-up | services-reset) control_task=${2:-} ;;
                 *) control_task=$1 ;;
             esac
             "$self" _service-prepare "$control_task" >&2
@@ -103,6 +106,7 @@ control_dispatch() {
             "$control_output/chainman-control" "${1#services-}" "$control_state"
             ;;
         services-up) "$control_output/chainman-control" up "$control_output/plan.json" ;;
+        services-reset) "$control_output/chainman-control" reset "$control_output/plan.json" --discard-data ;;
         *) "$control_output/chainman-control" run "$control_output/plan.json" ;;
     esac
     control_result=$?

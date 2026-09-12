@@ -128,6 +128,7 @@ let
         "services-stop"
         "services-run"
         "services-up"
+        "services-reset"
       ]
     then
       true

@@ -408,10 +408,14 @@ def export(root, arguments):
     fingerprint = config_fingerprint(root, cfg, env=dict(os.environ, **planning_env))
     task = (
         extra[0]
-        if action in {"run", "services-run", "services-up"} and extra
+        if action in {"run", "services-run", "services-up", "services-reset"} and extra
         else action
     )
-    task_args = extra[1:] if action in {"run", "services-run", "services-up"} else extra
+    task_args = (
+        extra[1:]
+        if action in {"run", "services-run", "services-up", "services-reset"}
+        else extra
+    )
     if task_args[:1] == ["--"]:
         task_args = task_args[1:]
     task_order = workflows.order(cfg.get("tasks", {}), [task])
