@@ -422,6 +422,26 @@ while IFS= read -r option; do
             printf '%s\n' "$value" >> "$temporary/patterns"
             continue
             ;;
+        --mount-env)
+            source_name=${value%%:*}
+            remainder=${value#*:}
+            target=${remainder%:*}
+            access=${remainder##*:}
+            case "$source_name" in '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) fail 'Invalid mount environment variable.' ;; esac
+            source=$(printenv "$source_name" && printf '.') || fail "Mount environment variable is unset: $source_name"
+            source=${source%.}
+            # Remove printenv's delimiter, preserving any newline in the value.
+            source=${source%?}
+            single_line "$source"
+            [ -n "$source" ] || fail "Mount environment variable is empty: $source_name"
+            case "$source" in /*) ;; *) source=$root/$source ;; esac
+            [ -n "$target" ] || target=$source
+            case "$access" in
+                ro) value="type=bind,src=$source,dst=$target,readonly" ;;
+                rw) value="type=bind,src=$source,dst=$target" ;;
+                *) fail 'Invalid mount access mode.' ;;
+            esac
+            ;;
         --mount)
             case "$value" in type=bind,src=*,dst=*) ;; *) fail 'Only explicit bind mounts are accepted.' ;; esac
             source=${value#type=bind,src=}

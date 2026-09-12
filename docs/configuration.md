@@ -113,6 +113,16 @@ publish specifications. The normal mount set is the project, the linked-worktree
 administrative paths where needed, and named Nix/download volumes. Relative sources
 resolve from the project; home/root/socket blanket mounts are rejected.
 
+A mount can use `source_env="SDK_DIRECTORY"` instead of `source`. The checked-in
+bootstrap reads that explicitly named host variable as a literal path; it never
+executes it or discovers a fallback. If `target` is omitted, the same absolute path
+is visible in the container. Declare `environment.pass=["SDK_DIRECTORY"]` when
+commands also need its value. Unset or empty variables, socket sources, blanket
+host mounts, and bootstrap-shadowing targets fail before project execution.
+Read-only remains the default. This supports opt-in SDK or Xauthority mounts
+without host Python or project-specific mount scripts; declare them only on the
+tasks that need access. Host-Nix execution does not add container mounts.
+
 Dynamic adapters can set `CHAINMAN_FORWARD_ENV` to comma-separated names or narrow
 patterns. `CHAINMAN_CONTAINER_OPTIONS_FILE` names a regular file of literal option
 and value lines, produced from an argument array rather than a shell command string.

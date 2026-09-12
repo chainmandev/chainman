@@ -12,6 +12,21 @@ import chainman
 
 
 class ProjectEnvironmentTests(unittest.TestCase):
+    def test_environment_mount_sources_are_explicit_and_unambiguous(self):
+        pe.transport({"mounts": [{"source_env": "APP_SDK", "read_only": True}]})
+        pe.transport({"mounts": [{"source_env": "APP_SDK", "target": "/sdk"}]})
+        for mount in (
+            {},
+            {"source": "/sdk"},
+            {"source": "/sdk", "source_env": "APP_SDK"},
+            {"source_env": "CHAINMAN_ROOT"},
+            {"source_env": "APP_*"},
+            {"source_env": "APP_SDK", "target": "relative"},
+            {"source_env": "APP_SDK", "read_only": "yes"},
+        ):
+            with self.subTest(mount=mount), self.assertRaises(ValueError):
+                pe.transport({"mounts": [mount]})
+
     def test_explicit_host_network_keeps_bindings_on_host_loopback(self):
         values = pe.expand(
             {"BIND": "{bind}", "HOST": "{host}"},

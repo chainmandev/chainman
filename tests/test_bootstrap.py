@@ -55,6 +55,12 @@ class BootstrapTests(unittest.TestCase):
             "  with tempfile.TemporaryFile(dir=directory) as handle:\n"
             "   handle.write(b'owned neutral fixture'); handle.flush()\n"
             "  record[label + '_writable'] = True\n"
+            "if '--inspect-sdk' in sys.argv:\n"
+            " sdk = pathlib.Path(os.environ['DEMO_SDK_FILE'])\n"
+            " record['sdk_data'] = sdk.read_text()\n"
+            " try: sdk.write_text('unexpected mutation')\n"
+            " except OSError as error: record['sdk_readonly'] = error.errno == 30\n"
+            " else: record['sdk_readonly'] = False\n"
             "if os.environ.get('DEMO_TEST_CACHE'):\n"
             " cache = pathlib.Path(os.environ['TOOLCHAIN_DOWNLOAD_CACHE']) / os.environ['DEMO_TEST_CACHE']\n"
             " record['cache_hits'] = int(cache.read_text()) + 1 if cache.exists() else 1\n"
@@ -672,6 +678,45 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(message, result.stderr)
         self.assertEqual(self.records(), [])
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
+    )
+    def test_real_container_environment_mount_is_literal_readonly_and_required(self):
+        outside = tempfile.TemporaryDirectory(prefix="chainman explicit SDK ")
+        self.addCleanup(outside.cleanup)
+        sdk = Path(outside.name) / "literal $(never-executed) SDK"
+        sdk.write_text("explicit SDK fixture")
+        (self.root / "chainman.toml").write_text(
+            'schema=2\n[environment]\npass=["DEMO_SDK_FILE"]\n[tasks.probe]\ncommands=[["true"]]\n[tasks.probe.transport]\nmounts=[{source_env="DEMO_SDK_FILE"}]\n'
+        )
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            DEMO_SDK_FILE=str(sdk),
+        )
+        self.run_bootstrap("run", "probe", "--inspect-sdk", env=env)
+        self.assertEqual(self.records()[0]["sdk_data"], "explicit SDK fixture")
+        self.assertTrue(self.records()[0]["sdk_readonly"])
+        self.assertEqual(sdk.read_text(), "explicit SDK fixture")
+        for value, message in (
+            (None, "unset"),
+            ("", "empty"),
+            ("/", "Blanket host"),
+            (str(sdk) + "\n", "Newlines"),
+        ):
+            with self.subTest(value=value):
+                selected = dict(env)
+                if value is None:
+                    selected.pop("DEMO_SDK_FILE")
+                else:
+                    selected["DEMO_SDK_FILE"] = value
+                result = self.run_bootstrap("run", "probe", check=False, env=selected)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+        self.assertEqual(len(self.records()), 1)
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),

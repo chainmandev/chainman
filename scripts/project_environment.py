@@ -43,13 +43,32 @@ def transport(spec):
     ):
         raise ValueError("Transport ports must explicitly bind loopback")
     mounts = spec.get("mounts", [])
-    if not isinstance(mounts, list) or any(
-        not isinstance(mount, dict) or set(mount) - {"source", "target", "read_only"}
-        for mount in mounts
-    ):
-        raise ValueError(
-            "Transport mounts require source, target and optional read_only"
-        )
+    if not isinstance(mounts, list):
+        raise ValueError("Transport mounts must be an array")
+    for mount in mounts:
+        if not isinstance(mount, dict) or set(mount) - {
+            "source",
+            "source_env",
+            "target",
+            "read_only",
+        }:
+            raise ValueError(
+                "Transport mounts require a source or source_env and optional target/read_only"
+            )
+        if ("source" in mount) == ("source_env" in mount):
+            raise ValueError("A mount requires exactly one source or source_env")
+        if "source_env" in mount:
+            variable(mount["source_env"])
+        elif not isinstance(mount["source"], str) or not mount["source"]:
+            raise ValueError("Mount source must be a nonempty path")
+        if "target" not in mount and "source_env" not in mount:
+            raise ValueError("Literal mounts require an explicit target")
+        if "target" in mount and (
+            not isinstance(mount["target"], str) or not mount["target"].startswith("/")
+        ):
+            raise ValueError("Mount target must be absolute")
+        if type(mount.get("read_only", True)) is not bool:
+            raise ValueError("Mount read_only must be boolean")
 
 
 def files(root, spec):
