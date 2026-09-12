@@ -10,7 +10,9 @@ import re
 import toolchain as tc
 
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-REFERENCE = re.compile(r"\{(root|cache|work|host|bind|env:[A-Za-z_][A-Za-z0-9_]*)\}")
+REFERENCE = re.compile(
+    r"\{(root|cache|work|host|bind|env:[A-Za-z_][A-Za-z0-9_]*|service:[^{}]*)\}"
+)
 
 
 def variable(name):
@@ -156,6 +158,14 @@ def expand(values, root, env):
 
         def replace(match):
             name = match[1]
+            if name.startswith("service:"):
+                import service_endpoints
+
+                parts = name.split(":")
+                if len(parts) != 3:
+                    raise ValueError("Service endpoints require {service:NAME:PORT}")
+                _, service, port = parts
+                return service_endpoints.address(root, service, port, container)
             if not name.startswith("env:"):
                 return paths[name]
             name = name[4:]

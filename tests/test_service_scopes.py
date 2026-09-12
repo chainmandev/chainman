@@ -83,6 +83,19 @@ class ServiceScopeTests(unittest.TestCase):
                 services.scope_key(base, first, "host-nix"),
                 services.scope_key(base, first, "container-nix"),
             )
+            self.assertEqual(
+                services.bridge_scope(first, base), services.bridge_scope(second, base)
+            )
+            self.assertNotEqual(
+                services.bridge_scope(first, base),
+                services.bridge_scope(first, base / "other-user"),
+            )
+            nested = first / "standalone"
+            nested.mkdir()
+            self.assertEqual(services.bridge_scope(nested, base)[0], nested)
+            self.assertNotEqual(
+                services.bridge_scope(nested, base), services.bridge_scope(first, base)
+            )
 
     def test_repository_service_rejects_worktree_bindings_and_dependencies(self):
         with tempfile.TemporaryDirectory() as temporary:

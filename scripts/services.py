@@ -345,6 +345,32 @@ def repository_scope(root, host_state, declared):
     )
 
 
+def bridge_scope(root, host_state):
+    # Only an adopted Git root may share resources with its linked worktrees.
+    # An embedded standalone consumer must not borrow an enclosing repository.
+    common = root.resolve()
+    top = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if top.returncode == 0 and Path(top.stdout.strip()).resolve() == common:
+        common = Path(
+            subprocess.check_output(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ],
+                text=True,
+            ).strip()
+        ).resolve(strict=True)
+    return common, scope_key(host_state, common, "network")
+
+
 def export(root, arguments):
     if len(arguments) < 6:
         raise ValueError("Invalid internal controller export request")
@@ -398,7 +424,11 @@ def export(root, arguments):
     )
     input_env = project_environment.host_inputs(destination, cfg.get("environment", {}))
     planning_env = dict(input_env, CHAINMAN_MODE=mode)
-    for name in ("TOOLCHAIN_DOWNLOAD_CACHE", "XDG_CACHE_HOME"):
+    for name in (
+        "TOOLCHAIN_DOWNLOAD_CACHE",
+        "XDG_CACHE_HOME",
+        "CHAINMAN_CONTAINER_NETWORK_MODE",
+    ):
         if name in os.environ:
             planning_env[name] = os.environ[name]
     planning_env = workflows.context_environment(root, cfg, task, planning_env)
@@ -427,6 +457,13 @@ def export(root, arguments):
     if not requested:
         raise ValueError(f"Task {task} has no declared services")
     closure = workflows.order(declared, requested)
+    import service_endpoints
+
+    bridge_root, bridge_key = bridge_scope(root, host_state)
+    bridge_name = "chainman-" + bridge_key
+    needs_bridge = mode == "container-nix" or any(
+        "container" in declared[name] for name in closure
+    )
     shared_names = {
         name for name, spec in declared.items() if spec.get("scope") == "repository"
     }
@@ -472,6 +509,13 @@ def export(root, arguments):
                 "--cap-drop",
                 "ALL",
             ]
+            if not spec.get("network_service"):
+                argv += [
+                    "--network",
+                    bridge_name,
+                    "--network-alias",
+                    service_endpoints.alias(root, name),
+                ]
             if item.get("read_only", False):
                 argv.append("--read-only")
             if "user" in item:
@@ -542,6 +586,8 @@ def export(root, arguments):
                 launch["environment"].update(
                     CHAINMAN_CONTAINER_NAME=container_name,
                     CHAINMAN_CONTAINER_OWNER=owner,
+                    CHAINMAN_CONTAINER_BRIDGE=bridge_name,
+                    CHAINMAN_CONTAINER_ALIAS=service_endpoints.alias(root, name),
                 )
                 ownership = {"engine": engine, "name": container_name, "token": owner}
         value = {
@@ -611,6 +657,7 @@ def export(root, arguments):
                 build["environment"].update(
                     CHAINMAN_CONTAINER_NAME=build_name,
                     CHAINMAN_CONTAINER_OWNER=build_owner,
+                    CHAINMAN_CONTAINER_BRIDGE=bridge_name,
                 )
                 value["watch"]["container"] = {
                     "engine": engine,
@@ -652,45 +699,69 @@ def export(root, arguments):
             cfg["tasks"][name].get("shutdown_seconds", 10) for name in task_order
         ),
     }
-    if shared_scope:
-        common, shared_key, shared_fingerprint = shared_scope
+    if needs_bridge:
+        if not engine:
+            raise ValueError(
+                "Container services require a host Docker or Podman executable"
+            )
         plan["resources"] = [
             {
                 "schema": 1,
-                "root": str(common),
-                "state": str(Path(host_state) / shared_key),
+                "root": str(bridge_root),
+                "state": str(Path(host_state) / bridge_key),
                 "backend": plan["backend"],
                 "licenses": plan["licenses"],
                 "fingerprint": hashlib.sha256(
-                    json.dumps(
-                        [
-                            shared_fingerprint,
-                            {
-                                name: literal_environment(
-                                    declared[name]["container"].get("environment", {}),
-                                    root,
-                                    planning_env,
-                                )
-                                for name in shared_names
-                            },
-                        ],
-                        sort_keys=True,
-                    ).encode()
+                    str(chainman.RUNTIME).encode()
                 ).hexdigest(),
-                "services": {
-                    name: spec
-                    for name, spec in prepared.items()
-                    if name in shared_names
-                },
-                "volumes": [
-                    volume
-                    for volume in volumes.values()
-                    if volume["scope"] == shared_key
-                ],
-                "requested": shared_requested,
-                "exclusive_services": plan["exclusive_services"],
+                "services": {},
+                "requested": [],
+                "bridge": {"engine": engine, "name": bridge_name, "scope": bridge_key},
             }
         ]
+    if shared_scope:
+        common, shared_key, shared_fingerprint = shared_scope
+        plan.setdefault("resources", []).extend(
+            [
+                {
+                    "schema": 1,
+                    "root": str(common),
+                    "state": str(Path(host_state) / shared_key),
+                    "backend": plan["backend"],
+                    "licenses": plan["licenses"],
+                    "fingerprint": hashlib.sha256(
+                        json.dumps(
+                            [
+                                shared_fingerprint,
+                                {
+                                    name: literal_environment(
+                                        declared[name]["container"].get(
+                                            "environment", {}
+                                        ),
+                                        root,
+                                        planning_env,
+                                    )
+                                    for name in shared_names
+                                },
+                            ],
+                            sort_keys=True,
+                        ).encode()
+                    ).hexdigest(),
+                    "services": {
+                        name: spec
+                        for name, spec in prepared.items()
+                        if name in shared_names
+                    },
+                    "volumes": [
+                        volume
+                        for volume in volumes.values()
+                        if volume["scope"] == shared_key
+                    ],
+                    "requested": shared_requested,
+                    "exclusive_services": plan["exclusive_services"],
+                }
+            ]
+        )
     if mode == "container-nix" and action != "services-up":
         networks = {
             cfg["tasks"][name]["network_service"]
@@ -713,6 +784,7 @@ def export(root, arguments):
         plan["task"]["environment"].update(
             CHAINMAN_CONTAINER_NAME=task_container["name"],
             CHAINMAN_CONTAINER_OWNER=owner,
+            CHAINMAN_CONTAINER_BRIDGE=bridge_name,
         )
     tc.atomic_json(destination / "plan.json", plan)
     return 0

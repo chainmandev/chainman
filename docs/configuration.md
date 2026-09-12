@@ -477,6 +477,25 @@ options apply only to that task's or service's Nix container; a verification tas
 does not inherit a frontend service's published ports. Data containers use their
 own `container` declaration instead. Project-wide container options remain additive.
 
+Service workflows with containers acquire an ordinary private engine bridge.
+Containers join it with stable service DNS aliases; host publications still bind
+only loopback. Use `{service:database:5432}` in a declared environment value, for
+example `DATABASE_URL = "postgresql://app@{service:database:5432}/app"`. The port is
+the service's listening TCP port. Container commands receive its DNS address and
+that port; host commands receive the corresponding loopback publication (which
+may use a different port). A host command service uses its listening port directly.
+Unknown services, invalid ports and ambiguous or missing host publications fail.
+A service borrowing another service's namespace uses the owner's DNS alias.
+
+Linked worktrees share the repository bridge and repository-scoped data services;
+worktree service aliases remain distinct. Standalone consumers inside another
+repository do not inherit that repository's bridge. Existing parent-linked leases
+cover network creation, startup and execution. Cleanup stops endpoints first and
+removes the network after its last client leaves. It checks engine identity and
+ownership labels and removes only the inspected network ID, without forced
+disconnection. An unrelated attached container blocks removal. Pure host workflows
+with no container services do not acquire a bridge or require an engine.
+
 When a local stack relies on loopback between processes, a task or service may
 declare `network_service = "database"`. In container mode it joins that acquired
 service's ordinary engine network namespace. Host mode already shares host

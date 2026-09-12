@@ -393,6 +393,17 @@ if [ -n "${CHAINMAN_CONTAINER_NETWORK:-}" ]; then
     case "$CHAINMAN_CONTAINER_NETWORK" in *[!a-f0-9]*) fail 'Invalid owned network container identity.' ;; esac
     [ "${#CHAINMAN_CONTAINER_NETWORK}" = 64 ] || fail 'Invalid owned network container identity.'
     printf '%s\n' --network "container:$CHAINMAN_CONTAINER_NETWORK" >> "$temporary/options"
+elif [ -n "${CHAINMAN_CONTAINER_BRIDGE:-}" ] && [ "$network_mode" != host ]; then
+    bridge_key=${CHAINMAN_CONTAINER_BRIDGE#chainman-}
+    case "$bridge_key" in *[!a-f0-9]*) fail 'Invalid owned bridge identity.' ;; esac
+    [ "${#bridge_key}" = 24 ] && [ "$CHAINMAN_CONTAINER_BRIDGE" = "chainman-$bridge_key" ] || fail 'Invalid owned bridge identity.'
+    printf '%s\n' --network "$CHAINMAN_CONTAINER_BRIDGE" >> "$temporary/options"
+    if [ -n "${CHAINMAN_CONTAINER_ALIAS:-}" ]; then
+        alias_key=${CHAINMAN_CONTAINER_ALIAS#cm-}
+        case "$alias_key" in *[!a-f0-9]*) fail 'Invalid service DNS alias.' ;; esac
+        [ "${#alias_key}" = 24 ] && [ "$CHAINMAN_CONTAINER_ALIAS" = "cm-$alias_key" ] || fail 'Invalid service DNS alias.'
+        printf '%s\n' --network-alias "$CHAINMAN_CONTAINER_ALIAS" >> "$temporary/options"
+    fi
 else
     printf '%s\n' --network "$network_mode" >> "$temporary/options"
 fi
@@ -464,8 +475,16 @@ while IFS= read -r option; do
                 container:*)
                     [ -n "${CHAINMAN_CONTAINER_NETWORK:-}" ] && [ "$value" = "container:$CHAINMAN_CONTAINER_NETWORK" ] || fail 'Container network is not an owned service namespace.'
                     ;;
-                *) fail 'Container network must be host, bridge or a verified service namespace.' ;;
+                chainman-*)
+                    [ -n "${CHAINMAN_CONTAINER_BRIDGE:-}" ] && [ "$value" = "$CHAINMAN_CONTAINER_BRIDGE" ] || fail 'Container network is not an owned private bridge.'
+                    ;;
+                *) fail 'Container network must be host, bridge or a verified service network.' ;;
             esac
+            set -- "$option" "$value" "$@"
+            continue
+            ;;
+        --network-alias)
+            [ -n "${CHAINMAN_CONTAINER_ALIAS:-}" ] && [ "$value" = "$CHAINMAN_CONTAINER_ALIAS" ] || fail 'Container alias is not an owned service alias.'
             set -- "$option" "$value" "$@"
             continue
             ;;

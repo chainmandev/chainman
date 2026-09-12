@@ -119,6 +119,93 @@ while True:time.sleep(.1)
         self.state = state
         self.plan["state"] = str(state)
 
+    def test_private_bridge_lease_outlives_shared_endpoints_and_releases_last(self):
+        first, second, shared = self.shared_resource()
+        network_state = self.base / "network-state"
+        network_file = self.base / "network.json"
+        events = self.base / "network-events"
+        scope = "a" * 24
+        network = {
+            "Id": "b" * 64,
+            "Name": "chainman-" + scope,
+            "Driver": "bridge",
+            "Labels": {"dev.chainman.scope": scope, "dev.chainman.network": "1"},
+        }
+        engine = self.base / "docker"
+        engine.write_text(
+            f"#!{sys.executable}\n"
+            + f"""import json,os,sys
+from pathlib import Path
+state=Path({str(network_file)!r}); events=Path({str(events)!r})
+if sys.argv[1]=='info': print('fixture-engine'); sys.exit(0)
+assert sys.argv[1]=='network'
+action=sys.argv[2]
+if action=='inspect':
+ if not state.exists(): sys.exit(1)
+ print(state.read_text())
+elif action=='ls':
+ if state.exists(): print({network["Name"]!r})
+elif action=='create':
+ assert not state.exists()
+ state.write_text(json.dumps([{network!r}]))
+ with events.open('a') as f: f.write('create\\n')
+elif action=='rm':
+ assert sys.argv[3:]==[{network["Id"]!r}]
+ pidfile=Path({str(self.root / "pid")!r})
+ if pidfile.exists():
+  try: os.kill(int(pidfile.read_text()),0)
+  except ProcessLookupError: pass
+  else: raise AssertionError('network removal preceded endpoint shutdown')
+ state.unlink()
+ with events.open('a') as f: f.write('remove\\n')
+else: raise AssertionError(sys.argv)
+"""
+        )
+        engine.chmod(0o700)
+        pool = {
+            "schema": 1,
+            "root": str(self.root),
+            "state": str(network_state),
+            "backend": BACKEND,
+            "fingerprint": "bridge-fixture",
+            "services": {},
+            "requested": [],
+            "bridge": {"engine": str(engine), "name": network["Name"], "scope": scope},
+        }
+        self.plan["resources"].insert(0, pool)
+        self.run_control("up", check=0)
+        self.assertTrue(network_file.exists())
+        self.assertFalse((network_state / "controller.json").exists())
+        self.select_scope(second)
+        self.run_control("up", check=0)
+        status = json.loads(self.run_control("status", check=0).stdout)
+        bridge_status = next(
+            entry for entry in status["resources"] if "bridge" in entry
+        )
+        self.assertTrue(bridge_status["running"])
+        self.assertEqual(bridge_status["clients"], 2)
+        self.assertEqual(bridge_status["network_id"], network["Id"])
+        self.select_scope(first)
+        self.run_control("stop", check=0)
+        self.assertTrue(network_file.exists())
+        self.assertEqual(events.read_text(), "create\n")
+        self.select_scope(second)
+        self.run_control("stop", check=0)
+        self.assertFalse(network_file.exists())
+        self.assertEqual(events.read_text(), "create\nremove\n")
+
+    def test_empty_local_scope_keeps_existing_resource_cleanup_intent(self):
+        self.shared_resource()
+        self.run_control("up", check=0)
+        pid = int((self.root / "pid").read_text())
+        self.plan["resources"] = []
+        self.run_control("run", check=7)
+        self.assertTrue(self.alive(pid))
+        saved = json.loads((self.state / "plan.json").read_text())
+        self.assertEqual(len(saved["resources"]), 1)
+        self.run_control("stop", check=0)
+        self.wait_until(lambda: not self.alive(pid))
+
     def test_worktree_stop_releases_only_its_repository_claim(self):
         first, second, shared = self.shared_resource()
         self.run_control("up", check=0)

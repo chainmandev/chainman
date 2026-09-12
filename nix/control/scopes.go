@@ -85,7 +85,9 @@ func mergeResources(old, fresh []Plan) []Plan {
 // Call with the worktree gate held. Resource cleanup never takes a parent gate;
 // it observes a parent's locked descriptor or saved kernel/container identity.
 func pruneResources(p Plan) error {
-	for _, resource := range p.Resources {
+	// Networks are acquired before data services and released after endpoints.
+	for index := len(p.Resources) - 1; index >= 0; index-- {
+		resource := p.Resources[index]
 		if filepath.Dir(resource.State) != filepath.Dir(p.State) || resource.State == p.State {
 			return fmt.Errorf("invalid saved resource scope")
 		}
@@ -136,6 +138,23 @@ func resourceStatus(p Plan) ([]map[string]any, error) {
 			return nil, e
 		}
 		used, e := active(saved)
+		if e == nil && saved.Bridge != nil {
+			current, err := inspectBridge(saved.Bridge)
+			clients, globError := filepath.Glob(filepath.Join(saved.State, "*.lease"))
+			gate.Close()
+			if err != nil {
+				return nil, err
+			}
+			if globError != nil {
+				return nil, globError
+			}
+			id := ""
+			if current != nil {
+				id = current.ID
+			}
+			result = append(result, map[string]any{"state": saved.State, "bridge": saved.Bridge.Name, "network_id": id, "running": current != nil, "clients": len(clients), "recovery_required": current == nil && len(clients) > 0})
+			continue
+		}
 		gate.Close()
 		if e != nil {
 			return nil, e

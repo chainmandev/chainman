@@ -63,6 +63,7 @@ type Plan struct {
 	Fingerprint        string             `json:"fingerprint"`
 	Services           map[string]Service `json:"services"`
 	Volumes            []Volume           `json:"volumes,omitempty"`
+	Bridge             *Bridge            `json:"bridge,omitempty"`
 	Requested          []string           `json:"requested"`
 	Task               Command            `json:"task"`
 	Prepare            *Command           `json:"prepare,omitempty"`
@@ -310,13 +311,21 @@ func validate(p Plan) error {
 	if len(p.Services) > 128 {
 		return fmt.Errorf("too many services")
 	}
-	if len(p.Resources) > 1 {
-		return fmt.Errorf("only one repository resource pool is supported")
+	if len(p.Resources) > 2 {
+		return fmt.Errorf("only repository data and network resource pools are supported")
 	}
+	if e := validateBridge(p.Bridge); e != nil {
+		return e
+	}
+	if p.Bridge != nil && (len(p.Services) > 0 || len(p.Resources) > 0) {
+		return fmt.Errorf("network scopes cannot contain services or nested resources")
+	}
+	resourceStates := map[string]bool{}
 	for _, resource := range p.Resources {
-		if len(resource.Resources) > 0 || resource.State == p.State || filepath.Dir(resource.State) != filepath.Dir(p.State) {
+		if len(resource.Resources) > 0 || resource.State == p.State || filepath.Dir(resource.State) != filepath.Dir(p.State) || resourceStates[resource.State] {
 			return fmt.Errorf("invalid repository resource scope")
 		}
+		resourceStates[resource.State] = true
 		if e := validate(resource); e != nil {
 			return e
 		}
@@ -689,6 +698,22 @@ func bindEngines(p *Plan) error {
 			containers = append(containers, s.Watch.Container)
 		}
 	}
+	// A repository-only `up` has no local container, while its later `run` does.
+	// Bind the already declared resource engines in both cases so adding a task
+	// does not change the identity of otherwise compatible live services.
+	for _, resource := range p.Resources {
+		for _, service := range resource.Services {
+			if service.Container != nil {
+				containers = append(containers, &Container{Engine: service.Container.Engine})
+			}
+		}
+		for _, volume := range resource.Volumes {
+			containers = append(containers, &Container{Engine: volume.Engine})
+		}
+		if resource.Bridge != nil {
+			containers = append(containers, &Container{Engine: resource.Bridge.Engine})
+		}
+	}
 	for _, c := range containers {
 		if c == nil {
 			continue
@@ -716,6 +741,18 @@ func bindEngines(p *Plan) error {
 			identities[volume.Engine] = identity
 		}
 		volume.EngineIdentity = identity
+	}
+	if p.Bridge != nil {
+		identity, ok := identities[p.Bridge.Engine]
+		if !ok {
+			var e error
+			identity, e = engineIdentity(p.Bridge.Engine)
+			if e != nil {
+				return e
+			}
+			identities[p.Bridge.Engine] = identity
+		}
+		p.Bridge.EngineIdentity = identity
 	}
 	if len(identities) > 0 {
 		data, e := json.Marshal(identities)
@@ -880,7 +917,13 @@ func releaseUnused(p Plan, force bool) error {
 			}
 		}
 	}
-	return pruneResources(p)
+	if e = pruneResources(p); e != nil {
+		return e
+	}
+	if p.Bridge != nil && !hasLeases(p) {
+		return removeBridge(p.Bridge)
+	}
+	return nil
 }
 func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error) {
 	if e := bindEngines(&p); e != nil {
@@ -988,16 +1031,30 @@ func acquire(p Plan, persistent bool, parent *LeaseRef) (*os.File, string, error
 	}
 	// Persist resource intent before acquiring anything in another scope. Recovery
 	// can then reap its parent-linked claims even if this client dies during start.
+	// An empty local selection can still have live repository users without a
+	// local controller. Retain their cleanup intent when adding another task.
 	if controller(p).alive() {
 		previous.Resources = mergeResources(previous.Resources, p.Resources)
 		if e = atomic(filepath.Join(p.State, "plan.json"), previous); e != nil {
 			return cleanup(e)
 		}
-	} else if e = atomic(filepath.Join(p.State, "plan.json"), p); e != nil {
-		return cleanup(e)
+	} else {
+		saved := p
+		if previousClients {
+			saved.Resources = mergeResources(previous.Resources, p.Resources)
+		}
+		if e = atomic(filepath.Join(p.State, "plan.json"), saved); e != nil {
+			return cleanup(e)
+		}
+	}
+	// The intent and lease are durable before the engine creates anything.
+	if p.Bridge != nil {
+		if e = ensureBridge(p.Bridge, previousClients); e != nil {
+			return cleanup(e)
+		}
 	}
 	for _, resource := range p.Resources {
-		if len(resource.Requested) == 0 {
+		if len(resource.Requested) == 0 && resource.Bridge == nil {
 			continue
 		}
 		claim, _, err := acquire(resource, false, &LeaseRef{State: p.State, File: filepath.Base(leasePath)})

@@ -25,7 +25,7 @@ class BootstrapTests(unittest.TestCase):
         (cls.tree / "scripts").mkdir(parents=True)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
-            "import json, os, pathlib, shutil, subprocess, sys, tempfile, time\n"
+            "import json, os, pathlib, shutil, socket, subprocess, sys, tempfile, time\n"
             "root = pathlib.Path(sys.argv[2])\n"
             "record = dict(argv=sys.argv[1:], runtime=os.environ['CHAINMAN_RUNTIME'], "
             "root=os.environ['CHAINMAN_ROOT'], cwd=os.getcwd(), "
@@ -68,6 +68,7 @@ class BootstrapTests(unittest.TestCase):
             " (pathlib.Path.home() / 'home-marker').write_text('persistent')\n"
             "(root / ('record-' + str(os.getpid()) + '.json')).write_text(json.dumps(record))\n"
             "if '--wait' in sys.argv: time.sleep(60)\n"
+            "if '--resolve-service' in sys.argv: print(socket.gethostbyname(os.environ['DEMO_SERVICE_ALIAS']))\n"
         )
         cls.nar_hash = subprocess.check_output(
             [
@@ -138,6 +139,68 @@ class BootstrapTests(unittest.TestCase):
         return [
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
+    )
+    def test_owned_private_bridge_resolves_service_alias_without_host_exposure(self):
+        engine = os.environ["CHAINMAN_TEST_CONTAINER"]
+        key = hashlib.sha256(str(self.root).encode()).hexdigest()[:24]
+        network, alias = "chainman-" + key, "cm-" + key
+        network_id = subprocess.check_output(
+            [engine, "network", "create", "--driver", "bridge", network], text=True
+        ).strip()
+        self.addCleanup(
+            lambda: subprocess.run(
+                [engine, "network", "rm", network_id], capture_output=True, check=True
+            )
+        )
+        image = (SOURCE / "nix/container-image.txt").read_text().strip()
+        container_id = subprocess.check_output(
+            [
+                engine,
+                "run",
+                "--detach",
+                "--rm",
+                "--network",
+                network,
+                "--network-alias",
+                alias,
+                "--user",
+                "1000:1000",
+                "--security-opt",
+                "no-new-privileges",
+                "--cap-drop",
+                "ALL",
+                image,
+                "sleep",
+                "120",
+            ],
+            text=True,
+        ).strip()
+        self.addCleanup(
+            lambda: subprocess.run(
+                [engine, "stop", "--time", "1", container_id],
+                capture_output=True,
+                check=True,
+            )
+        )
+        expected = json.loads(
+            subprocess.check_output([engine, "inspect", container_id], text=True)
+        )[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=engine,
+            CHAINMAN_CONTAINER_BRIDGE=network,
+            CHAINMAN_FORWARD_ENV="DEMO_SERVICE_ALIAS",
+            DEMO_SERVICE_ALIAS=alias,
+        )
+        result = self.run_bootstrap("--resolve-service", env=env)
+        self.assertEqual(result.stdout.strip(), expected)
+        self.assertEqual(self.records()[0]["cap_eff"], "0000000000000000")
+        self.assertEqual(self.records()[0]["no_new_privs"], "1")
 
     def test_script_transport_preserves_code_and_literal_arguments(self):
         script = self.root / "recipe with spaces"
