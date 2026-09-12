@@ -1,0 +1,81 @@
+"""Actual pnpm must not reinstall dependencies while a task uses its setup."""
+
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import toolchain
+
+
+@unittest.skipUnless(shutil.which("pnpm"), "requires the JavaScript profile's pnpm")
+class PnpmRuntimeTests(unittest.TestCase):
+    def test_ci_transition_preserves_setup_and_stale_dependencies_fail_closed(self):
+        with tempfile.TemporaryDirectory(prefix="chainman pnpm policy ") as directory:
+            root = Path(directory)
+            (root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
+            package = {
+                "name": "runtime-policy-fixture",
+                "private": True,
+                "version": "1.0.0",
+                "scripts": {
+                    "preinstall": "node install.cjs",
+                    "check": "node check.cjs",
+                },
+            }
+            manifest = root / "package.json"
+            manifest.write_text(json.dumps(package))
+            (root / "install.cjs").write_text(
+                "const fs=require('fs'); fs.appendFileSync('installed', 'install\\n');\n"
+            )
+            (root / "check.cjs").write_text(
+                "const fs=require('fs'); fs.appendFileSync('ran', 'run\\n');\n"
+            )
+            with patch.dict(
+                os.environ, {"TOOLCHAIN_DOWNLOAD_CACHE": str(root / "downloads")}
+            ):
+                env = toolchain.environment(root)
+            env.pop("CI", None)
+
+            def run(*args, selected=env):
+                return subprocess.run(
+                    ["pnpm", *args],
+                    cwd=root,
+                    env=selected,
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+
+            installed = run("install", "--offline")
+            self.assertEqual(
+                installed.returncode, 0, installed.stdout + installed.stderr
+            )
+            receipt = (root / "installed").read_bytes()
+            ci = dict(env, CI="true")
+            result = run("run", "check", selected=ci)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual((root / "installed").read_bytes(), receipt)
+            self.assertEqual((root / "ran").read_text(), "run\n")
+
+            dependency = root / "dependency"
+            dependency.mkdir()
+            (dependency / "package.json").write_text(
+                '{"name":"local-dependency","version":"1.0.0"}'
+            )
+            package["dependencies"] = {"local-dependency": "file:dependency"}
+            manifest.write_text(json.dumps(package))
+            stale = run("run", "check", selected=ci)
+            self.assertNotEqual(stale.returncode, 0, stale.stdout + stale.stderr)
+            self.assertEqual((root / "installed").read_bytes(), receipt)
+            self.assertEqual((root / "ran").read_text(), "run\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

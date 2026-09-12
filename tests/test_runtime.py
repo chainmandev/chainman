@@ -414,6 +414,30 @@ class RuntimeTests(unittest.TestCase):
                 for name in toolchain.PNPM_STORE_VARIABLES:
                     self.assertEqual(env[name], overrides[selected])
 
+    def test_pnpm_task_policy_does_not_inherit_nested_install_defaults(self):
+        unsafe = {
+            "pnpm_config_verify_deps_before_run": "install",
+            "npm_config_enable_global_virtual_store": "true",
+        }
+        with patch.dict(os.environ, unsafe):
+            env = toolchain.environment(self.root)
+        for aliases, value in zip(
+            toolchain.PNPM_SETTING_VARIABLES[1:], ("false", "error")
+        ):
+            for name in aliases:
+                self.assertEqual(env[name], value)
+
+    def test_explicit_pnpm_policy_layers_reconcile_all_aliases(self):
+        env = toolchain.environment(self.root)
+        toolchain.pnpm_environment(
+            env, {"PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE": "true"}
+        )
+        for name in toolchain.PNPM_SETTING_VARIABLES[1]:
+            self.assertEqual(env[name], "true")
+        toolchain.pnpm_environment(env, {"npm_config_verify_deps_before_run": "warn"})
+        for name in toolchain.PNPM_SETTING_VARIABLES[2]:
+            self.assertEqual(env[name], "warn")
+
     def test_special_operation_lock_fails_without_blocking(self):
         directory = self.root / ".cache/toolchain"
         directory.mkdir(parents=True)

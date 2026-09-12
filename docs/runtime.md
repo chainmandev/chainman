@@ -67,6 +67,13 @@ their setup artifacts, only when no managed operation is active. Set
 used by `setup`, returning 1 if any selected group is stale. It never installs
 dependencies or records unverified readiness. Use `setup [GROUP...]` to restore
 readiness after changing inputs or removing outputs.
+The shared pnpm defaults keep a project-local virtual store backed by the shared
+download cache, independent of whether `CI` is set. `pnpm run` and `pnpm exec`
+check dependency freshness and report an error instead of reinstalling a leased
+setup. Explicit install/update commands still perform their declared work.
+Current pnpm and older environment-setting aliases are reconciled through the
+project/profile environment layers; projects selecting another layout should
+keep that choice consistent across setup and task execution.
 Setup groups may declare `exclude_inputs` glob patterns when broad manifest
 patterns would otherwise include installed dependencies or build directories.
 Exclusions affect only that group's fingerprint inputs, never its artifact checks.

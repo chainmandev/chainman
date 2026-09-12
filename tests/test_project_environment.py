@@ -12,6 +12,19 @@ import chainman
 
 
 class ProjectEnvironmentTests(unittest.TestCase):
+    def test_explicit_file_pnpm_setting_reaches_nested_script_aliases(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "pnpm.env").write_text("PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=warn\n")
+            inherited = dict.fromkeys(pe.tc.PNPM_SETTING_VARIABLES[2], "error")
+            selected = pe.apply(
+                root,
+                {"files": [{"path": "pnpm.env", "override": True}]},
+                inherited,
+            )
+            for alias in pe.tc.PNPM_SETTING_VARIABLES[2]:
+                self.assertEqual(selected[alias], "warn")
+
     def test_environment_mount_sources_are_explicit_and_unambiguous(self):
         pe.transport({"mounts": [{"source_env": "APP_SDK", "read_only": True}]})
         pe.transport({"mounts": [{"source_env": "APP_SDK", "target": "/sdk"}]})

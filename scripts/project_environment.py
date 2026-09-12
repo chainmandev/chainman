@@ -187,9 +187,12 @@ def apply(root, spec, inherited):
     env = dict(inherited)
     for entry, _, values in files(root, spec):
         # File values are literal, including quotes, dollars and braces.
+        applied = {}
         for key, value in values.items():
             if entry.get("override", False) or key not in env:
                 env[key] = value
+                applied[key] = value
+        tc.pnpm_environment(env, applied)
     mode = env.get("CHAINMAN_MODE", "host-nix")
     modes = spec.get("modes", {})
     if set(modes) - {"host-nix", "container-nix"}:
@@ -206,7 +209,7 @@ def apply(root, spec, inherited):
             values = {key: value for key, value in values.items() if key not in env}
         expanded = expand(values, root, env)
         env.update(expanded)
-        tc.pnpm_store_environment(env, expanded)
+        tc.pnpm_environment(env, expanded)
     return env
 
 

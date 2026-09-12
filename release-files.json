@@ -168,6 +168,7 @@
     "tests/test_javascript_updates.py",
     "tests/test_lock_adapters.py",
     "tests/test_module_updates.py",
+    "tests/test_pnpm_runtime.py",
     "tests/test_project_environment.py",
     "tests/test_registry.py",
     "tests/test_resources.py",

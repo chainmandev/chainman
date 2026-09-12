@@ -131,7 +131,7 @@ def profile_environment(root, spec, inherited, overrides=None):
     for values in (spec.get("environment", {}), overrides or {}):
         expanded = project_environment.expand(values, root, selected)
         selected.update(expanded)
-        tc.pnpm_store_environment(selected, expanded)
+        tc.pnpm_environment(selected, expanded)
     for key in configuration(root).get("environment", {}).get("unset", []):
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise ValueError("Environment unset entries must be variable names")

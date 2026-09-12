@@ -513,14 +513,28 @@ PNPM_STORE_VARIABLES = (
     "PNPM_STORE_DIR",
     "npm_config_store_dir",
 )
+PNPM_SETTING_VARIABLES = (
+    PNPM_STORE_VARIABLES,
+    (
+        "PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE",
+        "pnpm_config_enable_global_virtual_store",
+        "npm_config_enable_global_virtual_store",
+    ),
+    (
+        "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN",
+        "pnpm_config_verify_deps_before_run",
+        "npm_config_verify_deps_before_run",
+    ),
+)
 
 
-def pnpm_store_environment(env: dict[str, str], values: dict[str, str]) -> None:
-    """Keep pnpm's current setting and legacy adapter aliases on one store."""
-    for name in PNPM_STORE_VARIABLES:
-        if name in values:
-            env.update(dict.fromkeys(PNPM_STORE_VARIABLES, values[name]))
-            return
+def pnpm_environment(env: dict[str, str], values: dict[str, str]) -> None:
+    """Keep pnpm versions and nested scripts on the same explicit settings."""
+    for aliases in PNPM_SETTING_VARIABLES:
+        for name in aliases:
+            if name in values:
+                env.update(dict.fromkeys(aliases, values[name]))
+                break
 
 
 def environment(root: Path = ROOT) -> dict[str, str]:
@@ -590,7 +604,17 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         TOOLCHAIN_WORK=str(work),
         TOOLCHAIN_DOWNLOAD_CACHE=str(downloads),
     )
-    pnpm_store_environment(env, {"PNPM_CONFIG_STORE_DIR": str(downloads / "pnpm")})
+    pnpm_environment(
+        env,
+        {
+            "PNPM_CONFIG_STORE_DIR": str(downloads / "pnpm"),
+            # pnpm changes its default virtual-store layout in CI. Stable
+            # layout avoids replacing a setup still leased by running tasks.
+            "PNPM_CONFIG_ENABLE_GLOBAL_VIRTUAL_STORE": "false",
+            # Frozen installation belongs to setup; run/exec may only check it.
+            "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "error",
+        },
+    )
     # Keep build JVMs within the command lifetime. Gradle may use a single-use
     # daemon for JVM settings, but it exits after the build; Kotlin stays in it.
     # Explicit project/profile options remain available through environment.
@@ -614,7 +638,7 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         if name in os.environ:
             env[name] = os.environ[name]
             preserved[name] = os.environ[name]
-    pnpm_store_environment(env, preserved)
+    pnpm_environment(env, preserved)
     # A refreshed subprocess may execute immutable runtime code outside this
     # project (notably a disposable source preview). Bind its data root explicitly
     # after inherited cache settings; source location is never project authority.
