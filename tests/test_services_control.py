@@ -819,6 +819,36 @@ if text=='bad': raise SystemExit(3)
         self.run_control("stop", check=0)
         self.assertFalse(self.alive(self.pid()))
 
+    @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
+    def test_watch_restart_preserves_active_client_but_real_exit_cancels_it(self):
+        source = self.root / "source"
+        source.write_text("first")
+        self.plan["watcher"] = WATCHER
+        self.plan["services"]["worker"]["watch"] = {
+            "build": self.command([sys.executable, "-c", "pass"]),
+            "paths": [str(source)],
+            "ignore": [],
+            "debounce_ms": 100,
+            "startup_seconds": 10,
+        }
+        parent = self.waiting_task(wait=False)
+        try:
+            for iteration in range(3):
+                previous = self.pid()
+                source.write_text(str(iteration))
+                self.wait_until(lambda: self.pid() != previous)
+                # Observe several monitor ticks after each real backend restart.
+                time.sleep(2)
+                self.assertIsNone(parent.poll())
+                self.assertTrue(self.alive(self.pid()))
+            os.kill(self.pid(), signal.SIGKILL)
+            self.assertEqual(parent.wait(timeout=15), 1)
+            self.assertFalse(self.alive(int((self.root / "waiting").read_text())))
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait()
+
     def test_stop_while_dependency_is_pending_does_not_start_late_child(self):
         self.plan["services"]["worker"]["readiness"]["command"] = self.command(
             [shutil.which("test"), "-f", str(self.root / "allow")]
