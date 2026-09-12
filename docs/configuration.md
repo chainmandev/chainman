@@ -441,6 +441,7 @@ pass = ["APP_*", "CI"]
 files = [
   { path = "environments/local.env" },
   { path = "environments/images.env", required = true, override = true },
+  { path = "environments/provider.env", required = true, when = { APP_AUTH_MODE = "provider" } },
 ]
 [environment.defaults]
 APP_HOST = "{host}"
@@ -462,6 +463,12 @@ values, mode values, profile environment and task/service environment apply in
 that order. Existing explicit caller values therefore beat defaults, while fixed
 values deliberately beat callers. Managed runtime and compiler ownership variables
 cannot be replaced through these declarations.
+
+A file can declare a nonempty `when` table of exact literal environment matches.
+Conditions read inherited/task context and earlier files in declaration order;
+unselected files are not read or required. Later files cannot change a variable
+already used to select a file. Service fingerprints include the selected file
+bytes, so changing provider inputs invalidates reuse.
 
 Declared TOML values support `{root}`, `{cache}` (shared download cache), `{work}`
 (the selected build context), `{host}`, `{bind}` and `{env:VARIABLE}` references.

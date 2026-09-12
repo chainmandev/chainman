@@ -12,6 +12,55 @@ import chainman
 
 
 class ProjectEnvironmentTests(unittest.TestCase):
+    def test_conditional_files_do_not_load_an_unselected_provider(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "local.env").write_text("AUTH_MODE=local\n")
+            spec = {
+                "files": [
+                    {"path": "local.env"},
+                    {
+                        "path": "provider.env",
+                        "required": True,
+                        "when": {"AUTH_MODE": "provider"},
+                    },
+                ]
+            }
+            local = pe.apply(root, spec, {})
+            self.assertEqual(local, {"AUTH_MODE": "local"})
+            before = pe.file_fingerprint(root, spec, local)
+            with self.assertRaises(ValueError):
+                pe.apply(root, spec, {"AUTH_MODE": "provider"})
+            (root / "provider.env").write_text("SOCIAL=twitter\nTOKEN=provider-only\n")
+            self.assertEqual(pe.file_fingerprint(root, spec, local), before)
+            provider = pe.apply(root, spec, {"AUTH_MODE": "provider"})
+            self.assertEqual(provider["TOKEN"], "provider-only")
+            self.assertEqual(pe.apply(root, spec, provider), provider)
+            self.assertNotEqual(pe.file_fingerprint(root, spec, provider), before)
+            (root / "provider.env").write_text("TOKEN=changed\n")
+            self.assertNotEqual(
+                pe.apply(root, spec, {"AUTH_MODE": "provider"})["TOKEN"],
+                provider["TOKEN"],
+            )
+
+    def test_file_conditions_reject_ambiguous_selector_mutation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "change.env").write_text("MODE=changed\n")
+            for condition in ({}, {"MODE": True}, {"CHAINMAN_MODE": "host-nix"}):
+                with self.subTest(condition=condition), self.assertRaises(ValueError):
+                    pe.apply(
+                        root, {"files": [{"path": "change.env", "when": condition}]}, {}
+                    )
+            spec = {
+                "files": [
+                    {"path": "unused.env", "when": {"MODE": "provider"}},
+                    {"path": "change.env", "override": True},
+                ]
+            }
+            with self.assertRaisesRegex(ValueError, "earlier file condition"):
+                pe.apply(root, spec, {"MODE": "local"})
+
     def test_explicit_file_pnpm_setting_reaches_nested_script_aliases(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

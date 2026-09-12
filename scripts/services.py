@@ -273,7 +273,7 @@ def config_fingerprint(root, cfg, *, include_volume_inputs=True, env=None):
         cfg.get("environment", {}),
         cfg.get("container", {}),
         cfg.get("tasks", {}),
-        project_environment.file_fingerprint(root, cfg.get("environment", {})),
+        project_environment.file_fingerprint(root, cfg.get("environment", {}), env),
     ]
     material += [
         chainman.profile_fingerprint(root, name, chainman.profile(root, name)[0])

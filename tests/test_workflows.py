@@ -215,6 +215,26 @@ command=["python3","probe.py"]
         self.assertEqual((self.root / "effective").read_text(), "caller")
         self.assertEqual((self.root / "install-count").read_text(), "2")
 
+    def test_literal_task_mode_selects_files_before_caller_provider_inputs(self):
+        self.body += '\n[environment]\nfiles=[{path="provider.env",required=true,when={AUTH_MODE="provider"}}]\n'
+        self.body = self.body.replace(
+            "[tasks.build]", '[tasks.build]\ncontext_environment={AUTH_MODE="local"}'
+        )
+        self.write_config()
+        cfg = workflows.configuration(self.root)
+        selected = workflows.context_environment(
+            self.root, cfg, "build", {"AUTH_MODE": "provider"}
+        )
+        self.assertEqual(selected["AUTH_MODE"], "local")
+        self.assertNotIn("PROVIDER_INPUT", selected)
+        (self.root / "provider.env").write_text("PROVIDER_INPUT=must-not-leak\n")
+        self.assertEqual(
+            workflows.context_environment(
+                self.root, cfg, "build", {"AUTH_MODE": "provider"}
+            ),
+            selected,
+        )
+
     def test_context_conflicts_fail_before_setup_and_project_policy_wins(self):
         self.body += 'context_environment={FIXTURE_SEED="dependency"}\n[tasks.test]\ndepends_on=["build"]\ncontext_environment={FIXTURE_SEED="different"}\n'
         self.write_config()

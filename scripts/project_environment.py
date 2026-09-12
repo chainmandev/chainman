@@ -73,18 +73,36 @@ def transport(spec):
             raise ValueError("Mount read_only must be boolean")
 
 
-def files(root, spec):
+def files(root, spec, inherited=None):
     result = []
+    env = dict(inherited or {})
+    selectors = {}
     for entry in spec.get("files", []):
-        if not isinstance(entry, dict) or set(entry) - {"path", "required", "override"}:
+        if not isinstance(entry, dict) or set(entry) - {
+            "path",
+            "required",
+            "override",
+            "when",
+        }:
             raise ValueError(
-                "Environment files require path, optional required/override booleans"
+                "Environment files require path, optional required/override booleans and a when table"
             )
         if any(
             type(entry.get(key, False)) is not bool for key in ("required", "override")
         ):
             raise ValueError("Environment file flags must be boolean")
         path = tc.contained(root, entry["path"])
+        condition = entry.get("when", {})
+        if not isinstance(condition, dict) or ("when" in entry and not condition):
+            raise ValueError("Environment file when must be a nonempty literal table")
+        for key, value in condition.items():
+            variable(key)
+            if not isinstance(value, str) or "\0" in value:
+                raise ValueError("Environment file conditions require literal strings")
+            selectors[key] = env.get(key)
+        if any(env.get(key) != value for key, value in condition.items()):
+            result.append((entry, None, {}))
+            continue
         if not path.exists() and not entry.get("required", False):
             result.append((entry, None, {}))
             continue
@@ -106,16 +124,23 @@ def files(root, spec):
                     f"Duplicate environment variable in {entry['path']}:{number}"
                 )
             values[key] = value
+        for key, value in values.items():
+            if entry.get("override", False) or key not in env:
+                if key in selectors and selectors[key] != value:
+                    raise ValueError(
+                        "Environment files cannot change an earlier file condition"
+                    )
+                env[key] = value
         result.append((entry, data, values))
     return result
 
 
-def file_fingerprint(root, spec):
+def file_fingerprint(root, spec, env=None):
     return hashlib.sha256(
         json.dumps(
             [
                 [entry, hashlib.sha256(data).hexdigest() if data is not None else None]
-                for entry, data, _ in files(root, spec)
+                for entry, data, _ in files(root, spec, env)
             ],
             sort_keys=True,
         ).encode()
@@ -185,7 +210,7 @@ def expand(values, root, env):
 
 def apply(root, spec, inherited):
     env = dict(inherited)
-    for entry, _, values in files(root, spec):
+    for entry, _, values in files(root, spec, env):
         # File values are literal, including quotes, dollars and braces.
         applied = {}
         for key, value in values.items():

@@ -421,7 +421,14 @@ def context_environment(root, cfg, task, inherited):
                 raise ValueError(f"Conflicting task context value: {variable}")
             values[variable] = value
     spec = cfg.get("environment", {})
-    configured = project_environment.apply(root, spec, inherited)
+    # Literal task selectors apply before reading provider-specific files.
+    # Values containing references resolve against the configured environment.
+    literal = {
+        key: value
+        for key, value in values.items()
+        if not project_environment.REFERENCE.search(value)
+    }
+    configured = project_environment.apply(root, spec, dict(inherited, **literal))
     expanded = project_environment.expand(values, root, configured)
     # The context replaces caller inputs; explicit project and profile policy
     # still has the same precedence as it does for a normal caller environment.
