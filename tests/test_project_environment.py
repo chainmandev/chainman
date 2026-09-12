@@ -12,6 +12,19 @@ import chainman
 
 
 class ProjectEnvironmentTests(unittest.TestCase):
+    def test_project_cannot_replace_the_managed_nix_store_connection(self):
+        for name in (
+            "NIX_REMOTE",
+            "NIX_STATE_DIR",
+            "NIX_STORE_DIR",
+            "NIX_DAEMON_SOCKET_PATH",
+        ):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ValueError, "managed Nix store"),
+            ):
+                pe.variable(name)
+
     def test_conditional_files_do_not_load_an_unselected_provider(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

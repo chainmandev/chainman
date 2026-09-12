@@ -421,30 +421,33 @@ def export(root, arguments):
         raise ValueError("Unsupported host controller platform")
     # Only the verified runtime's flake is evaluated here. Consumer flakes, setup
     # commands, hooks and service commands are deferred to explicit execution.
-    package = subprocess.run(
-        [
-            tc.nix_command(),
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "build",
-            f"path:{chainman.RUNTIME / 'nix'}#control-{target}",
-            "--out-link",
-            str(destination / "nix-package"),
-            "--print-out-paths",
-            "--no-write-lock-file",
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    package = Path(package)
-    if not package.is_absolute() or not str(package).startswith("/nix/store/"):
-        raise ValueError("Invalid native controller store output")
-    for name in ("chainman-control", "process-compose", "watchexec"):
-        source = package / "bin" / name
-        if source.is_symlink() or not source.is_file():
-            raise ValueError("Native controller output must be a regular executable")
-        tc.atomic_bytes(destination / name, source.read_bytes(), mode=0o700)
+    with tc.nix_temporary_directory("chainman-export-") as directory:
+        package = subprocess.run(
+            [
+                tc.nix_command(),
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "build",
+                f"path:{chainman.RUNTIME / 'nix'}#control-{target}",
+                "--out-link",
+                str(Path(directory) / "nix-package"),
+                "--print-out-paths",
+                "--no-write-lock-file",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        package = Path(package)
+        if not package.is_absolute() or not str(package).startswith("/nix/store/"):
+            raise ValueError("Invalid native controller store output")
+        for name in ("chainman-control", "process-compose", "watchexec"):
+            source = package / "bin" / name
+            if source.is_symlink() or not source.is_file():
+                raise ValueError(
+                    "Native controller output must be a regular executable"
+                )
+            tc.atomic_bytes(destination / name, source.read_bytes(), mode=0o700)
     mode = os.environ.get("CHAINMAN_MODE", "host-nix")
     key = scope_key(host_state, root, mode)
     state = str(Path(host_state) / key)

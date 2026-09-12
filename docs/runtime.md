@@ -31,6 +31,11 @@ They retain runtime source archives across nested commands and concurrent versio
 they do not install a Nix executable or retain every project SDK. Old source roots
 may be removed after all sessions using those versions stop. Nix then decides
 when to collect the unreferenced source. Runtime-cache directory symlinks are refused.
+Existing content-keyed roots are reused without replacing their symlinks; each
+entry still fetches and verifies the selected archive and checks the exact root
+target. This avoids temporary-link collisions between equal PIDs in separate
+containers sharing a Nix volume. Concurrent first registration can reuse another
+writer's completed root only after the same verification succeeds.
 
 A stop request announces a durable cancellation ticket before acquiring the
 service mutation lock. Startup checks that ticket while waiting for readiness,
@@ -58,7 +63,27 @@ the container's root owner can change its own directory permissions.
 A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
-separate engine stores. Project outputs live separately under `.cache/toolchain/work`.
+separate engine stores. One unmodified upstream Nix daemon owns each container
+store's state. Project containers connect through its Unix socket in the Nix
+volume; they do not run independent local-store writers with conflicting PID
+namespaces. The daemon runs as the same mapped user, with a read-only container
+root, all capabilities dropped, no new privileges, no published ports, no host
+project mounts and no container-engine socket. Its trusted clients already own
+the same per-user Nix volume; it is not a privileged service for other users.
+
+Managed temporary GC roots live under `/nix/tmp`, where both clients and the
+daemon can see them. Application temporary-directory settings remain separate.
+The small idle daemon remains available between commands and is started again
+by the next bootstrap if stopped. Its container is named `<nix-volume>-daemon`.
+After stopping all clients of that volume, the engine's normal stop/remove
+commands can remove the daemon while retaining the cached Nix volume. Bootstrap
+refuses to adopt a daemon with a different pinned image, ownership or isolation
+configuration; changing those settings requires stopping its clients first.
+The initial migration also refuses to run while containers from the earlier
+local-store arrangement still use that volume; it does not stop those clients.
+Host Nix continues using its own existing store arrangement.
+
+Project outputs live separately under `.cache/toolchain/work`.
 Named workflows apply the shared age and size pruning policy before acquiring
 their setup artifacts, only when no managed operation is active. Set
 `cache.automatic_prune = false` to keep pruning explicit.

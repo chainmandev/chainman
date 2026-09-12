@@ -263,9 +263,30 @@ EOF
     )
     runtime_root=$runtime_roots/$_content_id
     [ ! -e "$runtime_root" ] || [ -L "$runtime_root" ] || fail 'Runtime GC root must be a symlink.'
-    store=$(CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=fetch \
-        "$nix_bin" --extra-experimental-features 'nix-command flakes' build --impure --expr "$expression" \
-        --out-link "$runtime_root" --print-out-paths)
+    fetch_runtime() {
+        CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=fetch \
+            "$nix_bin" --extra-experimental-features 'nix-command flakes' build --impure --expr "$expression" \
+            "$@" --print-out-paths
+    }
+    # A content-keyed root is immutable. Replacing it on every entry makes Nix's
+    # PID-based temporary symlink names collide across container PID namespaces.
+    # Still evaluate the selected archive on every entry, including warm starts.
+    if [ -L "$runtime_root" ]; then
+        store=$(fetch_runtime --no-link)
+    elif ! store=$(fetch_runtime --out-link "$runtime_root"); then
+        # Another first writer may have installed the same root. Re-evaluate the
+        # archive and require the exact link below; never accept a failed fetch
+        # merely because some old source is cached.
+        [ -L "$runtime_root" ] || fail 'Runtime GC root registration failed.'
+        store=$(fetch_runtime --no-link)
+    fi
+    [ "$(readlink "$runtime_root")" = "$store" ] || fail 'Runtime GC root does not match the verified source.'
+    # A process killed between creating the link and registering its indirect
+    # root must not leave a permanently unregistered warm-cache entry.
+    registered_roots=$("$CHAINMAN_RUNTIME_NIX_BIN/nix-store" --query --roots "$store")
+    if ! printf '%s\n' "$registered_roots" | grep -F -x -q -- "$runtime_root -> $store"; then
+        store=$(fetch_runtime --out-link "$runtime_root")
+    fi
     actual=$("$nix_bin" --extra-experimental-features nix-command hash path "$store")
     [ "$actual" = "$nar_hash" ] || fail 'Runtime store source failed NAR verification.'
     # Archives are source distributions: symlinks are excluded before evaluating
@@ -363,25 +384,92 @@ run() {
 container_init='
     if [ "$(id -u)" = 0 ]; then chmod 0555 /; fi
     mkdir -p "$HOME"
+    mkdir -p /nix/tmp
+    export TMPDIR=/nix/tmp CHAINMAN_TEMP_BASE=/nix/tmp
     exec "$@"
 '
+daemon_name=$volume-daemon
+validate_daemon() {
+    daemon_identity=$("$engine" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
+{{index .Config.Labels "dev.chainman.store.volume"}}
+{{.Config.Image}}
+{{.Config.User}}
+{{.HostConfig.Privileged}}
+{{.HostConfig.ReadonlyRootfs}}
+{{.HostConfig.CapDrop}}
+{{.HostConfig.SecurityOpt}}
+{{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}}:{{.RW}};{{end}}
+{{len .HostConfig.PortBindings}}
+{{.HostConfig.NetworkMode}}
+pid={{.HostConfig.PidMode}}' "$daemon_name")
+    expected_identity="1
+$volume
+$image
+$container_uid:$container_gid
+false
+true
+[ALL]
+[no-new-privileges]
+volume:$volume:/nix:true;
+0
+bridge
+pid="
+    [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation. Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
+}
+if "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
+volume_clients=$("$engine" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}')
+while IFS= read -r client; do
+    case "$client" in '' | *' 1') ;; *) fail 'Stop existing containers using this Nix volume before migrating from independent local-store writers to the shared daemon.' ;; esac
+done << EOF
+$volume_clients
+EOF
 # Only the named Nix store is prepared as root. No host directory is mounted here.
-run --rm --user 0:0 --mount "type=volume,src=$volume,dst=/nix" --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" "$image" sh -eu -c '
+run --rm --user 0:0 --label dev.chainman.store.schema=1 --mount "type=volume,src=$volume,dst=/nix" --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" "$image" sh -eu -c '
     mkdir -p /nix/store /nix/var
     chown "$1:$2" /nix /nix/store
     [ ! -d /nix/store/.links ] || chown "$1:$2" /nix/store/.links
-    chown -R "$1:$2" /nix/var
+    if [ "$(stat -c %u:%g /nix/var)" != "$1:$2" ]; then chown -R "$1:$2" /nix/var; fi
     chown "$1:$2" /chainman-downloads
 ' sh "$container_uid" "$container_gid"
-run --rm --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
+# Local-store writers assume one PID namespace. A single upstream Nix daemon
+# owns this volume's store state; isolated project containers are daemon clients.
+# Its Unix socket and managed temporary roots are visible through the Nix volume.
+if ! "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then
+    run --detach --name "$daemon_name" --init --read-only --network bridge \
+        --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
+        --label dev.chainman.store.schema=1 --label "dev.chainman.store.volume=$volume" \
+        --mount "type=volume,src=$volume,dst=/nix" \
+        --env HOME=/nix/var/nix/chainman-daemon-home --env TMPDIR=/nix/tmp \
+        --env 'NIX_CONFIG=build-users-group =
+trusted-users = *' \
+        "$image" sh -eu -c 'mkdir -p "$HOME" "$TMPDIR"; exec nix-daemon --daemon' \
+        > /dev/null 2> "$temporary/daemon-create" || {
+        # Container creation is atomic; a concurrent bootstrap can win the name.
+        "$engine" container inspect "$daemon_name" > /dev/null 2>&1 || {
+            cat "$temporary/daemon-create" >&2
+            fail 'Could not create the shared Nix store daemon.'
+        }
+    }
+fi
+validate_daemon
+"$engine" container start "$daemon_name" > /dev/null
+run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
     --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
-    --env 'NIX_CONFIG=build-users-group =' \
+    --env 'NIX_CONFIG=build-users-group =' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
     --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
     "$image" sh -eu -c "$container_init" \
-    sh nix --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression" > "$temporary/options"
+    sh sh -eu -c '
+        attempt=0
+        until nix --extra-experimental-features nix-command store ping > /dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            [ "$attempt" -lt 30 ] || { echo "Shared Nix store daemon did not become ready." >&2; exit 2; }
+            sleep 1
+        done
+        exec nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1"
+    ' sh "$expression" > "$temporary/options"
 if grep -q -- '^--controller$' "$temporary/options"; then
     rm -rf -- "$temporary"
     trap - EXIT HUP INT TERM
@@ -603,13 +691,13 @@ if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
 fi
 project_mount="type=bind,src=$root,dst=$root"
 if [ "$CHAINMAN_REQUEST_ACTION" = _control-export ]; then project_mount=$project_mount,readonly; fi
-set -- --rm --init --interactive --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
+set -- --rm --init --interactive --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME \
-    --env 'NIX_CONFIG=build-users-group =' \
+    --env 'NIX_CONFIG=build-users-group =' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
     --env "TOOLCHAIN_GIT_POLICY_UNAVAILABLE=$policy_unavailable" --env CI --env TERM \
     --env GIT_AUTHOR_NAME --env GIT_AUTHOR_EMAIL --env GIT_COMMITTER_NAME --env GIT_COMMITTER_EMAIL "$@"

@@ -22,6 +22,13 @@ def variable(name):
         raise ValueError("Configure TMPDIR instead of internal temporary routing")
     if name == "CHAINMAN_RUNTIME_NIX_BIN":
         raise ValueError("Cannot override the internal runtime Nix binding")
+    if name in {
+        "NIX_REMOTE",
+        "NIX_STATE_DIR",
+        "NIX_STORE_DIR",
+        "NIX_DAEMON_SOCKET_PATH",
+    }:
+        raise ValueError("Cannot override the managed Nix store connection")
     if name.startswith(("CHAINMAN_", "TOOLCHAIN_")) or name in {
         "SCCACHE_SERVER_UDS",
         "RUSTC_WRAPPER",

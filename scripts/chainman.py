@@ -206,6 +206,10 @@ def execute(
     if ref and (
         gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
     ):
+        if selected.get("TOOLCHAIN_CONTAINER") == "1":
+            # Nix's own temporary profile must be visible to its daemon. The
+            # command below restores the application's selected temporary base.
+            selected["TMPDIR"] = "/nix/tmp"
         command = [
             tc.nix_command(selected),
             "--extra-experimental-features",
@@ -220,6 +224,8 @@ def execute(
             "-c",
             'if [ -n "${CHAINMAN_TEMP_BASE:-}" ]; then export TMPDIR="$CHAINMAN_TEMP_BASE"; '
             'elif [ -n "${TMPDIR:-}" ]; then export CHAINMAN_TEMP_BASE="$TMPDIR"; fi; '
+            'if [ "${TOOLCHAIN_CONTAINER:-}" = 1 ]; then '
+            "unset NIX_STATE_DIR NIX_STORE_DIR NIX_DAEMON_SOCKET_PATH; export NIX_REMOTE=daemon; fi; "
             "runtime_nix=$1; shift; "
             'if [ -n "$runtime_nix" ]; then export CHAINMAN_RUNTIME_NIX_BIN="$runtime_nix" PATH="$runtime_nix:$PATH"; fi; '
             'cd "$1"; shift; exec "$@"',

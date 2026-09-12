@@ -43,6 +43,10 @@ def nix_command(env=None) -> str:
 
 
 def runtime_nix_environment(env: dict[str, str]) -> None:
+    if env.get("TOOLCHAIN_CONTAINER") == "1":
+        env["NIX_REMOTE"] = "daemon"
+        for name in ("NIX_STATE_DIR", "NIX_STORE_DIR", "NIX_DAEMON_SOCKET_PATH"):
+            env.pop(name, None)
     directory = env.get("CHAINMAN_RUNTIME_NIX_BIN")
     if directory:
         if not Path(directory).is_absolute() or not (Path(directory) / "nix").is_file():
@@ -57,6 +61,14 @@ def runtime_nix_environment(env: dict[str, str]) -> None:
                 ],
             ]
         )
+
+
+def nix_temporary_directory(prefix: str):
+    """Keep managed roots visible to the shared container store daemon."""
+    return tempfile.TemporaryDirectory(
+        prefix=prefix,
+        dir="/nix/tmp" if os.environ.get("TOOLCHAIN_CONTAINER") == "1" else None,
+    )
 
 
 def entry_command(root: Path, profile: str) -> list[str]:
@@ -682,7 +694,7 @@ def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
     # The same standard Nix profile roots the preflight closure throughout the
     # server's lifetime. A successful preflight alone leaves a GC race before
     # the second entry that starts sccache.
-    with tempfile.TemporaryDirectory(prefix="chainman-compiler-") as directory:
+    with nix_temporary_directory("chainman-compiler-") as directory:
         executable_file = Path(directory) / "executable"
         resolve_command = [
             "sh",

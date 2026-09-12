@@ -32,6 +32,7 @@ class BootstrapTests(unittest.TestCase):
             "forward=os.environ.get('CHAINMAN_TEST_VALUE'), "
             "demo=os.environ.get('DEMO_TEST_VALUE'), container=os.environ.get('TOOLCHAIN_CONTAINER'))\n"
             "record.update(nix=shutil.which('nix'), uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
+            "record['nix_remote'] = os.environ.get('NIX_REMOTE')\n"
             "record.update(active_profile=os.environ.get('CHAINMAN_ACTIVE_PROFILE'), active_fingerprint=os.environ.get('CHAINMAN_ACTIVE_FINGERPRINT'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['no_new_privs'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('NoNewPrivs:'))\n"
@@ -66,7 +67,25 @@ class BootstrapTests(unittest.TestCase):
             " record['cache_hits'] = int(cache.read_text()) + 1 if cache.exists() else 1\n"
             " cache.write_text(str(record['cache_hits']))\n"
             " (pathlib.Path.home() / 'home-marker').write_text('persistent')\n"
+            "if '--hold-profile' in sys.argv:\n"
+            " held = tempfile.TemporaryDirectory(prefix='chainman-held-profile-')\n"
+            " profile = str(pathlib.Path(held.name) / 'profile')\n"
+            " expression = 'derivation { name = \"chainman-held-profile\"; system = builtins.currentSystem; builder = ' + json.dumps(str(pathlib.Path(shutil.which('bash')).resolve())) + '; args = [ \"-c\" \"echo held > $out\" ]; identity = ' + json.dumps(str(root)) + '; }'\n"
+            " output = subprocess.check_output(['nix', '--extra-experimental-features', 'nix-command', 'build', '--impure', '--expr', expression, '--out-link', profile, '--print-out-paths'], text=True).strip()\n"
+            " (root / 'held.json').write_text(json.dumps(dict(profile=profile, output=output)))\n"
+            "if '--check-held-profile' in sys.argv:\n"
+            " held_record = json.loads((root / 'held.json').read_text())\n"
+            " roots = subprocess.check_output(['nix-store', '--query', '--roots', held_record['output']], text=True)\n"
+            " assert held_record['profile'] in roots, roots\n"
+            " deletion = subprocess.run(['nix-store', '--delete', held_record['output']], capture_output=True, text=True)\n"
+            " assert deletion.returncode != 0, deletion.stdout + deletion.stderr\n"
+            " assert pathlib.Path(held_record['output']).read_text() == 'held\\n'\n"
+            " record['held_profile_protected'] = True\n"
             "(root / ('record-' + str(os.getpid()) + '.json')).write_text(json.dumps(record))\n"
+            "if '--hold-profile' in sys.argv:\n"
+            " deadline = time.monotonic() + 120\n"
+            " while not (root / 'release-profile').exists() and time.monotonic() < deadline: time.sleep(0.1)\n"
+            " held.cleanup()\n"
             "if '--wait' in sys.argv: time.sleep(60)\n"
             "if '--resolve-service' in sys.argv: print(socket.gethostbyname(os.environ['DEMO_SERVICE_ALIAS']))\n"
         )
@@ -318,6 +337,8 @@ class BootstrapTests(unittest.TestCase):
         self.run_bootstrap("status", env=env)
         record = self.records()[0]
         self.assertEqual(record["uid"], expected_uid)
+        self.assertEqual(record["nix_remote"], "daemon")
+        self.assertTrue(record["tmpdir"].startswith("/nix/tmp"))
         self.assertEqual(record["no_new_privs"], "1")
         self.assertEqual(int(record["cap_eff"], 16), 0)
         for path in self.root.glob("record-*.json"):
@@ -613,10 +634,214 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         )
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((runtime / "scripts/chainman.py").is_file())
+        root_inode = root.lstat().st_ino
         self.run_bootstrap("second", env=env)
+        self.assertEqual(root.lstat().st_ino, root_inode)
         self.assertEqual(
             {record["runtime"] for record in self.records()}, {str(runtime)}
         )
+
+    def test_runtime_root_left_unregistered_is_repaired(self):
+        self.run_bootstrap("first")
+        runtime = Path(self.records()[0]["runtime"])
+        cache = self.root / "private-cache"
+        root = (
+            cache
+            / "chainman/runtime-roots"
+            / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
+        )
+        root.parent.mkdir(parents=True)
+        root.symlink_to(runtime)
+        nix_store = str(Path(NIX).resolve().with_name("nix-store"))
+        self.assertNotIn(
+            str(root),
+            subprocess.check_output(
+                [nix_store, "--query", "--roots", str(runtime)], text=True
+            ),
+        )
+        self.run_bootstrap("repair", env=dict(self.env, XDG_CACHE_HOME=str(cache)))
+        self.assertIn(
+            str(root),
+            subprocess.check_output(
+                [nix_store, "--query", "--roots", str(runtime)], text=True
+            ),
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
+    )
+    def test_container_concurrent_cold_and_warm_runtime_roots(self):
+        candidate = self.root / "unique-runtime"
+        shutil.copytree(self.tree, candidate)
+        (candidate / "unique-source").write_text(str(self.root))
+        self.lock["narHash"] = subprocess.check_output(
+            [
+                NIX,
+                "--extra-experimental-features",
+                "nix-command",
+                "hash",
+                "path",
+                str(candidate),
+            ],
+            text=True,
+        ).strip()
+        with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
+            archive.add(candidate, arcname="runtime")
+        self.write_lock()
+        consumers = []
+        for index in range(6):
+            consumer = self.root / f"parallel-{index}"
+            consumer.mkdir()
+            shutil.copytree(self.root / "scripts", consumer / "scripts")
+            for name in ("chainman.lock", "bundle.tar.gz"):
+                shutil.copy2(self.root / name, consumer / name)
+            consumers.append(consumer)
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        for phase in ("cold", "warm"):
+            with self.subTest(phase=phase):
+                processes = [
+                    subprocess.Popen(
+                        [str(consumer / "scripts/chainman.sh"), phase],
+                        cwd="/",
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    for consumer in consumers
+                ]
+                try:
+                    for process in processes:
+                        stdout, stderr = process.communicate(timeout=180)
+                        self.assertEqual(process.returncode, 0, stdout + stderr)
+                finally:
+                    for process in processes:
+                        if process.poll() is None:
+                            process.terminate()
+                            process.communicate(timeout=30)
+                for consumer in consumers:
+                    records = [
+                        json.loads(path.read_text())
+                        for path in consumer.glob("record-*.json")
+                    ]
+                    self.assertTrue(
+                        any(record["argv"][-1] == phase for record in records)
+                    )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
+    )
+    def test_container_daemon_preserves_another_clients_temporary_profile(self):
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        process = subprocess.Popen(
+            [str(self.launcher), "--hold-profile"],
+            cwd="/",
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 120
+            while (
+                not (self.root / "held.json").exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.1)
+            self.assertTrue(
+                (self.root / "held.json").exists(),
+                "first client's profile did not become ready",
+            )
+            self.run_bootstrap("--check-held-profile", env=env)
+            self.assertTrue(
+                any(record.get("held_profile_protected") for record in self.records())
+            )
+        finally:
+            (self.root / "release-profile").touch()
+            stdout, stderr = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") == "docker",
+        "requires Docker for the isolated daemon migration fixture",
+    )
+    def test_daemon_migration_refuses_live_legacy_clients_and_restarts_owned_daemon(
+        self,
+    ):
+        volume = (
+            "chainman-daemon-fixture-"
+            + hashlib.sha256(str(self.root).encode()).hexdigest()[:16]
+        )
+        daemon = volume + "-daemon"
+        legacy = volume + "-legacy"
+        image = (SOURCE / "nix/container-image.txt").read_text().strip()
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE="docker",
+            CHAINMAN_NIX_VOLUME=volume,
+        )
+
+        def engine(*arguments):
+            return subprocess.run(
+                ["docker", *arguments], check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+        try:
+            engine(
+                "run",
+                "--detach",
+                "--name",
+                legacy,
+                "--mount",
+                f"type=volume,src={volume},dst=/nix",
+                image,
+                "sleep",
+                "300",
+            )
+            result = self.run_bootstrap("status", check=False, env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Stop existing containers", result.stderr)
+            self.assertEqual(
+                engine("inspect", "--format", "{{.State.Running}}", legacy), "true"
+            )
+            engine("rm", "--force", legacy)
+            self.run_bootstrap("first", env=env)
+            identity = engine("inspect", "--format", "{{.Id}}", daemon)
+            engine("stop", daemon)
+            self.run_bootstrap("restart", env=env)
+            self.assertEqual(engine("inspect", "--format", "{{.Id}}", daemon), identity)
+            self.assertEqual(
+                engine("inspect", "--format", "{{.State.Running}}", daemon), "true"
+            )
+            engine("rm", "--force", daemon)
+            engine("create", "--name", daemon, image, "sleep", "300")
+            result = self.run_bootstrap("status", check=False, env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("incompatible identity or isolation", result.stderr)
+            self.assertEqual(
+                engine("inspect", "--format", "{{.State.Status}}", daemon), "created"
+            )
+        finally:
+            subprocess.run(
+                ["docker", "rm", "--force", "--volumes", legacy, daemon],
+                capture_output=True,
+            )
+            subprocess.run(
+                ["docker", "volume", "rm", volume, volume + "-downloads"],
+                capture_output=True,
+            )
 
     def test_runtime_gc_cache_rejects_directory_links_and_regular_root_files(self):
         cache = self.root / "private-cache"

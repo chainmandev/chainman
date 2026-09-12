@@ -3,7 +3,6 @@
 from contextlib import contextmanager
 from pathlib import Path
 import platform
-import tempfile
 
 import chainman
 import toolchain as tc
@@ -16,7 +15,7 @@ def command(root, commands, spec):
         + "-"
         + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
     )
-    with tempfile.TemporaryDirectory(prefix="chainman-task-") as directory:
+    with tc.nix_temporary_directory("chainman-task-") as directory:
         package = tc.managed_run(
             [
                 tc.nix_command(),
