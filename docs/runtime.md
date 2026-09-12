@@ -71,9 +71,11 @@ The shared pnpm defaults keep a project-local virtual store backed by the shared
 download cache, independent of whether `CI` is set. `pnpm run` and `pnpm exec`
 check dependency freshness and report an error instead of reinstalling a leased
 setup. Explicit install/update commands still perform their declared work.
-Installations may rebuild their owned module directory without a terminal prompt
-(`confirmModulesPurge=false`), including migration from an earlier virtual-store
-layout; this does not enable installation during ordinary task execution.
+Declare `--config.confirmModulesPurge=false` on frozen pnpm install commands,
+as the shared JavaScript module does. It permits rebuilding their owned module
+directory without a terminal prompt when migrating an earlier virtual-store
+layout. This pnpm install option has no environment-setting equivalent; it does
+not enable installation during ordinary task execution.
 Current pnpm and older environment-setting aliases are reconciled through the
 project/profile environment layers; projects selecting another layout should
 keep that choice consistent across setup and task execution.

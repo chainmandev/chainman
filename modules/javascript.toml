@@ -7,7 +7,7 @@ artifacts = ["examples/javascript/node_modules/.pnpm/lock.yaml"]
 update_outputs = ["examples/javascript/package.json", "examples/javascript/pnpm-workspace.yaml", "examples/javascript/packages/*/package.json", "examples/javascript/pnpm-lock.yaml"]
 
 [commands]
-setup = [["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"]]
+setup = [["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--config.confirmModulesPurge=false"]]
 resolve = [["pnpm", "install", "--lockfile-only", "--ignore-scripts"]]
 build = [["pnpm", "--recursive", "run", "build"]]
 test = [["pnpm", "--recursive", "run", "test"]]

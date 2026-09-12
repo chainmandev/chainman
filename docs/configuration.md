@@ -159,7 +159,7 @@ flake = "nix#default"
 [setup.javascript]
 inputs = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
 artifacts = ["node_modules/.pnpm/lock.yaml"]
-commands = [["pnpm", "install", "--frozen-lockfile"]]
+commands = [["pnpm", "install", "--frozen-lockfile", "--config.confirmModulesPurge=false"]]
 [tasks.build]
 setup = ["javascript"]
 commands = [["pnpm", "run", "build"]]

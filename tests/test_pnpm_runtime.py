@@ -20,10 +20,16 @@ class PnpmRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="chainman pnpm policy ") as directory:
             root = Path(directory)
             (root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
+            dependency = root / "dependency"
+            dependency.mkdir()
+            (dependency / "package.json").write_text(
+                '{"name":"local-dependency","version":"1.0.0"}'
+            )
             package = {
                 "name": "runtime-policy-fixture",
                 "private": True,
                 "version": "1.0.0",
+                "dependencies": {"local-dependency": "file:dependency"},
                 "scripts": {
                     "preinstall": "node install.cjs",
                     "check": "node check.cjs",
@@ -61,12 +67,28 @@ class PnpmRuntimeTests(unittest.TestCase):
             self.assertEqual(
                 installed.returncode, 0, installed.stdout + installed.stderr
             )
+            modules = root / "node_modules/.modules.yaml"
+            self.assertTrue(
+                modules.is_file(), "Migration requires installed dependencies"
+            )
+            prior_modules = modules.read_bytes()
             # Migrate an existing global layout through explicit installation,
             # with captured stdio and no terminal or blanket CI environment.
-            installed = run("install", "--offline")
+            refused = run("install", "--offline")
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn(
+                "ABORTED_REMOVE_MODULES_DIR_NO_TTY", refused.stdout + refused.stderr
+            )
+            installed = run(
+                "install",
+                "--offline",
+                "--frozen-lockfile",
+                "--config.confirmModulesPurge=false",
+            )
             self.assertEqual(
                 installed.returncode, 0, installed.stdout + installed.stderr
             )
+            self.assertNotEqual(modules.read_bytes(), prior_modules)
             receipt = (root / "installed").read_bytes()
             ci = dict(env, CI="true")
             result = run("run", "check", selected=ci)
@@ -74,12 +96,12 @@ class PnpmRuntimeTests(unittest.TestCase):
             self.assertEqual((root / "installed").read_bytes(), receipt)
             self.assertEqual((root / "ran").read_text(), "run\n")
 
-            dependency = root / "dependency"
+            dependency = root / "another-dependency"
             dependency.mkdir()
             (dependency / "package.json").write_text(
-                '{"name":"local-dependency","version":"1.0.0"}'
+                '{"name":"another-dependency","version":"1.0.0"}'
             )
-            package["dependencies"] = {"local-dependency": "file:dependency"}
+            package["dependencies"]["another-dependency"] = "file:another-dependency"
             manifest.write_text(json.dumps(package))
             stale = run("run", "check", selected=ci)
             self.assertNotEqual(stale.returncode, 0, stale.stdout + stale.stderr)
