@@ -235,6 +235,27 @@ command=["python3","probe.py"]
             selected,
         )
 
+    def test_internal_workflow_uses_planned_provider_file_fingerprint(self):
+        import services
+
+        self.body += '\n[environment]\nfiles=[{path="provider.env",required=true,when={AUTH_MODE="provider"}}]\n'
+        self.write_config()
+        provider = self.root / "provider.env"
+        provider.write_text("PROVIDER_INPUT=original\n")
+        os.environ["AUTH_MODE"] = "provider"
+        cfg = workflows.configuration(self.root)
+        expected = services.config_fingerprint(self.root, cfg, env=dict(os.environ))
+        self.assertEqual(
+            services.execute_internal(self.root, "_workflow-task", ["build", expected]),
+            0,
+        )
+        self.assertTrue((self.root / "arguments.json").is_file())
+        provider.write_text("PROVIDER_INPUT=changed\n")
+        with self.assertRaisesRegex(
+            ValueError, "Service inputs changed after planning"
+        ):
+            services.execute_internal(self.root, "_workflow-task", ["build", expected])
+
     def test_context_conflicts_fail_before_setup_and_project_policy_wins(self):
         self.body += 'context_environment={FIXTURE_SEED="dependency"}\n[tasks.test]\ndepends_on=["build"]\ncontext_environment={FIXTURE_SEED="different"}\n'
         self.write_config()

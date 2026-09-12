@@ -253,6 +253,7 @@ def literal_environment(values, root, env=None):
 
 
 def config_fingerprint(root, cfg, *, include_volume_inputs=True, env=None):
+    env = os.environ if env is None else env
     declared = cfg.get("services", {})
     workflow_specs = [*declared.values(), *cfg.get("tasks", {}).values()]
     profiles = sorted(
