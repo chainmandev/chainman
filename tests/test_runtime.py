@@ -98,6 +98,8 @@ class RuntimeTests(unittest.TestCase):
                         listener.settimeout(0.05)
                         while True:
                             if Path("exit-server").exists():
+                                listener.close()
+                                time.sleep(float(os.environ.get("EXIT_DELAY", "0")))
                                 sys.exit(int(Path("exit-server").read_text()))
                             try:
                                 connection, _ = listener.accept()
@@ -268,6 +270,7 @@ class RuntimeTests(unittest.TestCase):
     def test_owned_server_disables_idle_exit_and_reaps_early_exit(self):
         env = self.cache_fixture()
         env["SCCACHE_IDLE_TIMEOUT"] = "1"
+        env["EXIT_DELAY"] = "0.3"
         endpoint = Path(env["SCCACHE_SERVER_UDS"])
         for status in (0, 29):
             with self.subTest(status=status):

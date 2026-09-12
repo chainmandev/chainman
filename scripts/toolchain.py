@@ -809,11 +809,14 @@ def owned_compiler_cache(root, env, executable, server_env, command):
                         timeout=15,
                         stdout=sys.stderr,
                     )
-                except subprocess.CalledProcessError:
-                    # It may have exited between poll and the stop request.
-                    # Only a reaped owned process permits endpoint cleanup.
-                    if server.poll() is None:
-                        raise
+                except subprocess.CalledProcessError as stop_failure:
+                    # The socket may close before the owned process exits.
+                    # Reap that process to preserve its actual exit status;
+                    # a still-live server must retain the stop failure.
+                    try:
+                        server.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        raise stop_failure from None
                 except subprocess.TimeoutExpired:
                     raise ValueError(
                         "Compiler cache stop request timed out; inspect the owned server and its operation lock"
