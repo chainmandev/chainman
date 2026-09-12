@@ -4,6 +4,10 @@
 # Child shell programs expand their own positional and environment values.
 # shellcheck disable=SC2016
 set -eu
+if [ "${CHAINMAN_TIMING:-0}" = 1 ] && { [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || [ -z "${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" ]; }; then
+    CHAINMAN_TIMING_BOOTSTRAP_STARTED=$(date +%s)
+    export CHAINMAN_TIMING_BOOTSTRAP_STARTED
+fi
 fail() {
     printf 'Chainman bootstrap: %s\n' "$*" >&2
     exit 2
@@ -292,8 +296,14 @@ EOF
     # Archives are source distributions: symlinks are excluded before evaluating
     # even the verified flake, so extraction cannot introduce an outside path.
     [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
-    if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] && [ "$(nix_eval route)" = 1 ]; then
-        control_dispatch "$@"
+    if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
+        if [ "$(nix_eval schema)" = 3 ]; then
+            route=$("$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file \
+                --command python3 -B "$store/scripts/bootstrap_plan.py" "$root" route)
+        else
+            route=$(nix_eval route)
+        fi
+        if [ "$route" = 1 ]; then control_dispatch "$@"; fi
     fi
     export CHAINMAN_MODE="$mode" CHAINMAN_ACTIVE_MODE="$mode"
     # Bootstrap entry replaces an external project shell. Its old profile token no
@@ -453,24 +463,46 @@ trusted-users = *' \
 fi
 validate_daemon
 "$engine" container start "$daemon_name" > /dev/null
-run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
-    --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
-    --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
-    --env 'NIX_CONFIG=build-users-group =
+plan_options() {
+    set --
+    if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
+        plan_archive=$CHAINMAN_ARCHIVE
+        case "$plan_archive" in /*) ;; *) plan_archive=$root/$plan_archive ;; esac
+        single_line "$plan_archive"
+        case "$plan_archive" in "$root"/*) ;; *)
+            [ -f "$plan_archive" ] && [ ! -L "$plan_archive" ] || fail 'Local archive override must be a regular file.'
+            set -- --mount "type=bind,src=$plan_archive,dst=$plan_archive,readonly" "$@"
+            ;;
+        esac
+        set -- --env "CHAINMAN_ARCHIVE=$plan_archive" "$@"
+    fi
+    run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
+        --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
+        --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
+        --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
-    --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
-    --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
-    --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
-    "$image" sh -eu -c "$container_init" \
-    sh sh -eu -c '
+        --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
+        --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
+        --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
+        "$@" "$image" sh -eu -c "$container_init" \
+        sh sh -eu -c '
         attempt=0
         until nix --extra-experimental-features nix-command store ping > /dev/null 2>&1; do
             attempt=$((attempt + 1))
             [ "$attempt" -lt 30 ] || { echo "Shared Nix store daemon did not become ready." >&2; exit 2; }
             sleep 1
         done
+        schema=$(CHAINMAN_BOOTSTRAP_ACTION=schema nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1")
+        if [ "$schema" = 3 ]; then
+            # Reuse the normal verified runtime/GC-root path in this read-only
+            # planning container. No consumer code or declared mounts run here.
+            exec env CHAINMAN_BOOTSTRAP_CONTAINER=1 CHAINMAN_MODE=container-nix \
+                "$2" _bootstrap-options "$CHAINMAN_REQUEST_ACTION" "$CHAINMAN_REQUEST_TASK"
+        fi
         exec nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1"
-    ' sh "$expression" > "$temporary/options"
+    ' sh "$expression" "/chainman-bootstrap/$(basename -- "$self")"
+}
+plan_options > "$temporary/options"
 if grep -q -- '^--controller$' "$temporary/options"; then
     rm -rf -- "$temporary"
     trap - EXIT HUP INT TERM
@@ -696,6 +728,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
+    --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME \
     --env 'NIX_CONFIG=build-users-group =

@@ -195,7 +195,9 @@ let
     "services-stop"
   ];
 in
-if action == "route" then
+if action == "schema" then
+  toString (config.schema or 1)
+else if action == "route" then
   (if controller then "1" else "0")
 else if action == "options" then
   (

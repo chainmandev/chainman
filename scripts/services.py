@@ -95,6 +95,7 @@ def declarations(root, cfg):
     entries = cfg.get("services", {})
     if not isinstance(entries, dict):
         raise ValueError("services must contain named declarations")
+    checked_profiles = set()
     for key, spec in entries.items():
         workflows.name(key)
         if not isinstance(spec, dict):
@@ -131,12 +132,12 @@ def declarations(root, cfg):
                 raise ValueError("Repository services cannot bind a worktree path")
         if "command" in spec:
             workflows.commands([spec["command"]])
-            chainman.profile(
-                root,
-                spec.get(
-                    "profile", cfg.get("project", {}).get("default_profile", "default")
-                ),
+            profile = spec.get(
+                "profile", cfg.get("project", {}).get("default_profile", "default")
             )
+            if profile not in checked_profiles:
+                chainman.profile(root, profile, cfg=cfg)
+                checked_profiles.add(profile)
         if "container" in spec:
             item = spec["container"]
             if not isinstance(item, dict) or set(item) - {

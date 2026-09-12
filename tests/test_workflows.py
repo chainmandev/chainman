@@ -422,14 +422,27 @@ command=["python3","probe.py"]
         self.assertFalse((self.root / "arguments.json").exists())
 
     def test_setup_status_never_installs_or_blesses_stale_outputs(self):
+        self.assertFalse((self.root / ".cache").exists())
         result = self.run_cli("setup-status", "dependencies")
+        self.assertFalse((self.root / ".cache").exists())
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual(json.loads(result.stdout)["groups"], {"dependencies": False})
+        self.assertEqual(
+            json.loads(result.stdout)["details"]["dependencies"]["reason"],
+            "not-installed",
+        )
         self.assertFalse((self.root / "install-count").exists())
         self.assertEqual(self.run_cli("setup").returncode, 0)
         self.assertEqual(self.run_cli("setup-status").returncode, 0)
         (self.root / "input.lock").write_text("changed")
+        last_used = next((self.root / ".cache/toolchain/work").glob("*/last-used"))
+        before = last_used.stat().st_mtime_ns
         result = self.run_cli("setup-status")
+        self.assertEqual(before, last_used.stat().st_mtime_ns)
+        self.assertEqual(
+            json.loads(result.stdout)["details"]["dependencies"]["reason"],
+            "inputs-changed",
+        )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertEqual((self.root / "install-count").read_text(), "1")
         self.assertFalse(json.loads(result.stdout)["current"])

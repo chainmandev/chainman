@@ -90,7 +90,7 @@ func ensureVolumes(volumes []Volume, active bool) error {
 				continue
 			}
 			if active || v.Policy != "disposable" {
-				return fmt.Errorf("volume %s has incompatible data; preserve/migrate it or explicitly reset disposable state after stopping its users", v.Name)
+				return fmt.Errorf("volume %s has incompatible data (stored compatibility %q, requested %q, policy %s, active users %t); inspect services-status, stop its users, and preserve/migrate the data before retrying; services-reset explicitly deletes owned data", v.Name, current.Labels["dev.chainman.compatibility"], v.Compatibility, v.Policy, active)
 			}
 			// Engine removal is intentionally unforced. References outside Chainman
 			// also prevent removal, even when no Chainman client holds a lease.

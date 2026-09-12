@@ -17,7 +17,7 @@ def validated(root):
         cfg = workflows.configuration(root)
         services.declarations(root, cfg)
     for profile in cfg.get("profiles", {}):
-        chainman.profile(root, profile)
+        chainman.profile(root, profile, cfg=cfg)
     return cfg
 
 
@@ -69,12 +69,20 @@ def document(root, action, arguments):
             for service in cfg["tasks"][task].get("services", [])
         ],
     )
+    watch_tasks = workflows.order(
+        cfg.get("tasks", {}),
+        [
+            cfg["services"][service]["watch"]["task"]
+            for service in service_names
+            if "watch" in cfg["services"][service]
+        ],
+    )
     groups = workflows.order(
         cfg.get("setup", {}),
         [
             group
             for spec in [
-                *[cfg["tasks"][task] for task in tasks],
+                *[cfg["tasks"][task] for task in dict.fromkeys([*tasks, *watch_tasks])],
                 *[cfg["services"][service] for service in service_names],
             ]
             for group in spec.get("setup", [])
@@ -88,6 +96,10 @@ def document(root, action, arguments):
             ("setup", groups),
         )
     }
+    if watch_tasks:
+        declarations["watch_tasks"] = {
+            name: deepcopy(cfg["tasks"][name]) for name in watch_tasks
+        }
     for service in declarations["services"].values():
         service.setdefault("scope", "worktree")
         service.setdefault("restart", "no")
@@ -113,14 +125,19 @@ def document(root, action, arguments):
     return dict(
         result,
         task=selected,
-        order={"tasks": tasks, "services": service_names, "setup": groups},
+        order={
+            "tasks": tasks,
+            "services": service_names,
+            "setup": groups,
+            **({"watch_tasks": watch_tasks} if watch_tasks else {}),
+        },
         declarations=redacted(declarations),
         environment=redacted(cfg.get("environment", {}), "environment"),
         origins={
             key: value
             for key, value in origins.items()
             if any(
-                key == f"{kind}.{name}"
+                key == f"{'tasks' if kind == 'watch_tasks' else kind}.{name}"
                 for kind, entries in declarations.items()
                 for name in entries
             )

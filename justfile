@@ -64,6 +64,10 @@ bootstrap-test engine="docker":
 control-test:
     @./scripts/enter.sh control python3 scripts/control_test.py
 
+# Static consumer validation; never executes project workflows.
+consumer-check +args:
+    @./scripts/enter.sh core python3 scripts/consumer_contract.py "$@"
+
 # Maturity gate for publication; release itself builds a local candidate artifact.
 control-release-check:
     @./scripts/enter.sh core python3 scripts/control_release.py

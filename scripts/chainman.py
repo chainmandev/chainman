@@ -61,10 +61,10 @@ def flake_reference(root: Path, location: Path, attribute: str) -> str:
     return f"path:{quote(str(location), safe='/')}#{attribute}"
 
 
-def profile(root: Path, name: str) -> tuple[str | None, dict]:
+def profile(root: Path, name: str, *, cfg=None) -> tuple[str | None, dict]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise ValueError("Invalid profile name")
-    cfg = configuration(root)
+    cfg = configuration(root) if cfg is None else cfg
     spec = cfg.get("profiles", {}).get(name)
     if name == "host":
         return None, {}
@@ -202,6 +202,21 @@ def execute(
         selected["CHAINMAN_TEMP_BASE"] = selected["TMPDIR"]
     else:
         selected.pop("CHAINMAN_TEMP_BASE", None)
+    import timing
+
+    timed = timing.enabled(selected)
+    timing_operation = None
+    if timed:
+        import uuid
+
+        timing_operation = uuid.uuid4().hex
+        timing.emit("profile_entry", "start", timing_operation)
+        argv = [
+            sys.executable,
+            str(RUNTIME / "scripts/timing.py"),
+            timing_operation,
+            *argv,
+        ]
     command = argv
     if ref and (
         gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
@@ -237,7 +252,11 @@ def execute(
         ]
     selected.update(CHAINMAN_ACTIVE_PROFILE=name, CHAINMAN_ACTIVE_FINGERPRINT=token)
     selected.pop("TOOLCHAIN_FRESH", None)
-    return tc.managed_run(command, cwd=target, env=selected, check=check, **kwargs)
+    try:
+        return tc.managed_run(command, cwd=target, env=selected, check=check, **kwargs)
+    finally:
+        if timed:
+            timing.emit("command", "end", timing_operation)
 
 
 def run_hook(root: Path, commands, *, name="default", extra=(), env=None):
@@ -290,6 +309,9 @@ def main(argv=None):
     parser.add_argument("action", nargs="?", default="doctor")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    import timing
+
+    timing.bootstrap()
     root = args.root.absolute()
     try:
         if args.action in {
@@ -360,6 +382,16 @@ def main(argv=None):
             return services.execute_internal(root, args.action, rest)
         elif args.action == "version":
             print((RUNTIME / "VERSION").read_text().strip())
+        elif args.action == "_bootstrap-options":
+            import bootstrap_plan
+
+            if len(rest) != 2:
+                raise ValueError(
+                    "Bootstrap options require the original action and task"
+                )
+            _, options = bootstrap_plan.plan(root, rest[0], rest[1])
+            if options:
+                print("\n".join(map(bootstrap_plan.line, options)))
         elif args.action in {"config", "explain"}:
             import config_inspection
 
@@ -516,6 +548,15 @@ def main(argv=None):
                         "mode": os.environ.get("CHAINMAN_MODE", "host-nix"),
                         "profiles": list(cfg.get("profiles", {})),
                         "modules": cfg["modules"],
+                        "configuration_schema": cfg["schema"],
+                        "nix_policy": "shared-container-daemon"
+                        if os.environ.get("CHAINMAN_MODE") == "container-nix"
+                        else "host-configuration",
+                        "inspect": {
+                            "configuration": ["config", "show", "--json"],
+                            "setup": ["setup-status"],
+                            "task": ["explain", "TASK", "--json"],
+                        },
                     },
                     indent=2,
                 )

@@ -15,9 +15,49 @@ import config_inspection
 import toolchain as tc
 import workflows
 import chainman
+import bootstrap_plan
 
 
 class CompositionTests(unittest.TestCase):
+    def test_bootstrap_and_explain_include_inherited_services_and_watched_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[setup.compiler]
+commands=[["true"]]
+inputs=["chainman.toml"]
+artifacts=["ready"]
+[tasks.build]
+commands=[["true"]]
+setup=["compiler"]
+[services.worker]
+command=["true"]
+[services.worker.watch]
+task="build"
+paths=["src"]
+[templates.tasks.base]
+services=["worker"]
+wait_for_services=true
+[templates.tasks.base.context_environment]
+DEMO_PROVIDER="local"
+[tasks.dev]
+extends="base"
+""")
+            controller, options = bootstrap_plan.plan(root, "run", "dev")
+            self.assertTrue(controller)
+            self.assertEqual(
+                options, ["--controller", "1", "--env-pattern", "DEMO_PROVIDER"]
+            )
+            self.assertFalse(bootstrap_plan.plan(root, "_update-prepare", "")[0])
+            plan = config_inspection.document(root, "explain", ["dev"])
+            self.assertEqual(plan["order"]["watch_tasks"], ["build"])
+            self.assertEqual(plan["order"]["setup"], ["compiler"])
+            self.assertEqual(
+                plan["origins"]["tasks.dev"]["services"], "templates.tasks.base"
+            )
+
     def test_recursive_tables_and_array_replacement_have_precise_origins(self):
         source = {
             "schema": 3,

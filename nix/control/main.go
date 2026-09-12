@@ -519,6 +519,7 @@ func start(p Plan, self string) error {
 	return fmt.Errorf("Process Compose failed to start (%v); service output: %s", e, filepath.Join(p.State, "services.log"))
 }
 func ready(p Plan, names []string, startup *startupGuard) error {
+	defer tracePhase("service_readiness")()
 	if e := startup.check(); e != nil {
 		return e
 	}
@@ -988,7 +989,7 @@ func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (
 		}
 		previousClients = len(used) > 0 || hasLeases(previous)
 		if previousClients && previous.Fingerprint != p.Fingerprint {
-			return nil, "", fmt.Errorf("active services have incompatible inputs; stop their users before replacing them")
+			return nil, "", fmt.Errorf("active services have incompatible inputs (running %q, requested %q); inspect services-status and stop their users before replacing them", previous.Fingerprint, p.Fingerprint)
 		}
 		if !previousClients && previous.Fingerprint != p.Fingerprint {
 			if e = releaseUnused(previous, true); e != nil {

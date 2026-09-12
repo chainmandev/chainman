@@ -10,10 +10,12 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 
 import chainman
 import toolchain as tc
 import project_environment
+import timing
 
 
 def name(value):
@@ -49,6 +51,13 @@ def configuration(root):
     cfg = tc.config(root)
     if cfg["schema"] not in (2, 3):
         raise ValueError("Named workflows require configuration schema=2 or schema=3")
+    checked_profiles = set()
+
+    def check_profile(profile):
+        if profile not in checked_profiles:
+            chainman.profile(root, profile, cfg=cfg)
+            checked_profiles.add(profile)
+
     for section in ("tasks", "setup"):
         entries = cfg.get(section, {})
         if not isinstance(entries, dict):
@@ -90,8 +99,7 @@ def configuration(root):
                 commands(spec.get("commands"))
             names(spec.get("depends_on", []))
             tc.contained(root, spec.get("directory", "."))
-            chainman.profile(
-                root,
+            check_profile(
                 spec.get(
                     "profile", cfg.get("project", {}).get("default_profile", "default")
                 ),
@@ -259,16 +267,7 @@ def stamp_path(root, key):
 
 
 def current(root, key, spec, env):
-    try:
-        recorded = json.loads(stamp_path(root, key).read_text())
-    except (FileNotFoundError, ValueError):
-        return False
-    return (
-        isinstance(recorded, dict)
-        and recorded.get("fingerprint") == fingerprint(root, spec, env)
-        and all(artifact_ready(root, item, env) for item in spec["artifacts"])
-        and recorded.get("artifact_digests", {}) == artifact_digests(root, spec)
-    )
+    return setup_detail(root, key, spec, env)["current"]
 
 
 def artifact_ready(root, item, env):
@@ -292,7 +291,8 @@ def artifact_digests(root, spec):
 
 @contextmanager
 def setup_use(root, cfg, requested, env):
-    specs = group_specs(root, cfg, requested, env)
+    with timing.span("setup_validation", env):
+        specs = group_specs(root, cfg, requested, env)
     if not specs:
         yield ()
         return
@@ -305,7 +305,11 @@ def setup_use(root, cfg, requested, env):
             raise ValueError(
                 "Another setup operation is installing project artifacts"
             ) from None
-        if any(not current(root, key, spec, env) for key, spec in specs.items()):
+        with timing.span("setup_validation", env):
+            stale = any(
+                not current(root, key, spec, env) for key, spec in specs.items()
+            )
+        if stale:
             fcntl.flock(lease, fcntl.LOCK_UN)
             try:
                 fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -347,26 +351,69 @@ def setup_use(root, cfg, requested, env):
         yield (lease.fileno(),)
 
 
+@contextmanager
+def inspection_lock(root, name):
+    """Borrow an existing lock without creating or touching project state."""
+    path = tc.contained(root, f".cache/toolchain/{name}")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        yield
+        return
+    with os.fdopen(descriptor, "rb") as lease:
+        if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
+            raise ValueError("Inspection lock must be a regular file")
+        try:
+            fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(
+                "Setup state is changing; retry after the active operation finishes"
+            ) from None
+        yield
+
+
+def setup_detail(root, key, spec, env):
+    try:
+        recorded = json.loads(stamp_path(root, key).read_text())
+    except FileNotFoundError:
+        reason = "not-installed"
+    except ValueError:
+        reason = "invalid-record"
+    else:
+        if not isinstance(recorded, dict):
+            reason = "invalid-record"
+        elif recorded.get("fingerprint") != fingerprint(root, spec, env):
+            reason = "inputs-changed"
+        elif not all(artifact_ready(root, item, env) for item in spec["artifacts"]):
+            reason = "artifact-missing-or-incompatible"
+        elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
+            reason = "artifact-content-changed"
+        else:
+            return {"current": True, "reason": "current"}
+    return {"current": False, "reason": reason, "recovery": ["setup", key]}
+
+
 def setup_status(root, requested):
-    """Inspect the same readiness contract without installing or blessing outputs."""
+    """Inspect readiness without creating caches, installing or blessing outputs."""
     cfg = configuration(root)
-    with tc.operation(root, exclusive=False, new_execution=True):
-        env = tc.environment(root)
+    with inspection_lock(root, "writer.lock"), inspection_lock(root, "setup-use.lock"):
+        env = tc.environment(root, create=False)
         specs = group_specs(root, cfg, requested or list(cfg.get("setup", {})), env)
-        with tc.operation_file(root, "setup-use.lock") as lease:
-            try:
-                fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise ValueError(
-                    "Another setup operation is installing project artifacts"
-                ) from None
-            result = {key: current(root, key, spec, env) for key, spec in specs.items()}
-            print(
-                json.dumps(
-                    {"schema": 1, "current": all(result.values()), "groups": result}
-                )
+        details = {
+            key: setup_detail(root, key, spec, env) for key, spec in specs.items()
+        }
+        result = {key: value["current"] for key, value in details.items()}
+        print(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "current": all(result.values()),
+                    "groups": result,
+                    "details": details,
+                }
             )
-            return 0 if all(result.values()) else 1
+        )
+        return 0 if all(result.values()) else 1
 
 
 @contextmanager

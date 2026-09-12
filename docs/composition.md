@@ -41,6 +41,12 @@ configuration change and invalidates the existing profile/configuration hashes.
 The expanded representation is derived at read time and is never checked in as
 another editable configuration.
 
+Schema-3 bootstrap routing and container transport also use this compiler from
+the verified runtime. Container planning runs with a read-only project mount,
+before applying project-declared mounts or executing project commands. The
+legacy bootstrap projection remains available for schema-1/2 consumers and old
+runtime archives; it does not implement template inheritance.
+
 ## Public inspection contract
 
 Use the project's checked-in launcher:
@@ -71,3 +77,42 @@ check the interface schema, ignore additional object fields, and treat a schema
 change as a compatibility boundary. Existing keys retain their meaning within
 interface schema 1. New configuration syntax requires upgrading the pinned
 runtime before a consumer adopts it.
+
+## Consumer qualification
+
+From Chainman's source checkout, run:
+
+```sh
+just consumer-check --release dist/release/chainman-release.json /path/to/consumer
+```
+
+The check validates effective declarations, the selected release identity,
+bundled archive digest, bootstrap bytes/modes, and every declared runtime copy.
+It never executes consumer workflows. `--baselines file.json` additionally
+compares effective declarations with an explicit mapping from absolute
+`chainman.toml` paths to parsed pre-migration configurations. Only the input
+schema number is ignored in that comparison. Application acceptance tests and
+actual launcher/platform qualification remain separate gates.
+
+## Diagnostics and timings
+
+`setup-status` retains its existing JSON fields and adds `details`: a reason for
+each stale group and a `recovery` argument array to pass to the launcher. It
+borrows existing locks without creating caches, refreshing usage timestamps,
+installing dependencies or changing readiness records. A concurrent writer can
+make the inspection unavailable; retry after that operation finishes.
+
+Set `CHAINMAN_TIMING=1` to emit local JSON records prefixed `CHAINMAN_TIMING ` on
+stderr. Records identify bootstrap, profile entry, command execution, setup
+validation and service readiness. They contain no argv, environment values or
+application output. Correlate Python start/end records by `operation`; unmatched
+records indicate interrupted entry/execution and are not successful timings.
+Go readiness records include their duration directly. Bootstrap uses portable
+whole-second shell timestamps and reports its one-second resolution. Other
+durations use monotonic clocks. Timing is disabled by default.
+
+Bootstrap measurements include runtime realization and, for schema 3, trusted
+planning. Record cold/warm cache conditions alongside measurements; do not sum
+overlapping parent/child phases or treat unpaired records as completed work.
+Normal application output continues to use its usual streams independently of
+the timing records.

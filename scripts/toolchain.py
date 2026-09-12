@@ -555,7 +555,7 @@ def pnpm_environment(env: dict[str, str], values: dict[str, str]) -> None:
                 break
 
 
-def environment(root: Path = ROOT) -> dict[str, str]:
+def environment(root: Path = ROOT, *, create=True) -> dict[str, str]:
     env = dict(os.environ)
     if _operation_id and env.get("TOOLCHAIN_OPERATION_ID") != _operation_id:
         # Public child commands own their server lifetime. Reusing the parent
@@ -563,7 +563,8 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         # socket would let parent exit stop an active child's compiler.
         env.pop("CHAINMAN_COMPILER_OWNER", None)
     work = contained(root, f".cache/toolchain/work/{context_id()}")
-    work.mkdir(parents=True, exist_ok=True)
+    if create:
+        work.mkdir(parents=True, exist_ok=True)
     downloads = Path(
         env.get(
             "TOOLCHAIN_DOWNLOAD_CACHE",
@@ -577,12 +578,14 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         raise ValueError("Download-cache overrides must select an absolute path")
     # Shared package caches and sccache are separate from project build outputs;
     # package managers own their cache locking.
-    downloads.mkdir(parents=True, exist_ok=True)
+    if create:
+        downloads.mkdir(parents=True, exist_ok=True)
     socket_directory = Path("/tmp").resolve() / f"nix-just-sockets-{os.getuid()}"
     if socket_directory.is_symlink():
         raise ValueError("compiler socket directory must not be a symlink")
-    socket_directory.mkdir(mode=0o700, exist_ok=True)
-    if (
+    if create:
+        socket_directory.mkdir(mode=0o700, exist_ok=True)
+    if socket_directory.exists() and (
         socket_directory.stat().st_uid != os.getuid()
         or socket_directory.stat().st_mode & 0o077
     ):
@@ -665,7 +668,8 @@ def environment(root: Path = ROOT) -> dict[str, str]:
         CHAINMAN_PROJECT_ROOT=str(root.resolve()),
         CHAINMAN_RUNTIME=str(RUNTIME),
     )
-    (work / "last-used").touch()
+    if create:
+        (work / "last-used").touch()
     return env
 
 

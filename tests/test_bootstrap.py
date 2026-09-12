@@ -160,6 +160,74 @@ class BootstrapTests(unittest.TestCase):
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
 
+    def use_real_runtime(self):
+        runtime = self.root / "real-runtime"
+        inventory = json.loads((SOURCE / "release-files.json").read_text())[
+            "runtime_files"
+        ]
+        for name in inventory:
+            target = runtime / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(SOURCE / name, target)
+        self.lock["narHash"] = subprocess.check_output(
+            [
+                NIX,
+                "--extra-experimental-features",
+                "nix-command",
+                "hash",
+                "path",
+                str(runtime),
+            ],
+            text=True,
+        ).strip()
+        with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
+            archive.add(runtime, arcname="runtime")
+        self.write_lock()
+        return runtime
+
+    def test_schema_three_actual_host_compilation_and_command(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n[templates.tasks.base]\ncommands=[["printf", "composed-command"]]\n[tasks.probe]\nextends="base"\n'
+        )
+        result = self.run_bootstrap("config", "validate")
+        self.assertEqual(
+            json.loads(result.stdout),
+            {"schema": 1, "configuration_schema": 3, "valid": True},
+        )
+        self.assertEqual(self.run_bootstrap("run", "probe").stdout, "composed-command")
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
+    )
+    def test_schema_three_inherited_mount_uses_verified_compiler(self):
+        self.use_real_runtime()
+        outside = tempfile.TemporaryDirectory(prefix="chainman composed mount ")
+        self.addCleanup(outside.cleanup)
+        sdk = Path(outside.name) / "literal $(never-executed) SDK"
+        sdk.write_text("composed SDK")
+        program = "import os,pathlib; p=pathlib.Path(os.environ['DEMO_SDK_FILE']); print(p.read_text());\ntry: p.write_text('wrong')\nexcept OSError as e: assert e.errno == 30\nelse: raise AssertionError('mount was writable')"
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n[environment]\npass=["DEMO_SDK_FILE"]\n[templates.tasks.base]\ncommands=[["python3", "-c", '
+            + json.dumps(program)
+            + ']]\n[templates.tasks.base.transport]\nmounts=[{source_env="DEMO_SDK_FILE"}]\n[tasks.probe]\nextends="base"\n'
+        )
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            DEMO_SDK_FILE=str(sdk),
+        )
+        result = self.run_bootstrap("run", "probe", env=env)
+        self.assertEqual(result.stdout.strip(), "composed SDK")
+        self.assertEqual(sdk.read_text(), "composed SDK")
+        missing = dict(env)
+        missing.pop("DEMO_SDK_FILE")
+        result = self.run_bootstrap("run", "probe", env=missing, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unset", result.stderr)
+
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
         "set CHAINMAN_TEST_CONTAINER to execute the real container engine",

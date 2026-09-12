@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,24 @@ import (
 	"syscall"
 	"time"
 )
+
+// Timing is opt-in and contains no commands, paths or environment values.
+func tracePhase(phase string) func() {
+	if os.Getenv("CHAINMAN_TIMING") != "1" {
+		return func() {}
+	}
+	started := time.Now()
+	return func() {
+		body, err := json.Marshal(map[string]any{
+			"schema": 1, "phase": phase, "event": "end",
+			"operation":  fmt.Sprintf("%d-%d", os.Getpid(), started.UnixNano()),
+			"elapsed_ns": time.Since(started).Nanoseconds(),
+		})
+		if err == nil {
+			fmt.Fprintln(os.Stderr, "CHAINMAN_TIMING "+string(body))
+		}
+	}
+}
 
 // Stop announces cancellation before waiting for the scope mutation gate. A
 // durable ticket also reaches startup waiting in a shared repository resource.
