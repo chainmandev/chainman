@@ -456,7 +456,8 @@ validate_daemon
 run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
     --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
-    --env 'NIX_CONFIG=build-users-group =' --env NIX_REMOTE=daemon \
+    --env 'NIX_CONFIG=build-users-group =
+store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
     --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
@@ -697,7 +698,8 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --workdir "$root" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME \
-    --env 'NIX_CONFIG=build-users-group =' --env NIX_REMOTE=daemon \
+    --env 'NIX_CONFIG=build-users-group =
+store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
     --env "TOOLCHAIN_GIT_POLICY_UNAVAILABLE=$policy_unavailable" --env CI --env TERM \
     --env GIT_AUTHOR_NAME --env GIT_AUTHOR_EMAIL --env GIT_COMMITTER_NAME --env GIT_COMMITTER_EMAIL "$@"

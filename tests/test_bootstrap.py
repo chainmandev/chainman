@@ -33,6 +33,7 @@ class BootstrapTests(unittest.TestCase):
             "demo=os.environ.get('DEMO_TEST_VALUE'), container=os.environ.get('TOOLCHAIN_CONTAINER'))\n"
             "record.update(nix=shutil.which('nix'), uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
             "record['nix_remote'] = os.environ.get('NIX_REMOTE')\n"
+            "if record['container'] == '1': record['nix_store'] = subprocess.check_output(['nix', '--extra-experimental-features', 'nix-command', 'config', 'show', 'store'], text=True).strip()\n"
             "record.update(active_profile=os.environ.get('CHAINMAN_ACTIVE_PROFILE'), active_fingerprint=os.environ.get('CHAINMAN_ACTIVE_FINGERPRINT'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['no_new_privs'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('NoNewPrivs:'))\n"
@@ -310,7 +311,8 @@ class BootstrapTests(unittest.TestCase):
         self.run_bootstrap("status", env=env)
         record = self.records()[0]
         self.assertEqual(record["uid"], 0)
-        self.assertEqual(record["nix_config"], "build-users-group =")
+        self.assertEqual(record["nix_config"], "build-users-group =\nstore = daemon")
+        self.assertEqual(record["nix_store"], "daemon")
         self.assertEqual(record["container"], "1")
         self.assertFalse(record["tmpdir"].startswith(str(host_temporary)))
         self.assertEqual(int(record["cap_eff"], 16), 0)
@@ -338,6 +340,7 @@ class BootstrapTests(unittest.TestCase):
         record = self.records()[0]
         self.assertEqual(record["uid"], expected_uid)
         self.assertEqual(record["nix_remote"], "daemon")
+        self.assertEqual(record["nix_store"], "daemon")
         self.assertTrue(record["tmpdir"].startswith("/nix/tmp"))
         self.assertEqual(record["no_new_privs"], "1")
         self.assertEqual(int(record["cap_eff"], 16), 0)

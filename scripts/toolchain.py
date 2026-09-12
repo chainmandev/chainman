@@ -45,6 +45,9 @@ def nix_command(env=None) -> str:
 def runtime_nix_environment(env: dict[str, str]) -> None:
     if env.get("TOOLCHAIN_CONTAINER") == "1":
         env["NIX_REMOTE"] = "daemon"
+        # NIX_CONFIG's store setting takes precedence over NIX_REMOTE. Restore
+        # the client policy after project shells, including their shell hooks.
+        env["NIX_CONFIG"] = "build-users-group =\nstore = daemon"
         for name in ("NIX_STATE_DIR", "NIX_STORE_DIR", "NIX_DAEMON_SOCKET_PATH"):
             env.pop(name, None)
     directory = env.get("CHAINMAN_RUNTIME_NIX_BIN")

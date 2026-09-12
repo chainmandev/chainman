@@ -23,6 +23,7 @@ def variable(name):
     if name == "CHAINMAN_RUNTIME_NIX_BIN":
         raise ValueError("Cannot override the internal runtime Nix binding")
     if name in {
+        "NIX_CONFIG",
         "NIX_REMOTE",
         "NIX_STATE_DIR",
         "NIX_STORE_DIR",

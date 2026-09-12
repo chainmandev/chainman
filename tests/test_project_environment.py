@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import chainman
 class ProjectEnvironmentTests(unittest.TestCase):
     def test_project_cannot_replace_the_managed_nix_store_connection(self):
         for name in (
+            "NIX_CONFIG",
             "NIX_REMOTE",
             "NIX_STATE_DIR",
             "NIX_STORE_DIR",
@@ -24,6 +26,30 @@ class ProjectEnvironmentTests(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "managed Nix store"),
             ):
                 pe.variable(name)
+
+    @unittest.skipUnless(shutil.which("nix"), "requires real Nix configuration parsing")
+    def test_effective_store_ignores_external_shell_configuration_in_containers(self):
+        env = dict(os.environ, NIX_REMOTE="daemon", NIX_CONFIG="store = local")
+        command = [
+            shutil.which("nix"),
+            "--extra-experimental-features",
+            "nix-command",
+            "config",
+            "show",
+            "store",
+        ]
+
+        def effective_store():
+            return subprocess.check_output(command, env=env, text=True).strip()
+
+        self.assertEqual(effective_store(), "local")
+        env["TOOLCHAIN_CONTAINER"] = "1"
+        pe.tc.runtime_nix_environment(env)
+        self.assertEqual(effective_store(), "daemon")
+        # Compatible installed host Nix retains its operator configuration.
+        env.update(TOOLCHAIN_CONTAINER="0", NIX_CONFIG="store = local")
+        pe.tc.runtime_nix_environment(env)
+        self.assertEqual(effective_store(), "local")
 
     def test_conditional_files_do_not_load_an_unselected_provider(self):
         with tempfile.TemporaryDirectory() as temporary:

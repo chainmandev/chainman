@@ -225,7 +225,8 @@ def execute(
             'if [ -n "${CHAINMAN_TEMP_BASE:-}" ]; then export TMPDIR="$CHAINMAN_TEMP_BASE"; '
             'elif [ -n "${TMPDIR:-}" ]; then export CHAINMAN_TEMP_BASE="$TMPDIR"; fi; '
             'if [ "${TOOLCHAIN_CONTAINER:-}" = 1 ]; then '
-            "unset NIX_STATE_DIR NIX_STORE_DIR NIX_DAEMON_SOCKET_PATH; export NIX_REMOTE=daemon; fi; "
+            "unset NIX_STATE_DIR NIX_STORE_DIR NIX_DAEMON_SOCKET_PATH; export NIX_REMOTE=daemon; "
+            "export NIX_CONFIG='build-users-group =\nstore = daemon'; fi; "
             "runtime_nix=$1; shift; "
             'if [ -n "$runtime_nix" ]; then export CHAINMAN_RUNTIME_NIX_BIN="$runtime_nix" PATH="$runtime_nix:$PATH"; fi; '
             'cd "$1"; shift; exec "$@"',
