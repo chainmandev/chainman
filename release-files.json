@@ -185,6 +185,7 @@
     "tests/test_control_release.py",
     "tests/test_dependency_api.py",
     "tests/test_dependency_identity.py",
+    "tests/test_dependency_coverage.py",
     "tests/test_dependency_reports.py",
     "tests/test_distribution.py",
     "tests/test_ecosystem_updates.py",

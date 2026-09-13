@@ -135,17 +135,27 @@ class Pin:
         return self.prefix + self.operator + selected
 
 
-def manifest_paths(directory, spec, root_manifest, settings):
+def manifest_paths(
+    directory: Path,
+    spec: Mapping[str, object],
+    root_manifest: Mapping[str, object],
+    settings: Mapping[str, object],
+) -> list[str]:
     patterns = spec.get("manifests")
     if patterns is None:
         workspaces = settings.get("packages", root_manifest.get("workspaces", []))
         if isinstance(workspaces, Mapping):
             workspaces = workspaces.get("packages", [])
-        patterns = ["package.json", *[p + "/package.json" for p in workspaces]]
-    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
-        raise ValueError("JavaScript manifests must be a list of relative patterns")
+        patterns = [
+            "package.json",
+            *[
+                p + "/package.json"
+                for p in inputs.strings(workspaces, "JavaScript workspaces")
+            ],
+        ]
+    paths = inputs.strings(patterns, "JavaScript manifest patterns")
     included, excluded = {"package.json"}, set[str]()
-    for pattern in patterns:
+    for pattern in paths:
         negative = pattern.startswith("!")
         pattern = pattern.removeprefix("!")
         tc.contained(directory, pattern)
@@ -220,10 +230,10 @@ class Workspace:
                 self.patches[selector] = relative
         for pattern in spec.get("copy_inputs", []):
             tc.contained(self.directory, pattern)
-            for path in self.directory.glob(pattern):
-                if path.is_dir():
+            for copy_path in self.directory.glob(pattern):
+                if copy_path.is_dir():
                     continue
-                self.keep(path.relative_to(self.directory).as_posix())
+                self.keep(copy_path.relative_to(self.directory).as_posix())
         lock = tc.contained(self.directory, self.lock)
         if lock.exists():
             self.keep(self.lock)
