@@ -57,8 +57,10 @@ traversal consumes these typed records; raw workspace documents, adapter
 configuration and solver policy remain dynamic. Inclusion in the gate does not
 imply complete strict typing.
 Adapter implementations outside that explicit list are not counted as checked.
-The unstubbed third-party `semantic_version` import has a scoped missing-import
-exception; its API remains a dynamic boundary, not an adapter-wide suppression.
+The unannotated third-party `semantic_version` package uses a local stub for the
+complete-version and npm-range API Chainman consumes. The stub is checked in the
+source archive and formatted with Python sources; it adds no consumer runtime
+code. There is no missing-import suppression for that dependency.
 This is incremental coverage, not a claim that all Python is strictly typed.
 
 Hypothesis is pinned through the development Python shell. It is absent from

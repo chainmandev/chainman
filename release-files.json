@@ -221,7 +221,8 @@
     "tests/test_update_staging.py",
     "tests/test_updates.py",
     "tests/test_workflows.py",
-    "toolchain.toml"
+    "toolchain.toml",
+    "typings/semantic_version.pyi"
   ],
   "runtime_files": [
     "LICENSE",

@@ -32,6 +32,7 @@ class DistributionTests(unittest.TestCase):
                 ("scripts", "*.py"),
                 ("tests", "*.py"),
                 ("nix/control", "*.go"),
+                ("typings", "*.pyi"),
             )
             for path in (package.ROOT / directory).glob(pattern)
         }

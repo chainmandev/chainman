@@ -14,9 +14,12 @@ def main() -> None:
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     python = sorted(
-        p
-        for directory in ("scripts", "tests", "examples/core", "template/scripts")
-        for p in (root / directory).rglob("*.py")
+        [
+            p
+            for directory in ("scripts", "tests", "examples/core", "template/scripts")
+            for p in (root / directory).rglob("*.py")
+        ]
+        + list((root / "typings").glob("*.pyi"))
     )
     shell = sorted(
         [*(root / "scripts").glob("*.sh"), *(root / "bootstrap").glob("*.sh")]

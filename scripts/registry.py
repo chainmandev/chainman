@@ -383,8 +383,8 @@ def version(provider: str, text: str):
                 return None
             return result
         # Deliberately do not coerce prerelease suffixes or incomplete tags.
-        result = Semver(text.removeprefix("v"))
-        return None if result.prerelease else result
+        semantic = Semver(text.removeprefix("v"))
+        return None if semantic.prerelease else semantic
     except (ValueError, InvalidVersion):
         return None
 
