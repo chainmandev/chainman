@@ -28,8 +28,8 @@ and peer metadata. Shared JavaScript range, override and compatibility helpers
 expose their input/output types and project their configuration values; the
 workspace planner still has dynamic operations. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 46 source
-files, including 44 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 47 source
+files, including 45 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -98,6 +98,11 @@ The Go source adapter enforces strict flags using the existing native Go
 requirement/replacement/workspace records. Snapshots retain the complete native
 documents for change detection; execution, candidate selection and checksum
 inventories carry concrete types.
+The shared source-update coordinator enforces strict flags for Actions, OCI and
+Nix selection and reconciliation. Action occurrences/selections, OCI inventory
+entries and Nix snapshots have named records. Source JSON and Nix follows paths
+are projected before use; OCI selections preserve extra caller metadata, and
+Nix resolution retains declared flake order.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by
@@ -133,6 +138,11 @@ perform no network requests, Nix evaluation or native package-manager operations
 
 The generated oracles cover:
 
+- Nix follows resolution against an integer alias graph with known terminal
+  tree depths: root-relative references from nested nodes, reachable cycles,
+  missing paths, suffix traversal, repeated completed follows and unchanged input.
+  An isolated mutation resolving follows relative to the current node is detected
+  and shrinks to one alias pointing at the root.
 - Workflow ordering against worklist reachability and iterative removal of ready
   vertices: requested closure only, dependencies first, no duplicate execution,
   missing names and reachable cycles. Both acyclic and arbitrary graphs are

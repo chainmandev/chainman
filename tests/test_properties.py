@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import configuration
 import registry
 import resources
+import source_updates
 import workflows
 
 GENERATED = settings(max_examples=200, derandomize=True, deadline=None)
@@ -97,6 +98,85 @@ class WorkflowProperties(unittest.TestCase):
                     self.assertLess(positions[dependency], positions[key])
             self.assertEqual(workflows.order(graph, requested), result)
         self.assertEqual(graph, original)
+
+
+@st.composite
+def nix_alias_graphs(draw):
+    count = draw(st.integers(min_value=1, max_value=6))
+    # Each alias points at another alias, the root, one of three tree depths,
+    # or a missing name. The model is an integer graph, not a Nix path resolver.
+    return draw(
+        st.lists(
+            st.integers(min_value=0, max_value=count + 4),
+            min_size=count,
+            max_size=count,
+        )
+    )
+
+
+class NixFollowProperties(unittest.TestCase):
+    @GENERATED
+    @given(nix_alias_graphs())
+    def test_follows_resolve_from_root_with_only_active_cycles_rejected(self, graph):
+        count = len(graph)
+        terminals = [
+            [],
+            ["base"],
+            ["base", "next"],
+            ["base", "next", "next"],
+            ["missing"],
+        ]
+        aliases = {
+            f"alias{index}": [f"alias{target}"]
+            if target < count
+            else terminals[target - count]
+            for index, target in enumerate(graph)
+        }
+        lock = {
+            "root": "root",
+            "nodes": {
+                "root": {
+                    "inputs": {
+                        "base": "node0",
+                        "next": "node0",
+                        "wrapper": "wrapper",
+                        **aliases,
+                    }
+                },
+                "node0": {"inputs": {"next": "node1"}},
+                "node1": {"inputs": {"next": "node2"}},
+                "node2": {"inputs": {}},
+                # A follow encountered below the root still names a root input.
+                "wrapper": {"inputs": {name: [name] for name in aliases}},
+            },
+        }
+        original = deepcopy(lock)
+        for start in range(count):
+            target, visited = start, set()
+            while target < count and target not in visited:
+                visited.add(target)
+                target = graph[target]
+            cycle = target < count
+            depth = target - count - 1
+            for prefix in ([], ["wrapper"]):
+                for steps in range(4):
+                    path = "/".join([*prefix, f"alias{start}", *(["next"] * steps)])
+                    if cycle:
+                        with self.assertRaisesRegex(ValueError, "follows cycle"):
+                            source_updates.nix_node(lock, path)
+                    elif depth + steps > 2:
+                        with self.assertRaises(KeyError):
+                            source_updates.nix_node(lock, path)
+                    else:
+                        expected = (
+                            "root" if depth + steps == -1 else f"node{depth + steps}"
+                        )
+                        self.assertEqual(source_updates.nix_node(lock, path), expected)
+                if not cycle and depth == -1:
+                    # Reusing a completed empty follow is not an active cycle.
+                    path = "/".join([*prefix, *([f"alias{start}"] * 3)])
+                    self.assertEqual(source_updates.nix_node(lock, path), "root")
+        self.assertEqual(lock, original)
 
 
 class CompositionProperties(unittest.TestCase):

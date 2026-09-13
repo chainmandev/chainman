@@ -110,7 +110,7 @@ def adapters(root: Path, selected: list[str], policy: Table) -> dict[str, Table]
     return configured
 
 
-def image_snapshot(root: Path, policy: Table) -> dict[str, str] | None:
+def image_snapshot(root: Path, policy: Table) -> source_updates.ImageRecord | None:
     spec = table(policy.get("docker", {}), "Docker update policy")
     if not spec.get("enabled", True):
         return None
@@ -178,6 +178,8 @@ def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> No
         if image_before is not None:
             expected = source_updates.select_oci(image_before, {}, policy, now)
             actual = image_snapshot(root, policy)
-            if actual is None or any(actual[key] != expected[key] for key in actual):
+            if actual is None or any(
+                value != expected[key] for key, value in actual.items()
+            ):
                 raise ValueError("Runtime image drifted from its audited selection")
         sdk_versions.synchronize(root, selected, check=True)

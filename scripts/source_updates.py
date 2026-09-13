@@ -6,20 +6,118 @@ import json
 import re
 import stat
 import subprocess
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NotRequired, TypedDict
 from urllib.parse import quote, urlencode
 
 import chainman
 import registry
 import toolchain as tc
 import yaml
+import adapter_data as ad
+import manifests
 
 ACTION_REF_LIMIT = 100_000
 
 
-def object_pairs(pairs):
-    result = {}
+class SourceSelection(TypedDict):
+    revision: str
+    reason: str
+    published: NotRequired[str]
+    version: NotRequired[str]
+    tag: NotRequired[str]
+
+
+class SourceRevision(TypedDict):
+    revision: str
+    published: str
+
+
+class ActionRecord(TypedDict):
+    file: str
+    action: str
+    ordinal: int
+    repository: str
+    revision: str
+    tracking: ad.Table
+
+
+class ActionPlan(ActionRecord):
+    selected: SourceSelection
+
+
+class ActionsSnapshot(TypedDict):
+    adapter: str
+    files: list[str]
+    records: list[ActionRecord]
+
+
+class ImageRecord(TypedDict):
+    repository: str
+    tag: str
+    digest: str
+    versionSource: str
+
+
+class NixSnapshot(TypedDict):
+    adapter: str
+    locks: dict[str, ad.Table]
+
+
+def image_record(value: object) -> ImageRecord:
+    entry = ad.table(value, "OCI image")
+    if oci_tag(entry.get("tag")) is None:
+        raise ValueError("OCI inventory requires explicit stable release tags")
+    return {
+        "repository": ad.text(entry["repository"], "OCI repository"),
+        "tag": ad.text(entry["tag"], "OCI tag"),
+        "digest": registry.digest(ad.text(entry.get("digest"), "OCI digest")),
+        "versionSource": ad.text(
+            entry.get("versionSource", "dockerHub"), "OCI version source"
+        ),
+    }
+
+
+def pointer(spec: Mapping[str, object]) -> list[str | int]:
+    result: list[str | int] = []
+    for part in ad.array(spec.get("pointer", ["images"]), "OCI inventory pointer"):
+        if not isinstance(part, (str, int)):
+            raise ValueError("OCI pointer components must be names or array indexes")
+        result.append(part)
+    return result
+
+
+def nix_nodes(lock: Mapping[str, object]) -> dict[str, ad.Table]:
+    return {
+        name: ad.table(value, "Nix lock node")
+        for name, value in ad.table(lock["nodes"], "Nix lock nodes").items()
+    }
+
+
+def action_records(value: object) -> list[ActionRecord]:
+    result: list[ActionRecord] = []
+    for raw in ad.array(value, "Actions snapshot records"):
+        record = ad.table(raw, "Actions snapshot record")
+        ordinal = record["ordinal"]
+        if type(ordinal) is not int or ordinal < 0:
+            raise ValueError("Actions record requires a nonnegative occurrence ordinal")
+        result.append(
+            {
+                "file": ad.text(record["file"], "Action file"),
+                "action": ad.text(record["action"], "Action name"),
+                "ordinal": ordinal,
+                "repository": ad.text(record["repository"], "Action repository"),
+                "revision": ad.text(record["revision"], "Action revision"),
+                "tracking": ad.table(record["tracking"], "Action tracking policy"),
+            }
+        )
+    return result
+
+
+def object_pairs(pairs: list[tuple[str, object]]) -> ad.Table:
+    result: ad.Table = {}
     for key, value in pairs:
         if key in result:
             raise ValueError("Duplicate JSON key in dependency input")
@@ -27,7 +125,7 @@ def object_pairs(pairs):
     return result
 
 
-def read_json(root: Path, name: str):
+def read_json(root: Path, name: str) -> object:
     return json.loads(tc.regular_input(root, name), object_pairs_hook=object_pairs)
 
 
@@ -50,19 +148,26 @@ def revision(value: str) -> str:
 def commit_time(repository: str, commit: str) -> datetime:
     repository_name(repository)
     revision(commit)
-    item = registry.data(f"https://api.github.com/repos/{repository}/commits/{commit}")
+    item = ad.table(
+        registry.data(f"https://api.github.com/repos/{repository}/commits/{commit}"),
+        "GitHub commit",
+    )
     if item.get("sha") != commit:
         raise ValueError("GitHub returned a different commit identity")
-    return registry.timestamp(item["commit"]["committer"]["date"])
+    details = ad.table(item["commit"], "GitHub commit details")
+    committer = ad.table(details["committer"], "GitHub committer")
+    return registry.timestamp(committer["date"])
 
 
-def cutoff(policy: dict, now: datetime) -> datetime:
+def cutoff(policy: Mapping[str, object], now: datetime) -> datetime:
     if now.tzinfo is None:
         raise ValueError("Update time must include a timezone")
     return now - timedelta(days=registry.minimum_age(policy))
 
 
-def nix_candidate(repository: str, branch: str, policy: dict, now: datetime) -> dict:
+def nix_candidate(
+    repository: str, branch: str, policy: Mapping[str, object], now: datetime
+) -> SourceRevision:
     """Branch age is commit age; it is never presented as release publication age."""
     repository_name(repository)
     if not isinstance(branch, str) or not branch or any(c.isspace() for c in branch):
@@ -74,18 +179,28 @@ def nix_candidate(repository: str, branch: str, policy: dict, now: datetime) -> 
     )
     if not isinstance(entries, list) or not entries:
         raise ValueError("No mature source revision with complete evidence")
-    selected = revision(entries[0].get("sha"))
+    selected = revision(
+        ad.text(ad.table(entries[0], "GitHub commit").get("sha"), "GitHub commit SHA")
+    )
     published = commit_time(repository, selected)
     if published > limit:
         raise ValueError("Selected branch revision is younger than its age policy")
     return {"revision": selected, "published": published.isoformat()}
 
 
-def action_version(tag: str):
+def action_version(tag: str) -> tuple[int, int, int] | None:
     if not isinstance(tag, str) or not re.fullmatch(r"v?\d+(?:\.\d+){0,2}", tag):
         return None
     parts = tuple(int(part) for part in tag.removeprefix("v").split("."))
-    return parts + (0,) * (3 - len(parts))
+    padded = parts + (0,) * (3 - len(parts))
+    return padded[0], padded[1], padded[2]
+
+
+def action_rank(tag: str) -> tuple[int, int, int]:
+    rank = action_version(tag)
+    if rank is None:
+        raise ValueError("Actions ranking requires a release version")
+    return rank
 
 
 def action_refs(repository: str) -> dict[str, str]:
@@ -104,7 +219,7 @@ def action_refs(repository: str) -> dict[str, str]:
         raise ValueError("GitHub ref advertisement exceeds its bound or media type")
     position = 0
 
-    def packet():
+    def packet() -> bytes | None:
         nonlocal position
         size = body[position : position + 4]
         if not re.fullmatch(rb"[0-9a-f]{4}", size):
@@ -121,8 +236,8 @@ def action_refs(repository: str) -> dict[str, str]:
 
     if packet() != b"# service=git-upload-pack\n" or packet() is not None:
         raise ValueError("Unsupported GitHub ref advertisement protocol")
-    refs = {}
-    previous = None
+    refs: dict[str, str] = {}
+    previous: str | None = None
     while (value := packet()) is not None:
         if len(refs) >= ACTION_REF_LIMIT:
             raise ValueError("GitHub ref inventory exceeds its bound")
@@ -145,7 +260,8 @@ def action_refs(repository: str) -> dict[str, str]:
         if ref in refs:
             raise ValueError("Duplicate GitHub advertised ref identity")
         if ref.endswith("^{}") and (
-            previous != ref[:-3]
+            previous is None
+            or previous != ref[:-3]
             or not previous.startswith("refs/tags/")
             or previous.endswith("^{}")
         ):
@@ -167,7 +283,9 @@ def action_refs(repository: str) -> dict[str, str]:
     return result
 
 
-def action_release(item, expected: str | None = None) -> registry.Release | None:
+def action_release(
+    item: object, expected: str | None = None
+) -> registry.Release | None:
     if not isinstance(item, dict):
         raise ValueError("Malformed GitHub release metadata")  # noqa: TRY004
     tag = item.get("tag_name")
@@ -195,10 +313,10 @@ def action_release_batch(repository: str) -> dict[str, registry.Release | None]:
     )
     if not isinstance(entries, list) or len(entries) > 100:
         raise ValueError("Malformed GitHub release metadata batch")
-    result = {}
+    result: dict[str, registry.Release | None] = {}
     for item in entries:
         release = action_release(item)
-        tag = item["tag_name"]
+        tag = ad.text(ad.table(item, "GitHub release")["tag_name"], "Release tag")
         if tag in result:
             raise ValueError("Duplicate GitHub release metadata identity")
         result[tag] = release
@@ -221,42 +339,54 @@ def action_release_by_tag(repository: str, tag: str) -> registry.Release | None:
 def select_action(
     repository: str,
     current: str,
-    tracking: dict,
-    policy: dict,
+    tracking: Mapping[str, object],
+    policy: Mapping[str, object],
     now: datetime,
     *,
     advance_major: bool = True,
-) -> dict:
+) -> SourceSelection:
     repository_name(repository)
     revision(current)
     if tracking["kind"] == "pin":
         return {"revision": current, "reason": "explicit immutable pin"}
     if tracking["kind"] == "channel":
-        selected = nix_candidate(repository, tracking["channel"], policy, now)
+        selected = nix_candidate(
+            repository,
+            ad.text(tracking["channel"], "Action tracking channel"),
+            policy,
+            now,
+        )
         if commit_time(repository, current) >= registry.timestamp(
             selected["published"]
         ):
             return {"revision": current, "reason": "retained newer current revision"}
-        return {**selected, "reason": "mature channel revision"}
+        return {
+            "revision": selected["revision"],
+            "published": selected["published"],
+            "reason": "mature channel revision",
+        }
     if tracking["kind"] != "release":
         raise ValueError("Unknown Actions tracking policy")
     major = tracking.get("major")
+    if major is not None and type(major) is not int:
+        raise ValueError("Actions tracking major must be an integer")
     bound = registry.constraint("github", policy, repository)
     safe = registry.minimum_safe("github", policy, repository)
     limit = cutoff(policy, now)
     exception_versions = {
-        item["version"]
-        for item in policy.get("exceptions", [])
+        ad.text(item["version"], "Exception version")
+        for raw in ad.array(policy.get("exceptions", []), "Version exceptions")
+        for item in [ad.table(raw, "Version exception")]
         if item.get("package") == f"github:{repository}"
     }
     refs = action_refs(repository)
-    groups = {}
+    groups: dict[tuple[int, int, int], list[str]] = {}
     for tag in refs:
-        rank = action_version(tag)
+        rank = action_rank(tag)
         version = ".".join(map(str, rank))
         if (
             (not advance_major and major is not None and rank[0] != major)
-            or (safe is not None and registry.version("github", version) < safe)
+            or (safe is not None and registry.stable_version("github", version) < safe)
             or not registry.compatible("github", version, bound)
         ):
             continue
@@ -265,7 +395,7 @@ def select_action(
     if any(item is not None and tag not in refs for tag, item in batch.items()):
         raise ValueError("Published Actions release lacks its advertised immutable tag")
 
-    def publication(tag):
+    def publication(tag: str) -> registry.Release | None:
         if tag not in batch:
             batch[tag] = action_release_by_tag(repository, tag)
         return batch[tag]
@@ -310,12 +440,21 @@ def select_action(
             break
     chosen = max(
         registry.eligible("github", releases, policy, repository, now),
-        key=lambda item: action_version(item.version),
+        key=lambda item: action_rank(item.version),
     )
     commit = refs[chosen.identity]
     tag = chosen.identity
-    rank = action_version(chosen.version)
-    old_rank = tracking.get("version")
+    rank = action_rank(chosen.version)
+    old_version = tracking.get("version")
+    old_rank: tuple[int, ...] | None = None
+    if old_version is not None:
+        components = ad.array(old_version, "Actions tracking version")
+        integers: list[int] = []
+        for component in components:
+            if type(component) is not int:
+                raise ValueError("Actions tracking version components must be integers")
+            integers.append(component)
+        old_rank = tuple(integers)
     retain = (
         (major is not None and rank[0] < major)
         or (old_rank is not None and rank < tuple(old_rank))
@@ -330,14 +469,14 @@ def select_action(
         # Baseline age may be retained, but dates and annotations cannot waive an
         # operative version limit. Use the highest published identity of this SHA;
         # a lower alias must not hide a current major/floor violation.
-        current_groups = {}
+        current_groups: dict[tuple[int, int, int], list[str]] = {}
         for name, ref_commit in refs.items():
             if ref_commit == current:
-                current_groups.setdefault(action_version(name), []).append(name)
+                current_groups.setdefault(action_rank(name), []).append(name)
         current_version = None
         for current_rank in sorted(current_groups, reverse=True):
-            values = [publication(name) for name in current_groups[current_rank]]
-            values = [item for item in values if item is not None]
+            observations = [publication(name) for name in current_groups[current_rank]]
+            values = [item for item in observations if item is not None]
             if values:
                 if (
                     max(
@@ -352,9 +491,9 @@ def select_action(
         if current_version is None:
             raise ValueError("Actions current immutable version evidence is missing")
         retain = (
-            (safe is None or registry.version("github", current_version) >= safe)
+            (safe is None or registry.stable_version("github", current_version) >= safe)
             and registry.compatible("github", current_version, bound)
-            and (not major_hold or action_version(current_version)[0] == major)
+            and (not major_hold or action_rank(current_version)[0] == major)
         )
     if retain:
         return {"revision": current, "reason": "retained newer current release"}
@@ -374,7 +513,7 @@ ACTION = re.compile(
 )
 
 
-def action_tracking(suffix: str) -> dict:
+def action_tracking(suffix: str) -> ad.Table:
     if "deps-update:" in suffix:
         text = suffix.split("deps-update:", 1)[1].strip()
         tokens = text.split()
@@ -399,13 +538,13 @@ def action_tracking(suffix: str) -> dict:
     if version:
         return {
             "kind": "release",
-            "major": action_version(version[1])[0],
-            "version": list(action_version(version[1])),
+            "major": action_rank(version[1])[0],
+            "version": list(action_rank(version[1])),
         }
     return {"kind": "pin"}
 
 
-def action_files(root: Path, spec: dict) -> list[str]:
+def action_files(root: Path, spec: Mapping[str, object]) -> list[str]:
     declared = spec.get("files")
     if not isinstance(declared, list) or not declared:
         raise ValueError("Actions requires declared workflow files or contained globs")
@@ -428,13 +567,13 @@ def action_files(root: Path, spec: dict) -> list[str]:
     return sorted(result)
 
 
-def actions_snapshot(root: Path, spec: dict) -> dict:
-    records = []
+def actions_snapshot(root: Path, spec: Mapping[str, object]) -> ActionsSnapshot:
+    records: list[ActionRecord] = []
     files = action_files(root, spec)
     for name in files:
         source = tc.regular_input(root, name).decode()
 
-        def external_uses(value):
+        def external_uses(value: object) -> Iterator[str]:
             if isinstance(value, dict):
                 for key, item in value.items():
                     if key == "uses":
@@ -460,7 +599,7 @@ def actions_snapshot(root: Path, spec: dict) -> dict:
             raise ValueError(
                 "External Actions uses entries must be standalone literal lines"
             )
-        ordinals = {}
+        ordinals: dict[str, int] = {}
         for match in ACTION.finditer(source):
             action = match["action"]
             if action.startswith(("./", "docker://")):
@@ -484,8 +623,14 @@ def actions_snapshot(root: Path, spec: dict) -> dict:
     return {"adapter": "actions", "files": files, "records": records}
 
 
-def action_plan(before: dict, spec: dict, policy: dict, now: datetime) -> list[dict]:
-    if type(spec.get("advance_major", True)) is not bool:
+def action_plan(
+    before: Mapping[str, object],
+    spec: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> list[ActionPlan]:
+    advance_major = spec.get("advance_major", True)
+    if type(advance_major) is not bool:
         raise ValueError("advance_major must be boolean")
     return [
         {
@@ -496,11 +641,11 @@ def action_plan(before: dict, spec: dict, policy: dict, now: datetime) -> list[d
                 record["tracking"],
                 policy,
                 now,
-                advance_major=spec.get("advance_major", True)
+                advance_major=advance_major
                 and spec.get("mode", "aggressive") != "compatible",
             ),
         }
-        for record in before["records"]
+        for record in action_records(before["records"])
     ]
 
 
@@ -519,7 +664,9 @@ def write_planned(root: Path, plans: list[tuple[str, bytes, bytes]]) -> list[str
     return changed
 
 
-def resolve_actions(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve_actions(
+    root: Path, spec: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> ad.Table:
     before = actions_snapshot(root, spec)
     decisions = action_plan(before, spec, policy, now)
     planned = []
@@ -528,9 +675,13 @@ def resolve_actions(root: Path, spec: dict, policy: dict, now: datetime) -> dict
         by_key = {
             (d["action"], d["ordinal"]): d for d in decisions if d["file"] == name
         }
-        counts = {}
+        counts: dict[str, int] = {}
 
-        def replace(match, counts=counts, by_key=by_key):
+        def replace(
+            match: re.Match[str],
+            counts: dict[str, int] = counts,
+            by_key: Mapping[tuple[str, int], ActionPlan] = by_key,
+        ) -> str:
             action = match["action"]
             if action.startswith(("./", "docker://")):
                 return match[0]
@@ -539,7 +690,7 @@ def resolve_actions(root: Path, spec: dict, policy: dict, now: datetime) -> dict
             selected = by_key[action, ordinal]["selected"]
             suffix = match["suffix"]
             if "version" in selected:
-                major = action_version(selected["version"])[0]
+                major = action_rank(selected["version"])[0]
                 if "deps-update:" in suffix:
                     suffix = re.sub(
                         r"release-major=v\d+", f"release-major=v{major}", suffix
@@ -564,7 +715,7 @@ def resolve_actions(root: Path, spec: dict, policy: dict, now: datetime) -> dict
     return {"changed": write_planned(root, planned), "selected": decisions}
 
 
-def oci_tag(tag: str):
+def oci_tag(tag: object) -> tuple[str, int, str] | None:
     if not isinstance(tag, str):
         return None
     match = re.fullmatch(r"v?(\d+(?:\.\d+){0,2})(-[A-Za-z0-9][A-Za-z0-9._-]*)?", tag)
@@ -591,11 +742,14 @@ def oci_candidates(repository: str, source: str) -> list[registry.Release]:
         ):
             raise ValueError("GCR requires an explicit public registry/repository")
         host, name = repository.split("/", 1)
-        body = registry.data(f"https://{host}/v2/{name}/tags/list")
+        body = ad.table(
+            registry.data(f"https://{host}/v2/{name}/tags/list"), "GCR inventory"
+        )
         if not isinstance(body.get("manifest"), dict):
             raise ValueError("GCR lacks manifest-bound publication evidence")
         seen = set()
-        for identity, entry in body["manifest"].items():
+        for identity, raw_entry in ad.table(body["manifest"], "GCR manifests").items():
+            entry = ad.table(raw_entry, "GCR manifest")
             identity = registry.digest(identity)
             raw = entry.get("timeUploadedMs")
             if (
@@ -605,7 +759,7 @@ def oci_candidates(repository: str, source: str) -> list[registry.Release]:
             ):
                 raise ValueError("GCR manifest lacks its upload time")
             at = datetime.fromtimestamp(int(raw) / 1000, timezone.utc)
-            for tag in entry.get("tag", []):
+            for tag in ad.strings(entry.get("tag", []), "GCR manifest tags"):
                 if oci_tag(tag) is None:
                     continue
                 if tag in seen:
@@ -616,46 +770,46 @@ def oci_candidates(repository: str, source: str) -> list[registry.Release]:
     raise ValueError("Unsupported OCI age-evidence source")
 
 
-def oci_inventory(root: Path, spec: dict) -> dict:
-    value = read_json(root, spec["file"])
-    for part in spec.get("pointer", ["images"]):
-        value = value[part]
+def oci_inventory(root: Path, spec: Mapping[str, object]) -> dict[str, ImageRecord]:
+    value = manifests.lookup(
+        read_json(root, ad.text(spec["file"], "OCI inventory file")), pointer(spec)
+    )
     if not isinstance(value, dict) or not value:
         raise ValueError("OCI inventory must be a nonempty named image mapping")
-    names = spec.get("names", list(value))
+    inventory = ad.table(value, "OCI inventory")
+    names = ad.strings(spec.get("names", list(inventory)), "OCI selected names")
     if (
         not isinstance(names, list)
         or not names
         or len(set(names)) != len(names)
-        or set(names) - value.keys()
+        or set(names) - inventory.keys()
     ):
         raise ValueError("OCI names must select distinct declared inventory entries")
-    result = {}
-    for name in names:
-        entry = value[name]
-        if not isinstance(entry, dict) or oci_tag(entry.get("tag")) is None:
-            raise ValueError("OCI inventory requires explicit stable release tags")
-        result[name] = {
-            "repository": entry["repository"],
-            "tag": entry["tag"],
-            "digest": registry.digest(entry.get("digest")),
-            "versionSource": entry.get("versionSource", "dockerHub"),
-        }
-    return result
+    return {name: image_record(inventory[name]) for name in names}
 
 
-def select_oci(current: dict, spec: dict, policy: dict, now: datetime) -> dict:
+def select_oci(
+    current: Mapping[str, object],
+    spec: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> ad.Table:
     parsed = oci_tag(current["tag"])
-    candidates = oci_candidates(current["repository"], current["versionSource"])
+    assert parsed is not None  # Inventory has already parsed this tag.
+    repository = ad.text(current["repository"], "OCI repository")
+    candidates = oci_candidates(
+        repository, ad.text(current["versionSource"], "OCI version source")
+    )
     eligible = []
     for item in candidates:
         tag = oci_tag(item.version)
+        assert tag is not None  # Candidate discovery includes only parsed tags.
         if tag[1:] != parsed[1:]:
             continue
         if (
             spec.get("mode", "aggressive") == "compatible"
-            and action_version(tag[0])[: min(parsed[1], 2)]
-            != action_version(parsed[0])[: min(parsed[1], 2)]
+            and action_rank(tag[0])[: min(parsed[1], 2)]
+            != action_rank(parsed[0])[: min(parsed[1], 2)]
         ):
             continue
         eligible.append(
@@ -663,54 +817,63 @@ def select_oci(current: dict, spec: dict, policy: dict, now: datetime) -> dict:
         )
     if spec.get("mode", "aggressive") not in ("aggressive", "compatible"):
         raise ValueError("OCI mode must be aggressive or compatible")
-    chosen = registry.select("docker", eligible, policy, current["repository"], now)
-    if registry.version("docker", chosen.version) < registry.version(
+    chosen = registry.select("docker", eligible, policy, repository, now)
+    result: ad.Table = {
+        **current,
+        "reason": "retained newer immutable image",
+    }
+    if registry.stable_version("docker", chosen.version) < registry.stable_version(
         "docker", parsed[0]
     ):
-        return {**current, "reason": "retained newer immutable image"}
-    tag, digest = chosen.identity.rsplit("@", 1)
-    return {
-        **current,
-        "tag": tag,
-        "digest": registry.digest(digest),
-        "published": chosen.published.isoformat(),
-        "reason": "eligible manifest-bound image",
-    }
+        return result
+    selected_tag, digest = chosen.identity.rsplit("@", 1)
+    result["tag"] = selected_tag
+    result["digest"] = registry.digest(digest)
+    result["published"] = chosen.published.isoformat()
+    result["reason"] = "eligible manifest-bound image"
+    return result
 
 
-def resolve_oci(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve_oci(
+    root: Path, spec: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> ad.Table:
     before = oci_inventory(root, spec)
     decisions = {
         name: select_oci(value, spec, policy, now) for name, value in before.items()
     }
-    old = tc.regular_input(root, spec["file"])
-    document = json.loads(old, object_pairs_hook=object_pairs)
-    inventory = document
-    for part in spec.get("pointer", ["images"]):
-        inventory = inventory[part]
+    file = ad.text(spec["file"], "OCI inventory file")
+    old = tc.regular_input(root, file)
+    document: object = json.loads(old, object_pairs_hook=object_pairs)
+    inventory_pointer = pointer(spec)
     for name, selected in decisions.items():
-        inventory[name].update(tag=selected["tag"], digest=selected["digest"])
+        manifests.assign(document, [*inventory_pointer, name, "tag"], selected["tag"])
+        manifests.assign(
+            document, [*inventory_pointer, name, "digest"], selected["digest"]
+        )
     new = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode()
     if all(
-        all(selected[k] == before[name][k] for k in ("tag", "digest"))
+        selected["tag"] == before[name]["tag"]
+        and selected["digest"] == before[name]["digest"]
         for name, selected in decisions.items()
     ):
         new = old
     return {
-        "changed": write_planned(root, [(spec["file"], old, new)]),
+        "changed": write_planned(root, [(file, old, new)]),
         "selected": decisions,
     }
 
 
-def nix_specs(root: Path, spec: dict) -> list[dict]:
+def nix_specs(root: Path, spec: Mapping[str, object]) -> list[ad.Table]:
     entries = spec.get("inputs")
     if not isinstance(entries, list) or not entries:
         raise ValueError("Nix updates require explicitly declared inputs")
-    seen = set()
-    for item in entries:
-        directory = item.get("directory", ".")
+    seen: set[tuple[str, str]] = set()
+    result: list[ad.Table] = []
+    for raw in entries:
+        item = ad.table(raw, "Nix input")
+        directory = ad.text(item.get("directory", "."), "Nix input directory")
         tc.regular_input(root, str(Path(directory) / "flake.nix"))
-        repository_name(item.get("repository"))
+        repository_name(ad.text(item.get("repository"), "Nix repository"))
         name = item.get("input")
         if not isinstance(name, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", name
@@ -720,19 +883,22 @@ def nix_specs(root: Path, spec: dict) -> list[dict]:
         if key in seen:
             raise ValueError("Duplicate Nix update target")
         seen.add(key)
-    return entries
+        result.append(item)
+    return result
 
 
-def nix_node(lock: dict, name: str) -> str:
-    def follow(path, active):
-        key = lock["root"]
+def nix_node(lock: Mapping[str, object], name: str) -> str:
+    nodes = nix_nodes(lock)
+
+    def follow(path: Sequence[str], active: set[tuple[str, ...]]) -> str:
+        key = ad.text(lock["root"], "Nix root node")
         for part in path:
-            ref = lock["nodes"][key]["inputs"][part]
+            ref = ad.table(nodes[key]["inputs"], "Nix node inputs")[part]
             if isinstance(ref, list):
-                token = tuple(ref)
+                token = tuple(ad.strings(ref, "Nix follows path"))
                 if token in active:
                     raise ValueError("Nix follows cycle")
-                key = follow(ref, active | {token})
+                key = follow(token, active | {token})
             elif isinstance(ref, str):
                 key = ref
             else:
@@ -742,33 +908,52 @@ def nix_node(lock: dict, name: str) -> str:
     return follow(name.split("/"), set())
 
 
-def nix_snapshot(root: Path, spec: dict) -> dict:
+def nix_snapshot(root: Path, spec: Mapping[str, object]) -> NixSnapshot:
     inputs = nix_specs(root, spec)
-    locks = {
-        str(Path(item.get("directory", ".")) / "flake.lock"): None for item in inputs
-    }
-    for path in locks:
-        locks[path] = read_json(root, path)
+    paths = dict.fromkeys(
+        str(
+            Path(ad.text(item.get("directory", "."), "Nix input directory"))
+            / "flake.lock"
+        )
+        for item in inputs
+    )
+    locks = {path: ad.table(read_json(root, path), "Nix lock") for path in paths}
     return {"adapter": "nix", "locks": locks}
 
 
-def nix_plan(before: dict, spec: dict, policy: dict, now: datetime) -> list[dict]:
-    plans = []
-    for item in spec["inputs"]:
-        path = str(Path(item.get("directory", ".")) / "flake.lock")
-        lock = before["locks"][path]
-        node = nix_node(lock, item["input"])
-        current = lock["nodes"][node]["locked"]
-        repository = item["repository"]
+def nix_plan(
+    before: Mapping[str, object],
+    spec: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> list[ad.Table]:
+    plans: list[ad.Table] = []
+    locks = ad.table(before["locks"], "Nix snapshot locks")
+    for raw in ad.array(spec["inputs"], "Nix inputs"):
+        item = ad.table(raw, "Nix input")
+        path = str(
+            Path(ad.text(item.get("directory", "."), "Nix input directory"))
+            / "flake.lock"
+        )
+        lock = ad.table(locks[path], "Nix lock")
+        node = nix_node(lock, ad.text(item["input"], "Nix input name"))
+        current = ad.table(nix_nodes(lock)[node]["locked"], "Nix locked source")
+        repository = ad.text(item["repository"], "Nix repository")
         if (
             current.get("type") != "github"
-            or current.get("owner", "") + "/" + current.get("repo", "") != repository
+            or ad.text(current.get("owner", ""), "Nix owner")
+            + "/"
+            + ad.text(current.get("repo", ""), "Nix repository")
+            != repository
         ):
             raise ValueError("Nix input differs from its declared source repository")
-        selected = nix_candidate(repository, item["branch"], policy, now)
-        at = commit_time(repository, current.get("rev"))
+        selected = nix_candidate(
+            repository, ad.text(item["branch"], "Nix branch"), policy, now
+        )
+        current_revision = ad.text(current.get("rev"), "Nix current revision")
+        at = commit_time(repository, current_revision)
         if at >= registry.timestamp(selected["published"]):
-            selected = {"revision": current["rev"], "published": at.isoformat()}
+            selected = {"revision": current_revision, "published": at.isoformat()}
         if any(
             p["file"] == path
             and p["node"] == node
@@ -780,15 +965,22 @@ def nix_plan(before: dict, spec: dict, policy: dict, now: datetime) -> list[dict
     return plans
 
 
-def resolve_nix(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve_nix(
+    root: Path, spec: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> ad.Table:
     before = nix_snapshot(root, spec)
     plans = nix_plan(before, spec, policy, now)
     changed = []
     # One invocation per flake keeps coordinated overrides in the same lock operation.
     for file in before["locks"]:
         selected = [p for p in plans if p["file"] == file]
+        nodes = nix_nodes(before["locks"][file])
         if all(
-            before["locks"][file]["nodes"][p["node"]]["locked"]["rev"] == p["revision"]
+            ad.table(
+                nodes[ad.text(p["node"], "Nix planned node")]["locked"],
+                "Nix locked source",
+            )["rev"]
+            == p["revision"]
             for p in selected
         ):
             continue
@@ -804,13 +996,13 @@ def resolve_nix(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
             argv.extend(
                 [
                     "--override-input",
-                    item["input"],
+                    ad.text(item["input"], "Nix input name"),
                     f"github:{item['repository']}/{item['revision']}",
                 ]
             )
         chainman.execute(
             root,
-            spec.get("profile", "core"),
+            ad.text(spec.get("profile", "core"), "Nix profile"),
             argv,
             env=tc.environment(root),
             cwd=tc.contained(root, str(Path(file).parent)),
@@ -820,7 +1012,9 @@ def resolve_nix(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     return {"changed": changed, "selected": plans}
 
 
-def nix_tree(root: Path, spec: dict, repository: str, commit: str) -> dict:
+def nix_tree(
+    root: Path, spec: Mapping[str, object], repository: str, commit: str
+) -> dict[str, str]:
     repository_name(repository)
     revision(commit)
     owner, repo = repository.split("/")
@@ -837,7 +1031,7 @@ def nix_tree(root: Path, spec: dict, repository: str, commit: str) -> dict:
     )
     result = chainman.execute(
         root,
-        spec.get("profile", "core"),
+        ad.text(spec.get("profile", "core"), "Nix profile"),
         [
             "nix",
             "--extra-experimental-features",
@@ -860,37 +1054,45 @@ def nix_tree(root: Path, spec: dict, repository: str, commit: str) -> dict:
         or not re.fullmatch(r"sha256-[A-Za-z0-9+/]{43}=", evidence["narHash"])
     ):
         raise ValueError("Nix source evidence lacks one SHA-256 content hash")
-    return evidence
+    return {"narHash": evidence["narHash"]}
 
 
 def audit_nix(
-    root: Path, spec: dict, before: dict, policy: dict, now: datetime
+    root: Path,
+    spec: Mapping[str, object],
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
 ) -> None:
     plans = nix_plan(before, spec, policy, now)
     current = nix_snapshot(root, spec)
-    for file, old in before["locks"].items():
+    for file, raw_old in ad.table(before["locks"], "Nix snapshot locks").items():
+        old = ad.table(raw_old, "Original Nix lock")
         new = current["locks"][file]
-        expected = {p["node"]: p for p in plans if p["file"] == file}
-        if (
-            new.get("root") != old.get("root")
-            or new["nodes"].keys() != old["nodes"].keys()
-        ):
+        expected = {
+            ad.text(p["node"], "Nix planned node"): p
+            for p in plans
+            if p["file"] == file
+        }
+        old_nodes, new_nodes = nix_nodes(old), nix_nodes(new)
+        if new.get("root") != old.get("root") or new_nodes.keys() != old_nodes.keys():
             raise ValueError("Nix changed undeclared lock structure")
-        for key, node in old["nodes"].items():
+        for key, node in old_nodes.items():
             if key not in expected:
-                if node != new["nodes"][key]:
+                if node != new_nodes[key]:
                     raise ValueError("Nix changed an undeclared input")
                 continue
             plan = expected[key]
-            selected = new["nodes"][key]["locked"]
-            owner, repository = plan["repository"].split("/")
+            selected_node = new_nodes[key]
+            selected = ad.table(selected_node["locked"], "Nix selected source")
+            owner, repository = ad.text(plan["repository"], "Nix repository").split("/")
             canonical_original = {
                 "type": "github",
                 "owner": owner,
                 "repo": repository,
                 "rev": plan["revision"],
             }
-            if new["nodes"][key].get("original") not in (
+            if selected_node.get("original") not in (
                 node.get("original"),
                 canonical_original,
             ):
@@ -899,7 +1101,7 @@ def audit_nix(
                 )
             if {
                 k: value
-                for k, value in new["nodes"][key].items()
+                for k, value in selected_node.items()
                 if k not in ("locked", "original")
             } != {
                 k: value for k, value in node.items() if k not in ("locked", "original")
@@ -909,14 +1111,18 @@ def audit_nix(
                 )
             allowed_locked = {"rev", "lastModified", "narHash"}
             if {k: v for k, v in selected.items() if k not in allowed_locked} != {
-                k: v for k, v in node["locked"].items() if k not in allowed_locked
+                k: v
+                for k, v in ad.table(node["locked"], "Nix original source").items()
+                if k not in allowed_locked
             }:
                 raise ValueError("Nix changed undeclared source attributes")
             if (
-                nix_node(new, plan["input"]) != key
+                nix_node(new, ad.text(plan["input"], "Nix input name")) != key
                 or selected.get("rev") != plan["revision"]
                 or selected.get("type") != "github"
-                or selected.get("owner", "") + "/" + selected.get("repo", "")
+                or ad.text(selected.get("owner", ""), "Nix owner")
+                + "/"
+                + ad.text(selected.get("repo", ""), "Nix repository")
                 != plan["repository"]
             ):
                 raise ValueError(
@@ -926,19 +1132,25 @@ def audit_nix(
                 if selected.get("lastModified") != int(
                     registry.timestamp(plan["published"]).timestamp()
                 ) or not re.fullmatch(
-                    r"sha256-[A-Za-z0-9+/]{43}=", selected.get("narHash", "")
+                    r"sha256-[A-Za-z0-9+/]{43}=",
+                    ad.text(selected.get("narHash", ""), "Nix content hash"),
                 ):
                     raise ValueError(
                         "Nix input lacks consistent timestamp/hash evidence"
                     )
-                tree = nix_tree(root, spec, plan["repository"], plan["revision"])
+                tree = nix_tree(
+                    root,
+                    spec,
+                    ad.text(plan["repository"], "Nix repository"),
+                    ad.text(plan["revision"], "Nix revision"),
+                )
                 if tree.get("narHash") != selected["narHash"]:
                     raise ValueError(
                         "Nix input content hash differs from its immutable source"
                     )
 
 
-def snapshot(root: Path, spec: dict) -> dict:
+def snapshot(root: Path, spec: Mapping[str, object]) -> Mapping[str, object]:
     adapter = spec.get("adapter")
     if adapter == "actions":
         return actions_snapshot(root, spec)
@@ -958,8 +1170,13 @@ def snapshot(root: Path, spec: dict) -> dict:
 
 
 def resolve(
-    root: Path, spec: dict, policy: dict, now: datetime, *, before: dict | None = None
-) -> dict:
+    root: Path,
+    spec: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+    *,
+    before: ad.Table | None = None,
+) -> Mapping[str, object]:
     cutoff(policy, now)
     adapter = spec.get("adapter")
     if adapter == "actions":
@@ -975,11 +1192,17 @@ def resolve(
     if adapter == "toolchain":
         import source_toolchain
 
-        return source_toolchain.resolve(root, spec, policy, now, before=before)
+        return source_toolchain.resolve(root, spec, dict(policy), now, before=before)
     raise ValueError("Unsupported source update adapter")
 
 
-def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> None:
+def audit(
+    root: Path,
+    spec: Mapping[str, object],
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> None:
     if before.get("adapter") != spec.get("adapter"):
         raise ValueError("Source audit snapshot belongs to a different adapter")
     cutoff(policy, now)
@@ -991,9 +1214,11 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
         ):
             raise ValueError("Actions target inventory changed during reconciliation")
         for current, planned in zip(actual["records"], expected, strict=True):
+            current_fields: Mapping[str, object] = current
+            planned_fields: Mapping[str, object] = planned
             if (
                 any(
-                    current[k] != planned[k]
+                    current_fields[k] != planned_fields[k]
                     for k in ("file", "action", "ordinal", "repository")
                 )
                 or current["revision"] != planned["selected"]["revision"]
@@ -1004,7 +1229,7 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
             old_tracking, new_tracking = planned["tracking"], current["tracking"]
             expected_tracking = dict(old_tracking)
             if "version" in planned["selected"]:
-                version = list(action_version(planned["selected"]["version"]))
+                version = list(action_rank(planned["selected"]["version"]))
                 if "major" in expected_tracking:
                     expected_tracking["major"] = version[0]
                 if "version" in expected_tracking:
@@ -1014,14 +1239,15 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
                     "Actions tracking policy changed during reconciliation"
                 )
     elif spec["adapter"] == "oci":
-        actual = oci_inventory(root, spec)
-        expected = {
-            name: select_oci(value, spec, policy, now)
-            for name, value in before["images"].items()
+        actual_images = oci_inventory(root, spec)
+        expected_images = {
+            name: select_oci(image_record(value), spec, policy, now)
+            for name, value in ad.table(before["images"], "OCI snapshot images").items()
         }
-        if actual.keys() != expected.keys() or any(
-            any(actual[name][k] != value[k] for k in actual[name])
-            for name, value in expected.items()
+        if actual_images.keys() != expected_images.keys() or any(
+            {k: v for k, v in value.items() if k in actual_images[name]}
+            != actual_images[name]
+            for name, value in expected_images.items()
         ):
             raise ValueError("OCI final identity differs from its verified selection")
     elif spec["adapter"] == "nix":
