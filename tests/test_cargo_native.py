@@ -241,6 +241,74 @@ class NativeCargoTests(unittest.TestCase):
             native.cargo_file_state(self.root, "Cargo.lock"), self.original_lock
         )
 
+    def test_real_workspace_inherited_alias_is_selected_once_and_members_are_preserved(
+        self,
+    ):
+        self.manifest.write_text(
+            '# public comment\n[workspace]\nmembers=["member-a", "member-b"]\nresolver="2"\n'
+            '[workspace.dependencies]\nalias={package="neutral-parent",version="^1.0.0"}\n'
+        )
+        members = {}
+        for name, section in (
+            ("member-a", "dependencies"),
+            ("member-b", "dev-dependencies"),
+        ):
+            path = self.put(
+                name + "/Cargo.toml",
+                f'# inherited alias\n[package]\nname="{name}"\nversion="0.1.0"\nedition="2021"\n'
+                f"[{section}]\nalias.workspace=true\n",
+            )
+            path.chmod(0o640)
+            members[path] = (path.read_bytes(), path.stat().st_mode)
+            self.put(name + "/src/lib.rs", "// unchanged member source\n")
+        # Refresh only local package membership, retaining the old registry graph.
+        self.cargo("update", "--workspace")
+        self.assertEqual(
+            {
+                p["name"]: p["version"]
+                for p in tomllib.loads(self.lock.read_text())["package"]
+                if p.get("source")
+            },
+            {"neutral-parent": "1.0.0", "neutral-leaf": "1.0.0"},
+        )
+        result = self.resolve()
+        self.assert_public_manifest()
+        self.assertTrue(all(b'version="=1.2.0"' in body for _, body in self.calls))
+        before = native.cargo_file_state(self.root, "Cargo.lock")
+        graph = json.loads(
+            self.cargo(
+                "metadata", "--quiet", "--locked", "--format-version", "1"
+            ).stdout
+        )
+        self.assertEqual(
+            {p["name"]: p["version"] for p in graph["packages"]},
+            {
+                "member-a": "0.1.0",
+                "member-b": "0.1.0",
+                "neutral-parent": "1.2.0",
+                "neutral-leaf": "1.5.0",
+            },
+        )
+        by_id = {p["id"]: p["name"] for p in graph["packages"]}
+        for node in graph["resolve"]["nodes"]:
+            if by_id[node["id"]] in ("member-a", "member-b"):
+                self.assertEqual(
+                    [(d["name"], by_id[d["pkg"]]) for d in node["deps"]],
+                    [("alias", "neutral-parent")],
+                )
+        self.assertEqual(native.cargo_file_state(self.root, "Cargo.lock"), before)
+        self.assertEqual(
+            {path: (path.read_bytes(), path.stat().st_mode) for path in members},
+            members,
+        )
+        self.assertEqual(
+            {tuple(item[:3]) for item in result["cargo_identities"]["rust-0"]},
+            {
+                ("crates", "neutral-parent", "1.2.0"),
+                ("crates", "neutral-leaf", "1.5.0"),
+            },
+        )
+
     def test_real_lock_checksum_mismatch_is_rejected_and_restored(self):
         release = self.releases["neutral-parent"][1]
         artifact = release.artifacts[0]

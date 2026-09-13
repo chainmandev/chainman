@@ -105,8 +105,8 @@ class NativeSwiftTests(unittest.TestCase):
         )
         self.spec = {"adapter": "swift", "mode": "compatible"}
 
-    def package(self, name, dependency=""):
-        child = "neutral-parent" if name == "NeutralApp" else "neutral-leaf"
+    def package(self, name, dependency="", *, child=None):
+        child = child or ("neutral-parent" if name == "NeutralApp" else "neutral-leaf")
         target_dependency = (
             f'.product(name: "{child}", package: "{child}")' if dependency else ""
         )
@@ -293,6 +293,69 @@ class NativeSwiftTests(unittest.TestCase):
         self.assertEqual(
             native.cargo_file_state(self.root, "Package.resolved"), self.original_lock
         )
+
+    def test_real_remote_graph_through_local_package_is_audited_and_preserved(self):
+        bridge = self.root / "bridge"
+        source = bridge / "Sources/NeutralBridge/Library.swift"
+        source.parent.mkdir(parents=True)
+        source.write_text("// unchanged local bridge\n")
+        child_manifest = bridge / "Package.swift"
+        child_manifest.write_text(
+            self.package(
+                "NeutralBridge",
+                '.package(url: "https://github.com/chainman-fixture/neutral-parent", exact: "1.2.0")',
+                child="neutral-parent",
+            )
+        )
+        child_manifest.chmod(0o640)
+        # SwiftPM's local package identity is its path basename, while its product
+        # name comes from Package.swift.
+        self.manifest.write_text(
+            self.package(
+                "NeutralApp", '.package(path: "bridge")', child="NeutralBridge"
+            ).replace('package: "NeutralBridge"', 'package: "bridge"')
+        )
+        original = {
+            path: (path.read_bytes(), path.stat().st_mode)
+            for path in (self.manifest, child_manifest, source)
+        }
+        with self.evidence():
+            result = native.resolve(self.root, self.spec, {}, self.now)
+            self.assertEqual(result["swift_selected"], {"swift-0": {}})
+            self.assertEqual(
+                set(result["swift_inputs"]), {"Package.swift", "bridge/Package.swift"}
+            )
+            pins = json.loads(self.lock.read_text())["pins"]
+            self.assertEqual(
+                {pin["identity"]: pin["state"]["version"] for pin in pins},
+                {"neutral-parent": "1.2.0", "neutral-leaf": "1.5.0"},
+            )
+            before = native.cargo_file_state(self.root, "Package.resolved")
+            baseline = {"identities": [], "resolution": result}
+            native.audit(self.root, self.spec, baseline, {}, self.now)
+            self.assertEqual(
+                native.cargo_file_state(self.root, "Package.resolved"), before
+            )
+            self.assertEqual(
+                {path: (path.read_bytes(), path.stat().st_mode) for path in original},
+                original,
+            )
+            # A stale native cache must not conceal an incomplete command-root lock.
+            lock = json.loads(self.lock.read_text())
+            lock["pins"] = [
+                pin for pin in lock["pins"] if pin["identity"] != "neutral-parent"
+            ]
+            self.lock.write_text(json.dumps(lock))
+            incomplete = native.cargo_file_state(self.root, "Package.resolved")
+            with self.assertRaisesRegex(ValueError, "lock|identity|identities"):
+                native.audit(self.root, self.spec, baseline, {}, self.now)
+            self.assertEqual(
+                native.cargo_file_state(self.root, "Package.resolved"), incomplete
+            )
+            self.assertEqual(
+                {path: (path.read_bytes(), path.stat().st_mode) for path in original},
+                original,
+            )
 
     def test_actual_resolution_rejects_disagreeing_revision_evidence(self):
         self.revisions["neutral-parent", "1.2.0"] = "0" * 40

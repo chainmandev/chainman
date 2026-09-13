@@ -149,7 +149,9 @@ checks exact direct selection, a native transitive conflict followed by eligible
 fallback, restored manifest syntax/modes, native acceptance with `--locked`,
 unsatisfiable resolution, and rejection/restoration of mismatched checksum
 evidence. The fixture supplies registry publication evidence; it does not qualify
-the crates.io HTTP client.
+the crates.io HTTP client. A virtual workspace case checks one renamed dependency
+inherited by two members through ordinary and development dependencies, native
+alias binding, transitive repair and preservation of member manifest bytes/modes.
 
 `just swift-test` runs the production Swift adapter against disposable versioned
 Git repositories. A fixture-only Git transport rewrite preserves the declared
@@ -159,6 +161,10 @@ The fixture isolates repository, configuration, fingerprint, and compiler caches
 It checks direct selection, transitive versions/revisions, public manifest
 restoration, failed resolution, mismatched revision evidence, and read-only
 repeated audit. The fixture supplies GitHub publication evidence.
+A local-package case reaches remote parent/leaf dependencies through a contained
+bridge package. It checks the real frozen graph and command-root lock, preserves
+the local manifest, and rejects an incomplete lock despite an already populated
+native cache. Local closure discovery does not expand automatic pin ownership.
 
 The Swift test initially reproduced an audit failure after a valid update:
 `--skip-update` reused a shared repository cache lacking the newly selected
