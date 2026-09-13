@@ -238,6 +238,10 @@ dependency policy updates both inputs with the ordinary commit-age rule. Generat
 examples inherit both locks and update targets. Intel compatibility depends on
 the remaining upstream 26.05 support period; its retirement requires a new
 platform-support decision.
+Local comparisons of its Python tools record both interpreter versions and module
+import paths. Ad hoc `nix shell` checks clear inherited `PYTHONPATH` and
+`NIX_PYTHONPATH` before starting the selected Python environment; otherwise an
+older interpreter can still import the main shell's newer libraries.
 On Intel macOS, source and bootstrap entry make the compatibility input's Bash
 available through `nix shell` before `nix develop`. Nix selects its startup Bash
 from the input named `nixpkgs` independently of the devShell, and otherwise falls

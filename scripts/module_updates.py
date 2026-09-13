@@ -114,14 +114,15 @@ def image_snapshot(root: Path, policy: Table) -> dict[str, str] | None:
     spec = table(policy.get("docker", {}), "Docker update policy")
     if not spec.get("enabled", True):
         return None
-    text = tc.regular_input(root, "nix/container-image.txt").decode().strip()
-    match = re.fullmatch(r"docker\.io/([^:@]+):([^@]+)@(sha256:[a-f0-9]{64})", text)
-    if not match or match[1] != spec.get("repository", "nixos/nix"):
+    reference = tc.regular_input(root, "nix/container-image.txt").decode().strip()
+    repository = text(spec.get("repository", "nixos/nix"), "Docker repository")
+    match = re.fullmatch(r"docker\.io/([^:@]+):([^@]+)@(sha256:[a-f0-9]{64})", reference)
+    if not match or match[1] != repository:
         raise ValueError(
             "Runtime image must match its declared repository and immutable identity"
         )
     bootstrap = tc.regular_input(root, "bootstrap/chainman.sh").decode()
-    if re.findall(r"(?m)^image=(\S+)$", bootstrap) != [text]:
+    if re.findall(r"(?m)^image=(\S+)$", bootstrap) != [reference]:
         raise ValueError("Bootstrap image and declared runtime image disagree")
     return {
         "repository": match[1],
