@@ -143,7 +143,8 @@
           control = shell "control" [ pkgs.go_latest pkgs.stdenv.cc ] "";
           flutter = shell "flutter" [ flutterPkgs.flutter ] "";
           swift =
-            shell "swift"
+            shellWith (if pkgs.stdenv.hostPlatform.isDarwin then pkgs.mkShellNoCC else pkgs.mkShell) base
+              "swift"
               (
                 [ pkgs.swift-format ]
                 ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
@@ -158,6 +159,14 @@
                 pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                   export LD_LIBRARY_PATH=${pkgs.swiftPackages.Dispatch}/lib:${pkgs.swiftPackages.Foundation}/lib/swift/linux:${pkgs.swiftPackages.XCTest}/lib/swift/linux
                   export LIBRARY_PATH=$LD_LIBRARY_PATH
+                ''
+                + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+                  # Use one selected Xcode for the native compiler and its SDK.
+                  # An outer Nix C shell can otherwise leak a different SDKROOT.
+                  SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
+                  CC=$(/usr/bin/xcrun --find clang)
+                  CXX=$(/usr/bin/xcrun --find clang++)
+                  export SDKROOT CC CXX
                 ''
               );
           compose = shell "compose" [ pkgs.gradle pkgs.jdk21 pkgs.ktlint ] "";
