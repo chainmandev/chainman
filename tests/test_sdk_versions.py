@@ -18,6 +18,39 @@ import updates
 from toolchain import module
 
 
+class ManifestPointerTests(unittest.TestCase):
+    def test_nested_sequence_edits_preserve_serializer_structure(self):
+        bodies = {
+            "json": json.dumps(
+                {"items": [{"version": "1.0.0", "name": "keep"}]}, indent=2
+            )
+            + "\n",
+            "toml": 'items = [{ version = "1.0.0", name = "keep" }] # keep comment\n',
+            "yaml": 'items:\n  - version: "1.0.0" # keep comment\n    name: keep\n',
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            for suffix, body in bodies.items():
+                with self.subTest(format=suffix):
+                    path = Path(temporary) / ("manifest." + suffix)
+                    value, render = manifests.document(path, body=body)
+                    self.assertEqual(
+                        manifests.lookup(value, ["items", 0, "version"]), "1.0.0"
+                    )
+                    manifests.assign(value, ["items", 0, "version"], "2.0.0")
+                    updated = render()
+                    reparsed, _ = manifests.document(path, body=updated)
+                    self.assertEqual(
+                        manifests.lookup(reparsed, ["items", 0, "version"]), "2.0.0"
+                    )
+                    self.assertEqual(
+                        manifests.lookup(reparsed, ["items", 0, "name"]), "keep"
+                    )
+                    if suffix != "yaml":
+                        self.assertEqual(updated, body.replace("1.0.0", "2.0.0"))
+                    else:
+                        self.assertRegex(updated, r'"2\.0\.0" +# keep comment')
+
+
 class SDKTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="sdk-contract-")

@@ -1,16 +1,20 @@
 """Optional finite-command ownership inside the selected execution environment."""
 
 from contextlib import contextmanager
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 import platform
 import subprocess
 
 import chainman
 import toolchain as tc
+from adapter_data import text
 
 
 @contextmanager
-def command(root, commands, spec):
+def command(
+    root: Path, commands: Sequence[Sequence[str]], spec: Mapping[str, object]
+) -> Iterator[list[str]]:
     target = (
         platform.system().lower()
         + "-"
@@ -44,7 +48,9 @@ def command(root, commands, spec):
                     {
                         "argv": argv,
                         "directory": str(
-                            tc.contained(root, spec.get("directory", "."))
+                            tc.contained(
+                                root, text(spec.get("directory", "."), "Task directory")
+                            )
                         ),
                     }
                     for argv in commands

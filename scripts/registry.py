@@ -459,7 +459,11 @@ def latest_publications(releases: list[Release]) -> dict[str, datetime]:
 
 
 def maturity(
-    provider: str, releases: list[Release], policy: dict, name: str, now: datetime
+    provider: str,
+    releases: list[Release],
+    policy: Mapping[str, object],
+    name: str,
+    now: datetime,
 ) -> list[Release]:
     bound = constraint(provider, policy, name)
     safe = minimum_safe(provider, policy, name)
@@ -482,7 +486,11 @@ def maturity(
 
 
 def active_exceptions(
-    provider: str, releases: list[Release], policy: dict, name: str, now: datetime
+    provider: str,
+    releases: list[Release],
+    policy: Mapping[str, object],
+    name: str,
+    now: datetime,
 ) -> list[Release]:
     mature = maturity(provider, releases, policy, name, now)
     bound = constraint(provider, policy, name)
@@ -514,7 +522,11 @@ def active_exceptions(
 
 
 def eligible(
-    provider: str, releases: list[Release], policy: dict, name: str, now: datetime
+    provider: str,
+    releases: list[Release],
+    policy: Mapping[str, object],
+    name: str,
+    now: datetime,
 ) -> list[Release]:
     candidates = maturity(provider, releases, policy, name, now) + active_exceptions(
         provider, releases, policy, name, now
@@ -527,7 +539,11 @@ def eligible(
 
 
 def select(
-    provider: str, releases: list[Release], policy: dict, name: str, now: datetime
+    provider: str,
+    releases: list[Release],
+    policy: Mapping[str, object],
+    name: str,
+    now: datetime,
 ) -> Release:
     return max(
         eligible(provider, releases, policy, name, now),
@@ -644,7 +660,7 @@ def go_releases(
     package: str,
     available: list[str] | None = None,
     *,
-    policy: dict | None = None,
+    policy: Mapping[str, object] | None = None,
     now: datetime | None = None,
     bounds: tuple[str, ...] = (),
     exact: str | None = None,

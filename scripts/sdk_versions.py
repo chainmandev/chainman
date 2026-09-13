@@ -16,6 +16,7 @@ from packaging.version import Version
 from semantic_version import NpmSpec, Version as Semver
 
 import manifests
+from adapter_data import Table, string_map, strings, table, text
 from toolchain import contained, environment, managed_run, module, entry_command
 
 KINDS = {
@@ -46,17 +47,17 @@ def extracted(output: str, pattern: str) -> Version:
     return number(matches[0])
 
 
-def probe(root: Path, spec: dict) -> dict[str, Version]:
+def probe(root: Path, spec: Mapping[str, object]) -> dict[str, Version]:
     env = environment(root)
     env["TOOLCHAIN_FRESH"] = "1"
 
-    def command(argv, *, json_output=False):
+    def command(argv: list[str], *, json_output: bool = False) -> str:
         # Probe outside project manifests: pnpm must not dispatch the old
         # packageManager pin, and Gradle must not configure/build the project.
         with tempfile.TemporaryDirectory(prefix="toolchain-sdk-probe-") as cwd:
             result = managed_run(
                 [
-                    *entry_command(root, spec["profile"]),
+                    *entry_command(root, text(spec["profile"], "SDK profile")),
                     "sh",
                     "-eu",
                     "-c",
@@ -112,10 +113,13 @@ def probe(root: Path, spec: dict) -> dict[str, Version]:
             )
         }
     if profile == "flutter":
-        body = json.loads(
-            command(["flutter", "--version", "--machine"], json_output=True)
+        body = table(
+            json.loads(
+                command(["flutter", "--version", "--machine"], json_output=True)
+            ),
+            "Flutter SDK probe",
         )
-        bundled = number(body.get("dartSdkVersion"))
+        bundled = number(text(body.get("dartSdkVersion"), "Bundled Dart SDK version"))
         actual = extracted(
             command(["dart", "--version"]),
             r"^Dart SDK version: ([0-9]+\.[0-9]+\.[0-9]+) .+$",
@@ -161,8 +165,8 @@ def supported(kind: str, value: str, sdk: Version) -> bool:
     return number(value) <= sdk
 
 
-def replacement(target: dict, old: str, sdk: Version) -> str:
-    kind = target["kind"]
+def replacement(target: Mapping[str, object], old: str, sdk: Version) -> str:
+    kind = text(target["kind"], "SDK target kind")
     held = target.get("hold_value")
     reason = target.get("hold_reason")
     if held is not None or reason is not None:
@@ -213,8 +217,10 @@ def replacement(target: dict, old: str, sdk: Version) -> str:
     elif kind == "ruff":
         floor = number(old[2] + "." + old[3:])
     else:
-        digits = re.search(r"[0-9]+(?:\.[0-9]+)*", old)[0]
-        floor = Version(digits)
+        digits = re.search(r"[0-9]+(?:\.[0-9]+)*", old)
+        if digits is None:
+            raise ValueError("SDK target lacks its numeric version")
+        floor = Version(digits[0])
     if floor > sdk:
         raise ValueError(
             "Refreshed SDK is older than the declared language/runtime target"
@@ -222,13 +228,14 @@ def replacement(target: dict, old: str, sdk: Version) -> str:
     return expected
 
 
-def rust_contract(path: Path, workspace: dict, sdk: Version) -> None:
-    body = tomllib.loads(path.read_text())
+def rust_contract(path: Path, workspace: Mapping[str, object], sdk: Version) -> None:
+    body = table(tomllib.loads(path.read_text()), "Rust manifest")
     package = body.get("package")
     if package is None:
         return
+    package = table(package, "Rust package")
 
-    def field(name, default=None):
+    def field(name: str, default: object = None) -> object:
         value = package.get(name, default)
         if isinstance(value, Mapping):
             if dict(value) != {"workspace": True} or name not in workspace:
@@ -238,22 +245,28 @@ def rust_contract(path: Path, workspace: dict, sdk: Version) -> None:
 
     edition = field("edition", "2015")
     minimum = {"2015": "1.0", "2018": "1.31", "2021": "1.56", "2024": "1.85"}.get(
-        edition
+        text(edition, "Rust edition")
     )
     if minimum is None or sdk < number(minimum):
         raise ValueError("Selected Rust SDK does not support the declared edition")
     msrv = field("rust-version")
-    if msrv is not None and sdk < number(msrv):
+    if msrv is not None and sdk < number(text(msrv, "Rust MSRV")):
         raise ValueError("Selected Rust SDK is below the declared MSRV")
 
 
-def synchronize(root: Path, selected: list[str], *, check: bool = False) -> dict:
-    config = tomllib.loads(contained(root, "sdk-versions.toml").read_text())
+def synchronize(
+    root: Path, selected: list[str], *, check: bool = False
+) -> dict[str, dict[str, str]]:
+    config = table(
+        tomllib.loads(contained(root, "sdk-versions.toml").read_text()),
+        "SDK configuration",
+    )
     if config.get("schema") != 1:
         raise ValueError("Unsupported SDK target configuration schema")
     declared = config.get("targets", [])
     if not isinstance(declared, list) or any(not isinstance(t, dict) for t in declared):
         raise ValueError("SDK targets must be a list of tables")
+    declared = [table(target, "SDK target") for target in declared]
     for target in declared:
         files = target.get("files")
         if (
@@ -270,8 +283,9 @@ def synchronize(root: Path, selected: list[str], *, check: bool = False) -> dict
         for reason in unmanaged.values()
     ):
         raise ValueError("Unmanaged SDK modules require explicit nonempty reasons")
+    unmanaged = string_map(unmanaged, "Unmanaged SDK modules")
     targets = [t for t in declared if t.get("module") in selected]
-    owned = {t.get("module") for t in declared}
+    owned = {text(t.get("module"), "SDK target module") for t in declared}
     if owned & unmanaged.keys():
         raise ValueError("SDK module cannot be both targeted and explicitly unmanaged")
     missing = set(selected) & set(KINDS.values()) - owned - unmanaged.keys()
@@ -280,10 +294,15 @@ def synchronize(root: Path, selected: list[str], *, check: bool = False) -> dict
             "Selected built-in SDK module has no targets or explicit unmanaged reason: "
             + ", ".join(sorted(missing))
         )
-    specs, versions, bodies, seen = {}, {}, {}, set()
-    python_ranges, ruff_targets = {}, {}
+    specs: dict[str, Table] = {}
+    versions: dict[str, dict[str, Version]] = {}
+    bodies: dict[Path, str] = {}
+    seen: set[tuple[str, str]] = set()
+    python_ranges: dict[str, list[str]] = {}
+    ruff_targets: dict[str, Version] = {}
     for target in targets:
-        name, kind = target["module"], target.get("kind")
+        name = text(target["module"], "SDK target module")
+        kind = text(target.get("kind"), "SDK target kind")
         if kind not in KINDS:
             raise ValueError("Unsupported SDK target kind")
         spec = specs.setdefault(name, module(name, root))
@@ -295,24 +314,29 @@ def synchronize(root: Path, selected: list[str], *, check: bool = False) -> dict
         if not isinstance(sdk, Version):
             raise ValueError("Missing selected SDK probe evidence")
         paths = set()
-        for pattern in target["files"]:
+        for pattern in strings(target["files"], "SDK target files"):
             contained(root, pattern)
             found = list(root.glob(pattern))
             if not found:
                 raise ValueError("Declared SDK target pattern matched no files")
             paths.update(found)
-        workspace = {}
+        workspace: Table = {}
         if kind == "rust":
-            workspace = (
-                tomllib.loads(contained(root, target["workspace"]).read_text())
-                .get("workspace", {})
-                .get("package", {})
+            workspace_manifest = tomllib.loads(
+                contained(root, text(target["workspace"], "Rust workspace")).read_text()
+            )
+            workspace = table(
+                table(workspace_manifest.get("workspace", {}), "Rust workspace").get(
+                    "package", {}
+                ),
+                "Rust workspace package",
             )
         for path in sorted(paths):
             relative = str(path.relative_to(root))
             contained(root, relative)
             if not path.is_file() or not any(
-                fnmatch.fnmatchcase(relative, p) for p in spec.get("update_outputs", [])
+                fnmatch.fnmatchcase(relative, p)
+                for p in strings(spec.get("update_outputs", []), "SDK update outputs")
             ):
                 raise ValueError("SDK target is not a declared regular update output")
             if (relative, kind) in seen:
@@ -349,7 +373,7 @@ def synchronize(root: Path, selected: list[str], *, check: bool = False) -> dict
                     "dart": ["environment", "sdk"],
                 }[kind]
                 document, render = manifests.document(path, body=old_body)
-                old = manifests.lookup(document, pointer)
+                old = text(manifests.lookup(document, pointer), "SDK declaration")
                 value = replacement(target, old, sdk)
                 if kind == "python":
                     python_ranges.setdefault(name, []).append(value)

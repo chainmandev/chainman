@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, MutableMapping, MutableSequence, Sequence
 import io
 import json
 from pathlib import Path
@@ -15,7 +15,9 @@ from ruamel.yaml import YAML
 from toolchain import contained, local_source, module, regular_input
 
 
-def document(path: Path, *, body: str | None = None):
+def document(
+    path: Path, *, body: str | None = None
+) -> tuple[object, Callable[[], str]]:
     body = path.read_text() if body is None else body
     suffix = path.suffix
     if suffix == ".json":
@@ -28,7 +30,7 @@ def document(path: Path, *, body: str | None = None):
     yaml.preserve_quotes = True
     value = yaml.load(body)
 
-    def render():
+    def render() -> str:
         buffer = io.StringIO()
         yaml.dump(value, buffer)
         return buffer.getvalue()
@@ -36,17 +38,32 @@ def document(path: Path, *, body: str | None = None):
     return value, render
 
 
-def lookup(value, pointer):
+def lookup(value: object, pointer: Sequence[str | int]) -> object:
     for component in pointer:
-        value = value[component]
+        if isinstance(value, Mapping):
+            value = value[component]
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if not isinstance(component, int):
+                raise ValueError("A manifest sequence requires an integer index")
+            value = value[component]
+        else:
+            raise ValueError("A manifest pointer must traverse mappings or sequences")
     return value
 
 
-def assign(value, pointer, replacement):
+def assign(value: object, pointer: Sequence[str | int], replacement: object) -> None:
     if not pointer:
         raise ValueError("A dependency pointer cannot replace an entire document")
     target = lookup(value, pointer[:-1])
-    target[pointer[-1]] = replacement
+    component = pointer[-1]
+    if isinstance(target, MutableMapping):
+        target[component] = replacement
+    elif isinstance(target, MutableSequence):
+        if not isinstance(component, int):
+            raise ValueError("A manifest sequence requires an integer index")
+        target[component] = replacement
+    else:
+        raise ValueError("A manifest pointer must select a mutable container")
 
 
 def js_pin(file: str, pointer: list, name: str, value: str):

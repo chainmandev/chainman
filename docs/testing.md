@@ -19,13 +19,14 @@ dependency identity, native input projections, timing and distribution/developme
 entrypoints enforce the pinned mypy
 strict flags, plus rejection of explicit `Any` and unreachable code. Decoded values
 enter as `object` and are narrowed by validation. Resource execution uses an
-immutable policy with typed fields. The transaction coordinator, source workflow,
-native lock adapter and npm adapter require complete function annotations and
-pass decoded records through their decisions. Their configuration inputs and some
-imported operations still have dynamic types. The other modules listed in
+immutable policy with typed fields. The native lock adapter, source workflow, finite-command adapter and SDK
+coordination also enforce strict flags. Native adapter configuration values are
+projected into typed paths, profiles, pin arrays and policy maps. The transaction
+coordinator and npm adapter require complete function annotations and pass decoded
+records through their decisions; some imported operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 33 source
-files, including 18 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 34 source
+files, including 22 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -33,7 +34,9 @@ wire schema. Timing context managers have explicit lifetime and environment type
 Operation leases and compiler lifetime context managers also expose concrete
 descriptor, stream and yielded-environment types. Managed subprocess options have
 explicit allowed keys and value types, with separate text and binary results.
-General configuration maps still need further typing.
+Shared manifest lookup/editing accepts unknown parsed values and narrows mutable
+mappings and sequences without replacing the serializer objects. General
+configuration maps still need further typing.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The

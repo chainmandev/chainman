@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal, TypedDict
 import json
@@ -89,7 +90,7 @@ def go_candidates(
     root: Path,
     package: str,
     *,
-    policy: dict | None = None,
+    policy: Mapping[str, object] | None = None,
     now: datetime | None = None,
     bounds: tuple[str, ...] = (),
     exact: str | None = None,
@@ -257,9 +258,16 @@ def swift_declarations(
     return result
 
 
-def swift_explicit_requirements(root: Path, spec: dict) -> dict[str, SwiftPinOwner]:
+def swift_explicit_requirements(
+    root: Path, spec: Mapping[str, object]
+) -> dict[str, SwiftPinOwner]:
     result: dict[str, SwiftPinOwner] = {}
-    name = str((contained(root, spec["directory"]) / "Package.swift").relative_to(root))
+    name = str(
+        (
+            contained(root, data.text(spec["directory"], "Adapter directory"))
+            / "Package.swift"
+        ).relative_to(root)
+    )
     body = regular_input(root, name).decode()
     # A named exact argument must refer to the configured literal initializer;
     # coincidentally equal, unused variables do not own a native dependency.
@@ -269,7 +277,8 @@ def swift_explicit_requirements(root: Path, spec: dict) -> dict[str, SwiftPinOwn
         body,
         flags=re.DOTALL,
     )
-    for pin in spec.get("pins", []):
+    for raw in data.array(spec.get("pins", []), "Adapter pins"):
+        pin = data.table(raw, "Adapter pin")
         if pin.get("file") != name:
             continue
         package = pin.get("name")
@@ -281,7 +290,9 @@ def swift_explicit_requirements(root: Path, spec: dict) -> dict[str, SwiftPinOwn
             raise ValueError("Explicit Swift pin requires its canonical repository")
         if pin.get("format") != "regex" or not isinstance(pin.get("pattern"), str):
             raise ValueError("Explicit Swift pin requires an owning manifest regex")
-        matches = list(re.finditer(pin["pattern"], body, re.MULTILINE))
+        matches = list(
+            re.finditer(data.text(pin["pattern"], "Pin pattern"), body, re.MULTILINE)
+        )
         if (
             len(matches) != 1
             or "value" not in matches[0].groupdict()
@@ -314,9 +325,14 @@ def swift_explicit_requirements(root: Path, spec: dict) -> dict[str, SwiftPinOwn
     return result
 
 
-def swift_local_manifests(root: Path, spec: dict) -> dict[str, list[SwiftDeclaration]]:
+def swift_local_manifests(
+    root: Path, spec: Mapping[str, object]
+) -> dict[str, list[SwiftDeclaration]]:
     """Read the project-local closure without expanding configured pin ownership."""
-    pending = [contained(root, spec["directory"]) / "Package.swift"]
+    pending = [
+        contained(root, data.text(spec["directory"], "Adapter directory"))
+        / "Package.swift"
+    ]
     result = {}
     while pending:
         path = pending.pop()
@@ -333,7 +349,9 @@ def swift_local_manifests(root: Path, spec: dict) -> dict[str, list[SwiftDeclara
     return result
 
 
-def swift_manifest_state(root: Path, spec: dict) -> dict[str, list[str | int] | None]:
+def swift_manifest_state(
+    root: Path, spec: Mapping[str, object]
+) -> dict[str, list[str | int] | None]:
     return {
         name: [
             hashlib.sha256(regular_input(root, name)).hexdigest(),
@@ -343,16 +361,21 @@ def swift_manifest_state(root: Path, spec: dict) -> dict[str, list[str | int] | 
     }
 
 
-def swift_lock_path(root: Path, spec: dict) -> Path:
+def swift_lock_path(root: Path, spec: Mapping[str, object]) -> Path:
     return contained(
         root,
         str(
-            (contained(root, spec["directory"]) / "Package.resolved").relative_to(root)
+            (
+                contained(root, data.text(spec["directory"], "Adapter directory"))
+                / "Package.resolved"
+            ).relative_to(root)
         ),
     )
 
 
-def swift_validation_state(root: Path, spec: dict) -> dict[str, list[str | int] | None]:
+def swift_validation_state(
+    root: Path, spec: Mapping[str, object]
+) -> dict[str, list[str | int] | None]:
     result = swift_manifest_state(root, spec)
     path = swift_lock_path(root, spec)
     name = str(path.relative_to(root))
@@ -364,7 +387,7 @@ def swift_validation_state(root: Path, spec: dict) -> dict[str, list[str | int] 
     return result
 
 
-def maven_repository(spec: dict, package: str) -> str:
+def maven_repository(spec: Mapping[str, object], package: str) -> str:
     declared = data.strings(
         spec.get("maven_repositories", ["central"]), "Maven repositories"
     )
@@ -391,7 +414,7 @@ def maven_repository(spec: dict, package: str) -> str:
     return name
 
 
-def local_gradle_projects(root: Path, spec: dict) -> dict[str, str]:
+def local_gradle_projects(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
     declared = data.string_map(spec.get("local_projects", {}), "Local Gradle projects")
     for package, relative in declared.items():
         registry.maven_prefix(package)
@@ -413,7 +436,9 @@ class GradleProjects(TypedDict):
     edges: list[data.Table]
 
 
-def validate_gradle_projects(root: Path, spec: dict, reports: object) -> GradleProjects:
+def validate_gradle_projects(
+    root: Path, spec: Mapping[str, object], reports: object
+) -> GradleProjects:
     """Join native build-tree identities to actual paths before admitting locals."""
     local = local_gradle_projects(root, spec)
     projects: dict[str, str] = {}
@@ -467,8 +492,8 @@ def validate_gradle_projects(root: Path, spec: dict, reports: object) -> GradleP
     return {"projects": projects, "edges": edges}
 
 
-def identities(root: Path, spec: dict) -> set[Identity]:
-    directory = contained(root, spec["directory"])
+def identities(root: Path, spec: Mapping[str, object]) -> set[Identity]:
+    directory = contained(root, data.text(spec["directory"], "Adapter directory"))
     kind, result = spec["ecosystem"], set()
     if kind == "go":
         for path in paths(root, directory, "go.sum") + paths(
@@ -538,7 +563,9 @@ def identities(root: Path, spec: dict) -> set[Identity]:
     elif kind == "maven":
         local = local_gradle_projects(root, spec)
         required = [
-            p for p in spec.get("artifacts", []) if p.endswith((".lockfile", ".xml"))
+            p
+            for p in data.strings(spec.get("artifacts", []), "Adapter artifacts")
+            if p.endswith((".lockfile", ".xml"))
         ]
         for name in required:
             if not contained(root, name).is_file():
@@ -728,9 +755,9 @@ type ReplacementTarget = LocalReplacement | RemoteReplacement
 type Replacements = dict[data.GoReference, ReplacementTarget]
 
 
-def validate_go_sources(root: Path, spec: dict, items: object) -> None:
+def validate_go_sources(root: Path, spec: Mapping[str, object], items: object) -> None:
     identities = inventory(items)
-    directory = contained(root, spec["directory"])
+    directory = contained(root, data.text(spec["directory"], "Adapter directory"))
     manifests = [
         (
             p,
@@ -849,10 +876,14 @@ def validate_go_sources(root: Path, spec: dict, items: object) -> None:
 
 
 def swift_declared_sources(
-    root: Path, spec: dict, items: object, *, require_locked: bool = True
+    root: Path,
+    spec: Mapping[str, object],
+    items: object,
+    *,
+    require_locked: bool = True,
 ) -> set[tuple[str, str]]:
     identities = inventory(items)
-    directory = contained(root, spec["directory"])
+    directory = contained(root, data.text(spec["directory"], "Adapter directory"))
     declarations = swift_declarations(
         root,
         str((directory / "Package.swift").relative_to(root)),
@@ -861,7 +892,7 @@ def swift_declared_sources(
     configured = swift_explicit_requirements(root, spec)
     body = native(
         root,
-        spec.get("profile", "swift"),
+        data.text(spec.get("profile", "swift"), "Adapter profile"),
         ["swift", "package", "--package-path", str(directory), "dump-package"],
     )
     dependencies = body.get("dependencies") if isinstance(body, dict) else None
@@ -1007,17 +1038,20 @@ def swift_declared_sources(
 
 
 def validate_swift_graph(
-    root: Path, spec: dict, items: object, edges: dict[str, set[tuple[str, str]]]
+    root: Path,
+    spec: Mapping[str, object],
+    items: object,
+    edges: dict[str, set[tuple[str, str]]],
 ) -> None:
     identities = inventory(items)
-    directory = contained(root, spec["directory"])
+    directory = contained(root, data.text(spec["directory"], "Adapter directory"))
     key = hashlib.sha256(str(directory).encode()).hexdigest()
     work = Path(environment(root)["TOOLCHAIN_WORK"])
     scratch = contained(root, str((work / "swift-audit" / key).relative_to(root)))
     graph = data.swift_node(
         native(
             root,
-            spec.get("profile", "swift"),
+            data.text(spec.get("profile", "swift"), "Adapter profile"),
             [
                 "swift",
                 "package",
@@ -1087,7 +1121,11 @@ def validate_swift_graph(
 
 
 def validate_swift_sources(
-    root: Path, spec: dict, items: object, *, require_locked: bool = True
+    root: Path,
+    spec: Mapping[str, object],
+    items: object,
+    *,
+    require_locked: bool = True,
 ) -> None:
     locked = inventory(items)
     before = swift_validation_state(root, spec)
