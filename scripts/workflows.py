@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Iterable, Mapping
 import fcntl
 import fnmatch
 import hashlib
@@ -16,9 +17,10 @@ import chainman
 import toolchain as tc
 import project_environment
 import timing
+from adapter_data import strings, table
 
 
-def name(value):
+def name(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_-]*", value
     ):
@@ -28,13 +30,13 @@ def name(value):
     return value
 
 
-def names(values):
+def names(values: object) -> list[str]:
     if not isinstance(values, list):
         raise ValueError("Workflow references must be arrays of names")
     return [name(value) for value in values]
 
 
-def commands(value):
+def commands(value: object) -> list[list[str]]:
     if not isinstance(value, list) or not value:
         raise ValueError("A workflow requires nonempty argument-array commands")
     for argv in value:
@@ -44,10 +46,10 @@ def commands(value):
             or any(not isinstance(arg, str) or "\0" in arg for arg in argv)
         ):
             raise ValueError("Workflow commands must be nonempty argument arrays")
-    return value
+    return [strings(argv, "Workflow command") for argv in value]
 
 
-def configuration(root):
+def configuration(root: Path) -> dict:
     cfg = tc.config(root)
     if cfg["schema"] not in (2, 3):
         raise ValueError("Named workflows require configuration schema=2 or schema=3")
@@ -189,10 +191,11 @@ def configuration(root):
     return cfg
 
 
-def order(entries, requested):
-    result, active = [], set()
+def order(entries: Mapping[str, object], requested: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    active: set[str] = set()
 
-    def visit(key):
+    def visit(key: str) -> None:
         name(key)
         if key not in entries:
             raise ValueError(f"Unknown workflow dependency: {key}")
@@ -201,7 +204,8 @@ def order(entries, requested):
         if key in result:
             return
         active.add(key)
-        for dependency in names(entries[key].get("depends_on", [])):
+        spec = table(entries[key], f"Workflow {key}")
+        for dependency in names(spec.get("depends_on", [])):
             visit(dependency)
         active.remove(key)
         result.append(key)

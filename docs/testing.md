@@ -20,14 +20,15 @@ dependency identity, native input projections, timing and distribution/developme
 entrypoints enforce the pinned mypy
 strict flags, plus rejection of explicit `Any` and unreachable code. Decoded values
 enter as `object` and are narrowed by validation. Resource execution uses an
-immutable policy with typed fields. The native lock adapter, source workflow, finite-command adapter and SDK
-coordination also enforce strict flags. Native adapter configuration values are
-projected into typed paths, profiles, pin arrays and policy maps. The transaction
-coordinator and npm adapter require complete function annotations and pass decoded
-records through their decisions; some imported operations remain dynamic. The other modules listed in
+immutable policy with typed fields. The transaction coordinator, native lock
+adapter, source workflow, finite-command adapter and SDK coordination also enforce
+strict flags. Native adapter configuration values are projected into typed paths,
+profiles, pin arrays and policy maps. The npm adapter requires complete function
+annotations and passes decoded records through its decisions; some imported
+operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 34 source
-files, including 22 with the strict flags. Recipe bindings and verification task
+files, including 23 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed

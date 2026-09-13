@@ -209,7 +209,9 @@ def declarations(root, cfg):
                 - {"task", "paths", "ignore", "debounce_ms", "startup_seconds"}
             ):
                 raise ValueError("Invalid service watch declaration")
-            tasks = workflows.order(cfg.get("tasks", {}), [watch.get("task")])
+            tasks = workflows.order(
+                cfg.get("tasks", {}), [workflows.name(watch.get("task"))]
+            )
             if any(cfg["tasks"][task].get("services") for task in tasks):
                 raise ValueError(
                     "A watched build task cannot acquire services recursively"

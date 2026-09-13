@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from dataclasses import replace
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 import json
 import hashlib
 import os
@@ -25,6 +25,7 @@ import toolchain as tc
 import updates
 import workflows
 from transaction_state import Inspection, RuntimeMode, State
+from adapter_data import strings
 
 
 def directory(value: str | Path) -> Path:
@@ -84,9 +85,9 @@ def export_authority(
     tc.atomic_json(target / "chainman.lock", pin)
 
 
-def patterns(root: Path, policy: dict) -> list[str]:
+def patterns(root: Path, policy: Mapping[str, object]) -> list[str]:
     result = [
-        *policy.get("outputs", []),
+        *strings(policy.get("outputs", []), "Update outputs"),
         *runtime_files(root),
     ]
     if not policy.get("resolver") and not policy.get("steps"):
@@ -109,7 +110,7 @@ def runtime_files(root: Path) -> list[str]:
     ]
 
 
-def verification(root: Path, policy: dict) -> list[str]:
+def verification(root: Path, policy: Mapping[str, object]) -> list[str]:
     task = policy.get("verify_task")
     tasks = policy.get("verify_tasks")
     if (
@@ -123,15 +124,14 @@ def verification(root: Path, policy: dict) -> list[str]:
             "Declare only one of updates.verify_task, verify_tasks or verify"
         )
     if task is not None or tasks is not None:
-        tasks = [task] if task is not None else tasks
-        workflows.names(tasks)
-        if not tasks or len(tasks) != len(set(tasks)):
+        selected_tasks = workflows.names([task] if task is not None else tasks)
+        if not selected_tasks or len(selected_tasks) != len(set(selected_tasks)):
             raise ValueError("Update verification requires distinct finite tasks")
         cfg = workflows.configuration(root)
-        order = workflows.order(cfg.get("tasks", {}), tasks)
+        order = workflows.order(cfg.get("tasks", {}), selected_tasks)
         if any(cfg["tasks"][name].get("wait_for_services") for name in order):
             raise ValueError("Update verification must be a finite task")
-        return [argument for task in tasks for argument in ("run", task)]
+        return [argument for task in selected_tasks for argument in ("run", task)]
     if tc.config(root)["schema"] in (2, 3) and not policy.get("verify"):
         raise ValueError("Schema 2 updates require updates.verify_task or verify_tasks")
     return ["_update-verify", "legacy"]
