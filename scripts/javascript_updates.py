@@ -416,7 +416,8 @@ class Workspace:
                 self.add(file, (*pointer, selector), match[1], requirement)
 
     def render(self, selected, *, resolver_pins=False):
-        for pin, version in zip(self.pins, selected):
+        # An empty selection serializes existing declarations without repinning.
+        for pin, version in zip(self.pins, selected, strict=False):
             table = self.documents[pin.file][0]
             for component in pin.pointer[:-1]:
                 table = table[component]
@@ -1669,7 +1670,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         prefix="javascript-update-", dir=parent
     ) as temporary_name:
         temporary = Path(temporary_name)
-        for attempt in range(attempts):
+        for _attempt in range(attempts):
             workspace.settings["minimumReleaseAgeExclude"] = sorted(
                 set(excludes + baseline_excludes)
             )
@@ -1864,7 +1865,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         "changed_files": sorted(changed),
         "selected": {
             f"{p.file}:{'/'.join(p.pointer)}": v
-            for p, v in zip(workspace.pins, selected)
+            for p, v in zip(workspace.pins, selected, strict=True)
         },
-        "resolution_attempts": attempt + 1,
+        "resolution_attempts": _attempt + 1,
     }

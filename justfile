@@ -37,6 +37,9 @@ format-staged:
 format-check:
     @./scripts/enter.sh core python3 scripts/format.py --check
 
+type-check:
+    @./scripts/enter.sh core mypy --config-file mypy.ini
+
 module name action="verify":
     @./scripts/enter.sh core python3 scripts/toolchain.py module "$@"
 

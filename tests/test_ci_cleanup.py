@@ -1,6 +1,5 @@
 """Disposable hosted SDK pruning never becomes general host cleanup."""
 
-import os
 from pathlib import Path
 import sys
 import tempfile

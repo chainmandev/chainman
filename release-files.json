@@ -82,6 +82,7 @@
     "modules/python.toml",
     "modules/rust.toml",
     "modules/swift.toml",
+    "mypy.ini",
     "nix/README.md",
     "nix/container-image.txt",
     "nix/control-sources.json",

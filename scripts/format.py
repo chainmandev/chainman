@@ -39,7 +39,12 @@ def main() -> None:
             "check",
             "--no-cache",
             "--select",
-            "E9,F63,F7,F82",
+            "E4,E7,E9,F,B,PLE",
+            "--ignore",
+            # Tests deliberately select local scripts before importing them.
+            # Synchronous loop-local callbacks and exception display policy are
+            # reviewed directly; neither rule distinguishes those patterns well.
+            "E402,B023,B904",
             *map(str, python),
         ],
         [

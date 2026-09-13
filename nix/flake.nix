@@ -72,6 +72,7 @@
               shellcheck
               shfmt
               ruff
+              mypy
             ]);
           shellWith =
             builder: base: name: packages: extra:

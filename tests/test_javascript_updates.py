@@ -95,7 +95,8 @@ class JavaScriptTests(unittest.TestCase):
         workspace = js.Workspace(self.root, self.spec)
         _, selected = js.plan(workspace, self.policy, self.now)
         return workspace, {
-            pin.alias: version for pin, version in zip(workspace.pins, selected)
+            pin.alias: version
+            for pin, version in zip(workspace.pins, selected, strict=True)
         }
 
     def test_many_peer_alternatives_preserve_the_conjunction_without_expansion(self):
@@ -850,7 +851,10 @@ class JavaScriptTests(unittest.TestCase):
         )
         selected = js.solve(workspace, evidence, {}, initial)
         self.assertEqual(
-            {pin.name: value for pin, value in zip(workspace.pins, selected)},
+            {
+                pin.name: value
+                for pin, value in zip(workspace.pins, selected, strict=True)
+            },
             {"renderer": "1.0.0", "framework": "3.0.0"},
         )
 
@@ -1102,7 +1106,9 @@ class JavaScriptTests(unittest.TestCase):
         }
         workspace = js.Workspace(self.root, self.spec)
         _, selected = js.plan(workspace, self.policy, self.now)
-        versions = {(p.file, p.alias): v for p, v in zip(workspace.pins, selected)}
+        versions = {
+            (p.file, p.alias): v for p, v in zip(workspace.pins, selected, strict=True)
+        }
         self.assertEqual(versions["package.json", "renderer"], "2.0.0")
         self.assertEqual(versions["packages/app/package.json", "renderer"], "1.0.0")
 

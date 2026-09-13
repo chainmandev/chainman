@@ -96,3 +96,9 @@ the outputs it understands.
 Read [the runtime and bootstrap contract](docs/runtime.md) before extending mounts,
 cache lifetimes or managed release files. The development environment runs trusted
 project code with declared access; it is not a sandbox for hostile source.
+
+`just verify` includes Ruff correctness checks across Python source and tests, plus
+`just type-check` for the runtime/control modules listed in `mypy.ini`. Mypy checks
+unannotated function bodies in that scope; this is not a repository-wide strict
+typing claim. Adapter signatures are visible to the gate, while expanding coverage
+of their implementations remains separate work. All checkers come from pinned Nix.

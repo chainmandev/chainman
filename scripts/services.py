@@ -55,7 +55,7 @@ def volume_compatibility(root, volume):
     ):
         raise ValueError("Volume compatibility inputs must be path patterns")
     digest = hashlib.sha256(json.dumps([1, volume["format"]]).encode())
-    selected = set()
+    selected: set[Path] = set()
     for pattern in inputs:
         tc.contained(root, pattern)
         matches = list(root.glob(pattern))
@@ -415,7 +415,7 @@ def export(root, arguments):
     # Only the verified runtime's flake is evaluated here. Consumer flakes, setup
     # commands, hooks and service commands are deferred to explicit execution.
     with tc.nix_temporary_directory("chainman-export-") as directory:
-        package = subprocess.run(
+        package_output = subprocess.run(
             [
                 tc.nix_command(),
                 "--extra-experimental-features",
@@ -431,7 +431,7 @@ def export(root, arguments):
             capture_output=True,
             text=True,
         ).stdout.strip()
-        package = Path(package)
+        package = Path(package_output)
         if not package.is_absolute() or not str(package).startswith("/nix/store/"):
             raise ValueError("Invalid native controller store output")
         for name in ("chainman-control", "process-compose", "watchexec"):
@@ -507,13 +507,15 @@ def export(root, arguments):
         repository_scope(root, host_state, declared) if shared_requested else None
     )
     prepared = {}
-    volumes = {}
+    volumes: dict[str, dict] = {}
     for name, spec in declared.items():
         if name in shared_names and not shared_requested:
             continue
-        service_root, service_key = (
-            (shared_scope[0], shared_scope[1]) if name in shared_names else (root, key)
-        )
+        if name in shared_names:
+            assert shared_scope is not None
+            service_root, service_key = shared_scope[0], shared_scope[1]
+        else:
+            service_root, service_key = root, key
         owner = secrets.token_hex(16)
         container_name = "chainman-" + service_key + "-" + name
         env = (
@@ -608,9 +610,6 @@ def export(root, arguments):
             launch = command(argv, service_root, env)
             ownership = {"engine": engine, "name": container_name, "token": owner}
         else:
-            profile = spec.get(
-                "profile", cfg.get("project", {}).get("default_profile", "default")
-            )
             launch = command(
                 [launcher, "_workflow-service", name, fingerprint], root, env
             )

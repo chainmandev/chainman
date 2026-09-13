@@ -164,7 +164,7 @@ def options(arguments):
     """Normalize public options without interpreting values as options or code."""
     main, resolver = [], []
     pending = None
-    selected = {}
+    selected: dict[str, int] = {}
     passthrough = False
     for argument in arguments:
         if pending is not None:

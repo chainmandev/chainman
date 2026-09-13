@@ -358,8 +358,8 @@ def inherited_operation():
     if value is None:
         return None, None, "", None, ()
     descriptor = int(value)
-    gate = os.environ.get("TOOLCHAIN_GATE_FD")
-    compat = os.environ.get("TOOLCHAIN_COMPAT_FD")
+    gate_value = os.environ.get("TOOLCHAIN_GATE_FD")
+    compat_value = os.environ.get("TOOLCHAIN_COMPAT_FD")
     identity = os.environ.get("TOOLCHAIN_OPERATION_ID", "")
     if identity and (
         len(identity) != 12 or any(c not in "0123456789abcdef" for c in identity)
@@ -374,8 +374,12 @@ def inherited_operation():
     # incoming runtime handoff; never convert that inherited kernel lock.
     # An old exclusive compatibility lease is not a modern writer gate: nested
     # writers must still exclude later modern siblings through writer.lock.
-    gate = int(gate) if gate is not None else None
-    compat = int(compat) if compat is not None else (None if identity else descriptor)
+    gate = int(gate_value) if gate_value is not None else None
+    compat = (
+        int(compat_value)
+        if compat_value is not None
+        else (None if identity else descriptor)
+    )
     descriptor_identities(
         [
             descriptor,
@@ -688,11 +692,11 @@ def environment(root: Path = ROOT, *, create=True) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def compiler_cache(profile: str, env: dict[str, str], root: Path = ROOT):
+def compiler_cache(profile: str | None, env: dict[str, str], root: Path = ROOT):
     owns_cache = (
         config(root).get("profiles", {}).get(profile, {}).get("compiler_cache", False)
     )
-    if profile != "rust" and not owns_cache:
+    if profile is None or (profile != "rust" and not owns_cache):
         yield env
         return
     if env.get("CHAINMAN_COMPILER_OWNER") == str(root):

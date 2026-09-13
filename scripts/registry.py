@@ -17,7 +17,7 @@ import re
 import time
 from threading import Lock
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 import xml.etree.ElementTree as ET
 
@@ -130,7 +130,7 @@ def retry_delay(value, attempt: int, status: int, host: str) -> float:
     return delay
 
 
-def timestamp(value: str) -> datetime:
+def timestamp(value: object) -> datetime:
     if not isinstance(value, str):
         raise ValueError("Missing registry publication age")
     result = datetime.fromisoformat(value.replace("Z", "+00:00"))

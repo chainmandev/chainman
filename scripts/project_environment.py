@@ -143,7 +143,7 @@ def validate(root, spec):
 
 
 def files(root, spec, inherited=None):
-    result = []
+    result: list[tuple[dict, bytes | None, dict[str, str]]] = []
     env = dict(inherited or {})
     selectors = {}
     for entry in spec.get("files", []):
@@ -242,7 +242,7 @@ def expand(values, root, env):
         "host": "host.docker.internal" if container else "127.0.0.1",
         "bind": "0.0.0.0" if container else "127.0.0.1",
     }
-    resolved = {}
+    resolved: dict[str, str] = {}
 
     def resolve(key, visiting):
         if key in resolved:

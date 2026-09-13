@@ -415,11 +415,14 @@ class NativeTests(unittest.TestCase):
         spec = {"adapter": "gradle", "catalogs": ["gradle/libs.versions.toml"]}
         pins = native.pins(self.root, spec, native.specifications(self.root, spec))
         self.assertEqual(len(pins), 1)
-        inventory = lambda package, repo: (
-            self.inventory("maven", package)
-            if package.endswith(":a")
-            else [registry.Release("1.2.0", NOW - timedelta(days=50))]
-        )
+
+        def inventory(package, repo):
+            return (
+                self.inventory("maven", package)
+                if package.endswith(":a")
+                else [registry.Release("1.2.0", NOW - timedelta(days=50))]
+            )
+
         with patch.object(registry, "maven_releases", side_effect=inventory):
             self.assertEqual(
                 native.choose(self.root, pins[0], spec, {}, NOW).version, "1.2.0"

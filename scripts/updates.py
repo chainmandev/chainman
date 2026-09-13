@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import fnmatch
 import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -24,14 +23,13 @@ import registry
 from toolchain import (
     atomic_bytes,
     ROOT,
-    atomic_json,
     config,
     contained,
     local_source,
     environment,
     managed_run,
     module,
-    operation,
+    operation as operation,
     run_commands,
     setup,
     entry_command,

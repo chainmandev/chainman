@@ -444,7 +444,7 @@ def context_environment(root, cfg, task, inherited):
     All tasks in one dependency closure share one graph. Conflicting declarations
     are rejected instead of depending on task execution order.
     """
-    values = {}
+    values: dict[str, str] = {}
     for key in order(cfg.get("tasks", {}), [task]):
         for variable, value in cfg["tasks"][key].get("context_environment", {}).items():
             if variable in values and values[variable] != value:

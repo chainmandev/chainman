@@ -10,7 +10,6 @@ from pathlib import Path
 import javascript_updates as js
 import registry
 import toolchain as tc
-import updates
 from semantic_version import NpmSpec, Version
 
 
