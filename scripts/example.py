@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import MutableMapping
 import hashlib
 import io
 import json
@@ -135,8 +136,14 @@ def create(destination: Path, metadata_path: Path) -> dict[str, str | int]:
     # Container image updates belong to the managed bootstrap/runtime release.
     dependency_body, mode = selected["dependencies.toml"]
     dependencies = tomlkit.parse(dependency_body.decode())
-    dependencies["nix"]["directory"] = "."
-    dependencies["docker"]["enabled"] = False
+    nix_policy = dependencies["nix"]
+    docker_policy = dependencies["docker"]
+    if not isinstance(nix_policy, MutableMapping) or not isinstance(
+        docker_policy, MutableMapping
+    ):
+        raise ValueError("Example dependency policies require Nix and Docker tables")
+    nix_policy["directory"] = "."
+    docker_policy["enabled"] = False
     dependencies["pins"] = [
         pin
         for pin in dependencies.get("pins", [])

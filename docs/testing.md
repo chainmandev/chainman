@@ -237,6 +237,8 @@ back to the host's Bash. A real-Nix fixture supplies a primary input that cannot
 provide Bash and a failing host Bash; both launchers must still deliver literal
 arguments and the child's exit status through the pinned shell. Native Intel CI
 also qualifies the actual compatibility packages.
+Darwin controller fixtures invoke `/bin/ps` directly for process-state evidence;
+system administration tools need not be on a selected Nix profile's `PATH`.
 
 `just rust-test` runs the production Cargo adapter with a loopback sparse index,
 real crate archives, and isolated source replacement/cache configuration. It

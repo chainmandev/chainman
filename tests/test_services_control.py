@@ -700,7 +700,7 @@ else: raise AssertionError(sys.argv)
             except FileNotFoundError:
                 return False
         result = subprocess.run(
-            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+            ["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
         )
         return result.returncode == 0 and not result.stdout.strip().startswith("Z")
 
