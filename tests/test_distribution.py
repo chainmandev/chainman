@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import example
 import package
+import module_updates
 
 
 class DistributionTests(unittest.TestCase):
@@ -70,7 +71,10 @@ class DistributionTests(unittest.TestCase):
                 "nix/flake.lock": (b"consumer SDK lock", 0o644),
                 "nix/flake.nix": (b"shared SDK implementation", 0o644),
                 "nix/control/main.go": (b"shared controller", 0o644),
-                "dependencies.toml": (b"[nix]\n[docker]\n", 0o644),
+                "dependencies.toml": (
+                    b'[nix]\ninputs = [{input="primary",repository="Example/packages",branch="current"}, {input="compat",repository="Example/packages",branch="compat"}]\n[docker]\n',
+                    0o644,
+                ),
                 "template/flake.nix": (b"import verified runtime", 0o644),
             }
             runtime = {
@@ -119,6 +123,26 @@ class DistributionTests(unittest.TestCase):
                     "nix"
                 ]["directory"],
                 ".",
+            )
+            policy = example.tomlkit.parse(
+                (destination / "dependencies.toml").read_text()
+            )
+            self.assertEqual(
+                module_updates.nix_spec(policy)["inputs"],
+                [
+                    {
+                        "directory": ".",
+                        "input": "primary",
+                        "repository": "Example/packages",
+                        "branch": "current",
+                    },
+                    {
+                        "directory": ".",
+                        "input": "compat",
+                        "repository": "Example/packages",
+                        "branch": "compat",
+                    },
+                ],
             )
 
     def test_release_reads_one_immutable_commit_when_head_moves(self):

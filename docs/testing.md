@@ -206,6 +206,13 @@ The bundled macOS Swift profile uses the Xcode selected by `xcode-select` for bo
 its compiler and SDK. It restores `DEVELOPER_DIR` before refreshing `SDKROOT`,
 `CC` and `CXX` through `xcrun`; Nix's Apple SDK hook otherwise changes both the
 developer directory and SDK, including when entering from another Nix C shell.
+The bundled profiles use the main Nixpkgs lock on Linux and Apple Silicon.
+Intel macOS uses the separately locked `nixpkgs-darwin` input from
+`nixpkgs-26.05-darwin`, since unstable has removed that platform. The source
+dependency policy updates both inputs with the ordinary commit-age rule. Generated
+examples inherit both locks and update targets. Intel compatibility depends on
+the remaining upstream 26.05 support period; its retirement requires a new
+platform-support decision.
 
 `just rust-test` runs the production Cargo adapter with a loopback sparse index,
 real crate archives, and isolated source replacement/cache configuration. It

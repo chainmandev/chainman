@@ -5,28 +5,41 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 import re
+from collections.abc import Mapping
 
 import dependency_api
 import sdk_versions
 import source_updates
 import toolchain as tc
+from adapter_data import Table, array, table
 
 
-def nix_spec(policy: dict) -> dict | None:
-    declared = policy.get("nix", {})
+def nix_spec(policy: Mapping[str, object]) -> Table | None:
+    declared = table(policy.get("nix", {}), "Nix update policy")
     if not declared.get("enabled", True):
         return None
-    return {
-        "adapter": "nix",
-        "profile": "core",
-        "inputs": [
+    if "inputs" in declared:
+        if any(key in declared for key in ("input", "repository", "branch")):
+            raise ValueError("Nix input lists cannot also declare a single input")
+        inputs = [
+            {"directory": declared.get("directory", "nix"), **table(item, "Nix input")}
+            for item in array(declared["inputs"], "Nix inputs")
+        ]
+        if not inputs:
+            raise ValueError("Nix updates require at least one declared input")
+    else:
+        inputs = [
             {
                 "directory": declared.get("directory", "nix"),
                 "input": declared.get("input", "nixpkgs"),
                 "repository": declared.get("repository", "NixOS/nixpkgs"),
                 "branch": declared.get("branch", "nixos-unstable"),
             }
-        ],
+        ]
+    return {
+        "adapter": "nix",
+        "profile": "core",
+        "inputs": inputs,
     }
 
 

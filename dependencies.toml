@@ -17,9 +17,10 @@ reason = "The example's sdist and wheel are qualified with the mature uv_build 0
 
 [nix]
 enabled = true
-input = "nixpkgs"
-repository = "NixOS/nixpkgs"
-branch = "nixos-unstable"
+inputs = [
+    { input = "nixpkgs", repository = "NixOS/nixpkgs", branch = "nixos-unstable" },
+    { input = "nixpkgs-darwin", repository = "NixOS/nixpkgs", branch = "nixpkgs-26.05-darwin" },
+]
 # This adapter checks commit age. A branch revision has no release publication date.
 
 [docker]

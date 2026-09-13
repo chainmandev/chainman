@@ -18,6 +18,70 @@ class ModuleTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
 
+    def test_nix_input_list_preserves_each_branch_and_directory(self):
+        declared = {
+            "directory": ".",
+            "inputs": [
+                {
+                    "input": "nixpkgs",
+                    "repository": "NixOS/nixpkgs",
+                    "branch": "nixos-unstable",
+                },
+                {
+                    "input": "compat",
+                    "repository": "NixOS/nixpkgs",
+                    "branch": "nixpkgs-26.05-darwin",
+                    "directory": "sdk",
+                },
+            ],
+        }
+        result = modules.nix_spec({"nix": declared})
+        self.assertEqual(
+            result,
+            {
+                "adapter": "nix",
+                "profile": "core",
+                "inputs": [
+                    {
+                        "directory": ".",
+                        "input": "nixpkgs",
+                        "repository": "NixOS/nixpkgs",
+                        "branch": "nixos-unstable",
+                    },
+                    {
+                        "directory": "sdk",
+                        "input": "compat",
+                        "repository": "NixOS/nixpkgs",
+                        "branch": "nixpkgs-26.05-darwin",
+                    },
+                ],
+            },
+        )
+        result["inputs"][0]["branch"] = "changed"
+        self.assertEqual(declared["inputs"][0]["branch"], "nixos-unstable")
+
+    def test_nix_input_list_keeps_legacy_defaults_and_rejects_ambiguous_policy(self):
+        self.assertEqual(
+            modules.nix_spec({})["inputs"],
+            [
+                {
+                    "directory": "nix",
+                    "input": "nixpkgs",
+                    "repository": "NixOS/nixpkgs",
+                    "branch": "nixos-unstable",
+                }
+            ],
+        )
+        self.assertIsNone(modules.nix_spec({"nix": {"enabled": False}}))
+        for spec in (
+            {"inputs": []},
+            {"inputs": "nixpkgs"},
+            {"inputs": ["nixpkgs"]},
+            {"inputs": [{}], "input": "nixpkgs"},
+        ):
+            with self.subTest(spec=spec), self.assertRaises(ValueError):
+                modules.nix_spec({"nix": spec})
+
     def test_native_commands_and_coordinated_pins_retain_module_policy(self):
         module = {
             "name": "compose",

@@ -1,8 +1,15 @@
 {
   description = "Development shells for a small modular project";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # Current unstable no longer provides Intel macOS packages. Keep its supported
+  # compatibility channel explicit and independently locked/updated.
+  inputs.nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
   outputs =
-    { nixpkgs, ... }:
+    {
+      nixpkgs,
+      nixpkgs-darwin ? nixpkgs,
+      ...
+    }:
     let
       systems = [
         "aarch64-linux"
@@ -15,7 +22,9 @@
         builtins.listToAttrs (
           map (system: {
             name = system;
-            value = f nixpkgs.legacyPackages.${system};
+            value = f (
+              (if system == "x86_64-darwin" then nixpkgs-darwin else nixpkgs).legacyPackages.${system}
+            );
           }) systems
         );
     in
