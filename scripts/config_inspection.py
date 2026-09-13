@@ -23,7 +23,7 @@ def validated(root: Path) -> dict[str, object]:
     if cfg["schema"] in (2, 3):
         cfg = workflows.configuration(root)
         services.declarations(root, cfg)
-    for profile in cfg.get("profiles", {}):
+    for profile in table(cfg.get("profiles", {}), "Profiles"):
         _, spec = chainman.profile(root, profile, cfg=cfg)
         project_environment.values(spec.get("environment", {}))
         resources.validate(

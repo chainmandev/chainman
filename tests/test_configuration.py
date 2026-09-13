@@ -19,6 +19,22 @@ import bootstrap_plan
 
 
 class CompositionTests(unittest.TestCase):
+    def test_preserved_cache_environment_rejects_scalars_and_non_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "chainman.toml"
+            for value in ('"PATH"', "[1]", "{ PATH = true }"):
+                original = f"schema=3\n[cache]\npreserve_environment={value}\n"
+                path.write_text(original)
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(
+                        ValueError, "Cache preserved environment"
+                    ):
+                        tc.config(root)
+                    self.assertEqual(path.read_text(), original)
+            path.write_text('schema=3\n[cache]\npreserve_environment=["PATH"]\n')
+            self.assertEqual(tc.config(root)["cache"]["preserve_environment"], ["PATH"])
+
     def test_malformed_cache_is_rejected_as_configuration_error(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()

@@ -14,6 +14,7 @@ import dependency_api
 import toolchain as tc
 import update_staging as staging
 import updates
+from adapter_data import strings
 
 
 def format_source(root: Path, *, check: bool = False, staged: bool = False) -> None:
@@ -92,7 +93,7 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
                 updates.perform(
                     candidate,
                     state.at,
-                    tc.config(candidate)["modules"],
+                    strings(tc.config(candidate)["modules"], "Modules"),
                 )
         staging.inspect(root, destination)
         state, candidate = staging.read_state(root, destination)
@@ -101,7 +102,9 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
                 if opts.format:
                     format_source(candidate, check=True, staged=opts.staged)
                 else:
-                    updates.verify(candidate, tc.config(candidate)["modules"])
+                    updates.verify(
+                        candidate, strings(tc.config(candidate)["modules"], "Modules")
+                    )
         staging.finalize(root, destination)
     except BaseException:
         print(

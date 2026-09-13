@@ -529,9 +529,9 @@ def resolve_current(
             name=ad.text(
                 policy.get(
                     "profile",
-                    tc.config(root)
-                    .get("project", {})
-                    .get("default_profile", "default"),
+                    ad.table(tc.config(root).get("project", {}), "Project").get(
+                        "default_profile", "default"
+                    ),
                 ),
                 "Resolver profile",
             ),
@@ -549,7 +549,7 @@ def resolve_current(
                 raise ValueError(
                     "Built-in module updates do not accept target selection or policy overrides"
                 )
-        selected = tc.config(root)["modules"]
+        selected = ad.strings(tc.config(root)["modules"], "Modules")
         updates.perform(root, now, selected)
 
 
@@ -596,18 +596,18 @@ def verify_current(root: Path) -> None:
             name=ad.text(
                 policy.get(
                     "profile",
-                    tc.config(root)
-                    .get("project", {})
-                    .get("default_profile", "default"),
+                    ad.table(tc.config(root).get("project", {}), "Project").get(
+                        "default_profile", "default"
+                    ),
                 ),
                 "Verification profile",
             ),
             env=env,
         )
-    elif tc.config(root).get("commands", {}).get("verify"):
+    elif ad.table(tc.config(root).get("commands", {}), "Commands").get("verify"):
         chainman.run_project(root, "verify", [])
     else:
-        updates.verify(root, tc.config(root)["modules"])
+        updates.verify(root, ad.strings(tc.config(root)["modules"], "Modules"))
 
 
 def options(args: list[str]) -> Options:
@@ -678,7 +678,7 @@ if __name__ == "__main__":
         root = Path(sys.argv[2]).resolve()
         resolve_current(
             root,
-            tc.config(root)["updates"],
+            ad.table(tc.config(root)["updates"], "Updates"),
             datetime.fromisoformat(sys.argv[3]),
             json.loads(sys.argv[4]),
         )

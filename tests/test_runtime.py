@@ -724,7 +724,12 @@ class RuntimeTests(unittest.TestCase):
     def test_generated_inputs_and_outputs_refuse_symlink_escapes(self):
         scripts = self.root / "scripts"
         scripts.mkdir()
-        for name in ("generate.py", "toolchain_build.py", "toolchain.py"):
+        for name in (
+            "generate.py",
+            "toolchain_build.py",
+            "toolchain.py",
+            "adapter_data.py",
+        ):
             shutil.copyfile(Path(toolchain.__file__).parent / name, scripts / name)
         source = self.root / "examples/core"
         source.mkdir(parents=True)

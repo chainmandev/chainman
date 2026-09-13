@@ -25,7 +25,7 @@ import toolchain as tc
 import updates
 import workflows
 from transaction_state import Inspection, RuntimeMode, State
-from adapter_data import strings, table
+from adapter_data import strings, table, text
 
 
 def directory(value: str | Path) -> Path:
@@ -67,10 +67,13 @@ def export_authority(
         )
     tc.atomic_bytes(target / "authority-root", (str(candidate) + "\n").encode())
     tc.atomic_bytes(target / "chainman.toml", tc.regular_input(root, "chainman.toml"))
-    policy_file = tc.config(root).get("updates", {}).get("policy_file")
+    policy_file = table(tc.config(root).get("updates", {}), "Updates").get(
+        "policy_file"
+    )
     if policy_file:
         tc.atomic_bytes(
-            target / "dependency-policy.toml", tc.regular_input(root, policy_file)
+            target / "dependency-policy.toml",
+            tc.regular_input(root, text(policy_file, "Policy file")),
         )
     tc.atomic_bytes(
         target / "git-directories", ("\n".join(git_directories) + "\n").encode()
@@ -93,8 +96,10 @@ def patterns(root: Path, policy: Mapping[str, object]) -> list[str]:
     if not policy.get("resolver") and not policy.get("steps"):
         result += [
             p
-            for name in tc.config(root)["modules"]
-            for p in tc.module(name, root).get("update_outputs", [])
+            for name in strings(tc.config(root)["modules"], "Modules")
+            for p in strings(
+                tc.module(name, root).get("update_outputs", []), "Module update outputs"
+            )
         ]
     updates.allowed([], result)
     return result
@@ -770,7 +775,7 @@ def run(root: Path, action: str, args: list[str]) -> int:
             )
         workflows.names(tasks)
         for task in tasks:
-            workflows.order(cfg.get("tasks", {}), [task])
+            workflows.order(workflows.declarations(cfg, "tasks"), [task])
             print(task)
         return 0
     if action == "_update-verify" and args == ["legacy"]:

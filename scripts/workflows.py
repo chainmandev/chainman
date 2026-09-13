@@ -135,9 +135,7 @@ def configuration(root: Path) -> Table:
             names(spec.get("depends_on", []))
             tc.contained(root, spec.get("directory", "."))
             check_profile(
-                spec.get(
-                    "profile", cfg.get("project", {}).get("default_profile", "default")
-                ),
+                text(spec.get("profile", default_profile(cfg)), "Workflow profile")
             )
             if section == "setup":
                 environment_inputs = spec.get("environment_inputs", [])
@@ -198,10 +196,12 @@ def configuration(root: Path) -> Table:
                 for field in ("timeout_seconds", "shutdown_seconds"):
                     task_seconds(spec, field)
         order(entries, list(entries))
-    for spec in cfg.get("tasks", {}).values():
-        order(cfg.get("setup", {}), spec.get("setup", []))
-    for key, spec in cfg.get("tasks", {}).items():
-        graph = [cfg["tasks"][name] for name in order(cfg["tasks"], [key])]
+    tasks = declarations(cfg, "tasks")
+    setups = declarations(cfg, "setup")
+    for spec in tasks.values():
+        order(setups, names(spec.get("setup", [])))
+    for key, spec in tasks.items():
+        graph = [tasks[name] for name in order(tasks, [key])]
         if any(task.get("exclusive", False) for task in graph) and any(
             task.get("services") for task in graph
         ):
@@ -209,7 +209,7 @@ def configuration(root: Path) -> Table:
                 "Exclusive maintenance tasks cannot acquire or borrow services"
             )
         if spec.get("wait_for_services") and not any(
-            cfg["tasks"][name].get("services") for name in order(cfg["tasks"], [key])
+            task.get("services") for task in graph
         ):
             raise ValueError("wait_for_services requires a service-bearing task")
         if spec.get("exclusive_services") and not any(

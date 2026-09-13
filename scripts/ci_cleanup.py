@@ -9,6 +9,7 @@ import shutil
 import subprocess
 
 from toolchain import ROOT, config, contained, module, operation, size
+from adapter_data import strings, table
 
 SDK_PATHS = {
     "android": "usr/local/lib/android",
@@ -35,17 +36,17 @@ def plan(
             "SDK cleanup requires an explicitly disposable GitHub-hosted Linux host"
         )
     cfg = config(root)
-    disposable = cfg.get("ci", {}).get("disposable_sdks", [])
+    disposable = table(cfg.get("ci", {}), "CI settings").get("disposable_sdks", [])
     if not isinstance(disposable, list) or any(
         sdk not in SDK_PATHS for sdk in disposable
     ):
         raise ValueError(
             "Unknown disposable SDK; configure only the declared SDK names"
         )
-    required = set()
-    for name in set(cfg["modules"] + selected):
+    required: set[str] = set()
+    for name in set(strings(cfg["modules"], "Modules") + selected):
         spec = module(name, root)
-        required.update(spec.get("native_sdks", []))
+        required.update(strings(spec.get("native_sdks", []), "Module SDKs"))
         if spec["profile"] == "flutter":
             required.add("android")
     paths = []

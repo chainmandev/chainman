@@ -95,7 +95,9 @@ def inspection_policy(root: Path) -> Table:
     import module_updates
 
     result = table(updates.settings(root), "Update settings")
-    specs = module_updates.adapters(root, tc.config(root)["modules"], result)
+    specs = module_updates.adapters(
+        root, strings(tc.config(root)["modules"], "Modules"), result
+    )
     nix = module_updates.nix_spec(result)
     if nix is not None:
         specs = {"nix": nix, **specs}
@@ -171,7 +173,10 @@ def configured(
         raise ValueError(f"Dependency adapter {name!r} is not configured")
     result = deepcopy(table(spec, f"Adapter {name}"))
     result.setdefault(
-        "profile", tc.config(root).get("project", {}).get("default_profile", "default")
+        "profile",
+        table(tc.config(root).get("project", {}), "Project").get(
+            "default_profile", "default"
+        ),
     )
     if "cargo_max_attempts" in result:
         import ecosystem_updates

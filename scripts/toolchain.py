@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 import contextlib
 import fcntl
 import hashlib
@@ -23,6 +24,7 @@ import tomllib
 import uuid
 from urllib.parse import quote
 from typing import IO, Literal, TextIO, TypedDict, Unpack, overload
+import adapter_data as ad
 
 RUNTIME = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
@@ -199,12 +201,61 @@ def configuration_root(root: Path) -> Path:
     return root
 
 
-def config(root: Path = ROOT) -> dict:
+@dataclass(frozen=True)
+class CachePolicy:
+    build_limit_gib: float
+    compiler_limit_gib: float
+    stale_hours: float
+    automatic_prune: bool
+    preserve_environment: tuple[str, ...]
+
+    @classmethod
+    def decode(cls, cfg: Mapping[str, object]) -> CachePolicy:
+        import configuration
+
+        cache = configuration.table(cfg.get("cache", {}), "cache")
+        numbers: dict[str, float] = {}
+        for key, default in (
+            ("build_limit_gib", 12),
+            ("compiler_limit_gib", 8),
+            ("stale_hours", 48),
+        ):
+            value = cache.get(key, default)
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+                or (key == "compiler_limit_gib" and value == 0)
+            ):
+                raise ValueError(
+                    f"cache.{key} must be finite and nonnegative; compiler_limit_gib must be positive"
+                )
+            numbers[key] = value
+        automatic = cache.get("automatic_prune", True)
+        if type(automatic) is not bool:
+            raise ValueError("cache.automatic_prune must be boolean")
+        return cls(
+            build_limit_gib=numbers["build_limit_gib"],
+            compiler_limit_gib=numbers["compiler_limit_gib"],
+            stale_hours=numbers["stale_hours"],
+            automatic_prune=automatic,
+            preserve_environment=tuple(
+                ad.strings(
+                    cache.get("preserve_environment", []), "Cache preserved environment"
+                )
+            ),
+        )
+
+
+def config(root: Path = ROOT) -> ad.Table:
     selected = configuration_root(root)
     name = (
         "chainman.toml" if (selected / "chainman.toml").exists() else "toolchain.toml"
     )
-    data = tomllib.loads(regular_input(selected, name).decode())
+    data = ad.table(
+        tomllib.loads(regular_input(selected, name).decode()), "Project configuration"
+    )
     if name == "chainman.toml":
         data.setdefault("modules", ["project"])
     schemas = (1, 2, 3) if name == "chainman.toml" else (1,)
@@ -219,48 +270,35 @@ def config(root: Path = ROOT) -> dict:
     import configuration
 
     data, _ = configuration.compile(data)
-    cache = configuration.table(data.get("cache", {}), "cache")
-    for key, default in (
-        ("build_limit_gib", 12),
-        ("compiler_limit_gib", 8),
-        ("stale_hours", 48),
-    ):
-        value = cache.get(key, default)
-        if (
-            not isinstance(value, (int, float))
-            or isinstance(value, bool)
-            or not math.isfinite(value)
-            or value < 0
-            or (key == "compiler_limit_gib" and value == 0)
-        ):
-            raise ValueError(
-                f"cache.{key} must be finite and nonnegative; compiler_limit_gib must be positive"
-            )
-    if type(cache.get("automatic_prune", True)) is not bool:
-        raise ValueError("cache.automatic_prune must be boolean")
+    CachePolicy.decode(data)
     return data
 
 
-def module(name: str, root: Path = ROOT) -> dict:
+def module(name: str, root: Path = ROOT) -> ad.Table:
     if not name.replace("-", "").isalnum():
         raise ValueError("invalid module name")
     if name == "project" and (root / "chainman.toml").exists():
         cfg = config(root)
-        data = {
+        setup = ad.table(cfg.get("setup", {}), "Setup")
+        data: ad.Table = {
             "name": name,
             "directory": ".",
-            "profile": cfg.get("project", {}).get("default_profile", "default"),
+            "profile": ad.table(cfg.get("project", {}), "Project").get(
+                "default_profile", "default"
+            ),
             "commands": cfg.get("commands", {}),
-            "inputs": cfg.get("setup", {}).get("inputs", []),
-            "artifacts": cfg.get("setup", {}).get("artifacts", []),
-            "cache_setup": bool(cfg.get("setup", {}).get("inputs")),
+            "inputs": setup.get("inputs", []),
+            "artifacts": setup.get("artifacts", []),
+            "cache_setup": bool(setup.get("inputs")),
         }
     else:
-        data = tomllib.loads(contained(root, f"modules/{name}.toml").read_text())
+        data = ad.table(
+            tomllib.loads(contained(root, f"modules/{name}.toml").read_text()), "Module"
+        )
     if data.get("name") != name:
         raise ValueError("module identity mismatch")
-    contained(root, data["directory"])
-    for commands in data.get("commands", {}).values():
+    contained(root, ad.text(data["directory"], "Module directory"))
+    for commands in ad.table(data.get("commands", {}), "Module actions").values():
         if not isinstance(commands, list) or any(
             not isinstance(c, list) or not c or any(not isinstance(a, str) for a in c)
             for c in commands
@@ -701,13 +739,12 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
         if len(identity) != 12 or any(c not in "0123456789abcdef" for c in identity):
             raise ValueError("Invalid inherited operation identity")
         socket_name += identity
+    cache_policy = CachePolicy.decode(config(root))
     env.update(
         CARGO_HOME=str(downloads / "cargo"),
         CARGO_TARGET_DIR=str(work / "cargo"),
         SCCACHE_DIR=str(downloads / "sccache"),
-        SCCACHE_CACHE_SIZE=str(
-            int(config(root).get("cache", {}).get("compiler_limit_gib", 8) * 1024**3)
-        ),
+        SCCACHE_CACHE_SIZE=str(int(cache_policy.compiler_limit_gib * 1024**3)),
         SCCACHE_SERVER_UDS=str(socket_directory / socket_name),
         RUSTC_WRAPPER="",
         CARGO_INCREMENTAL="0",
@@ -743,7 +780,7 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
         "-Dorg.gradle.project.kotlin.compiler.execution.strategy=in-process",
     )
     preserved = {}
-    for name in config(root).get("cache", {}).get("preserve_environment", []):
+    for name in cache_policy.preserve_environment:
         if name in {
             "RUSTC_WRAPPER",
             "SCCACHE_SERVER_UDS",
@@ -775,9 +812,10 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
 def compiler_cache(
     profile: str | None, env: dict[str, str], root: Path = ROOT
 ) -> Iterator[dict[str, str]]:
-    owns_cache = (
-        config(root).get("profiles", {}).get(profile, {}).get("compiler_cache", False)
-    )
+    profiles = ad.table(config(root).get("profiles", {}), "Profiles")
+    owns_cache = ad.table(
+        profiles.get(profile, {}) if profile is not None else {}, "Profile"
+    ).get("compiler_cache", False)
     if profile is None or (profile != "rust" and not owns_cache):
         yield env
         return
@@ -995,7 +1033,7 @@ def release_compiler_lifetime(
         endpoint.unlink()
 
 
-def fingerprint(spec: dict, root: Path = ROOT) -> str:
+def fingerprint(spec: Mapping[str, object], root: Path = ROOT) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps([2, context_id(), spec], sort_keys=True).encode())
     paths = {root / "toolchain.toml", root / "chainman.toml", root / "chainman.lock"}
@@ -1003,15 +1041,16 @@ def fingerprint(spec: dict, root: Path = ROOT) -> str:
     if (root / "chainman.toml").exists():
         import chainman
 
-        ref, _ = chainman.profile(root, spec["profile"])
-        digest.update(chainman.profile_fingerprint(root, spec["profile"], ref).encode())
+        profile = ad.text(spec["profile"], "Module profile")
+        ref, _ = chainman.profile(root, profile)
+        digest.update(chainman.profile_fingerprint(root, profile, ref).encode())
     for directory in ("scripts", "nix", "modules"):
         paths.update(
             p
             for p in (root / directory).rglob("*")
             if p.is_file() and "__pycache__" not in p.parts
         )
-    for pattern in spec.get("inputs", []):
+    for pattern in ad.strings(spec.get("inputs", []), "Module inputs"):
         paths.update(root.glob(pattern))
     for p in sorted(paths):
         if p.is_file():
@@ -1022,9 +1061,9 @@ def fingerprint(spec: dict, root: Path = ROOT) -> str:
 
 
 def run_commands(
-    spec: dict, action: str, env: dict[str, str], root: Path = ROOT
+    spec: Mapping[str, object], action: str, env: dict[str, str], root: Path = ROOT
 ) -> None:
-    commands = spec.get("commands", {}).get(action)
+    commands = ad.table(spec.get("commands", {}), "Module commands").get(action)
     if commands is None:
         raise ValueError(f"{spec['name']} does not define {action}")
     if spec.get("native") == "darwin" and (
@@ -1033,12 +1072,13 @@ def run_commands(
         raise ValueError(
             f"{spec['name']} requires a macOS host with Xcode; this lane has not run"
         )
-    cwd = contained(root, spec["directory"])
+    cwd = contained(root, ad.text(spec["directory"], "Module directory"))
+    profile = ad.text(spec["profile"], "Module profile")
 
     def launch(argv: list[str], selected_env: dict[str, str]) -> None:
         # The working directory travels as an argument, never shell syntax.
         launch = [
-            *entry_command(root, spec["profile"]),
+            *entry_command(root, profile),
             "sh",
             "-eu",
             "-c",
@@ -1049,9 +1089,9 @@ def run_commands(
         ]
         managed_run(launch, cwd=root, env=selected_env, check=True)
 
-    with compiler_cache(spec["profile"], env, root) as selected_env:
-        for argv in commands:
-            launch(argv, selected_env)
+    with compiler_cache(profile, env, root) as selected_env:
+        for argv in ad.array(commands, "Module commands"):
+            launch(ad.strings(argv, "Module command"), selected_env)
 
 
 def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
@@ -1076,7 +1116,7 @@ def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
     return candidate.is_file() and candidate.resolve() == expected.resolve()
 
 
-def setup(spec: dict, env: dict[str, str], root: Path = ROOT) -> None:
+def setup(spec: Mapping[str, object], env: dict[str, str], root: Path = ROOT) -> None:
     if not spec.get("cache_setup", True):
         # An opaque project adapter owns its readiness checks until it explicitly
         # declares fingerprint inputs; never cache an unknown manifest surface.
@@ -1086,7 +1126,7 @@ def setup(spec: dict, env: dict[str, str], root: Path = ROOT) -> None:
     # A stamp per context would falsely reuse files last installed by another mode.
     stamp = contained(root, f".cache/toolchain/setup/{spec['name']}.json")
     expected = fingerprint(spec, root)
-    artifacts = spec.get("artifacts", [])
+    artifacts = ad.array(spec.get("artifacts", []), "Module artifacts")
     try:
         recorded: object = json.loads(stamp.read_text())
     except (FileNotFoundError, ValueError):
@@ -1130,7 +1170,7 @@ def size(path: Path, *, reporting: bool = False) -> int:
 def prune(
     root: Path = ROOT, *, all_outputs: bool = False, now: float | None = None
 ) -> list[str]:
-    settings = config(root).get("cache", {})
+    settings = CachePolicy.decode(config(root))
     base = contained(root, ".cache/toolchain/work")
     if not base.exists():
         return []
@@ -1144,11 +1184,9 @@ def prune(
         entries.append((age, item, count))
     removed = []
     total = sum(item[2] for item in entries)
-    limit = settings.get("build_limit_gib", 12) * 1024**3
+    limit = settings.build_limit_gib * 1024**3
     for age, item, count in sorted(entries, reverse=True):
-        if not all_outputs and (
-            age < settings.get("stale_hours", 48) * 3600 or total <= limit
-        ):
+        if not all_outputs and (age < settings.stale_hours * 3600 or total <= limit):
             continue
         shutil.rmtree(
             item
@@ -1203,9 +1241,9 @@ def main() -> int:
                         ),
                         "download_cache": str(downloads),
                         "download_bytes": size(downloads, reporting=True),
-                        "compiler_limit_gib": cfg.get("cache", {}).get(
-                            "compiler_limit_gib", 8
-                        ),
+                        "compiler_limit_gib": CachePolicy.decode(
+                            cfg
+                        ).compiler_limit_gib,
                         "note": "Apparent bytes without following symlinks; shared cache activity may change this snapshot.",
                     },
                     indent=2,
@@ -1216,7 +1254,7 @@ def main() -> int:
             exclusive=args.action != "exec",
             new_execution=args.action == "exec",
             automatic_prune=args.action not in ("cache-prune", "clean")
-            and cfg.get("cache", {}).get("automatic_prune", True),
+            and CachePolicy.decode(cfg).automatic_prune,
         ) as outer_operation:
             if args.action in ("cache-prune", "clean"):
                 if not outer_operation:
@@ -1276,7 +1314,7 @@ def main() -> int:
                     return 0
                 except subprocess.CalledProcessError as exc:
                     return exc.returncode
-            selected, action = cfg["modules"], args.action
+            selected, action = ad.strings(cfg["modules"], "Modules"), args.action
             if action == "module":
                 if len(args.arguments) not in (1, 2):
                     raise ValueError("module requires a name and optional action")

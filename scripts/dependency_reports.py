@@ -239,7 +239,9 @@ def report(root: Path, arguments: list[str]) -> ad.Table:
         },
         constraints=settings.get("constraints", {}),
         exceptions=settings.get("exceptions", []),
-        audit_exceptions=tc.config(root).get("audits", {}).get("exceptions", {}),
+        audit_exceptions=ad.table(tc.config(root).get("audits", {}), "Audits").get(
+            "exceptions", {}
+        ),
         target_groups=settings.get("target_groups", {}),
         declarations=declarations(root),
         coverage=coverage(root),
