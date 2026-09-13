@@ -571,9 +571,10 @@ def verified_runtime(candidate: Path, *, gc_root: Path) -> Path:
         ):
             raise ValueError("Candidate bootstrap differs from the verified runtime")
     for destination, source in runtime_updates.managed_paths(candidate).items():
-        if runtime_updates.managed_state(
-            candidate, destination
-        ) != runtime_updates.managed_state(candidate, source):
+        if not runtime_updates.managed_matches(
+            runtime_updates.managed_state(candidate, destination),
+            runtime_updates.managed_state(candidate, source),
+        ):
             raise ValueError(f"Candidate runtime copy differs: {destination}")
     import recipes
 

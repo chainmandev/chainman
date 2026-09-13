@@ -4,7 +4,6 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import stat
 from collections.abc import Mapping
 from typing import TypedDict
 
@@ -52,21 +51,19 @@ def check(
         ("chainman.sh", "chainman.sh"),
         ("fetch.nix", "chainman-fetch.nix"),
     ):
-        path = chainman.RUNTIME / "bootstrap" / source
-        target = tc.contained(root, f"scripts/{destination}")
-        if tc.regular_input(
-            root, f"scripts/{destination}"
-        ) != path.read_bytes() or stat.S_IMODE(target.stat().st_mode) != stat.S_IMODE(
-            path.stat().st_mode
+        if not chainman_updates.managed_matches(
+            chainman_updates.managed_state(root, f"scripts/{destination}"),
+            chainman_updates.managed_state(chainman.RUNTIME, f"bootstrap/{source}"),
         ):
             raise ValueError(
                 f"Consumer bootstrap differs from the candidate: {destination}"
             )
     copies = chainman_updates.managed_paths(root)
     for destination, source in copies.items():
-        if chainman_updates.managed_state(
-            root, destination
-        ) != chainman_updates.managed_state(root, source):
+        if not chainman_updates.managed_matches(
+            chainman_updates.managed_state(root, destination),
+            chainman_updates.managed_state(root, source),
+        ):
             raise ValueError(f"Consumer runtime copy differs: {destination}")
     if baseline is not None:
         before, _ = configuration.compile(baseline)

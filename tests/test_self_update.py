@@ -268,6 +268,47 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual(self.managed(), self.before)
         self.assertEqual((copy / "scripts/chainman.sh").read_text(), "operator changes")
 
+    def test_generated_copy_permissions_allow_update_and_restore_exactly(self):
+        copy = self.add_copy()
+        for name in self.before:
+            executable = name.endswith(".sh")
+            (self.root / name).chmod(0o775 if executable else 0o664)
+            (copy / name).chmod(0o755 if executable else 0o644)
+        original = {
+            name: subject.managed_state(self.root, name) for name in self.before
+        }
+        exported = {name: subject.managed_state(copy, name) for name in self.before}
+
+        def reject(*_):
+            self.assertEqual(
+                json.loads((copy / "chainman.lock").read_text())["version"], "2.0.0"
+            )
+            raise ValueError("candidate rejected after replacement")
+
+        with self.assertRaisesRegex(ValueError, "candidate rejected after replacement"):
+            self.run_apply(reject)
+        self.assertEqual(
+            {name: subject.managed_state(self.root, name) for name in self.before},
+            original,
+        )
+        self.assertEqual(
+            {name: subject.managed_state(copy, name) for name in self.before}, exported
+        )
+        self.run_apply(lambda *_: None)
+        for directory in (self.root, copy):
+            self.assertEqual(
+                json.loads((directory / "chainman.lock").read_text())["version"],
+                "2.0.0",
+            )
+            self.assertEqual((directory / "bundle.tar.gz").read_bytes(), self.body)
+
+    def test_copy_executable_change_still_blocks_update(self):
+        copy = self.add_copy()
+        (copy / "scripts/chainman.sh").chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "copy was locally modified"):
+            self.run_apply(lambda *_: self.fail("candidate executed"))
+        self.assertEqual(self.managed(), self.before)
+
     def test_runtime_copies_reject_symlinks_duplicates_and_project_escape(self):
         copy = self.add_copy()
         config = self.root / "chainman.toml"

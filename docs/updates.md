@@ -596,9 +596,14 @@ The consumer archive consequently does not need to ship those tests.
 A repository that embeds the same runtime in templates or example projects can
 list their relative roots under `[runtime]`, for example
 `copies = ["templates/common", "examples/demo"]`. Each copy must contain identical
-lock, launcher, fetch helper and optional bundled archive bytes and modes, using
+lock, launcher, fetch helper and optional bundled archive bytes and Git executable
+identity, using
 the same relative paths as the root. Customized or missing copies are rejected
 before replacement; reconcile their ownership explicitly.
+Ordinary checkout umasks, immutable store permissions and canonical export modes
+may differ without changing that identity. Other mode flags must still match.
+Transaction snapshots retain each file's full mode: changes during preparation,
+verification, application or rollback are still detected and preserved.
 
 Updates that include Chainman prepare every declared copy from the verified runtime in the
 same candidate transaction. The normal project gate verifies the complete change

@@ -71,6 +71,29 @@ class ConsumerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "copy differs"):
             consumer_contract.check(self.root, self.release)
 
+    def test_checkout_and_generated_permissions_preserve_copy_identity(self):
+        for root_modes, copy_modes in (
+            ((0o775, 0o664), (0o755, 0o644)),
+            ((0o700, 0o600), (0o555, 0o444)),
+        ):
+            with self.subTest(root=root_modes, copy=copy_modes):
+                for directory, modes in (
+                    (self.root, root_modes),
+                    (self.root / "copy", copy_modes),
+                ):
+                    for name in (
+                        "chainman.lock",
+                        "bundle.tar.gz",
+                        "scripts/chainman.sh",
+                        "scripts/chainman-fetch.nix",
+                    ):
+                        (directory / name).chmod(
+                            modes[0] if name.endswith(".sh") else modes[1]
+                        )
+                self.assertTrue(
+                    consumer_contract.check(self.root, self.release)["valid"]
+                )
+
     def test_bootstrap_drift_rejected(self):
         (self.root / "scripts/chainman.sh").write_text("exit 0\n")
         with self.assertRaisesRegex(ValueError, "bootstrap"):

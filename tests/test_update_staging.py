@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import shutil
 import os
 from pathlib import Path
 import subprocess
@@ -495,6 +496,64 @@ commands=[["true"]]
         ):
             # Bypass this class's integration-only fetch mock for this test.
             with self.assertRaisesRegex(ValueError, "NAR verification"):
+                self.real_verified_runtime(
+                    self.candidate, gc_root=self.stage / "runtime-root"
+                )
+
+    def test_verified_runtime_accepts_generated_copy_permissions(self):
+        self.prepare()
+        runtime = self.base / "verified-runtime"
+        for name in (
+            "VERSION",
+            "bootstrap/chainman.sh",
+            "bootstrap/fetch.nix",
+            "nix/flake.nix",
+            "nix/flake.lock",
+            "scripts/chainman.py",
+            "scripts/chainman_updates.py",
+        ):
+            destination = runtime / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(chainman.RUNTIME / name, destination)
+        config = self.candidate / "chainman.toml"
+        config.write_text(config.read_text() + '\n[runtime]\ncopies=["export"]\n')
+        (self.candidate / "scripts").mkdir()
+        for source, target in (
+            ("chainman.sh", "chainman.sh"),
+            ("fetch.nix", "chainman-fetch.nix"),
+        ):
+            shutil.copy2(
+                chainman.RUNTIME / "bootstrap" / source,
+                self.candidate / "scripts" / target,
+            )
+        for name in (
+            "chainman.lock",
+            "scripts/chainman.sh",
+            "scripts/chainman-fetch.nix",
+        ):
+            original = self.candidate / name
+            exported = self.candidate / "export" / name
+            exported.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(original, exported)
+            original.chmod(0o775 if name.endswith(".sh") else 0o664)
+            exported.chmod(0o755 if name.endswith(".sh") else 0o644)
+        nar = json.loads((self.candidate / "chainman.lock").read_text())["narHash"]
+        with (
+            patch.object(subject.runtime_updates, "fetch_source", return_value=runtime),
+            patch.object(
+                subject.tc,
+                "managed_run",
+                return_value=subprocess.CompletedProcess([], 0, nar + "\n"),
+            ),
+        ):
+            self.assertEqual(
+                self.real_verified_runtime(
+                    self.candidate, gc_root=self.stage / "runtime-root"
+                ),
+                runtime,
+            )
+            (self.candidate / "export/scripts/chainman.sh").chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "runtime copy differs"):
                 self.real_verified_runtime(
                     self.candidate, gc_root=self.stage / "runtime-root"
                 )

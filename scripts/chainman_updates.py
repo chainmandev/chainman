@@ -49,6 +49,21 @@ def managed_state(root: Path, name: str) -> FileState | None:
     return tc.regular_input(root, name), stat.S_IMODE(path.stat().st_mode)
 
 
+def managed_matches(first: FileState | None, second: FileState | None) -> bool:
+    """Compare copies by bytes and Git execution identity, independent of umask.
+
+    Non-permission mode flags must still match. Transaction snapshots continue to
+    use managed_state directly so each file's complete original mode is retained.
+    """
+    if first is None or second is None:
+        return False
+    return (
+        first[0] == second[0]
+        and bool(first[1] & stat.S_IXUSR) == bool(second[1] & stat.S_IXUSR)
+        and first[1] & ~0o777 == second[1] & ~0o777
+    )
+
+
 def managed_paths(root: Path) -> dict[str, str]:
     """Map declared identical runtime copies to their root-owned source files."""
     names = ["chainman.lock", "scripts/chainman.sh", "scripts/chainman-fetch.nix"]
@@ -338,7 +353,7 @@ def runtime_candidate(
         if target == source:
             continue
         before = managed_state(root, target)
-        if before is None or before != source_states[source]:
+        if before is None or not managed_matches(before, source_states[source]):
             raise ValueError(
                 f"Managed runtime copy was locally modified; reconcile it explicitly: {target}"
             )
