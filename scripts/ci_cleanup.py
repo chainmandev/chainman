@@ -17,7 +17,9 @@ SDK_PATHS = {
 }
 
 
-def plan(root: Path, filesystem: Path, env: dict, selected: list[str]) -> list[Path]:
+def plan(
+    root: Path, filesystem: Path, env: dict[str, str], selected: list[str]
+) -> list[Path]:
     expected = {
         "CI": "true",
         "GITHUB_ACTIONS": "true",

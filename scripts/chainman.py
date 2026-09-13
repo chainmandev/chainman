@@ -255,7 +255,7 @@ def execute(
     try:
         return tc.managed_run(command, cwd=target, env=selected, check=check, **kwargs)
     finally:
-        if timed:
+        if timing_operation is not None:
             timing.emit("command", "end", timing_operation)
 
 

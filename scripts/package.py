@@ -12,11 +12,33 @@ import re
 import subprocess
 import tarfile
 import tempfile
+from typing import Literal, TypedDict
+
+from adapter_data import strings, table
 
 ROOT = Path(__file__).resolve().parents[1]
 
+type FileContents = dict[str, tuple[bytes, int]]
 
-def archive_bytes(files: dict[str, tuple[bytes, int]], version: str) -> bytes:
+
+class SourceMetadata(TypedDict):
+    filename: str
+    url: str
+    archive_sha256: str
+    narHash: str
+
+
+class ReleaseMetadata(TypedDict):
+    schema: Literal[1]
+    version: str
+    revision: str
+    url: str
+    narHash: str
+    archive_sha256: str
+    source: SourceMetadata
+
+
+def archive_bytes(files: FileContents, version: str) -> bytes:
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise ValueError("A release requires a stable numeric version")
     raw = io.BytesIO()
@@ -37,13 +59,13 @@ def archive_bytes(files: dict[str, tuple[bytes, int]], version: str) -> bytes:
     return gzip.compress(raw.getvalue(), mtime=0)
 
 
-def git(root, *args) -> bytes:
+def git(root: Path, *args: str) -> bytes:
     return subprocess.check_output(
         ["git", "--no-replace-objects", "--literal-pathspecs", "-C", str(root), *args]
     )
 
 
-def release(root: Path, output: Path) -> dict:
+def release(root: Path, output: Path) -> ReleaseMetadata:
     if (
         Path(git(root, "rev-parse", "--show-toplevel").decode().strip()).resolve()
         != root.resolve()
@@ -52,13 +74,15 @@ def release(root: Path, output: Path) -> dict:
     if git(root, "status", "--porcelain", "--untracked-files=all"):
         raise ValueError("Commit the intended release source first")
     revision = git(root, "rev-parse", "HEAD").decode().strip()
-    inventory = json.loads(git(root, "show", f"{revision}:release-files.json"))
-    if inventory.get("schema") != 1 or len(inventory["files"]) != len(
-        set(inventory["files"])
-    ):
+    inventory = table(
+        json.loads(git(root, "show", f"{revision}:release-files.json")),
+        "Release inventory",
+    )
+    source_names = strings(inventory.get("files"), "Release files")
+    if inventory.get("schema") != 1 or len(source_names) != len(set(source_names)):
         raise ValueError("Malformed release inventory")
     files = {}
-    for name in inventory["files"]:
+    for name in source_names:
         entry = git(root, "ls-tree", revision, "--", name).decode().strip()
         meta, sep, actual = entry.partition("\t")
         if not sep or actual != name or meta.split()[0] not in {"100644", "100755"}:
@@ -68,7 +92,9 @@ def release(root: Path, output: Path) -> dict:
             int(meta.split()[0][-3:], 8),
         )
     version = files["VERSION"][0].decode().strip()
-    runtime_names = inventory.get("runtime_files", list(files))
+    runtime_names = strings(
+        inventory.get("runtime_files", list(files)), "Runtime files"
+    )
     if len(runtime_names) != len(set(runtime_names)) or any(
         name not in files for name in runtime_names
     ):
@@ -77,7 +103,7 @@ def release(root: Path, output: Path) -> dict:
     body = archive_bytes(runtime_files, version)
     source_body = archive_bytes(files, version)
 
-    def nar_hash(selected):
+    def nar_hash(selected: FileContents) -> str:
         with tempfile.TemporaryDirectory(prefix="chainman-release-") as directory:
             tree = Path(directory)
             for name, (data, mode) in selected.items():
@@ -100,7 +126,7 @@ def release(root: Path, output: Path) -> dict:
     nar = nar_hash(runtime_files)
     filename = f"chainman-{version}.tar.gz"
     source_filename = f"chainman-source-{version}.tar.gz"
-    metadata = {
+    metadata: ReleaseMetadata = {
         "schema": 1,
         "version": version,
         "revision": revision,

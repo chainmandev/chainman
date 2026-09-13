@@ -1,6 +1,7 @@
 """Opt-in timing records; never log argv, environment values or project output."""
 
 from contextlib import contextmanager
+from collections.abc import Iterator, Mapping
 import json
 import os
 import re
@@ -9,11 +10,11 @@ import time
 import uuid
 
 
-def enabled(env=None):
+def enabled(env: Mapping[str, str] | None = None) -> bool:
     return (os.environ if env is None else env).get("CHAINMAN_TIMING") == "1"
 
 
-def emit(phase, event, operation, **values):
+def emit(phase: str, event: str, operation: str, **values: int | str) -> None:
     parent = os.environ.get("CHAINMAN_TIMING_PARENT", "")
     if re.fullmatch(r"[0-9a-f-]{1,64}", parent):
         values["parent"] = parent
@@ -37,7 +38,7 @@ def emit(phase, event, operation, **values):
 
 
 @contextmanager
-def span(phase, env=None):
+def span(phase: str, env: Mapping[str, str] | None = None) -> Iterator[None]:
     if not enabled(env):
         yield
         return
@@ -50,7 +51,7 @@ def span(phase, env=None):
         emit(phase, "end", operation, elapsed_ns=time.monotonic_ns() - started)
 
 
-def bootstrap():
+def bootstrap() -> None:
     if not enabled():
         return
     started = os.environ.pop("CHAINMAN_TIMING_BOOTSTRAP_STARTED", "")
@@ -67,7 +68,7 @@ def bootstrap():
     os.environ["CHAINMAN_TIMING_PARENT"] = operation
 
 
-def command():
+def command() -> None:
     operation, *argv = sys.argv[1:]
     emit("profile_entry", "end", operation)
     emit("command", "start", operation)

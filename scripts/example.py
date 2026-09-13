@@ -12,8 +12,11 @@ import tarfile
 import tempfile
 import tomlkit
 
+from adapter_data import table, text
+from package import FileContents
 
-def read_archive(body: bytes, version: str) -> dict:
+
+def read_archive(body: bytes, version: str) -> FileContents:
     result = {}
     prefix = f"chainman-{version}/"
     with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as archive:
@@ -36,41 +39,45 @@ def read_archive(body: bytes, version: str) -> dict:
                 or name in result
             ):
                 raise ValueError("Unsafe or duplicate archive path")
-            result[name] = (archive.extractfile(member).read(), member.mode)
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise ValueError("Regular release file has no content stream")
+            with stream:
+                result[name] = (stream.read(), member.mode)
     return result
 
 
-def create(destination: Path, metadata_path: Path):
+def create(destination: Path, metadata_path: Path) -> dict[str, str | int]:
     for path in (destination, *destination.parents):
         if path.is_symlink():
             raise ValueError("Example destination must not contain symlinks")
     if destination.exists() and any(destination.iterdir()):
         raise ValueError("Choose a new or empty example directory")
-    metadata = json.loads(metadata_path.read_text())
+    metadata = table(json.loads(metadata_path.read_text()), "Release metadata")
     if metadata.get("schema") != 1:
         raise ValueError("Unsupported release metadata")
-    body = (
-        metadata_path.parent / f"chainman-{metadata['version']}.tar.gz"
-    ).read_bytes()
+    version = text(metadata.get("version"), "Release version")
+    body = (metadata_path.parent / f"chainman-{version}.tar.gz").read_bytes()
     if hashlib.sha256(body).hexdigest() != metadata["archive_sha256"]:
         raise ValueError("Release archive checksum mismatch")
-    runtime_files = read_archive(body, metadata["version"])
+    runtime_files = read_archive(body, version)
     files = runtime_files
-    expected_nar = metadata["narHash"]
+    runtime_nar = text(metadata.get("narHash"), "Runtime NAR hash")
+    expected_nar = runtime_nar
     if "source" in metadata:
-        source = metadata["source"]
-        filename = source["filename"]
-        if filename != f"chainman-source-{metadata['version']}.tar.gz":
+        source = table(metadata["source"], "Source archive metadata")
+        filename = text(source.get("filename"), "Source archive filename")
+        if filename != f"chainman-source-{version}.tar.gz":
             raise ValueError("Invalid source archive filename")
         source_body = (metadata_path.parent / filename).read_bytes()
         if hashlib.sha256(source_body).hexdigest() != source["archive_sha256"]:
             raise ValueError("Source archive checksum mismatch")
-        files = read_archive(source_body, metadata["version"])
+        files = read_archive(source_body, version)
         if any(files.get(name) != item for name, item in runtime_files.items()):
             raise ValueError("Runtime and source archive content disagree")
-        expected_nar = source["narHash"]
+        expected_nar = text(source.get("narHash"), "Source NAR hash")
     for selected_files, expected_hash in [
-        (runtime_files, metadata["narHash"]),
+        (runtime_files, runtime_nar),
         (files, expected_nar),
     ]:
         with tempfile.TemporaryDirectory(prefix="chainman-example-") as directory:
@@ -150,7 +157,7 @@ def create(destination: Path, metadata_path: Path):
     return {
         "directory": str(destination),
         "files": len(selected),
-        "version": metadata["version"],
+        "version": version,
     }
 
 

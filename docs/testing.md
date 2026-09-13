@@ -14,7 +14,8 @@ just exec python3 -B -m unittest discover -s tests -p test_application_recovery.
 ```
 
 The configuration compiler, resource policy, transaction checkpoint codec,
-dependency identity and native input projection modules enforce the pinned mypy
+dependency identity, native input projections, timing and distribution/development
+entrypoints enforce the pinned mypy
 strict flags, plus rejection of explicit `Any` and unreachable code. Decoded values
 enter as `object` and are narrowed by validation. Resource execution uses an
 immutable policy with typed fields. The transaction coordinator, source workflow,
@@ -22,8 +23,10 @@ native lock adapter and npm adapter require complete function annotations and
 pass decoded records through their decisions. Their configuration inputs and some
 imported operations still have dynamic types. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 22 source
-files, including five with the strict flags.
+but still permit untyped calls and dynamic payloads. The gate checks 31 source
+files, including 14 with the strict flags. Distribution inventories and consumed
+release metadata are validated before use; produced release metadata has a typed
+wire schema. Timing context managers have explicit lifetime and environment types.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The

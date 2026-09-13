@@ -11,7 +11,7 @@ import toolchain as tc
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def main():
+def main() -> None:
     target = (
         f"{platform.system().lower()}-"
         + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
