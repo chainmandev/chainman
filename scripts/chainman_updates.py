@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -13,7 +14,9 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
+from typing import Literal, NotRequired, TypedDict
 
+import adapter_data as ad
 import chainman
 import registry
 import source_updates
@@ -21,8 +24,25 @@ import toolchain as tc
 import updates
 from transaction_state import Options
 
+type FileState = tuple[bytes, int]
 
-def managed_state(root: Path, name: str) -> tuple[bytes, int] | None:
+
+class RuntimePin(TypedDict):
+    schema: Literal[1]
+    version: str
+    revision: str
+    url: str
+    narHash: str
+    bundled_archive: NotRequired[str]
+
+
+class ReleaseAsset(TypedDict):
+    id: int
+    size: int
+    digest: str
+
+
+def managed_state(root: Path, name: str) -> FileState | None:
     path = tc.contained(root, name)
     if not path.exists():
         return None
@@ -80,11 +100,11 @@ def managed_paths(root: Path) -> dict[str, str]:
 class ManagedFiles:
     """Restore only our still-identical managed outputs after a failed candidate."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path) -> None:
         self.root = root
-        self.written: dict[str, tuple[tuple[bytes, int] | None, tuple[bytes, int]]] = {}
+        self.written: dict[str, tuple[FileState | None, FileState]] = {}
 
-    def publish(self, name: str, before, after):
+    def publish(self, name: str, before: FileState | None, after: FileState) -> None:
         if managed_state(self.root, name) != before:
             raise ValueError(
                 f"Managed runtime input changed during preparation: {name}"
@@ -94,7 +114,7 @@ class ManagedFiles:
         self.written[name] = (before, after)
         tc.atomic_bytes(tc.contained(self.root, name), after[0], after[1])
 
-    def restore(self):
+    def restore(self) -> None:
         preserved = []
         for name, (before, candidate) in reversed(list(self.written.items())):
             try:
@@ -157,7 +177,9 @@ def fetch_source(root: Path, *, gc_root: Path) -> Path:
     return runtime
 
 
-def fetch_runtime(candidate: dict, body: bytes, *, gc_root: Path) -> Path:
+def fetch_runtime(
+    candidate: Mapping[str, object], body: bytes, *, gc_root: Path
+) -> Path:
     # Fetch exactly the downloaded bytes, before changing the live consumer pin.
     # The trusted old helper validates their unpacked NAR hash; no candidate
     # source is imported or executed while this temporary lock is evaluated.
@@ -177,11 +199,11 @@ def fetch_runtime(candidate: dict, body: bytes, *, gc_root: Path) -> Path:
     return runtime
 
 
-def validate_runtime(runtime: Path, version: str):
+def validate_runtime(runtime: Path, version: str) -> None:
     if runtime.is_symlink() or not runtime.is_dir():
         raise ValueError("Candidate runtime must be a real directory")
 
-    def unreadable(error):
+    def unreadable(error: OSError) -> None:
         raise ValueError("Candidate runtime tree could not be inspected") from error
 
     for directory, folders, files in os.walk(
@@ -214,7 +236,9 @@ def validate_runtime(runtime: Path, version: str):
         raise ValueError("Candidate VERSION does not match release metadata")
 
 
-def release_assets(selected: registry.Release, policy: dict, now: datetime):
+def release_assets(
+    selected: registry.Release, policy: Mapping[str, object], now: datetime
+) -> tuple[object, bytes, str]:
     """Bind release maturity to the exact server-dated assets before execution."""
     repository = "chainmandev/chainman"
     api = f"https://api.github.com/repos/{repository}"
@@ -233,7 +257,7 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
         selected.published, source_updates.commit_time(repository, revision)
     )
     names = ("chainman-release.json", f"chainman-{selected.version.lstrip('v')}.tar.gz")
-    assets = {}
+    assets: dict[str, ReleaseAsset] = {}
     for name in names:
         matches = [
             item
@@ -243,14 +267,15 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
         if len(matches) != 1:
             raise ValueError("Runtime release lacks one exact required asset")
         item = matches[0]
+        asset_id, size, digest = item.get("id"), item.get("size"), item.get("digest")
         if (
-            type(item.get("id")) is not int
-            or item["id"] <= 0
+            type(asset_id) is not int
+            or asset_id <= 0
             or item.get("state") != "uploaded"
-            or type(item.get("size")) is not int
-            or item["size"] <= 0
-            or not isinstance(item.get("digest"), str)
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", item["digest"])
+            or type(size) is not int
+            or size <= 0
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
         ):
             raise ValueError("Runtime asset lacks immutable checksum evidence")
         published = max(
@@ -258,7 +283,7 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
             registry.timestamp(item.get("created_at")),
             registry.timestamp(item.get("updated_at")),
         )
-        assets[name] = item
+        assets[name] = {"id": asset_id, "size": size, "digest": digest}
     registry.eligible(
         "github",
         [registry.Release(selected.version, published)],
@@ -268,13 +293,13 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
     )
     bodies = []
     for name in names:
-        item = assets[name]
+        asset = assets[name]
         body = registry.fetch(
-            f"{api}/releases/assets/{item['id']}", accept="application/octet-stream"
+            f"{api}/releases/assets/{asset['id']}", accept="application/octet-stream"
         )[0]
         if (
-            len(body) != item["size"]
-            or "sha256:" + hashlib.sha256(body).hexdigest() != item["digest"]
+            len(body) != asset["size"]
+            or "sha256:" + hashlib.sha256(body).hexdigest() != asset["digest"]
         ):
             raise ValueError("Runtime asset bytes differ from dated release identity")
         bodies.append(body)
@@ -285,7 +310,7 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
 
 def runtime_candidate(
     root: Path,
-    policy: dict,
+    policy: Mapping[str, object],
     now: datetime,
     managed: ManagedFiles | None = None,
     *,
@@ -297,13 +322,13 @@ def runtime_candidate(
     lock_before = managed_state(root, "chainman.lock")
     if lock_before is None:
         raise ValueError("Runtime pin disappeared during preparation")
-    old = json.loads(lock_before[0])
+    old = ad.table(json.loads(lock_before[0]), "Runtime pin")
     inputs = {
         name: managed_state(root, name)
         for name in ("scripts/chainman.sh", "scripts/chainman-fetch.nix")
     }
     if old.get("bundled_archive"):
-        name = old["bundled_archive"]
+        name = ad.text(old["bundled_archive"], "Bundled runtime archive")
         if name in inputs or name == "chainman.lock":
             raise ValueError("Bundled archive overlaps a managed bootstrap input")
         inputs[name] = managed_state(root, name)
@@ -326,7 +351,7 @@ def runtime_candidate(
         now,
     )
     if registry.version("github", selected.version) <= registry.version(
-        "github", old["version"]
+        "github", ad.text(old["version"], "Runtime version")
     ):
         return chainman.RUNTIME
     metadata, body, expected = release_assets(selected, policy, now)
@@ -340,18 +365,24 @@ def runtime_candidate(
     keys = ("version", "revision", "url", "narHash")
     if any(not isinstance(metadata.get(key), str) or not metadata[key] for key in keys):
         raise ValueError("Runtime release metadata lacks required identity fields")
-    required = {key: metadata[key] for key in keys}
+    required = {key: ad.text(metadata[key], f"Runtime {key}") for key in keys}
     registry.artifact_url(required["url"])
     if required["revision"] != expected:
         raise ValueError("Runtime archive provenance differs from release tag")
-    candidate = {"schema": 1, **required}
+    candidate: RuntimePin = {
+        "schema": 1,
+        "version": required["version"],
+        "revision": required["revision"],
+        "url": required["url"],
+        "narHash": required["narHash"],
+    }
     if (
         old.get("bundled_archive") or metadata.get("archive_sha256") is not None
     ) and hashlib.sha256(body).hexdigest() != metadata.get("archive_sha256"):
         raise ValueError("Runtime archive checksum does not match release")
     runtime = fetch_runtime(candidate, body, gc_root=gc_root)
     validate_runtime(runtime, required["version"])
-    prepared: dict[str, tuple[tuple[bytes, int] | None, tuple[bytes, int]]] = {}
+    prepared: dict[str, tuple[FileState | None, FileState]] = {}
     for source, target in (
         ("chainman.sh", "chainman.sh"),
         ("fetch.nix", "chainman-fetch.nix"),
@@ -373,9 +404,9 @@ def runtime_candidate(
             )
     if old.get("bundled_archive"):
         # A self-contained consumer remains self-contained after its runtime upgrade.
-        target = old["bundled_archive"]
+        target = ad.text(old["bundled_archive"], "Bundled runtime archive")
         prepared[target] = (inputs[target], (body, 0o644))
-        candidate["bundled_archive"] = old["bundled_archive"]
+        candidate["bundled_archive"] = target
     prepared["chainman.lock"] = (
         lock_before,
         ((json.dumps(candidate, indent=2) + "\n").encode(), 0o644),
@@ -412,12 +443,12 @@ def runtime_candidate(
 
 def perform(
     root: Path,
-    policy: dict,
+    policy: Mapping[str, object],
     now: datetime,
     extra: list[str],
     *,
-    only_runtime=False,
-    skip_runtime=True,
+    only_runtime: bool = False,
+    skip_runtime: bool = True,
     managed: ManagedFiles | None = None,
 ) -> Path:
     with tc.nix_temporary_directory("chainman-runtime-update-") as directory:
@@ -462,7 +493,9 @@ def perform(
         return runtime
 
 
-def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
+def resolve_current(
+    root: Path, policy: Mapping[str, object], now: datetime, extra: list[str]
+) -> None:
     import dependency_api
 
     policy = dependency_api.policy(root)
@@ -515,7 +548,7 @@ def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
         updates.perform(root, now, selected)
 
 
-def verify(root: Path, policy: dict, runtime: Path):
+def verify(root: Path, policy: Mapping[str, object], runtime: Path) -> None:
     # Re-enter the candidate runtime even when only the runtime pin changed.
     env = dict(
         os.environ,
@@ -545,7 +578,7 @@ def verify(root: Path, policy: dict, runtime: Path):
     )
 
 
-def verify_current(root: Path):
+def verify_current(root: Path) -> None:
     import dependency_api
 
     policy = dependency_api.policy(root)

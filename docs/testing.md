@@ -28,7 +28,7 @@ annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 42 source
-files, including 34 with the strict flags. Recipe bindings and verification task
+files, including 35 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -65,6 +65,9 @@ manifest lists, including exclusions.
 The runtime resolver regression also covers a project whose adapters all require
 explicit selection. Its targeted policy reaches snapshot, resolution and final
 validation; the preliminary plan check must use that same selection.
+Runtime update preparation also enforces strict flags, with named pin and asset
+records and explicit before/after file bytes and modes. Release JSON enters as
+unknown data, including when a saved update rechecks its release metadata.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by

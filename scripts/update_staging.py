@@ -25,7 +25,7 @@ import toolchain as tc
 import updates
 import workflows
 from transaction_state import Inspection, RuntimeMode, State
-from adapter_data import strings
+from adapter_data import strings, table
 
 
 def directory(value: str | Path) -> Path:
@@ -439,6 +439,7 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
             metadata, body, revision = runtime_updates.release_assets(
                 selected, settings, now
             )
+            metadata = table(metadata, "Runtime release metadata")
             if (
                 any(
                     pin[key] != metadata[key]
