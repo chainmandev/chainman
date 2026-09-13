@@ -1,10 +1,12 @@
 """Pinned ecosystem audit tools, shared exception rules and explicit coverage."""
 
+from collections.abc import Mapping, Sequence
 from datetime import date
 import json
 from pathlib import Path
 import subprocess
 import tempfile
+from typing import Literal, NotRequired, TypedDict
 
 import chainman
 import adapter_data as ad
@@ -12,31 +14,62 @@ import dependency_api
 import toolchain as tc
 
 
-def javascript(report):
+class Lane(TypedDict):
+    adapter: str
+    status: Literal["unsupported", "failed", "passed"]
+    directory: NotRequired[str]
+    reason: NotRequired[str]
+    findings: NotRequired[dict[str, str]]
+    accepted: NotRequired[int]
+    output: NotRequired[str]
+    error: NotRequired[str]
+
+
+class Report(TypedDict):
+    schema: Literal[1]
+    complete: bool
+    passed: bool
+    lanes: list[Lane]
+
+
+def javascript(report: object) -> dict[str, str]:
     if not isinstance(report, dict) or report.get("error"):
         raise ValueError("Package audit did not return a successful report")
-    if "advisories" in report:
+    document = ad.table(report, "Package report")
+    if "advisories" in document:
         return {
-            str(key): value["module_name"]
-            for key, value in report["advisories"].items()
+            key: ad.text(
+                ad.table(value, "Package advisory")["module_name"], "Package name"
+            )
+            for key, value in ad.table(
+                document["advisories"], "Package advisories"
+            ).items()
         }
-    if "vulnerabilities" in report:
-        findings = {}
-        for value in report["vulnerabilities"].values():
-            for via in value.get("via", []):
+    if "vulnerabilities" in document:
+        findings: dict[str, str] = {}
+        for raw in ad.table(document["vulnerabilities"], "Package inventory").values():
+            value = ad.table(raw, "Package entry")
+            for via in ad.array(value.get("via", []), "Package references"):
                 if isinstance(via, dict):
-                    findings[str(via["source"])] = via["name"]
+                    entry = ad.table(via, "Package reference")
+                    findings[str(entry["source"])] = ad.text(
+                        entry["name"], "Package name"
+                    )
         return findings
     raise ValueError("Package audit report has no recognized vulnerability inventory")
 
 
-def evaluate(findings, exceptions, today=None):
+def evaluate(
+    findings: Mapping[str, str],
+    exceptions: Sequence[Mapping[str, object]],
+    today: date | None = None,
+) -> dict[str, str]:
     today = today or date.today()
     ignored = set()
     for entry in exceptions:
         if (
             set(entry) != {"id", "package", "reason", "review_after"}
-            or not entry["reason"].strip()
+            or not ad.text(entry["reason"], "Exception reason").strip()
         ):
             raise ValueError(
                 "Audit exceptions require id, package, reason and review_after"
@@ -46,13 +79,16 @@ def evaluate(findings, exceptions, today=None):
             raise ValueError(
                 "Audit exception is duplicate, stale or belongs to another package"
             )
-        if date.fromisoformat(entry["review_after"]) <= today:
+        if (
+            date.fromisoformat(ad.text(entry["review_after"], "Exception review date"))
+            <= today
+        ):
             raise ValueError("Audit exception requires review")
         ignored.add(key)
     return {key: package for key, package in findings.items() if key not in ignored}
 
 
-def tools_path(root, kind, *, gc_root):
+def tools_path(root: Path, kind: str, *, gc_root: Path) -> Path:
     return (
         Path(
             tc.managed_run(
@@ -96,10 +132,12 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
         raise ValueError(
             "Audit configuration supports exceptions and unsupported declarations"
         )
+    audit = ad.table(audit, "Audit configuration")
     exceptions = audit.get("exceptions", {})
     if not isinstance(exceptions, dict):
         raise ValueError("Audit exceptions must be keyed by adapter")
-    for name, entries in exceptions.items():
+    exception_entries = ad.table(exceptions, "Audit exceptions")
+    for name, entries in exception_entries.items():
         if ad.table(adapters.get(name, {}), "Adapter").get(
             "adapter"
         ) != "javascript" or not isinstance(entries, list):
@@ -112,12 +150,14 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
         for name, reason in unsupported.items()
     ):
         raise ValueError("Unsupported audit declarations require an adapter and reason")
-    rows, binaries = [], {}
+    unsupported_reasons = ad.string_map(unsupported, "Unsupported audit declarations")
+    rows: list[Lane] = []
+    binaries: dict[str, Path] = {}
     for name in adapters:
         if name not in selected:
             continue
         spec = dependency_api.configured(root, name, settings)
-        kind = spec["adapter"]
+        kind = ad.text(spec["adapter"], "Adapter kind")
         if kind not in {
             "javascript",
             "rust",
@@ -133,7 +173,7 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
                 dict(
                     adapter=name,
                     status="unsupported",
-                    reason=audit.get("unsupported", {}).get(
+                    reason=unsupported_reasons.get(
                         name,
                         "No shared vulnerability scanner is configured for this ecosystem",
                     ),
@@ -147,7 +187,7 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
             try:
                 cwd = tc.contained(root, directory)
 
-                def execute(argv):
+                def execute(argv: list[str]) -> subprocess.CompletedProcess[str]:
                     result = chainman.execute(
                         root,
                         ad.text(spec["profile"], "Adapter profile"),
@@ -161,12 +201,24 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
                     return result
 
                 if kind == "javascript":
-                    result = execute([spec.get("manager", "pnpm"), "audit", "--json"])
+                    result = execute(
+                        [
+                            ad.text(spec.get("manager", "pnpm"), "JavaScript manager"),
+                            "audit",
+                            "--json",
+                        ]
+                    )
                     if result.returncode not in (0, 1):
                         raise ValueError("Package audit tool failed")
                     findings = javascript(json.loads(result.stdout))
                     remaining = evaluate(
-                        findings, audit.get("exceptions", {}).get(name, [])
+                        findings,
+                        [
+                            ad.table(entry, "Audit exception")
+                            for entry in ad.array(
+                                exception_entries.get(name, []), "Audit exceptions"
+                            )
+                        ],
                     )
                     rows.append(
                         dict(
@@ -244,7 +296,7 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
                         error=str(error),
                     )
                 )
-    report = dict(
+    report: Report = dict(
         schema=1,
         complete=not any(row["status"] == "unsupported" for row in rows),
         passed=all(row["status"] == "passed" for row in rows),

@@ -29,7 +29,7 @@ expose their input/output types and project their configuration values; the
 workspace planner still has dynamic operations. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 48 source
-files, including 46 with the strict flags. Recipe bindings and verification task
+files, including 47 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -106,6 +106,8 @@ Nix resolution retains declared flake order.
 Artifact transport callbacks and origin observations also enforce strict flags.
 The urllib constructor/callback options and consumed private standard-library
 attributes are declared explicitly; returned observations have a named wire record.
+The report adapter declares its lane/result records, parser projections and
+execution callback; its unit fixtures replace external tools.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by
