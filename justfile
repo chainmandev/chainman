@@ -38,7 +38,8 @@ format-check:
     @./scripts/enter.sh core python3 scripts/format.py --check
 
 type-check:
-    @./scripts/enter.sh core mypy --config-file mypy.ini
+    @./scripts/enter.sh core mypy --config-file mypy.ini --platform linux
+    @./scripts/enter.sh core mypy --config-file mypy.ini --platform darwin
 
 module name action="verify":
     @./scripts/enter.sh core python3 scripts/toolchain.py module "$@"

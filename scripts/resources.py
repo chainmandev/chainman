@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import re
 import subprocess
+import sys
 
 GIB = 1024**3
 
@@ -67,10 +68,12 @@ def linux_limits(
 
 
 def detected() -> tuple[int, int | None]:
-    try:
-        cpus = len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        cpus = os.cpu_count() or 1
+    cpus = os.cpu_count() or 1
+    if sys.platform == "linux":
+        try:
+            cpus = len(os.sched_getaffinity(0))
+        except (AttributeError, OSError):
+            pass
     memory = None
     if platform.system() == "Linux":
         memory, quota = linux_limits()

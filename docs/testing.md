@@ -3,7 +3,8 @@
 ## Development gates
 
 Use `just verify` for the complete core gate. `just type-check` runs its mypy
-portion. To run the generated contracts alone:
+portion for both Linux and Darwin, independent of the current host. This checks
+platform-specific Python APIs before native CI. To run the generated contracts alone:
 
 ```sh
 just exec python3 -B -m unittest discover -s tests -p test_properties.py -v
