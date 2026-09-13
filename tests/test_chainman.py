@@ -62,6 +62,10 @@ class ConsumerFixture(unittest.TestCase):
 
     def init_git(self):
         self.git("init", "-q", "-b", "main")
+        # Detached Git maintenance must not outlive this disposable fixture and
+        # race TemporaryDirectory cleanup of its administrative directory.
+        self.git("config", "maintenance.auto", "false")
+        self.git("config", "gc.auto", "0")
         self.git("config", "user.name", "Fixture Developer")
         self.git("config", "user.email", "developer@example.invalid")
         self.git("config", "commit.gpgsign", "false")

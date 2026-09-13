@@ -644,7 +644,11 @@ format-check=["format-check"]
         )
         cache = tempfile.TemporaryDirectory(prefix="chainman recovery host state ")
         self.addCleanup(cache.cleanup)
-        env = dict(self.env, CHAINMAN_MODE=mode, XDG_CACHE_HOME=cache.name)
+        env = dict(
+            self.env,
+            CHAINMAN_MODE=mode,
+            XDG_CACHE_HOME=str(Path(cache.name).resolve()),
+        )
         if mode == "container-nix":
             env["CHAINMAN_CONTAINER_ENGINE"] = os.environ["CHAINMAN_TEST_CONTAINER"]
         try:
