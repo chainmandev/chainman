@@ -220,6 +220,13 @@ dependency policy updates both inputs with the ordinary commit-age rule. Generat
 examples inherit both locks and update targets. Intel compatibility depends on
 the remaining upstream 26.05 support period; its retirement requires a new
 platform-support decision.
+On Intel macOS, source and bootstrap entry make the compatibility input's Bash
+available through `nix shell` before `nix develop`. Nix selects its startup Bash
+from the input named `nixpkgs` independently of the devShell, and otherwise falls
+back to the host's Bash. A real-Nix fixture supplies a primary input that cannot
+provide Bash and a failing host Bash; both launchers must still deliver literal
+arguments and the child's exit status through the pinned shell. Native Intel CI
+also qualifies the actual compatibility packages.
 
 `just rust-test` runs the production Cargo adapter with a loopback sparse index,
 real crate archives, and isolated source replacement/cache configuration. It

@@ -193,6 +193,7 @@
         pkgs:
         {
           just = pkgs.just;
+          bash = pkgs.bashInteractive;
           audit-rust = pkgs.cargo-deny;
           audit-go = pkgs.govulncheck;
           audit-python = pkgs.pip-audit;

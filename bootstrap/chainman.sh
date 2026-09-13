@@ -16,6 +16,17 @@ single_line() {
     case "$1" in *'
 '* | *''*) fail 'Newlines are not supported in bootstrap paths or options.' ;; esac
 }
+develop_runtime() {
+    develop_action=$1
+    shift
+    set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file --command "$@"
+    # The primary nixpkgs input no longer supplies Intel macOS Bash. Make the
+    # compatibility input's Bash available before Nix executes its shell script.
+    if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
+        set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' shell "path:$store/nix#bash" --no-write-lock-file --command "$@"
+    fi
+    if [ "$develop_action" = exec ]; then exec "$@"; else "$@"; fi
+}
 script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
 self=$script_dir/$(basename -- "$0")
 root=$(CDPATH='' cd -P -- "${CHAINMAN_PROJECT_ROOT:-$script_dir/..}" && pwd)
@@ -376,8 +387,7 @@ EOF
     [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
     if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
         if [ "$(nix_eval schema)" = 3 ]; then
-            route=$("$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file \
-                --command python3 -B "$store/scripts/bootstrap_plan.py" "$root" route)
+            route=$(develop_runtime run python3 -B "$store/scripts/bootstrap_plan.py" "$root" route)
         else
             route=$(nix_eval route)
         fi
@@ -387,8 +397,7 @@ EOF
     # Bootstrap entry replaces an external project shell. Its old profile token no
     # longer describes PATH, even when the project inputs themselves are unchanged.
     unset IN_NIX_SHELL CHAINMAN_ACTIVE_PROFILE CHAINMAN_ACTIVE_FINGERPRINT
-    exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file \
-        --command python3 -c '
+    develop_runtime exec python3 -c '
 import os, sys
 root, store, *args = sys.argv[1:]
 os.chdir(root)

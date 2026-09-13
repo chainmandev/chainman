@@ -36,4 +36,11 @@ fi
 export TOOLCHAIN_ACTIVE_ROOT="$root" TOOLCHAIN_ACTIVE_INPUTS="$inputs" TOOLCHAIN_MODE=host-nix
 unset IN_NIX_SHELL TOOLCHAIN_FRESH
 cd "$root/nix"
-exec "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:.#$profile" --no-write-lock-file --command sh -eu -c 'cd "$1"; shift; exec "$@"' sh "$root" "$@"
+set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:.#$profile" --no-write-lock-file --command sh -eu -c 'cd "$1"; shift; exec "$@"' sh "$root" "$@"
+# Nix develop looks for Bash in the input named nixpkgs, independently of the
+# selected shell. Intel macOS uses our compatibility input; its host Bash cannot
+# parse modern stdenv functions when that independent lookup falls back to PATH.
+if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
+    set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' shell path:.#bash --no-write-lock-file --command "$@"
+fi
+exec "$@"

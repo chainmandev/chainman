@@ -1,6 +1,7 @@
 """Managed child lifetime and disposal boundaries protect active build outputs."""
 
 from contextlib import chdir
+import json
 import os
 from pathlib import Path
 import signal
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import textwrap
 import time
 import unittest
@@ -19,6 +21,143 @@ import native_tasks
 
 
 class NixReferenceTests(unittest.TestCase):
+    def test_source_entry_uses_pinned_bash_when_primary_input_cannot_supply_it(self):
+        self.pinned_bash_entry_case(bootstrap=False)
+
+    def test_bootstrap_uses_pinned_bash_when_primary_input_cannot_supply_it(self):
+        self.pinned_bash_entry_case(bootstrap=True)
+
+    def pinned_bash_entry_case(self, *, bootstrap):
+        with tempfile.TemporaryDirectory(prefix="chainman shell entry ") as temporary:
+            root = Path(temporary).resolve()
+            (root / "scripts").mkdir()
+            (root / "nix/broken").mkdir(parents=True)
+            shutil.copy2(
+                toolchain.RUNTIME / "scripts/enter.sh", root / "scripts/enter.sh"
+            )
+            # Nix develop obtains Bash from the input named nixpkgs even when
+            # another input supplies the actual shell on this platform.
+            (root / "nix/broken/flake.nix").write_text(
+                "{ outputs = { self }: { legacyPackages = "
+                'throw "fixture primary input does not support this platform"; }; }'
+            )
+            (root / "nix/flake.nix").write_text(
+                "{ inputs.base.url = "
+                + json.dumps(
+                    toolchain.nix_path_reference(
+                        toolchain.RUNTIME / "nix", ""
+                    ).removesuffix("#")
+                )
+                + "; inputs.nixpkgs.url = "
+                + json.dumps(
+                    toolchain.nix_path_reference(root / "nix/broken", "").removesuffix(
+                        "#"
+                    )
+                )
+                + "; "
+                "outputs = { base, ... }: { inherit (base) devShells packages; }; }"
+            )
+            subprocess.run(
+                [
+                    toolchain.nix_command(),
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "flake",
+                    "lock",
+                ],
+                cwd=root / "nix",
+                check=True,
+                capture_output=True,
+                timeout=120,
+            )
+            binaries = root / "host-bin"
+            binaries.mkdir()
+            (binaries / "nix").symlink_to(toolchain.nix_command())
+            (binaries / "bash").write_text("#!/bin/sh\nexit 77\n")
+            (binaries / "bash").chmod(0o755)
+            (binaries / "uname").write_text(
+                '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo x86_64;; *) exit 2;; esac\n'
+            )
+            (binaries / "uname").chmod(0o755)
+            command = [
+                str(root / "scripts/enter.sh"),
+                "core",
+                "python3",
+                "-c",
+                "import sys; print(sys.argv[1]); raise SystemExit(7)",
+                "literal ' $ value",
+            ]
+            env = dict(
+                os.environ,
+                PATH=str(binaries) + os.pathsep + os.defpath,
+                CHAINMAN_NIX_BIN=toolchain.nix_command(),
+                TOOLCHAIN_FRESH="1",
+            )
+            if bootstrap:
+                runtime = root / "runtime"
+                shutil.copytree(root / "nix", runtime / "nix")
+                (runtime / "scripts").mkdir()
+                (runtime / "scripts/chainman.py").write_text(
+                    "import sys; print(sys.argv[-1]); raise SystemExit(7)\n"
+                )
+                nar_hash = subprocess.check_output(
+                    [
+                        toolchain.nix_command(),
+                        "--extra-experimental-features",
+                        "nix-command",
+                        "hash",
+                        "path",
+                        str(runtime),
+                    ],
+                    text=True,
+                    timeout=30,
+                ).strip()
+                consumer = root / "consumer"
+                (consumer / "scripts").mkdir(parents=True)
+                shutil.copy2(
+                    toolchain.RUNTIME / "bootstrap/chainman.sh",
+                    consumer / "scripts/chainman.sh",
+                )
+                shutil.copy2(
+                    toolchain.RUNTIME / "bootstrap/fetch.nix",
+                    consumer / "scripts/chainman-fetch.nix",
+                )
+                with tarfile.open(consumer / "bundle.tar.gz", "w:gz") as archive:
+                    archive.add(runtime, arcname="runtime")
+                (consumer / "chainman.lock").write_text(
+                    json.dumps(
+                        {
+                            "schema": 1,
+                            "version": "fixture",
+                            "revision": "fixture-only",
+                            "url": "https://example.invalid/runtime.tar.gz",
+                            "narHash": nar_hash,
+                            "bundled_archive": "bundle.tar.gz",
+                        }
+                    )
+                )
+                command = [str(consumer / "scripts/chainman.sh"), "literal ' $ value"]
+                # Keep runtime/cache identity local to this disposable fixture.
+                env = {
+                    key: value
+                    for key, value in env.items()
+                    if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+                }
+                env.update(
+                    CHAINMAN_MODE="host-nix",
+                    CHAINMAN_NIX_BIN=toolchain.nix_command(),
+                    XDG_CACHE_HOME=str(root / "cache"),
+                )
+            result = subprocess.run(
+                command,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(result.stdout, "literal ' $ value\n")
+
     def test_native_task_from_copied_runtime_keeps_output_and_exit_status(self):
         with tempfile.TemporaryDirectory(
             prefix="chainman native runtime "
