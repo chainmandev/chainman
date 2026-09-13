@@ -182,6 +182,8 @@ The public bootstrap suite includes real host-Nix update/recovery lifecycles.
 Bounded bootstrap calls retain captured stdout and stderr in timeout diagnostics,
 including output from cold container startup. A timeout remains a failed check;
 diagnostic reporting does not extend its deadline or retry the operation.
+Container fixtures stop and explicitly remove their service container before
+removing its network, avoiding asynchronous auto-removal races during cleanup.
 Combined and runtime-only updates use two independently packaged runtime
 generations. They assert that project resolution and verification run under the
 new runtime while the original checkout retains its old pin until application.

@@ -741,23 +741,22 @@ format-check=["format-check"]
     )
     def test_owned_private_bridge_resolves_service_alias_without_host_exposure(self):
         engine = os.environ["CHAINMAN_TEST_CONTAINER"]
+
+        def checked_engine(*args):
+            result = run_captured([engine, *args], env=os.environ)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            return result.stdout.strip()
+
         key = hashlib.sha256(str(self.root).encode()).hexdigest()[:24]
         network, alias = "chainman-" + key, "cm-" + key
-        network_id = subprocess.check_output(
-            [engine, "network", "create", "--driver", "bridge", network], text=True
-        ).strip()
-        self.addCleanup(
-            lambda: subprocess.run(
-                [engine, "network", "rm", network_id], capture_output=True, check=True
-            )
-        )
+        network_id = checked_engine("network", "create", "--driver", "bridge", network)
+        self.addCleanup(checked_engine, "network", "rm", network_id)
         image = (SOURCE / "nix/container-image.txt").read_text().strip()
         container_id = subprocess.check_output(
             [
                 engine,
                 "run",
                 "--detach",
-                "--rm",
                 "--network",
                 network,
                 "--network-alias",
@@ -774,13 +773,10 @@ format-check=["format-check"]
             ],
             text=True,
         ).strip()
-        self.addCleanup(
-            lambda: subprocess.run(
-                [engine, "stop", "--time", "1", container_id],
-                capture_output=True,
-                check=True,
-            )
-        )
+        # stop can return before --rm finishes deleting an exited container.
+        # Remove the fixture explicitly before removing its network (LIFO).
+        self.addCleanup(checked_engine, "rm", container_id)
+        self.addCleanup(checked_engine, "stop", "--time", "1", container_id)
         expected = json.loads(
             subprocess.check_output([engine, "inspect", container_id], text=True)
         )[0]["NetworkSettings"]["Networks"][network]["IPAddress"]
