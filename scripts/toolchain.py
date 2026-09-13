@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable, Iterator, Mapping
 import contextlib
 import fcntl
 import hashlib
@@ -21,6 +22,7 @@ import time
 import tomllib
 import uuid
 from urllib.parse import quote
+from typing import TextIO
 
 RUNTIME = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
@@ -31,13 +33,15 @@ _operation_compat_fd: int | None = None
 _ancestor_fds: tuple[int, ...] = ()
 _COMPILER_STARTUP_SECONDS = 120
 
+type OperationState = tuple[int | None, int | None, str, int | None, tuple[int, ...]]
+
 
 def nix_path_reference(directory: Path, attribute: str) -> str:
     """Encode filesystem characters before using a path as a Nix flake URI."""
     return f"path:{quote(str(directory), safe='/')}#{attribute}"
 
 
-def nix_command(env=None) -> str:
+def nix_command(env: Mapping[str, str] | None = None) -> str:
     """Retain the host/image Nix selected by the launcher across project shells."""
     selected = os.environ if env is None else env
     directory = selected.get("CHAINMAN_RUNTIME_NIX_BIN")
@@ -72,7 +76,7 @@ def runtime_nix_environment(env: dict[str, str]) -> None:
         )
 
 
-def nix_temporary_directory(prefix: str):
+def nix_temporary_directory(prefix: str) -> tempfile.TemporaryDirectory[str]:
     """Keep managed roots visible to the shared container store daemon."""
     return tempfile.TemporaryDirectory(
         prefix=prefix,
@@ -259,7 +263,9 @@ def cache_root(root: Path = ROOT) -> Path:
 
 
 @contextlib.contextmanager
-def operation_file(root: Path, name: str, *, create=True, unique=False):
+def operation_file(
+    root: Path, name: str, *, create: bool = True, unique: bool = False
+) -> Iterator[TextIO]:
     path = contained(root, f".cache/toolchain/{name}")
     if path.exists() and not stat.S_ISREG(path.lstat().st_mode):
         raise ValueError("Operation lock must be a regular file")
@@ -276,7 +282,7 @@ def operation_file(root: Path, name: str, *, create=True, unique=False):
 
 
 @contextlib.contextmanager
-def operation_gate(root: Path):
+def operation_gate(root: Path) -> Iterator[None]:
     # This mutex covers admission and stale-lease inspection only, never a child
     # command. A writer retains writer.lock after admission.
     with operation_file(root, "operation-admission.lock") as gate:
@@ -284,7 +290,7 @@ def operation_gate(root: Path):
         yield
 
 
-def acquire_operation(descriptor: int):
+def acquire_operation(descriptor: int) -> None:
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -308,7 +314,7 @@ def active_operations(root: Path) -> set[tuple[int, int]]:
     return active
 
 
-def descriptor_identities(descriptors) -> set[tuple[int, int]]:
+def descriptor_identities(descriptors: Iterable[int]) -> set[tuple[int, int]]:
     result = set()
     for descriptor in descriptors:
         metadata = os.fstat(descriptor)
@@ -319,7 +325,13 @@ def descriptor_identities(descriptors) -> set[tuple[int, int]]:
 
 
 @contextlib.contextmanager
-def operation_state(descriptor, gate, identity, compat, ancestors):
+def operation_state(
+    descriptor: int | None,
+    gate: int | None,
+    identity: str,
+    compat: int | None,
+    ancestors: tuple[int, ...],
+) -> Iterator[None]:
     global \
         _operation_fd, \
         _operation_gate_fd, \
@@ -352,7 +364,7 @@ def operation_state(descriptor, gate, identity, compat, ancestors):
         ) = previous
 
 
-def inherited_operation():
+def inherited_operation() -> OperationState:
     if _operation_fd is not None:
         return (
             _operation_fd,
@@ -413,9 +425,9 @@ def operation(
     root: Path = ROOT,
     *,
     exclusive: bool = True,
-    automatic_prune=False,
-    new_execution=False,
-):
+    automatic_prune: bool = False,
+    new_execution: bool = False,
+) -> Iterator[bool]:
     cache_root(root).mkdir(parents=True, exist_ok=True)
     contained(root, ".cache/toolchain/operations").mkdir(exist_ok=True)
     descriptor, inherited_gate, identity, inherited_compat, ancestors = (
@@ -490,14 +502,14 @@ def operation(
                     "Another managed operation is active; an older runtime owns exclusive access"
                 ) from None
             compat_descriptor = compat.fileno()
-        gate = (
+        writer = (
             None
             if same and inherited_gate is not None
             else stack.enter_context(operation_file(root, "writer.lock"))
         )
         with operation_gate(root):
-            if gate is not None:
-                acquire_operation(gate.fileno())
+            if writer is not None:
+                acquire_operation(writer.fileno())
             active = active_operations(root)
             if exclusive and active - descriptor_identities(owners):
                 raise ValueError(
@@ -512,11 +524,11 @@ def operation(
                 prune(root)
             gate_descriptor = (
                 inherited_gate
-                if gate is None
-                else (gate.fileno() if exclusive else None)
+                if writer is None
+                else (writer.fileno() if exclusive else None)
             )
-            if gate is not None and not exclusive:
-                gate.close()
+            if writer is not None and not exclusive:
+                writer.close()
         with operation_state(
             lease.fileno(), gate_descriptor, identity, compat_descriptor, owners
         ):
@@ -580,7 +592,7 @@ def pnpm_environment(env: dict[str, str], values: dict[str, str]) -> None:
                 break
 
 
-def environment(root: Path = ROOT, *, create=True) -> dict[str, str]:
+def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
     env = dict(os.environ)
     if _operation_id and env.get("TOOLCHAIN_OPERATION_ID") != _operation_id:
         # Public child commands own their server lifetime. Reusing the parent
@@ -699,7 +711,9 @@ def environment(root: Path = ROOT, *, create=True) -> dict[str, str]:
 
 
 @contextlib.contextmanager
-def compiler_cache(profile: str | None, env: dict[str, str], root: Path = ROOT):
+def compiler_cache(
+    profile: str | None, env: dict[str, str], root: Path = ROOT
+) -> Iterator[dict[str, str]]:
     owns_cache = (
         config(root).get("profiles", {}).get(profile, {}).get("compiler_cache", False)
     )
@@ -781,7 +795,13 @@ def compiler_cache(profile: str | None, env: dict[str, str], root: Path = ROOT):
 
 
 @contextlib.contextmanager
-def owned_compiler_cache(root, env, executable, server_env, command):
+def owned_compiler_cache(
+    root: Path,
+    env: dict[str, str],
+    executable: str,
+    server_env: dict[str, str],
+    command: list[str],
+) -> Iterator[dict[str, str]]:
     endpoint = Path(env["SCCACHE_SERVER_UDS"])
     lifecycle_name = "compiler-" + uuid.uuid4().hex + ".lock"
     # Keep a distinct lifetime lease in the actual compiler process and every
@@ -886,7 +906,7 @@ def owned_compiler_cache(root, env, executable, server_env, command):
             print(f"Compiler cache cleanup also failed: {cleanup}", file=sys.stderr)
 
 
-def stop_owned_compiler(server):
+def stop_owned_compiler(server: subprocess.Popen[bytes]) -> None:
     if server.poll() is None:
         server.terminate()
     try:
@@ -897,7 +917,9 @@ def stop_owned_compiler(server):
         ) from None
 
 
-def release_compiler_lifetime(root, lifecycle_name, endpoint, owned_socket):
+def release_compiler_lifetime(
+    root: Path, lifecycle_name: str, endpoint: Path, owned_socket: os.stat_result | None
+) -> None:
     with operation_file(root, lifecycle_name, create=False) as lifecycle:
         try:
             fcntl.flock(lifecycle, fcntl.LOCK_EX | fcntl.LOCK_NB)

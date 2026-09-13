@@ -27,6 +27,9 @@ but still permit untyped calls and dynamic payloads. The gate checks 32 source
 files, including 15 with the strict flags. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
 wire schema. Timing context managers have explicit lifetime and environment types.
+Operation leases and compiler lifetime context managers also expose concrete
+descriptor, stream and yielded-environment types. The subprocess option boundary
+and general configuration maps still need further typing.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The
