@@ -430,10 +430,10 @@ commands=[["true"]]
         def snapshot(root, spec):
             self.assertEqual((root / "dependency.lock").read_text(), "old\n")
             self.assertEqual((root / "source.txt").read_text(), "user source\n")
-            return "original identities"
+            return {"identities": "original identities"}
 
         def audit(root, spec, before, policy, now):
-            self.assertEqual(before, "original identities")
+            self.assertEqual(before, {"identities": "original identities"})
             self.assertEqual((root / "dependency.lock").read_text(), "new\n")
             self.assertFalse((root / "source.txt").exists())
             seen.append(now)

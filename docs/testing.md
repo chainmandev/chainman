@@ -27,8 +27,8 @@ profiles, pin arrays and policy maps. The npm adapter requires complete function
 annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 42 source
-files, including 35 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 43 source
+files, including 36 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -68,6 +68,11 @@ validation; the preliminary plan check must use that same selection.
 Runtime update preparation also enforces strict flags, with named pin and asset
 records and explicit before/after file bytes and modes. Release JSON enters as
 unknown data, including when a saved update rechecks its release metadata.
+Dependency planning and public queries also enforce strict flags. Adapter dispatch
+exposes typed snapshot, resolution and final validation operations; SDK resolution
+can consume the saved baseline. Ordered update tests require every baseline before
+the first mutation and every final validation after generators, including targeted
+updates and failure paths. Policy composition shares the configuration merger.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by

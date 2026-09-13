@@ -145,7 +145,7 @@ def inputs(root: Path, spec: ad.Table) -> set[str]:
 def coverage(root: Path) -> Coverage:
     settings = dependency_api.inspection_policy(root)
     owners: dict[str, list[str]] = {}
-    for name in settings.get("adapters", {}):
+    for name in ad.table(settings.get("adapters", {}), "Dependency adapters"):
         for path in inputs(root, dependency_api.configured(root, name, settings)):
             owners.setdefault(path, []).append(name)
     spec = ad.table(tc.config(root).get("dependencies", {}), "Dependency coverage")
@@ -235,7 +235,7 @@ def report(root: Path, arguments: list[str]) -> ad.Table:
                     "retained_sources",
                 }
             }
-            for name in settings.get("adapters", {})
+            for name in ad.table(settings.get("adapters", {}), "Dependency adapters")
         },
         constraints=settings.get("constraints", {}),
         exceptions=settings.get("exceptions", []),

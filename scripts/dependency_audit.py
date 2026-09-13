@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 
 import chainman
+import adapter_data as ad
 import dependency_api
 import toolchain as tc
 
@@ -86,6 +87,7 @@ def run_retained(root, arguments, roots):
 
     cfg = tc.config(root)
     settings = dependency_api.inspection_policy(root)
+    adapters = ad.table(settings.get("adapters", {}), "Dependency adapters")
     selected, _ = dependency_api.selection(
         settings, recipes.selection_options(arguments)
     )
@@ -98,7 +100,7 @@ def run_retained(root, arguments, roots):
     if not isinstance(exceptions, dict):
         raise ValueError("Audit exceptions must be keyed by adapter")
     for name, entries in exceptions.items():
-        if settings.get("adapters", {}).get(name, {}).get(
+        if ad.table(adapters.get(name, {}), "Adapter").get(
             "adapter"
         ) != "javascript" or not isinstance(entries, list):
             raise ValueError(
@@ -106,14 +108,12 @@ def run_retained(root, arguments, roots):
             )
     unsupported = audit.get("unsupported", {})
     if not isinstance(unsupported, dict) or any(
-        name not in settings.get("adapters", {})
-        or not isinstance(reason, str)
-        or not reason.strip()
+        name not in adapters or not isinstance(reason, str) or not reason.strip()
         for name, reason in unsupported.items()
     ):
         raise ValueError("Unsupported audit declarations require an adapter and reason")
     rows, binaries = [], {}
-    for name in settings.get("adapters", {}):
+    for name in adapters:
         if name not in selected:
             continue
         spec = dependency_api.configured(root, name, settings)
@@ -140,7 +140,9 @@ def run_retained(root, arguments, roots):
                 )
             )
             continue
-        directories = spec.get("directories", [spec.get("directory", ".")])
+        directories = ad.strings(
+            spec.get("directories", [spec.get("directory", ".")]), "Adapter directories"
+        )
         for directory in directories:
             try:
                 cwd = tc.contained(root, directory)
@@ -148,7 +150,7 @@ def run_retained(root, arguments, roots):
                 def execute(argv):
                     result = chainman.execute(
                         root,
-                        spec["profile"],
+                        ad.text(spec["profile"], "Adapter profile"),
                         argv,
                         cwd=cwd,
                         env=tc.environment(root),

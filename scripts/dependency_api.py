@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,26 +14,59 @@ from pathlib import Path
 import re
 import sys
 import tomllib
+from typing import Protocol
 
 import chainman
 import adapter_data
 import registry
 import toolchain as tc
 import updates
+import configuration
+from adapter_data import Table, array, table, text, strings
 
 
-def merge(base: dict, extra: dict) -> dict:
-    result = deepcopy(base)
-    for key, value in extra.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = merge(result[key], value)
-        else:
-            result[key] = deepcopy(value)
-    return result
+merge = configuration.merge
 
 
-def policy(root: Path) -> dict:
-    result = deepcopy(tc.config(root).get("updates", {}))
+class Resolver(Protocol):
+    def __call__(
+        self,
+        root: Path,
+        spec: Table,
+        policy: Table,
+        now: datetime,
+        *,
+        before: Table | None = None,
+    ) -> object: ...
+
+
+@dataclass(frozen=True)
+class Adapter:
+    snapshot: Callable[[Path, Table], Mapping[str, object]]
+    resolve: Resolver
+    audit: Callable[[Path, Table, Table, Table, datetime], object]
+
+
+def standard_resolver(
+    function: Callable[[Path, Table, Table, datetime], object],
+) -> Resolver:
+    def resolve(
+        root: Path,
+        spec: Table,
+        policy: Table,
+        now: datetime,
+        *,
+        before: Table | None = None,
+    ) -> object:
+        if before is not None:
+            raise ValueError("Only SDK resolution consumes a saved baseline")
+        return function(root, spec, policy, now)
+
+    return resolve
+
+
+def policy(root: Path) -> Table:
+    result = deepcopy(table(tc.config(root).get("updates", {}), "Update policy"))
     if result.get("policy_file"):
         authority = tc.configuration_root(root)
         declared = tomllib.loads(
@@ -40,7 +74,7 @@ def policy(root: Path) -> dict:
                 authority,
                 "dependency-policy.toml"
                 if authority != root
-                else result["policy_file"],
+                else text(result["policy_file"], "Policy file"),
             ).decode()
         )
         result = merge(result, declared)
@@ -53,14 +87,14 @@ def instant() -> datetime:
     return registry.timestamp(value) if value else datetime.now(timezone.utc)
 
 
-def inspection_policy(root: Path) -> dict:
+def inspection_policy(root: Path) -> Table:
     """Expose the same adapters used by optional module resolution to inspection."""
     result = policy(root)
     if result.get("adapters") or result.get("steps") or result.get("resolver"):
         return result
     import module_updates
 
-    result = updates.settings(root)
+    result = table(updates.settings(root), "Update settings")
     specs = module_updates.adapters(root, tc.config(root)["modules"], result)
     nix = module_updates.nix_spec(result)
     if nix is not None:
@@ -69,7 +103,7 @@ def inspection_policy(root: Path) -> dict:
 
 
 @contextmanager
-def transaction_environment(root: Path, now: datetime):
+def transaction_environment(root: Path, now: datetime) -> Iterator[None]:
     values = {
         "CHAINMAN_UPDATE_ACTIVE": "1",
         "CHAINMAN_UPDATE_AT": now.isoformat(),
@@ -89,37 +123,53 @@ def transaction_environment(root: Path, now: datetime):
                 os.environ[key] = value
 
 
-def implementation(spec: dict):
-    adapter = spec.get("adapter")
+def implementation(spec: Mapping[str, object]) -> Adapter:
+    adapter = text(spec.get("adapter"), "Adapter kind")
     if adapter == "javascript":
         import javascript_updates
 
-        return javascript_updates
+        return Adapter(
+            javascript_updates.snapshot,
+            standard_resolver(javascript_updates.resolve),
+            javascript_updates.audit,
+        )
     if adapter in {"actions", "oci", "nix", "go", "toolchain"}:
         import source_updates
 
-        return source_updates
+        return Adapter(
+            source_updates.snapshot, source_updates.resolve, source_updates.audit
+        )
     if adapter == "artifact":
         import source_artifacts
 
-        return source_artifacts
+        return Adapter(
+            source_artifacts.snapshot,
+            standard_resolver(source_artifacts.resolve),
+            source_artifacts.audit,
+        )
     if adapter in {"rust", "python", "flutter", "swift", "gradle"}:
         import ecosystem_updates
 
-        return ecosystem_updates
+        return Adapter(
+            ecosystem_updates.snapshot,
+            standard_resolver(ecosystem_updates.resolve),
+            ecosystem_updates.audit,
+        )
     raise ValueError(f"Unknown dependency adapter: {adapter!r}")
 
 
-def configured(root: Path, name: str, settings: dict | None = None):
+def configured(
+    root: Path, name: str, settings: Mapping[str, object] | None = None
+) -> Table:
     settings = policy(root) if settings is None else settings
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
         raise ValueError(
             "Adapter names require letters, digits, underscores or hyphens"
         )
-    spec = settings.get("adapters", {}).get(name)
+    spec = table(settings.get("adapters", {}), "Dependency adapters").get(name)
     if not isinstance(spec, dict):
         raise ValueError(f"Dependency adapter {name!r} is not configured")
-    result = deepcopy(spec)
+    result = deepcopy(table(spec, f"Adapter {name}"))
     result.setdefault(
         "profile", tc.config(root).get("project", {}).get("default_profile", "default")
     )
@@ -131,8 +181,10 @@ def configured(root: Path, name: str, settings: dict | None = None):
     return result
 
 
-def effective_policy(settings: dict, spec: dict) -> dict:
-    result = merge(settings, spec.get("policy", {}))
+def effective_policy(
+    settings: Mapping[str, object], spec: Mapping[str, object]
+) -> Table:
+    result = merge(settings, table(spec.get("policy", {}), "Adapter policy"))
     registry.minimum_age(result)
     return result
 
@@ -166,24 +218,30 @@ def selection_arguments(
     )
 
 
-def selection(settings: dict, extra: list[str]) -> tuple[set[str], dict[str, str]]:
+def selection(
+    settings: Mapping[str, object], extra: list[str]
+) -> tuple[set[str], dict[str, str]]:
     args = selection_arguments(extra)
     names = target_names(settings)
-    automatic = {
-        name
-        for name in names
-        if not settings.get("adapters", {}).get(name, {}).get("explicit_only", False)
+    adapters = {
+        name: table(spec, f"Adapter {name}")
+        for name, spec in table(
+            settings.get("adapters", {}), "Dependency adapters"
+        ).items()
     }
-    for spec in settings.get("adapters", {}).values():
+    automatic = {
+        name for name in names if not adapters.get(name, {}).get("explicit_only", False)
+    }
+    for spec in adapters.values():
         if type(spec.get("explicit_only", False)) is not bool:
             raise ValueError("Adapter explicit_only must be a boolean")
-    groups = settings.get("target_groups", {})
-    targets = set()
+    groups = table(settings.get("target_groups", {}), "Target groups")
+    targets: set[str] = set()
     for name in args.targets.split(","):
         if name == "all":
             targets.update(automatic)
         elif name in groups:
-            targets.update(groups[name])
+            targets.update(strings(groups[name], "Target group members"))
         else:
             targets.add(name)
     if not targets or targets - names:
@@ -201,7 +259,7 @@ def selection(settings: dict, extra: list[str]) -> tuple[set[str], dict[str, str
     return targets, modes
 
 
-def target_names(settings: dict) -> set[str]:
+def target_names(settings: Mapping[str, object]) -> set[str]:
     hooks = settings.get("targets", [])
     if not isinstance(hooks, list) or any(
         not isinstance(name, str)
@@ -209,30 +267,36 @@ def target_names(settings: dict) -> set[str]:
         for name in hooks
     ):
         raise ValueError("Hook targets require a list of simple names")
-    adapters = set(settings.get("adapters", {}))
+    adapters = set(table(settings.get("adapters", {}), "Dependency adapters"))
     if len(hooks) != len(set(hooks)) or adapters.intersection(hooks):
         raise ValueError("Hook target names must be unique and distinct from adapters")
     return adapters | set(hooks)
 
 
-def plan_steps(root: Path, settings: dict, extra: list[str]):
+def plan_steps(
+    root: Path, settings: Mapping[str, object], extra: list[str]
+) -> tuple[set[str], dict[str, str], dict[str, tuple[Table, Table]]]:
     """Validate the adapter/step contract without running resolvers or hooks."""
     steps = settings.get("steps")
     if not isinstance(steps, list) or not steps:
         raise ValueError("Configured adapters require a nonempty updates.steps list")
     names, modes = selection(settings, extra)
     all_names = target_names(settings)
-    adapters, seen, covered, phase = {}, set(), set(), 0
-    for step in steps:
-        if not isinstance(step, dict) or ("resolve" in step) == ("commands" in step):
+    adapters: dict[str, tuple[Table, Table]] = {}
+    seen: set[str] = set()
+    covered: set[str] = set()
+    phase = 0
+    for raw in steps:
+        step = table(raw, "Update step")
+        if ("resolve" in step) == ("commands" in step):
             raise ValueError("Each update step must declare resolve or commands")
-        targets = step.get("targets", [])
-        if not isinstance(targets, list) or set(targets) - all_names:
+        targets = strings(step.get("targets", []), "Hook targets")
+        if set(targets) - all_names:
             raise ValueError("Hook targets must name configured adapters or hooks")
         if "resolve" not in step:
             covered.update(targets)
             continue
-        name = step["resolve"]
+        name = text(step["resolve"], "Step adapter")
         spec = configured(root, name, settings)
         if name in seen:
             raise ValueError("An adapter must occur exactly once in updates.steps")
@@ -242,31 +306,42 @@ def plan_steps(root: Path, settings: dict, extra: list[str]):
             continue
         if name in modes:
             spec["mode"] = modes[name]
-        next_phase = {"nix": 0, "toolchain": 1}.get(spec["adapter"], 2)
+        next_phase = {"nix": 0, "toolchain": 1}.get(
+            text(spec["adapter"], "Adapter kind"), 2
+        )
         if next_phase < phase:
             raise ValueError(
                 "Nix inputs and toolchain synchronization must precede package resolution"
             )
         phase = next_phase
         adapters[name] = (spec, effective_policy(settings, spec))
-    if names.intersection(settings.get("adapters", {})) - seen or names - covered:
+    if (
+        names.intersection(table(settings.get("adapters", {}), "Dependency adapters"))
+        - seen
+        or names - covered
+    ):
         raise ValueError("Selected update targets are missing from updates.steps")
     return names, modes, adapters
 
 
-def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
+def run_steps(
+    root: Path, settings: Mapping[str, object], now: datetime, extra: list[str]
+) -> None:
     """Resolve in order, then audit every selected adapter after all project hooks."""
     names, modes, adapters = plan_steps(root, settings, extra)
-    steps = settings["steps"]
+    steps = [
+        table(value, "Update step")
+        for value in array(settings["steps"], "Update steps")
+    ]
     # Capture all pre-update identities before any resolver or generator can run.
     baselines = {
-        name: implementation(spec).snapshot(root, spec)
+        name: table(implementation(spec).snapshot(root, spec), "Adapter snapshot")
         for name, (spec, _) in adapters.items()
     }
     with transaction_environment(root, now):
         for step in steps:
             if "resolve" in step:
-                name = step["resolve"]
+                name = text(step["resolve"], "Step adapter")
                 if name in adapters:
                     spec, chosen_policy = adapters[name]
                     result = implementation(spec).resolve(
@@ -283,7 +358,9 @@ def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
                     if isinstance(result, dict):
                         baselines[name]["resolution"] = result
                 continue
-            if step.get("targets") and not names.intersection(step["targets"]):
+            if step.get("targets") and not names.intersection(
+                strings(step["targets"], "Hook targets")
+            ):
                 continue
             env = tc.environment(root)
             env.update(
@@ -313,7 +390,7 @@ def run_steps(root: Path, settings: dict, now: datetime, extra: list[str]):
             implementation(spec).audit(root, spec, baselines[name], chosen_policy, now)
 
 
-def resolve_command(root: Path, args: list[str]):
+def resolve_command(root: Path, args: list[str]) -> object:
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE") != "1":
         raise ValueError("deps-resolve must run inside deps-update")
     parser = argparse.ArgumentParser(prog="deps-resolve")
@@ -327,7 +404,7 @@ def resolve_command(root: Path, args: list[str]):
     selected_policy = effective_policy(settings, spec)
     engine = implementation(spec)
     now = instant()
-    before = engine.snapshot(root, spec)
+    before = table(engine.snapshot(root, spec), "Adapter snapshot")
     result = engine.resolve(
         root,
         spec,
@@ -341,7 +418,7 @@ def resolve_command(root: Path, args: list[str]):
     return result
 
 
-def release_record(release: registry.Release) -> dict:
+def release_record(release: registry.Release) -> Table:
     return {
         "version": release.version,
         "identity": release.identity,
@@ -357,7 +434,7 @@ def release_record(release: registry.Release) -> dict:
     }
 
 
-def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
+def query(root: Path, request: Table, *, now: datetime | None = None) -> Table:
     if (
         not isinstance(request, dict)
         or type(request.get("schema")) is not int
@@ -389,25 +466,30 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
         }
     settings = policy(root)
     if request.get("adapter"):
-        spec = configured(root, request["adapter"], settings)
+        spec = configured(root, text(request["adapter"], "Query adapter"), settings)
         settings = effective_policy(settings, spec)
-    operation = request.get("operation")
+    operation = text(request.get("operation"), "Dependency operation")
     if operation in {"artifact-metadata", "artifact-audit"}:
         import source_artifact
 
-        url, digest = request.get("url"), request.get("digest")
+        url, digest = (
+            text(request.get("url"), "Artifact URL"),
+            text(request.get("digest"), "Artifact digest"),
+        )
+        maximum = request.get("max_bytes")
+        if maximum is not None and type(maximum) is not int:
+            raise ValueError("Artifact download limit must be an integer")
         result = (
-            source_artifact.audit(
-                url, digest, settings, now, max_bytes=request.get("max_bytes")
-            )
+            source_artifact.audit(url, digest, settings, now, max_bytes=maximum)
             if operation == "artifact-audit"
-            else source_artifact.inspect(
-                url, digest, now, max_bytes=request.get("max_bytes")
-            )
+            else source_artifact.inspect(url, digest, now, max_bytes=maximum)
         )
         return {"schema": 1, "operation": operation, **result}
     if operation in {"select", "metadata"}:
-        provider, package = request.get("provider"), request.get("package")
+        provider, package = (
+            text(request.get("provider"), "Registry provider"),
+            request.get("package"),
+        )
         if provider not in {
             "npm",
             "pypi",
@@ -425,7 +507,9 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
         tag_pattern = request.get("tag_pattern")
         if tag_pattern is not None and provider != "github":
             raise ValueError("Tag patterns are supported only for GitHub releases")
-        restriction = ""
+        if tag_pattern is not None:
+            tag_pattern = text(tag_pattern, "GitHub tag pattern")
+        restriction: str | tuple[str, ...] = ""
         if operation == "select" and request.get("constraint"):
             bound = request["constraint"]
             if (
@@ -447,8 +531,9 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
         elif provider == "go":
             import lock_adapters
 
-            if operation == "metadata" and not registry.go_version(
-                request.get("version")
+            exact_go = request.get("version") if operation == "metadata" else None
+            if operation == "metadata" and (
+                not isinstance(exact_go, str) or not registry.go_version(exact_go)
             ):
                 raise ValueError("Exact Go metadata requires a canonical version")
             candidates = lock_adapters.go_candidates(
@@ -456,8 +541,10 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
                 package,
                 policy=settings if operation == "select" else None,
                 now=now,
-                bounds=(restriction,) if restriction else (),
-                exact=request.get("version") if operation == "metadata" else None,
+                bounds=(text(restriction, "Go constraint"),) if restriction else (),
+                exact=text(exact_go, "Exact Go version")
+                if exact_go is not None
+                else None,
             )
         elif provider == "swift" and operation == "metadata":
             exact = request.get("version")
@@ -529,7 +616,11 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
             }
         current = request.get("current")
         rank = registry.version(provider, current) if isinstance(current, str) else None
-        if rank is not None and registry.version(provider, chosen.version) <= rank:
+        if (
+            isinstance(current, str)
+            and rank is not None
+            and registry.version(provider, chosen.version) <= rank
+        ):
             for source, bound in (
                 ("request", restriction),
                 ("configured", registry.constraint(provider, settings, package)),
@@ -569,7 +660,7 @@ def query(root: Path, request: dict, *, now: datetime | None = None) -> dict:
     raise ValueError("Dependency operation must be select, metadata or audit")
 
 
-def query_command(root: Path, args: list[str]):
+def query_command(root: Path, args: list[str]) -> Table:
     if args:
         raise ValueError(
             "deps-query reads one schema-versioned JSON request from stdin"

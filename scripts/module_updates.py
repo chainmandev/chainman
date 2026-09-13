@@ -137,7 +137,9 @@ def image_snapshot(root: Path, policy: Table) -> dict[str, str] | None:
 def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> None:
     configured = adapters(root, selected, policy)
     before = {
-        name: dependency_api.implementation(spec).snapshot(root, spec)
+        name: table(
+            dependency_api.implementation(spec).snapshot(root, spec), "Adapter snapshot"
+        )
         for name, spec in configured.items()
     }
     image_before = image_snapshot(root, policy)

@@ -199,12 +199,17 @@ def prepare(
         verify = verification(root, policy)
         original_index = index(root)
         output_patterns = (
-            (runtime_files(root) + policy.get("reconcile_outputs", []))
+            (
+                runtime_files(root)
+                + strings(policy.get("reconcile_outputs", []), "Reconcile outputs")
+            )
             if opts.only_chainman
             else patterns(root, policy)
         )
         if opts.runtime is RuntimeMode.INCLUDE:
-            output_patterns += policy.get("reconcile_outputs", [])
+            output_patterns += strings(
+                policy.get("reconcile_outputs", []), "Reconcile outputs"
+            )
         selected = None
         if opts.staged:
             staged = set(
@@ -467,7 +472,7 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
         with dependency_api.transaction_environment(root, now):
             for spec, policy in adapters.values():
                 adapter = dependency_api.implementation(spec)
-                before = adapter.snapshot(baseline, spec)
+                before = table(adapter.snapshot(baseline, spec), "Adapter snapshot")
                 adapter.audit(root, spec, before, policy, now)
             if legacy_modules:
                 import module_updates
@@ -759,7 +764,10 @@ def run(root: Path, action: str, args: list[str]) -> int:
                 [] if opts.staged else declared.get("generate", [])
             ) + declared.get("format-write", [])
         else:
-            tasks = dependency_api.policy(root).get("reconcile_tasks", [])
+            tasks = strings(
+                dependency_api.policy(root).get("reconcile_tasks", []),
+                "Reconcile tasks",
+            )
         workflows.names(tasks)
         for task in tasks:
             workflows.order(cfg.get("tasks", {}), [task])
