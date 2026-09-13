@@ -123,4 +123,4 @@ if __name__ == "__main__":
         run(tc.ROOT, sys.argv[1], sys.argv[2:])
     except (OSError, ValueError) as error:
         print(f"Chainman source workflow: {error}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from None

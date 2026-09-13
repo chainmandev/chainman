@@ -45,9 +45,9 @@ def main() -> None:
             "E4,E7,E9,F,B,PLE",
             "--ignore",
             # Tests deliberately select local scripts before importing them.
-            # Synchronous loop-local callbacks and exception display policy are
-            # reviewed directly; neither rule distinguishes those patterns well.
-            "E402,B023,B904",
+            # B023 also flags synchronous loop-local callbacks. Their lifetime
+            # is reviewed with the configuration, solver and native-path tests.
+            "E402,B023",
             *map(str, python),
         ],
         [

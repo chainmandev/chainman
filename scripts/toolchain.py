@@ -928,9 +928,9 @@ def owned_compiler_cache(
                 if not stat.S_ISSOCK(owned_socket.st_mode):
                     raise ValueError("Compiler cache endpoint is not a socket")
                 break
-            except (FileNotFoundError, ConnectionRefusedError):
+            except (FileNotFoundError, ConnectionRefusedError) as error:
                 if time.monotonic() >= deadline:
-                    raise ValueError("Compiler cache startup timed out")
+                    raise ValueError("Compiler cache startup timed out") from error
                 time.sleep(0.05)
     except BaseException as failure:
         try:

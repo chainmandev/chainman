@@ -1518,7 +1518,7 @@ def cargo_resolve(
                 raise
             print(str(error), file=sys.stderr)
             failure.add_note(str(error))
-            raise failure
+            raise failure from error
         if failure is not None:
             first = next(
                 (

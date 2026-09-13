@@ -22,6 +22,9 @@ There are no per-module exemptions or silent import traversal. CI exercises the
 primary development tools and the older pinned Intel macOS environment.
 An isolated source-copy probe adds a fiftieth module: an annotated control passes,
 while a missing annotation and a wrong return type each fail the ordinary gate.
+The Ruff gate includes explicit exception chaining (`B904`). Loop callback
+lifetime (`B023`) remains a direct-review concern because the resolver and
+configuration code deliberately use synchronous callbacks within loops.
 
 Decoded configuration, registry payloads and saved update records enter as
 `object`. Each consuming boundary projects the fields it uses into strings,
