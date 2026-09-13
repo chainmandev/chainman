@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import chainman
-import adapter_data as data
+import adapter_data as inputs
 import registry
 from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
@@ -37,12 +37,7 @@ import updates
 from ruamel.yaml import YAML
 from semantic_version import NpmSpec, Version
 
-SECTIONS = (
-    "dependencies",
-    "devDependencies",
-    "optionalDependencies",
-    "peerDependencies",
-)
+SECTIONS = inputs.DEPENDENCY_SECTIONS
 NAME = r"(?:@[a-z0-9_.~-]+/)?[a-z0-9_.~-]+"
 
 
@@ -472,7 +467,7 @@ class Evidence:
     def get(self, name: str) -> tuple[list[registry.Release], dict[str, object]]:
         package_name(name)
         if name not in self.cache:
-            body = data.table(
+            body = inputs.table(
                 registry.data(f"https://registry.npmjs.org/{quote(name, safe='')}"),
                 "Registry package metadata",
             )
@@ -481,13 +476,13 @@ class Evidence:
             releases = registry.releases(
                 "npm", name, include_prerelease=True, include_deprecated=True
             )
-            versions = data.table(body.get("versions", {}), "Registry versions")
+            versions = inputs.table(body.get("versions", {}), "Registry versions")
             for release in releases:
                 if release.version not in versions:
                     raise ValueError(
                         "Registry release metadata disagrees with its manifest"
                     )
-                info = data.table(
+                info = inputs.table(
                     versions[release.version], "Registry version manifest"
                 )
                 if info.get("name") != name or info.get("version") != release.version:
@@ -518,7 +513,7 @@ class Evidence:
 
     def peers(
         self, name: str, version: str, *, manifest: str | None = None
-    ) -> tuple[dict[str, str], dict[str, data.PeerMetadata]]:
+    ) -> tuple[dict[str, str], dict[str, inputs.PeerMetadata]]:
         info = self.get(name)[1].get(version)
         if not isinstance(info, Mapping):
             raise ValueError("Selected package lacks registry dependency metadata")
@@ -534,7 +529,7 @@ class Evidence:
                 self.policy.get("javascript", {}), manifest, name, peer
             ):
                 NpmSpec(value)
-        return peers, data.peer_metadata(info.get("peerDependenciesMeta", {}))
+        return peers, inputs.peer_metadata(info.get("peerDependenciesMeta", {}))
 
 
 def peer_range(value: object) -> str:
@@ -1130,10 +1125,10 @@ def snapshot(root: Path, spec: dict) -> dict:
     }
 
 
-def has_local_resolution(lock):
+def has_local_resolution(lock: inputs.PnpmLock) -> bool:
     local = False
-    for item in lock.get("packages", {}).values():
-        resolution = item.get("resolution", {})
+    for item in lock["packages"].values():
+        resolution = item["resolution"]
         if "directory" in resolution or resolution.get("type") == "directory":
             if (
                 set(resolution) != {"directory", "type"}
@@ -1143,19 +1138,24 @@ def has_local_resolution(lock):
             local = True
     if local:
         return True
-    for kind in ("importers", "snapshots"):
-        for node in lock.get(kind, {}).values():
-            for section in SECTIONS:
-                for edge in node.get(section, {}).values():
-                    raw = edge.get("version", "") if isinstance(edge, Mapping) else edge
-                    if isinstance(raw, str) and raw.startswith(
-                        ("file:", "link:", "workspace:")
-                    ):
-                        return True
+    for importer in lock["importers"].values():
+        for section in SECTIONS:
+            for edge in importer.get(section, {}).values():
+                if edge["version"].startswith(("file:", "link:", "workspace:")):
+                    return True
+    for snapshot in lock["snapshots"].values():
+        for section in SECTIONS:
+            for raw in snapshot.get(section, {}).values():
+                if raw.startswith(("file:", "link:", "workspace:")):
+                    return True
     return False
 
 
-def local_registry_entries(workspace, lock, entries):
+def local_registry_entries(
+    workspace: Workspace,
+    lock: inputs.PnpmLock,
+    entries: dict[str, inputs.PnpmPackage],
+) -> dict[str, inputs.PnpmPackage]:
     """Local directory packages have no registry identity; validate their binding."""
     remaining = dict(entries)
     local_keys = {}
@@ -1180,13 +1180,13 @@ def local_registry_entries(workspace, lock, entries):
             raise ValueError("Local pnpm package version disagrees with its manifest")
         local_keys[alias + "@file:" + raw] = manifest
         del remaining[key]
-    for importer, info in lock.get("importers", {}).items():
+    for importer, info in lock["importers"].items():
         manifest = "package.json" if importer == "." else importer + "/package.json"
         if manifest not in workspace.manifests:
             raise ValueError("Lockfile contains an undeclared workspace importer")
         for section in SECTIONS:
             for alias, edge in info.get(section, {}).items():
-                raw = edge.get("version", "")
+                raw = edge["version"]
                 if raw.startswith("link:"):
                     target = workspace.local_manifest(alias, raw, importer)
                 elif raw.startswith("file:"):
@@ -1206,8 +1206,8 @@ def local_registry_entries(workspace, lock, entries):
                     raise ValueError(
                         "Local pnpm importer differs from its manifest declaration"
                     )
-    for context, node in lock.get("snapshots", {}).items():
-        for section in ("dependencies", "optionalDependencies"):
+    for context, node in lock["snapshots"].items():
+        for section in SECTIONS:
             for alias, raw in node.get(section, {}).items():
                 if raw.startswith("link:"):
                     workspace.local_manifest(alias, raw)
@@ -1220,12 +1220,17 @@ def local_registry_entries(workspace, lock, entries):
         if "@file:" in context:
             if context.partition("(")[0] not in local_keys:
                 raise ValueError("Undeclared local pnpm snapshot")
-    if any(key not in lock.get("snapshots", {}) for key in local_keys):
+    if any(key not in lock["snapshots"] for key in local_keys):
         raise ValueError("Local pnpm package lacks its snapshot")
     return remaining
 
 
-def lock_target(alias, raw, workspace=None):
+type LockTarget = tuple[str, str, str]
+
+
+def lock_target(
+    alias: str, raw: object, workspace: Workspace | None = None
+) -> LockTarget | None:
     if not isinstance(raw, str):
         raise ValueError("pnpm lock dependency resolution must be a string")
     if raw.startswith(("link:", "workspace:")):
@@ -1245,7 +1250,10 @@ def lock_target(alias, raw, workspace=None):
             )
         manifest = workspace.local_manifest(alias, raw.partition("(")[0])
         version = workspace.documents[manifest][0].get("version")
-        if registry.lock_version("npm", version) is None:
+        if (
+            not isinstance(version, str)
+            or registry.lock_version("npm", version) is None
+        ):
             raise ValueError("Local pnpm package requires a valid declared version")
         return alias, version, alias + "@" + raw
     base = raw.partition("(")[0]
@@ -1376,25 +1384,27 @@ def audit_registry_children(workspace, evidence, parent, children):
             )
 
 
-def audit_peers(workspace, evidence, options):
+def audit_peers(
+    workspace: Workspace, evidence: Evidence, options: dict
+) -> dict[tuple[str, str], list[str]]:
     import javascript_sources
 
-    lock = document(
-        Path(workspace.lock),
-        tc.regular_input(workspace.directory, workspace.lock).decode(),
-    )[0]
-    packages, snapshots = lock.get("packages", {}), lock.get("snapshots", {})
-    if not str(lock.get("lockfileVersion", "")).startswith("9"):
-        raise ValueError("JavaScript peer audit requires pnpm lockfile version 9")
+    lock = inputs.pnpm_lock(
+        document(
+            Path(workspace.lock),
+            tc.regular_input(workspace.directory, workspace.lock).decode(),
+        )[0]
+    )
+    packages, snapshots = lock["packages"], lock["snapshots"]
     scopes: dict[tuple[str, str], list[str]] = {}
-    for importer, info in lock.get("importers", {}).items():
+    for importer, info in lock["importers"].items():
         manifest = "package.json" if importer == "." else importer + "/package.json"
         if manifest not in workspace.manifests:
             raise ValueError("Lockfile contains an undeclared workspace importer")
-        roots = {}
+        roots: dict[str, LockTarget | None] = {}
         for section in SECTIONS:
             for alias, value in info.get(section, {}).items():
-                raw = value.get("version")
+                raw = value["version"]
                 roots[alias] = (
                     None
                     if javascript_sources.is_target(
@@ -1537,9 +1547,11 @@ def audit_peers(workspace, evidence, options):
                 if target is None:
                     # Workspace links may provide a local peer whose declared
                     # package version is the relevant compatibility contract.
-                    local = workspace.locals.get(peer)
-                    if peer in children and local:
-                        target_version = workspace.documents[local][0].get("version")
+                    local_manifest = workspace.locals.get(peer)
+                    if peer in children and local_manifest:
+                        target_version = workspace.documents[local_manifest][0].get(
+                            "version"
+                        )
                     elif metadata.get(peer, {}).get("optional") is True:
                         continue
                     else:
@@ -1549,9 +1561,11 @@ def audit_peers(workspace, evidence, options):
                 else:
                     target_version = target[1]
                     scopes.setdefault(target[:2], []).append(requirement)
-                if registry.lock_version("npm", target_version) is None or Version(
-                    target_version
-                ) not in NpmSpec(requirement):
+                if (
+                    not isinstance(target_version, str)
+                    or registry.lock_version("npm", target_version) is None
+                    or Version(target_version) not in NpmSpec(requirement)
+                ):
                     raise ValueError(
                         f"Incompatible resolved peer {actual}>{peer} in {manifest}"
                     )
@@ -1628,6 +1642,9 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
         return javascript_npm.audit(workspace, before, policy, now)
     import javascript_sources
 
+    lock = inputs.pnpm_lock(
+        document(Path(workspace.lock), workspace.original[workspace.lock].decode())[0]
+    )
     workspace.source_contents = javascript_sources.audit(workspace, before, policy, now)
     evidence = Evidence(policy, now)
     options = policy.get("javascript", {})
@@ -1638,18 +1655,15 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
     scopes = audit_peers(workspace, evidence, options)
     # Recheck policy at actual locked versions; ranges/wildcards may resolve to
     # another version from the planner's preferred candidate.
-    lock = document(Path(workspace.lock), workspace.original[workspace.lock].decode())[
-        0
-    ]
     for manifest, refs in workspace.refs.items():
         importer = str(Path(manifest).parent)
-        info = lock.get("importers", {}).get(importer)
-        if not isinstance(info, Mapping):
+        info = lock["importers"].get(importer)
+        if info is None:
             raise ValueError("JavaScript lock is missing a declared workspace importer")
         for alias, index in refs.items():
             pin = workspace.pins[index]
             targets = [
-                lock_target(alias, section[alias].get("version"))
+                lock_target(alias, section[alias]["version"])
                 for name in SECTIONS
                 if alias in (section := info.get(name, {}))
             ]
@@ -1862,6 +1876,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         resolved_lock = document(
             lock_path, tc.regular_input(temporary, workspace.lock).decode()
         )[0]
+        inputs.pnpm_lock(resolved_lock)
         normalized = chainman.execute(
             root,
             spec.get("profile", "javascript"),
@@ -1885,6 +1900,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         normalized_lock = document(
             lock_path, tc.regular_input(temporary, workspace.lock).decode()
         )[0]
+        inputs.pnpm_lock(normalized_lock)
         if normalization_graph(resolved_lock) != normalization_graph(normalized_lock):
             raise ValueError(
                 "pnpm lock normalization changed the selected dependency graph"

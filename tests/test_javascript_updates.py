@@ -312,6 +312,142 @@ class JavaScriptTests(unittest.TestCase):
         ):
             return js.resolve(self.root, self.spec, self.policy, self.now)
 
+    def test_malformed_native_graph_stops_at_each_boundary_without_publication(self):
+        self.manifest("package.json", {"library": "^1.0.0"})
+        self.release("library", "1.0.0")
+        original = {
+            name: (self.root / name).read_bytes()
+            for name in ("package.json", "pnpm-workspace.yaml")
+        }
+        for stage in ("resolve", "normalize", "frozen"):
+            for malformed in (
+                {"lockfileVersion": "9garbage"},
+                {"importers": None},
+                {
+                    "importers": {
+                        ".": {
+                            "dependencies": {
+                                "library": {"specifier": "^1", "version": []}
+                            }
+                        }
+                    }
+                },
+                {"packages": {"library@1.0.0": {"resolution": False}}},
+                {"snapshots": {"library@1.0.0": {"dependencies": {"child": False}}}},
+            ):
+                calls = []
+
+                def execute(*args, **kwargs):
+                    argv = args[2]
+                    current = (
+                        "frozen"
+                        if "--frozen-lockfile" in argv
+                        else "normalize"
+                        if "--no-frozen-lockfile" in argv
+                        else "resolve"
+                    )
+                    calls.append(current)
+                    result = self.fake_pnpm(*args, **kwargs)
+                    if current == stage:
+                        path = kwargs["cwd"] / "pnpm-lock.yaml"
+                        lock = js.document(path, path.read_text())[0]
+                        path.write_text(json.dumps({**lock, **malformed}))
+                    return result
+
+                with (
+                    self.subTest(stage=stage, malformed=malformed),
+                    self.assertRaisesRegex(ValueError, "pnpm"),
+                ):
+                    self.resolve(execute)
+                self.assertEqual(
+                    calls,
+                    ["resolve", "normalize", "frozen"][
+                        : ["resolve", "normalize", "frozen"].index(stage) + 1
+                    ],
+                )
+                self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+                self.assertEqual(
+                    {name: (self.root / name).read_bytes() for name in original},
+                    original,
+                )
+
+    def test_malformed_existing_graph_is_rejected_before_native_resolution(self):
+        self.manifest("package.json", {"library": "^1.0.0"})
+        self.release("library", "1.0.0")
+        for field in ("importers", "packages", "snapshots"):
+            self.write(
+                "pnpm-lock.yaml", json.dumps({"lockfileVersion": "9.0", field: False})
+            )
+            original = {
+                name: (self.root / name).read_bytes()
+                for name in ("package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml")
+            }
+            with (
+                self.subTest(field=field),
+                patch.object(js.chainman, "execute") as execute,
+                self.assertRaisesRegex(ValueError, "pnpm"),
+            ):
+                js.resolve(self.root, self.spec, self.policy, self.now)
+            execute.assert_not_called()
+            self.assertEqual(
+                {name: (self.root / name).read_bytes() for name in original}, original
+            )
+
+    def test_unknown_native_metadata_survives_projection_and_publication(self):
+        self.manifest("package.json", {"library": "^1.0.0"})
+        self.release("library", "1.0.0")
+
+        def execute(*args, **kwargs):
+            result = self.fake_pnpm(*args, **kwargs)
+            if (
+                "--frozen-lockfile" not in args[2]
+                and "--no-frozen-lockfile" not in args[2]
+            ):
+                path = kwargs["cwd"] / "pnpm-lock.yaml"
+                lock = js.document(path, path.read_text())[0]
+                for key, entry in (
+                    ("importers", "."),
+                    ("packages", "library@1.0.0"),
+                    ("snapshots", "library@1.0.0"),
+                ):
+                    lock[key][entry]["future-metadata"] = {"keep": [key, entry]}
+                path.write_text(json.dumps(lock))
+            return result
+
+        self.resolve(execute)
+        path = self.root / "pnpm-lock.yaml"
+        lock = js.document(path, path.read_text())[0]
+        for key, entry in (
+            ("importers", "."),
+            ("packages", "library@1.0.0"),
+            ("snapshots", "library@1.0.0"),
+        ):
+            self.assertEqual(
+                lock[key][entry]["future-metadata"], {"keep": [key, entry]}
+            )
+
+    def test_normalization_cannot_hide_drift_in_unprojected_metadata(self):
+        self.manifest("package.json", {"library": "^1.0.0"})
+        self.release("library", "1.0.0")
+        calls = []
+
+        def execute(*args, **kwargs):
+            calls.append(args[2])
+            result = self.fake_pnpm(*args, **kwargs)
+            if "--no-frozen-lockfile" in args[2]:
+                path = kwargs["cwd"] / "pnpm-lock.yaml"
+                lock = js.document(path, path.read_text())[0]
+                lock["packages"]["library@1.0.0"]["future-metadata"] = {"changed": True}
+                path.write_text(json.dumps(lock))
+            return result
+
+        with self.assertRaisesRegex(
+            ValueError, "changed the selected dependency graph"
+        ):
+            self.resolve(execute)
+        self.assertEqual(len(calls), 2)
+        self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+
     def fake_npm(self, root, profile, argv, *, cwd, **kwargs):
         self.assertEqual(argv[0], "npm")
         if argv[1] == "ci":

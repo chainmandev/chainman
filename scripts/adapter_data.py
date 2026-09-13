@@ -5,7 +5,7 @@ serializer. Source/identity, path and version policy remain with each adapter.
 """
 
 from dataclasses import dataclass
-from typing import NotRequired, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 type Table = dict[str, object]
@@ -97,6 +97,103 @@ class NpmPackage(TypedDict, total=False):
     devDependencies: dict[str, str]
     optionalDependencies: dict[str, str]
     peerDependencies: dict[str, str]
+
+
+class PnpmDependency(TypedDict):
+    specifier: str
+    version: str
+
+
+type DependencySection = Literal[
+    "dependencies", "devDependencies", "optionalDependencies", "peerDependencies"
+]
+
+DEPENDENCY_SECTIONS: tuple[DependencySection, ...] = (
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+)
+
+
+class PnpmImporter(TypedDict, total=False):
+    dependencies: dict[str, PnpmDependency]
+    devDependencies: dict[str, PnpmDependency]
+    optionalDependencies: dict[str, PnpmDependency]
+    peerDependencies: dict[str, PnpmDependency]
+
+
+class PnpmSnapshot(TypedDict, total=False):
+    dependencies: dict[str, str]
+    devDependencies: dict[str, str]
+    optionalDependencies: dict[str, str]
+    peerDependencies: dict[str, str]
+
+
+class PnpmPackage(TypedDict):
+    # Preserve every resolution key: source policy must still see unsupported
+    # fields. Ordinary package metadata is outside this decision projection.
+    resolution: Table
+    version: NotRequired[str]
+
+
+class PnpmLock(TypedDict):
+    importers: dict[str, PnpmImporter]
+    packages: dict[str, PnpmPackage]
+    snapshots: dict[str, PnpmSnapshot]
+
+
+def pnpm_lock(value: object) -> PnpmLock:
+    document = table(value, "pnpm lock")
+    version = document.get("lockfileVersion")
+    if not isinstance(version, (str, int, float)) or str(version) not in ("9", "9.0"):
+        raise ValueError("JavaScript auditing requires pnpm lockfile version 9")
+    importers: dict[str, PnpmImporter] = {}
+    for name, raw in table(document.get("importers", {}), "pnpm importers").items():
+        importer = table(raw, f"pnpm importer {name!r}")
+        parsed: PnpmImporter = {}
+        for section in DEPENDENCY_SECTIONS:
+            if section in importer:
+                entries: dict[str, PnpmDependency] = {}
+                for alias, edge in table(
+                    importer[section], f"pnpm importer {section}"
+                ).items():
+                    dependency = table(edge, "pnpm importer dependency")
+                    entries[alias] = {
+                        "specifier": text(
+                            dependency.get("specifier"), "pnpm dependency specifier"
+                        ),
+                        "version": text(
+                            dependency.get("version"), "pnpm dependency version"
+                        ),
+                    }
+                parsed[section] = entries
+        importers[name] = parsed
+    snapshots: dict[str, PnpmSnapshot] = {}
+    for name, raw in table(document.get("snapshots", {}), "pnpm snapshots").items():
+        snapshot = table(raw, f"pnpm snapshot {name!r}")
+        node: PnpmSnapshot = {}
+        for section in DEPENDENCY_SECTIONS:
+            if section in snapshot:
+                node[section] = string_map(
+                    snapshot[section], f"pnpm snapshot {section}"
+                )
+        snapshots[name] = node
+    packages: dict[str, PnpmPackage] = {}
+    for name, raw in table(document.get("packages", {}), "pnpm packages").items():
+        package = table(raw, f"pnpm package {name!r}")
+        resolution = table(package.get("resolution", {}), "pnpm resolution")
+        # Validate consumed scalar fields without concealing unknown source keys.
+        for key in ("integrity", "tarball", "directory", "type"):
+            if key in resolution:
+                text(resolution[key], f"pnpm resolution {key}")
+        if "gitHosted" in resolution and type(resolution["gitHosted"]) is not bool:
+            raise ValueError("pnpm resolution gitHosted must be boolean")
+        result: PnpmPackage = {"resolution": resolution}
+        if "version" in package:
+            result["version"] = text(package["version"], "pnpm package version")
+        packages[name] = result
+    return {"importers": importers, "packages": packages, "snapshots": snapshots}
 
 
 class NpmLock(TypedDict):

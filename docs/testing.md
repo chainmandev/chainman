@@ -30,8 +30,11 @@ visited. Unused older peer metadata cannot invalidate a valid selection. The
 shared registry implementation is also checked: constraint containers are
 validated before use, and matching age exceptions become named immutable records
 before version ranking. Its callable cache exposes typed cache operations.
-Raw workspace documents, adapter configuration and parts of the pnpm graph solver
-remain dynamic; inclusion in the gate does not imply complete strict typing.
+pnpm importer edges, package records and snapshot edges are validated before
+baseline identity collection, graph auditing and native lock normalization. Graph
+traversal consumes these typed records; raw workspace documents, adapter
+configuration and solver policy remain dynamic. Inclusion in the gate does not
+imply complete strict typing.
 Adapter implementations outside that explicit list are not counted as checked.
 The unstubbed third-party `semantic_version` import has a scoped missing-import
 exception; its API remains a dynamic boundary, not an adapter-wide suppression.
@@ -65,6 +68,10 @@ The generated oracles cover:
   requirement order and duplicate entries and remaining independent of later
   input mutation. This checks the data boundary, not Go replacement precedence;
   disposable native Go fixtures check that separately.
+- pnpm importer and snapshot records against independently generated section,
+  alias, declared specifier and resolved context coordinates. These consumed edge
+  coordinates are independently copied; unknown resolution keys remain visible
+  to source policy.
 - Application/recovery sequences against independent expected file bytes, full
   modes, index entries and HEAD. The bounded state machine runs 20 examples of up
   to 12 steps: interrupted application, refused resume over partial outputs,
@@ -229,19 +236,31 @@ before finalization. The persisted flat schema and dependency identity wire form
 remain compatible. Records have frozen fields, with copied mutable collections
 inside the transaction state; they are not deeply immutable.
 
-Native input projections now validate npm package records, Go manifests/queries
-and Swift graph nodes before their fields drive adapter decisions. Go local and
+Native input projections now validate npm and pnpm package records, pnpm importer
+and snapshot edges, Go manifests/queries and Swift graph nodes before their fields
+drive adapter decisions. Go local and
 remote replacements use distinct records; Swift declarations use a tagged union.
 Go's native `null` list form remains valid; other falsey malformed values no
 longer silently mean no dependencies. npm retains the raw lock document for
 serialization, so validating a projection does not drop unknown native metadata.
+pnpm also retains the full document for normalization graph comparison. Tests
+inject malformed output after resolution, normalization and frozen verification:
+each must stop before publication and preserve original project inputs. Separate
+cases check both retention of unknown metadata and rejection of changes to it
+during normalization.
+In disposable module copies, five deliberate regressions failed the intended
+assertions: omitting optional dependency sections, crossing importer
+specifier/version fields, hiding unknown resolution keys, comparing only projected
+normalization data, and delaying validation until after normalization. The
+unmodified controls passed. Mypy separately rejected four incompatible importer,
+snapshot, package and resolved target values.
 Go records have immutable fields and tuple collections; Swift graph children are
 decoded one level at a time during iterative traversal, not deeply frozen.
 
-Remaining typing work is concentrated in adapter configuration, the deeper pnpm
-graph payloads, registry HTTP payloads and adapter implementations outside the
-gate. Splitting large modules for
-size alone is a lower priority than replacing dynamic decision inputs.
+Remaining typing work is concentrated in adapter configuration, solver policy,
+registry HTTP payloads and adapter implementations outside the gate. Splitting
+large modules for size alone is a lower priority than replacing dynamic decision
+inputs.
 
 Add differential tests against native resolvers when changing their adapters.
 Extend the native fixtures when changing supported resolver behavior. Application

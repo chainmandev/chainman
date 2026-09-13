@@ -8,13 +8,167 @@ import unittest
 from unittest.mock import patch
 
 from hypothesis import given, settings, strategies as st
+from ruamel.yaml import YAML
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import adapter_data as data
 import lock_adapters
 
+# Independent wire vocabulary: production omissions must remain testable.
+PNPM_SECTIONS = (
+    "dependencies",
+    "devDependencies",
+    "optionalDependencies",
+    "peerDependencies",
+)
+
 
 class AdapterDataTests(unittest.TestCase):
+    @settings(max_examples=80, derandomize=True, deadline=None)
+    @given(
+        st.dictionaries(
+            st.sampled_from(PNPM_SECTIONS),
+            st.dictionaries(
+                st.sampled_from(("renamed", "@scope/library", "local")),
+                st.tuples(
+                    st.sampled_from(("^1", "npm:actual@~2", "workspace:*", "file:lib")),
+                    st.sampled_from(
+                        ("1.2.3(peer@4.0.0)", "actual@2.1.0", "link:lib", "file:lib")
+                    ),
+                ),
+            ),
+        )
+    )
+    def test_pnpm_projection_preserves_each_edge_coordinate_and_owns_graph(
+        self, sections
+    ):
+        wire = {
+            "lockfileVersion": "9.0",
+            "importers": {
+                "packages/app": {
+                    section: {
+                        alias: {"specifier": specifier, "version": version}
+                        for alias, (specifier, version) in edges.items()
+                    }
+                    for section, edges in sections.items()
+                }
+            },
+            "snapshots": {
+                "parent@1.0.0(peer@4.0.0)": {
+                    section: {alias: version for alias, (_, version) in edges.items()}
+                    for section, edges in sections.items()
+                }
+            },
+            "packages": {
+                "parent@1.0.0": {
+                    "resolution": {
+                        "integrity": "sha512-fixture",
+                        "future-source": True,
+                    },
+                    "future-metadata": {"keep": [1, 2]},
+                }
+            },
+        }
+        original = deepcopy(wire)
+        parsed = data.pnpm_lock(wire)
+        importer = parsed["importers"]["packages/app"]
+        snapshot = parsed["snapshots"]["parent@1.0.0(peer@4.0.0)"]
+        self.assertEqual(set(importer), set(sections))
+        self.assertEqual(set(snapshot), set(sections))
+        for section, edges in sections.items():
+            self.assertEqual(set(importer[section]), set(edges))
+            self.assertEqual(set(snapshot[section]), set(edges))
+            for alias, (specifier, version) in edges.items():
+                self.assertEqual(importer[section][alias]["specifier"], specifier)
+                self.assertEqual(importer[section][alias]["version"], version)
+                self.assertEqual(snapshot[section][alias], version)
+                importer[section][alias]["version"] = "changed"
+                snapshot[section][alias] = "changed"
+        resolution = parsed["packages"]["parent@1.0.0"]["resolution"]
+        self.assertEqual(
+            resolution, {"integrity": "sha512-fixture", "future-source": True}
+        )
+        resolution["integrity"] = "changed"
+        self.assertEqual(wire, original)
+
+    def test_pnpm_rejects_malformed_nodes_instead_of_treating_them_as_empty(self):
+        for field in ("importers", "packages", "snapshots"):
+            for invalid in (
+                None,
+                [],
+                False,
+                0,
+                "",
+                {1: {}},
+                {"entry": None},
+                {"entry": []},
+            ):
+                with (
+                    self.subTest(field=field, invalid=invalid),
+                    self.assertRaises(ValueError),
+                ):
+                    data.pnpm_lock({"lockfileVersion": "9.0", field: invalid})
+        for kind in ("importers", "snapshots"):
+            for section in PNPM_SECTIONS:
+                invalid_entries = (
+                    None,
+                    [],
+                    False,
+                    {"alias": None},
+                    {"alias": 1},
+                    {"alias": False},
+                )
+                if kind == "importers":
+                    invalid_entries += (
+                        {"alias": "1.0.0"},
+                        {"alias": {"version": "1.0.0"}},
+                        {"alias": {"specifier": "^1", "version": []}},
+                    )
+                else:
+                    invalid_entries += ({"alias": {"version": "1.0.0"}},)
+                for invalid in invalid_entries:
+                    with (
+                        self.subTest(kind=kind, section=section, invalid=invalid),
+                        self.assertRaises(ValueError),
+                    ):
+                        data.pnpm_lock(
+                            {"lockfileVersion": 9, kind: {"entry": {section: invalid}}}
+                        )
+        for resolution in (
+            None,
+            [],
+            False,
+            {"integrity": []},
+            {"tarball": False},
+            {"directory": 1},
+            {"type": None},
+            {"gitHosted": "true"},
+        ):
+            with self.subTest(resolution=resolution), self.assertRaises(ValueError):
+                data.pnpm_lock(
+                    {
+                        "lockfileVersion": 9,
+                        "packages": {"a@1": {"resolution": resolution}},
+                    }
+                )
+        for invalid in (None, True, "9garbage", "90", "9.1", 8, [], {}):
+            with self.subTest(version=invalid), self.assertRaises(ValueError):
+                data.pnpm_lock({"lockfileVersion": invalid})
+        for version in (9, 9.0, "9", "9.0"):
+            self.assertEqual(
+                data.pnpm_lock({"lockfileVersion": version}),
+                {"importers": {}, "packages": {}, "snapshots": {}},
+            )
+        for source in (
+            "lockfileVersion: 9",
+            "lockfileVersion: 9.0",
+            "lockfileVersion: '9.0'",
+        ):
+            self.assertEqual(
+                data.pnpm_lock(YAML().load(source)),
+                {"importers": {}, "packages": {}, "snapshots": {}},
+            )
+
     def test_peer_metadata_projection_preserves_boolean_meaning_and_owns_input(self):
         original = {
             "required": {"optional": False},

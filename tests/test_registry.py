@@ -1278,7 +1278,12 @@ class ArtifactTests(unittest.TestCase):
             if url is not None:
                 resolution["tarball"] = url
             (self.root / provider / "pnpm-lock.yaml").write_text(
-                json.dumps({"packages": {"demo@1.0.0": {"resolution": resolution}}})
+                json.dumps(
+                    {
+                        "lockfileVersion": "9.0",
+                        "packages": {"demo@1.0.0": {"resolution": resolution}},
+                    }
+                )
             )
         elif provider == "crates":
             (self.root / provider / "Cargo.lock").write_text(
@@ -1570,6 +1575,7 @@ class ArtifactTests(unittest.TestCase):
         path.write_text(
             json.dumps(
                 {
+                    "lockfileVersion": "9.0",
                     "packages": {
                         "demo@1.0.0": {
                             "resolution": {
@@ -1577,7 +1583,7 @@ class ArtifactTests(unittest.TestCase):
                                 + base64.b64encode(bytes.fromhex("a" * 40)).decode()
                             }
                         }
-                    }
+                    },
                 }
             )
         )

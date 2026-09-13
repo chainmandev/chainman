@@ -17,6 +17,7 @@ import tempfile
 import tomllib
 
 import manifests
+import adapter_data
 import lock_adapters
 import sdk_versions
 import registry
@@ -620,17 +621,21 @@ def lock_identities(
             continue
         if kind == "npm":
             lock = manifests.document(path)[0]
-            entries = lock.get("packages", {})
+            projected = adapter_data.pnpm_lock(lock)
+            entries = projected["packages"]
             if spec.get("retained_sources"):
                 import javascript_sources
 
-                entries = javascript_sources.registry_entries(root, spec, lock)
+                entries = {
+                    key: entries[key]
+                    for key in javascript_sources.registry_entries(root, spec, lock)
+                }
                 identities.update(javascript_sources.lock_identities(root, spec, lock))
             import javascript_updates
 
-            if javascript_updates.has_local_resolution(lock):
+            if javascript_updates.has_local_resolution(projected):
                 entries = javascript_updates.local_registry_entries(
-                    javascript_updates.Workspace(root, spec), lock, entries
+                    javascript_updates.Workspace(root, spec), projected, entries
                 )
             for key, item in entries.items():
                 package, _, version = key.partition("(")[0].rpartition("@")
