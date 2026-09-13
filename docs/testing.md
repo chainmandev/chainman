@@ -25,7 +25,8 @@ pass decoded records through their decisions. Their configuration inputs and som
 imported operations still have dynamic types. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 32 source
-files, including 15 with the strict flags. Distribution inventories and consumed
+files, including 16 with the strict flags. Recipe bindings and verification task
+lists are validated into typed collections before facade generation. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
 wire schema. Timing context managers have explicit lifetime and environment types.
 Operation leases and compiler lifetime context managers also expose concrete

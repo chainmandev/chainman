@@ -1,12 +1,14 @@
 """The opinionated public recipe facade; project differences are declarations."""
 
 import argparse
+from collections.abc import Mapping
 from pathlib import Path
 import re
 import shlex
 import tomllib
 
 import toolchain as tc
+from adapter_data import Table, strings, table
 
 
 FILE = "scripts/chainman.just"
@@ -43,25 +45,30 @@ BUILTINS = {
 }
 
 
-def bindings(cfg):
-    result = cfg.get("recipes", {})
-    if not isinstance(result, dict) or set(result) - BINDINGS:
+def bindings(cfg: Mapping[str, object]) -> dict[str, list[str]]:
+    declared = table(cfg.get("recipes", {}), "Standard recipe bindings")
+    if set(declared) - BINDINGS:
         raise ValueError("Unknown standard recipe binding")
-    for name, tasks in result.items():
-        if not isinstance(tasks, list) or any(
-            task not in cfg.get("tasks", {}) for task in tasks
-        ):
+    available = table(cfg.get("tasks", {}), "Project tasks")
+    result = {}
+    for name, value in declared.items():
+        tasks = strings(value, f"Recipe {name}")
+        if any(task not in available for task in tasks):
             raise ValueError(f"Recipe {name} requires declared task names")
         if len(tasks) != len(set(tasks)):
             raise ValueError(f"Recipe {name} repeats a task")
+        result[name] = tasks
     return result
 
 
-def verification(cfg):
+def verification(cfg: Mapping[str, object]) -> list[str]:
     declared = bindings(cfg).get("verify")
-    updates = cfg.get("updates", {})
-    selected = updates.get(
-        "verify_tasks", [updates["verify_task"]] if "verify_task" in updates else []
+    updates = table(cfg.get("updates", {}), "Project updates")
+    selected = strings(
+        updates.get(
+            "verify_tasks", [updates["verify_task"]] if "verify_task" in updates else []
+        ),
+        "Update verification tasks",
     )
     if declared is not None and selected and declared != selected:
         raise ValueError(
@@ -70,7 +77,7 @@ def verification(cfg):
     return declared if declared is not None else selected
 
 
-def render(cfg):
+def render(cfg: Mapping[str, object]) -> bytes:
     declared = bindings(cfg)
     actions = {name: [argv] for name, argv in BUILTINS.items()}
     for name in BINDINGS - {"format-hygiene"}:
@@ -92,9 +99,10 @@ def render(cfg):
             actions[name] = [["_recipe-required", name]]
     actions["doctor"] = [["doctor"], *actions.get("doctor", [])]
     actions["clean"] = [["services-stop"], *actions.get("clean", []), ["clean"]]
+    updates = table(cfg.get("updates", {}), "Project updates")
     for target in sorted(
-        set(cfg.get("updates", {}).get("adapters", {}))
-        | set(cfg.get("updates", {}).get("target_groups", {}))
+        table(updates.get("adapters", {}), "Update adapters").keys()
+        | table(updates.get("target_groups", {}), "Update target groups").keys()
     ):
         if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", target):
             actions["deps-update-" + target] = [["deps-update", "targets=" + target]]
@@ -120,7 +128,7 @@ def render(cfg):
     return "\n".join(lines).encode()
 
 
-def sync(root, *, check=False):
+def sync(root: Path, *, check: bool = False) -> None:
     body = render(config(root))
     path = tc.contained(root, FILE)
     if check:
@@ -132,15 +140,16 @@ def sync(root, *, check=False):
         tc.atomic_bytes(path, body, 0o644)
 
 
-def roots(root):
+def roots(root: Path) -> list[Path]:
     cfg = tc.config(root)
+    runtime = table(cfg.get("runtime", {}), "Project runtime")
     return [
         path
         for path in [
             root,
             *[
                 tc.contained(root, name)
-                for name in cfg.get("runtime", {}).get("copies", [])
+                for name in strings(runtime.get("copies", []), "Runtime copies")
             ],
         ]
         if ((path / "chainman.toml").is_file() or (path / "chainman.toml.j2").is_file())
@@ -148,7 +157,7 @@ def roots(root):
     ]
 
 
-def config(root):
+def config(root: Path) -> Table:
     if (root / "chainman.toml").is_file():
         return tc.config(root)
     # Templates keep recipe declarations valid TOML; quoted placeholders may
@@ -160,10 +169,11 @@ def config(root):
     )[0]
 
 
-def options(arguments):
+def options(arguments: list[str]) -> list[str]:
     """Normalize public options without interpreting values as options or code."""
-    main, resolver = [], []
-    pending = None
+    main: list[str | None] = []
+    resolver: list[str] = []
+    pending: list[str | None] | list[str] | None = None
     selected: dict[str, int] = {}
     passthrough = False
     for argument in arguments:
@@ -219,7 +229,7 @@ def options(arguments):
     )
 
 
-def selection_options(arguments):
+def selection_options(arguments: list[str]) -> list[str]:
     normalized = options(arguments)
     if normalized[:1] == ["--"]:
         return normalized[1:]
