@@ -4,6 +4,8 @@ import json
 import fcntl
 import os
 from pathlib import Path
+import platform
+import shlex
 import shutil
 import signal
 import socket
@@ -12,9 +14,11 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import native_tasks
+import services
 
 CONTROL = os.environ.get("CHAINMAN_TEST_CONTROL")
 BACKEND = os.environ.get("CHAINMAN_TEST_PROCESS_COMPOSE")
@@ -72,6 +76,88 @@ while True:time.sleep(.1)
 
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
+
+    def test_exported_plan_runs_after_readiness_and_preserves_task_exit(self):
+        output = self.base / "exported"
+        output.mkdir(mode=0o700)
+        (output / "host-environment").write_bytes(b"")
+        launcher = self.root / "launch"
+        launcher.write_text(
+            "#!/bin/sh\nexec "
+            + shlex.join(
+                [
+                    sys.executable,
+                    str(services.chainman.RUNTIME / "scripts/chainman.py"),
+                    "--root",
+                    str(self.root),
+                ]
+            )
+            + ' "$@"\n'
+        )
+        launcher.chmod(0o700)
+        task = [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; assert Path('ready').is_file(); "
+            "Path('task-result').write_text('observed readiness'); raise SystemExit(7)",
+        ]
+        readiness = [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; raise SystemExit(0 if Path('ready').is_file() else 1)",
+        ]
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[tasks.check]\nservices=["worker"]\ncommands='
+            + json.dumps([task])
+            + "\n[services.worker]\ncommand="
+            + json.dumps([sys.executable, str(self.root / "worker.py")])
+            + "\nshutdown_seconds=1\nreadiness={command="
+            + json.dumps(readiness)
+            + ",period_seconds=1,timeout_seconds=2,failure_threshold=10}\n"
+        )
+        fixture_env = dict(os.environ, CHAINMAN_MODE="host-nix")
+        # The fixture is a separate project. Its controller gets its own leases;
+        # it cannot advertise the outer Just process's non-inherited descriptors.
+        for key in (
+            "TOOLCHAIN_LOCK_FD",
+            "TOOLCHAIN_GATE_FD",
+            "TOOLCHAIN_COMPAT_FD",
+            "TOOLCHAIN_OPERATION_ID",
+            "TOOLCHAIN_ANCESTOR_FDS",
+        ):
+            fixture_env.pop(key, None)
+        target = (
+            platform.system().lower()
+            + "-"
+            + {
+                "aarch64": "arm64",
+                "arm64": "arm64",
+                "x86_64": "amd64",
+            }[platform.machine()]
+        )
+        with patch.dict(os.environ, fixture_env, clear=True):
+            services.export(
+                self.root,
+                [
+                    str(output),
+                    target,
+                    str(self.base / "cache"),
+                    "",
+                    str(launcher),
+                    "run",
+                    "check",
+                ],
+            )
+            self.plan = json.loads((output / "plan.json").read_text())
+            self.state = Path(self.plan["state"])
+            self.run_control("run", check=7)
+            self.assertEqual(
+                (self.root / "task-result").read_text(), "observed readiness"
+            )
+            pid = self.pid()
+            self.run_control("stop", check=0)
+            self.wait_until(lambda: not self.alive(pid))
 
     def test_finite_command_retains_its_nix_package_until_context_exits(self):
         for fail in (False, True):

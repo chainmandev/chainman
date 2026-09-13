@@ -190,6 +190,13 @@ fixtures. They cannot prove how the real package managers interpret a lockfile.
 and a disposable local registry. The same distinction applies to other adapters:
 mocked native success is not evidence of native acceptance or compatibility.
 
+`just control-test` also sends a real Python-exported service plan through the
+packaged Go controller and Process Compose. Its service and readiness commands
+use the actual Python workflow entrypoints; the task checks readiness, returns
+exit code 7, and the test explicitly stops the service and waits for its process
+to exit. This covers the exporter/controller boundary alongside the focused
+ownership tests that construct controller plans directly.
+
 A repeat native JavaScript run exposed an intermittent upstream-override failure.
 The case and complete native suite then passed without production changes.
 Investigation confirmed that pnpm 11 ignored the fixture's `.npmrc` cache-directory
