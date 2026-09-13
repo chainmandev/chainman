@@ -51,6 +51,10 @@ preserves the candidate under the host's Chainman update cache for inspection.
 Candidate source changes during verification are failures. Failures while applying
 or committing already verified files preserve the resulting files/index for review.
 No reset, stash, push, background updater or automatic retry is involved.
+Staged formatting also compares the complete resulting index against the verified
+selected bytes/modes plus the original unrelated staging. A clean filter or ignored
+executable-bit change that produces a different staged result fails and preserves
+the files and index for inspection.
 Registry metadata responses are bounded to 64 MiB, including complete package
 histories; a larger response fails explicitly rather than dropping release evidence.
 Crates.io API requests are serialized within each process with a conservative

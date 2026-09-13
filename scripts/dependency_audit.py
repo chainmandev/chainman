@@ -51,7 +51,7 @@ def evaluate(findings, exceptions, today=None):
     return {key: package for key, package in findings.items() if key not in ignored}
 
 
-def tools_path(root, kind):
+def tools_path(root, kind, *, gc_root):
     return (
         Path(
             tc.managed_run(
@@ -61,7 +61,8 @@ def tools_path(root, kind):
                     "nix-command flakes",
                     "build",
                     f"path:{chainman.RUNTIME}/nix#audit-{kind}",
-                    "--no-link",
+                    "--out-link",
+                    str(gc_root),
                     "--print-out-paths",
                     "--no-write-lock-file",
                 ],
@@ -76,6 +77,11 @@ def tools_path(root, kind):
 
 
 def run(root, arguments):
+    with tc.nix_temporary_directory("chainman-audit-tools-") as directory:
+        return run_retained(root, arguments, Path(directory))
+
+
+def run_retained(root, arguments, roots):
     import recipes
 
     cfg = tc.config(root)
@@ -171,7 +177,7 @@ def run(root, arguments):
                     )
                     continue
                 if kind not in binaries:
-                    binaries[kind] = tools_path(root, kind)
+                    binaries[kind] = tools_path(root, kind, gc_root=roots / kind)
                 bin_path = binaries[kind]
                 if kind == "rust":
                     result = execute(

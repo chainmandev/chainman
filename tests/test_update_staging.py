@@ -364,7 +364,9 @@ commands=[["true"]]
         ):
             # Bypass this class's integration-only fetch mock for this test.
             with self.assertRaisesRegex(ValueError, "NAR verification"):
-                self.real_verified_runtime(self.candidate)
+                self.real_verified_runtime(
+                    self.candidate, gc_root=self.stage / "runtime-root"
+                )
 
     def test_update_verification_must_terminate(self):
         path = self.root / "chainman.toml"

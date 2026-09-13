@@ -7,11 +7,10 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
 
@@ -82,7 +81,7 @@ class ManagedFiles:
 
     def __init__(self, root: Path):
         self.root = root
-        self.written = {}
+        self.written: dict[str, tuple[tuple[bytes, int] | None, tuple[bytes, int]]] = {}
 
     def publish(self, name: str, before, after):
         if managed_state(self.root, name) != before:
@@ -119,7 +118,45 @@ class ManagedFiles:
             )
 
 
-def fetch_runtime(candidate: dict, body: bytes) -> Path:
+def fetch_source(root: Path, *, gc_root: Path) -> Path:
+    """Fetch with the trusted helper and register a root before Nix exits.
+
+    The caller owns gc_root and must retain it through the last source read or
+    execution. Container roots must be visible to the shared Nix daemon.
+    """
+    env = dict(
+        os.environ,
+        CHAINMAN_PROJECT_ROOT=str(root),
+        CHAINMAN_BOOTSTRAP_HELPER=str(chainman.RUNTIME / "bootstrap/fetch.nix"),
+    )
+    expression = 'import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) { root = builtins.getEnv "CHAINMAN_PROJECT_ROOT"; action = "fetch"; archive = ""; }'
+    runtime = Path(
+        tc.managed_run(
+            [
+                tc.nix_command(),
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "build",
+                "--impure",
+                "--out-link",
+                str(gc_root),
+                "--print-out-paths",
+                "--expr",
+                expression,
+            ],
+            text=True,
+            cwd=root,
+            env=env,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+    )
+    if runtime.parent != Path("/nix/store"):
+        raise ValueError("Runtime fetch did not return a Nix store tree")
+    return runtime
+
+
+def fetch_runtime(candidate: dict, body: bytes, *, gc_root: Path) -> Path:
     # Fetch exactly the downloaded bytes, before changing the live consumer pin.
     # The trusted old helper validates their unpacked NAR hash; no candidate
     # source is imported or executed while this temporary lock is evaluated.
@@ -129,31 +166,7 @@ def fetch_runtime(candidate: dict, body: bytes) -> Path:
         (staged / "chainman.lock").write_text(
             json.dumps({**candidate, "bundled_archive": "archive.tar.gz"})
         )
-        fetch_env = dict(
-            os.environ,
-            CHAINMAN_PROJECT_ROOT=str(staged),
-            CHAINMAN_BOOTSTRAP_HELPER=str(chainman.RUNTIME / "bootstrap/fetch.nix"),
-        )
-        expression = 'import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) { root = builtins.getEnv "CHAINMAN_PROJECT_ROOT"; action = "fetch"; archive = ""; }'
-        runtime = Path(
-            tc.managed_run(
-                [
-                    tc.nix_command(),
-                    "--extra-experimental-features",
-                    "nix-command flakes",
-                    "eval",
-                    "--impure",
-                    "--raw",
-                    "--expr",
-                    expression,
-                ],
-                text=True,
-                cwd=staged,
-                env=fetch_env,
-                capture_output=True,
-                check=True,
-            ).stdout.strip()
-        )
+        runtime = fetch_source(staged, gc_root=gc_root)
     if (
         runtime.parent != Path("/nix/store")
         or runtime.is_symlink()
@@ -270,12 +283,19 @@ def release_assets(selected: registry.Release, policy: dict, now: datetime):
 
 
 def runtime_candidate(
-    root: Path, policy: dict, now: datetime, managed: ManagedFiles | None = None
+    root: Path,
+    policy: dict,
+    now: datetime,
+    managed: ManagedFiles | None = None,
+    *,
+    gc_root: Path,
 ) -> Path:
     lockpath = tc.contained(root, "chainman.lock")
     if not lockpath.exists():
         return chainman.RUNTIME
     lock_before = managed_state(root, "chainman.lock")
+    if lock_before is None:
+        raise ValueError("Runtime pin disappeared during preparation")
     old = json.loads(lock_before[0])
     inputs = {
         name: managed_state(root, name)
@@ -328,9 +348,9 @@ def runtime_candidate(
         old.get("bundled_archive") or metadata.get("archive_sha256") is not None
     ) and hashlib.sha256(body).hexdigest() != metadata.get("archive_sha256"):
         raise ValueError("Runtime archive checksum does not match release")
-    runtime = fetch_runtime(candidate, body)
+    runtime = fetch_runtime(candidate, body, gc_root=gc_root)
     validate_runtime(runtime, required["version"])
-    prepared = {}
+    prepared: dict[str, tuple[tuple[bytes, int] | None, tuple[bytes, int]]] = {}
     for source, target in (
         ("chainman.sh", "chainman.sh"),
         ("fetch.nix", "chainman-fetch.nix"),
@@ -399,43 +419,46 @@ def perform(
     skip_runtime=True,
     managed: ManagedFiles | None = None,
 ) -> Path:
-    runtime = (
-        chainman.RUNTIME
-        if skip_runtime and not only_runtime
-        else runtime_candidate(root, policy, now, managed)
-    )
-    if only_runtime:
-        return runtime
-    if runtime != chainman.RUNTIME:
-        tc.managed_run(
-            [
-                tc.nix_command(),
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "develop",
-                f"path:{quote(str(runtime / 'nix'), safe='/')}#updates",
-                "--no-write-lock-file",
-                "--command",
-                "python3",
-                str(runtime / "scripts/chainman_updates.py"),
-                "--resolve-root",
-                str(root),
-                now.isoformat(),
-                json.dumps(extra),
-            ],
-            cwd=root,
-            env=dict(
-                os.environ,
-                CHAINMAN_ROOT=str(root),
-                CHAINMAN_PROJECT_ROOT=str(root),
-                TOOLCHAIN_FRESH="1",
-                CHAINMAN_UPDATE_ACTIVE="1",
-            ),
-            check=True,
+    with tc.nix_temporary_directory("chainman-runtime-update-") as directory:
+        runtime = (
+            chainman.RUNTIME
+            if skip_runtime and not only_runtime
+            else runtime_candidate(
+                root, policy, now, managed, gc_root=Path(directory) / "runtime"
+            )
         )
-    else:
-        resolve_current(root, policy, now, extra)
-    return runtime
+        if only_runtime:
+            return runtime
+        if runtime != chainman.RUNTIME:
+            tc.managed_run(
+                [
+                    tc.nix_command(),
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "develop",
+                    f"path:{quote(str(runtime / 'nix'), safe='/')}#updates",
+                    "--no-write-lock-file",
+                    "--command",
+                    "python3",
+                    str(runtime / "scripts/chainman_updates.py"),
+                    "--resolve-root",
+                    str(root),
+                    now.isoformat(),
+                    json.dumps(extra),
+                ],
+                cwd=root,
+                env=dict(
+                    os.environ,
+                    CHAINMAN_ROOT=str(root),
+                    CHAINMAN_PROJECT_ROOT=str(root),
+                    TOOLCHAIN_FRESH="1",
+                    CHAINMAN_UPDATE_ACTIVE="1",
+                ),
+                check=True,
+            )
+        else:
+            resolve_current(root, policy, now, extra)
+        return runtime
 
 
 def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):

@@ -869,7 +869,9 @@ class RuntimeReleaseTests(ConsumerFixture):
             patch.object(toolchain, "managed_run") as fetch,
         ):
             with self.assertRaisesRegex(ValueError, "eligible"):
-                consumer_updates.runtime_candidate(self.root, self.policy, self.now)
+                consumer_updates.runtime_candidate(
+                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
+                )
             fetch.assert_not_called()
             self.download.assert_not_called()
         self.assertEqual((self.root / "chainman.lock").read_bytes(), self.initial_lock)
@@ -882,7 +884,12 @@ class RuntimeReleaseTests(ConsumerFixture):
                 patch.object(toolchain, "managed_run") as fetch,
             ):
                 with self.assertRaises(ValueError):
-                    consumer_updates.runtime_candidate(self.root, self.policy, self.now)
+                    consumer_updates.runtime_candidate(
+                        self.root,
+                        self.policy,
+                        self.now,
+                        gc_root=self.base / "runtime-root",
+                    )
                 fetch.assert_not_called()
                 self.assert_downloaded_exact_assets()
                 self.download.reset_mock()
@@ -896,7 +903,9 @@ class RuntimeReleaseTests(ConsumerFixture):
         )
         with patch.object(toolchain, "managed_run", side_effect=failed):
             with self.assertRaises(subprocess.CalledProcessError):
-                consumer_updates.runtime_candidate(self.root, self.policy, self.now)
+                consumer_updates.runtime_candidate(
+                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
+                )
         self.assert_downloaded_exact_assets()
         self.assertEqual((self.root / "chainman.lock").read_bytes(), self.initial_lock)
 
@@ -948,14 +957,14 @@ class RuntimeReleaseTests(ConsumerFixture):
             return_value=subprocess.CompletedProcess(["nix"], 0, str(candidate) + "\n"),
         ) as fetch:
             selected = consumer_updates.runtime_candidate(
-                self.root, self.policy, self.now
+                self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
             )
         self.assertEqual(selected, candidate)
         lock = json.loads((self.root / "chainman.lock").read_text())
         self.assertEqual(lock["version"], "2.0.0")
         self.assertEqual(lock["revision"], "b" * 40)
         self.assertEqual(lock["narHash"], self.metadata["narHash"])
-        self.assertIn("--raw", fetch.call_args.args[0])
+        self.assertIn("--out-link", fetch.call_args.args[0])
         self.assert_downloaded_exact_assets()
 
     def test_bundled_checksum_failure_never_commits_or_replaces_bundle(self):
@@ -979,7 +988,9 @@ class RuntimeReleaseTests(ConsumerFixture):
             patch.object(consumer_updates, "verify") as verify,
         ):
             with self.assertRaisesRegex(ValueError, "checksum"):
-                consumer_updates.runtime_candidate(self.root, self.policy, self.now)
+                consumer_updates.runtime_candidate(
+                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
+                )
             verify.assert_not_called()
         self.assertEqual(self.git("rev-parse", "HEAD"), initial)
         self.assertEqual(
@@ -995,7 +1006,9 @@ class RuntimeReleaseTests(ConsumerFixture):
             return_value=subprocess.CompletedProcess(["nix"], 0, str(self.base) + "\n"),
         ):
             with self.assertRaisesRegex(ValueError, "Nix store"):
-                consumer_updates.runtime_candidate(self.root, self.policy, self.now)
+                consumer_updates.runtime_candidate(
+                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
+                )
 
     def test_candidate_runtime_drives_resolution_and_verification(self):
         candidate = Path("/nix/store/00000000000000000000000000000000-candidate")

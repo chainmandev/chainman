@@ -422,36 +422,10 @@ def candidate_unchanged(candidate, state):
         raise ValueError("Updater or verifier changed candidate Git HEAD or index")
 
 
-def verified_runtime(candidate):
+def verified_runtime(candidate, *, gc_root):
     # Evaluate the old trusted fetch helper; never import candidate source merely
     # because the resolver left it in the checkout.
-    env = dict(
-        os.environ,
-        CHAINMAN_BOOTSTRAP_HELPER=str(chainman.RUNTIME / "bootstrap/fetch.nix"),
-        CHAINMAN_PROJECT_ROOT=str(candidate),
-    )
-    expression = 'import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) { root = builtins.getEnv "CHAINMAN_PROJECT_ROOT"; action = "fetch"; archive = ""; }'
-    runtime = Path(
-        tc.managed_run(
-            [
-                tc.nix_command(),
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "eval",
-                "--impure",
-                "--raw",
-                "--expr",
-                expression,
-            ],
-            cwd=candidate,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-    )
-    if runtime.parent != Path("/nix/store"):
-        raise ValueError("Candidate runtime must be a verified Nix store tree")
+    runtime = runtime_updates.fetch_source(candidate, gc_root=gc_root)
     lock = json.loads(tc.regular_input(candidate, "chainman.lock"))
     actual = tc.managed_run(
         [
@@ -538,15 +512,18 @@ def inspect(root, destination):
         ) != dependency_api.policy(root):
             raise ValueError("Update must not change its workflow or dependency policy")
         if paths and not state.get("source"):
-            runtime = verified_runtime(candidate)
-            export_bootstrap(runtime, destination / "candidate-bootstrap")
-            export_authority(
-                root,
-                candidate,
-                destination / "candidate-bootstrap",
-                pin_root=candidate,
-                git_directories=state["candidate_git"],
-            )
+            with tc.nix_temporary_directory("chainman-inspect-") as directory:
+                runtime = verified_runtime(
+                    candidate, gc_root=Path(directory) / "runtime"
+                )
+                export_bootstrap(runtime, destination / "candidate-bootstrap")
+                export_authority(
+                    root,
+                    candidate,
+                    destination / "candidate-bootstrap",
+                    pin_root=candidate,
+                    git_directories=state["candidate_git"],
+                )
         state.update(updated=updated, paths=paths)
         control = destination / "control"
         tc.atomic_json(control / "state.json", state)
@@ -596,19 +573,42 @@ def finalize(root, destination):
                 )
             if not opts["no_commit"]:
                 commit = updates.commit_verified(
-                    root, *state["identity"], expected, state["paths"], opts["message"]
+                    root,
+                    state["identity"][0],
+                    state["identity"][1],
+                    expected,
+                    state["paths"],
+                    opts["message"],
                 )
             elif opts.get("staged"):
-                prior = index(root)
-                updates.git(root, "add", "--", *state["paths"])
-                after = index(root)
-                if any(
-                    prior.get(name) != after.get(name)
-                    for name in prior.keys() | after.keys()
+                # Preserve partial/unrelated staging, but require selected entries
+                # to contain exactly the verified raw bytes and executable modes.
+                # Git clean filters and core.filemode can otherwise silently
+                # turn a successful format check into an unverified staged tree.
+                expected_index = {
+                    name: value
+                    for name, value in state["index"].items()
                     if name not in state["paths"]
+                }
+                expected_index.update(
+                    {
+                        name: list(value)
+                        for name, value in updates.raw_entries(
+                            root, state["paths"]
+                        ).items()
+                    }
+                )
+                updates.git(root, "add", "--", *state["paths"])
+                if index(root) != expected_index:
+                    raise ValueError(
+                        "The staged tree differs from verified bytes/modes or contains unrelated index changes; inspect Git filters and the preserved index"
+                    )
+                if (
+                    list(updates.repository(root, clean=False)) != state["identity"]
+                    or updates.snapshot(root) != expected
                 ):
                     raise ValueError(
-                        "Concurrent index changes during staged formatting; inspect the preserved index"
+                        "Original checkout changed during staged formatting; inspect the preserved changes"
                     )
         result = dict(
             schema=1,

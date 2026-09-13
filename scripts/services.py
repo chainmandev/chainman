@@ -441,6 +441,10 @@ def export(root, arguments):
                     "Native controller output must be a regular executable"
                 )
             tc.atomic_bytes(destination / name, source.read_bytes(), mode=0o700)
+        licenses = {
+            path.parent.name.replace(".", "-"): path.read_text()
+            for path in (package / "share/licenses").glob("*/LICENSE")
+        }
     mode = os.environ.get("CHAINMAN_MODE", "host-nix")
     key = scope_key(host_state, root, mode)
     state = str(Path(host_state) / key)
@@ -705,10 +709,7 @@ def export(root, arguments):
         "state": state,
         "backend": str(destination / "process-compose"),
         "watcher": str(destination / "watchexec"),
-        "licenses": {
-            path.parent.name.replace(".", "-"): path.read_text()
-            for path in (package / "share/licenses").glob("*/LICENSE")
-        },
+        "licenses": licenses,
         "fingerprint": hashlib.sha256(
             json.dumps([fingerprint, forwarded], sort_keys=True).encode()
         ).hexdigest(),

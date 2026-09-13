@@ -144,6 +144,35 @@ class FormatTransactions(unittest.TestCase):
         self.finish()
         self.assertEqual((self.root / "source.txt").read_text(), "reconciled\n")
 
+    def test_staged_formatting_rejects_clean_filter_changes(self):
+        (self.root / ".gitattributes").write_text("source.txt filter=change\n")
+        updates.git(
+            self.root, "config", "filter.change.clean", "sed s/formatted/altered/g"
+        )
+        updates.git(self.root, "add", ".gitattributes")
+        updates.git(self.root, "commit", "-m", "Declare clean filter")
+        (self.root / "source.txt").write_text("selected\n")
+        updates.git(self.root, "add", "source.txt")
+        self.prepare("--format", "--staged")
+        (self.candidate / "source.txt").write_text("formatted\n")
+        update_staging.inspect(self.root, self.stage)
+        with self.assertRaisesRegex(ValueError, "staged tree differs"):
+            self.finish()
+        self.assertEqual((self.root / "source.txt").read_text(), "formatted\n")
+        self.assertEqual(updates.git(self.root, "show", ":source.txt"), "altered")
+
+    def test_staged_formatting_rejects_ignored_executable_mode(self):
+        updates.git(self.root, "config", "core.filemode", "false")
+        (self.root / "source.txt").write_text("selected\n")
+        updates.git(self.root, "add", "source.txt")
+        self.prepare("--format", "--staged")
+        (self.candidate / "source.txt").chmod(0o755)
+        update_staging.inspect(self.root, self.stage)
+        with self.assertRaisesRegex(ValueError, "staged tree differs"):
+            self.finish()
+        self.assertEqual((self.root / "source.txt").stat().st_mode & 0o777, 0o755)
+        self.assertEqual(updates.staged_entries(self.root)["source.txt"][0], "100644")
+
     def test_staged_resume_keeps_selection(self):
         (self.root / "source.txt").write_text("selected\n")
         updates.git(self.root, "add", "source.txt")

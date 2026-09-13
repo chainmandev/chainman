@@ -156,7 +156,12 @@ class SelfUpdateTests(unittest.TestCase):
                         ),
                     ):
                         with self.assertRaises(ValueError):
-                            subject.runtime_candidate(self.root, {}, self.now)
+                            subject.runtime_candidate(
+                                self.root,
+                                {},
+                                self.now,
+                                gc_root=self.base / "runtime-root",
+                            )
                         evaluate.assert_not_called()
                     self.assertEqual(self.managed(), self.before)
 
@@ -341,13 +346,43 @@ class SelfUpdateTests(unittest.TestCase):
                     patch.object(subject, "verify") as execute,
                 ):
                     with self.assertRaises(ValueError):
-                        subject.runtime_candidate(self.root, {}, self.now)
+                        subject.runtime_candidate(
+                            self.root, {}, self.now, gc_root=self.base / "runtime-root"
+                        )
                     execute.assert_not_called()
                 self.assertEqual(self.managed(), self.before)
 
     def test_candidate_runtime_does_not_require_development_tests(self):
         (self.candidate / "tests").rmdir()
         self.assertEqual(self.run_apply(lambda *_: None), {"verification": "passed"})
+
+    def test_runtime_root_lasts_through_resolution_and_is_released_on_failure(self):
+        for fails in (False, True):
+            roots = []
+
+            def candidate(*args, gc_root, **kwargs):
+                gc_root.symlink_to(self.candidate)
+                roots.append(gc_root)
+                return self.candidate
+
+            def resolve(argv, **kwargs):
+                self.assertTrue(roots[0].is_symlink())
+                if fails:
+                    raise subprocess.CalledProcessError(7, argv)
+                return subprocess.CompletedProcess(argv, 0)
+
+            with (
+                self.subTest(fails=fails),
+                patch.object(subject, "runtime_candidate", side_effect=candidate),
+                patch.object(subject.tc, "managed_run", side_effect=resolve),
+            ):
+                if fails:
+                    with self.assertRaises(subprocess.CalledProcessError):
+                        subject.perform(self.root, {}, self.now, [], skip_runtime=False)
+                else:
+                    subject.perform(self.root, {}, self.now, [], skip_runtime=False)
+            self.assertEqual(len(roots), 1)
+            self.assertFalse(roots[0].parent.exists())
 
     def test_download_or_fetch_failure_does_not_publish_candidate(self):
         for failure in (ValueError("bad archive"), OSError("fetch unavailable")):
@@ -356,11 +391,13 @@ class SelfUpdateTests(unittest.TestCase):
                     patch.object(subject, "fetch_runtime", side_effect=failure),
                     self.assertRaises(type(failure)),
                 ):
-                    subject.runtime_candidate(self.root, {}, self.now)
+                    subject.runtime_candidate(
+                        self.root, {}, self.now, gc_root=self.base / "runtime-root"
+                    )
                 self.assertEqual(self.managed(), self.before)
 
     def test_concurrent_change_during_fetch_is_not_overwritten(self):
-        def fetched(*_):
+        def fetched(*_, **_kwargs):
             (self.root / "bundle.tar.gz").write_bytes(b"concurrent archive")
             return self.candidate
 
@@ -369,7 +406,9 @@ class SelfUpdateTests(unittest.TestCase):
             patch.object(subject, "verify") as execute,
         ):
             with self.assertRaisesRegex(ValueError, "changed during preparation"):
-                subject.runtime_candidate(self.root, {}, self.now)
+                subject.runtime_candidate(
+                    self.root, {}, self.now, gc_root=self.base / "runtime-root"
+                )
             execute.assert_not_called()
         self.assertEqual(
             (self.root / "bundle.tar.gz").read_bytes(), b"concurrent archive"
@@ -438,11 +477,22 @@ class SelfUpdateTests(unittest.TestCase):
         lock["narHash"] = nar_hash
         actual = Path(__file__).resolve().parents[1]
         with patch.object(chainman, "RUNTIME", actual):
-            runtime = subject.fetch_runtime(lock, output.getvalue())
+            runtime = subject.fetch_runtime(
+                lock, output.getvalue(), gc_root=self.base / "runtime-root"
+            )
             self.assertEqual((runtime / "VERSION").read_text().strip(), "2.0.0")
+            roots = subprocess.check_output(
+                ["nix-store", "--query", "--roots", str(runtime)], text=True
+            )
+            self.assertIn(
+                str(self.base / "runtime-root") + " -> " + str(runtime),
+                roots.splitlines(),
+            )
             lock["narHash"] = "sha256-" + "A" * 43 + "="
             with self.assertRaises(subprocess.CalledProcessError):
-                subject.fetch_runtime(lock, output.getvalue())
+                subject.fetch_runtime(
+                    lock, output.getvalue(), gc_root=self.base / "runtime-root"
+                )
         self.assertEqual(self.managed(), self.before)
 
 
@@ -602,7 +652,9 @@ class FreshReleaseTagTests(unittest.TestCase):
             self.assertRaisesRegex(expected, message),
         ):
             try:
-                subject.runtime_candidate(self.root, {}, self.now)
+                subject.runtime_candidate(
+                    self.root, {}, self.now, gc_root=self.root / "runtime-root"
+                )
             finally:
                 evaluate.assert_not_called()
                 self.assertEqual(self.lock.read_bytes(), self.before)

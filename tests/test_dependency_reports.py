@@ -18,6 +18,40 @@ import updates
 
 
 class ReportTests(unittest.TestCase):
+    def test_native_audit_tools_remain_rooted_through_scanner_execution(self):
+        cfg = {
+            "updates": {
+                "adapters": {"go": {"adapter": "go", "profile": "host"}},
+                "steps": [{"resolve": "go"}],
+            }
+        }
+        roots = []
+
+        def build(argv, **kwargs):
+            root = Path(argv[argv.index("--out-link") + 1])
+            root.symlink_to("/nix/store/fixture-audit")
+            roots.append(root)
+            return subprocess.CompletedProcess(argv, 0, "/nix/store/fixture-audit\n")
+
+        def execute(root, profile, argv, **kwargs):
+            self.assertEqual(
+                argv, ["/nix/store/fixture-audit/bin/govulncheck", "./..."]
+            )
+            self.assertTrue(roots[0].is_symlink())
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(dependency_audit.tc, "config", return_value=cfg),
+            patch.object(dependency_audit.tc, "environment", return_value={}),
+            patch.object(dependency_audit.tc, "managed_run", side_effect=build),
+            patch.object(dependency_audit.chainman, "execute", side_effect=execute),
+            redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(dependency_audit.run(Path(temporary), []), 0)
+        self.assertEqual(len(roots), 1)
+        self.assertFalse(roots[0].parent.exists())
+
     def test_native_exception_declarations_fail_before_scanner_execution(self):
         cfg = {
             "updates": {

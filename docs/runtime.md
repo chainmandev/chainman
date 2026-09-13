@@ -48,6 +48,10 @@ Native task helpers have temporary GC roots for the duration of command executio
 Controller export similarly retains its Nix package until the standalone binaries
 have been copied. The temporary directories, including their roots, are removed
 when these operations finish or fail; Nix handles later collection normally.
+Runtime updates and inspection likewise register fetched sources before the Nix
+evaluator exits and retain them through their final reads or execution. Dependency
+audit tool packages remain rooted for the complete audit. Controller export reads
+licenses while its package root is still held.
 
 Container command probes validate the engine, owner label and running state, then
 execute against the inspected immutable container ID. A stopped, missing or replaced
