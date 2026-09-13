@@ -458,20 +458,27 @@ class Evidence:
                 if info.get("name") != name or info.get("version") != release.version:
                     raise ValueError("Registry version manifest identity mismatch")
             # Baseline maturity checks visit every transitive package. Keep the
-            # complete version inventory and peer evidence, not each release's
+            # complete version inventory and dependency evidence, not each release's
             # unrelated README, scripts and development dependency payloads.
             # Dates and immutable artifact identities remain in releases above.
-            peer_versions = {
+            dependency_versions = {
                 value: {
                     key: info[key]
-                    for key in ("peerDependencies", "peerDependenciesMeta")
+                    for key in (
+                        "dependencies",
+                        "optionalDependencies",
+                        "bundleDependencies",
+                        "bundledDependencies",
+                        "peerDependencies",
+                        "peerDependenciesMeta",
+                    )
                     if key in info
                 }
                 if isinstance(info, Mapping)
                 else info
                 for value, info in versions.items()
             }
-            self.cache[name] = releases, peer_versions
+            self.cache[name] = releases, dependency_versions
         return self.cache[name]
 
     def peers(self, name, version, *, manifest=None):
@@ -1221,7 +1228,12 @@ def effective_requirements(workspace, pin, *, parent=None, versions=None):
         **workspace.documents["package.json"][0].get("pnpm", {}).get("overrides", {}),
         **workspace.settings.get("overrides", {}),
     }
-    for selector, replacement in overrides.items():
+    # pnpm gives a matching parent-specific override precedence over generic
+    # overrides, regardless of their declaration order.
+    for selector, replacement in sorted(
+        overrides.items(),
+        key=lambda item: bool(re.search(r">(?=@?[A-Za-z_~])", item[0])),
+    ):
         if re.search(r">(?=@?[A-Za-z_~])", selector):
             scope, selector = re.split(r">(?=@?[A-Za-z_~])", selector, maxsplit=1)
             if parent is None:
@@ -1239,17 +1251,15 @@ def effective_requirements(workspace, pin, *, parent=None, versions=None):
         match = re.fullmatch(rf"({NAME})(?:@(.+))?", selector)
         if not match or match[1] not in (pin.alias, pin.name):
             continue
-        if (
-            parent is not None
-            and match[2]
-            and not any(
+        if parent is not None and match[2]:
+            inventory = versions() if callable(versions) else (versions or [])
+            if not any(
                 registry.lock_version("npm", value) is not None
                 and Version(value) in NpmSpec(pin.requirement)
                 and Version(value) in NpmSpec(match[2])
-                for value in (versions or [])
-            )
-        ):
-            continue
+                for value in inventory
+            ):
+                continue
         if replacement.startswith("$"):
             name = replacement[1:]
             index = workspace.refs["package.json"].get(name)
@@ -1259,13 +1269,74 @@ def effective_requirements(workspace, pin, *, parent=None, versions=None):
             if parent is not None:
                 allowed = []
             allowed.append((reference.name, reference.requirement))
-        elif replacement != "-":
+        elif replacement == "-":
+            if parent is not None:
+                allowed = []
+        else:
             parsed = parse_requirement(pin.alias, replacement)
             if parsed:
                 if parent is not None:
                     allowed = []
                 allowed.append((parsed[0], parsed[2]))
     return allowed
+
+
+def audit_registry_children(workspace, evidence, parent, children):
+    """pnpm's frozen lock check does not verify registry dependency ranges."""
+    info = evidence.get(parent[0])[1][parent[1]]
+    required = info.get("dependencies", {})
+    optional = info.get("optionalDependencies", {})
+    if not isinstance(required, Mapping) or not isinstance(optional, Mapping):
+        raise ValueError("Registry dependencies must be objects of named ranges")
+    bundled = info.get("bundleDependencies", info.get("bundledDependencies", []))
+    if type(bundled) is bool:
+        bundled = list(required) + list(optional) if bundled else []
+    if not isinstance(bundled, list) or any(
+        not isinstance(name, str) for name in bundled
+    ):
+        raise ValueError("Bundled dependencies must be names or a boolean")
+    for alias, requirement in {**required, **optional}.items():
+        package_name(alias)
+        target = children.get(alias)
+        # A bundled child is part of its parent's hashed archive, not a separate
+        # remote artifact or registry edge in pnpm's lock.
+        if alias not in children and (alias in optional or alias in bundled):
+            continue
+        # Retained source bindings have their own exact parent, declaration,
+        # override and archive checks, completed before this graph traversal.
+        if target and target[2] in workspace.source_contents:
+            continue
+        if target is None and alias in children and alias in workspace.locals:
+            # Deep workspace links have already been bound to their contained
+            # manifests. Their declared versions still have to satisfy the edge.
+            local_version = workspace.documents[workspace.locals[alias]][0].get(
+                "version"
+            )
+            if registry.lock_version("npm", local_version) is not None:
+                target = (alias, local_version, "")
+        if not isinstance(requirement, str):
+            raise ValueError("Registry dependency requirements must be strings")
+        try:
+            parsed = parse_requirement(alias, requirement)
+        except ValueError:
+            parsed = None
+        # A declared override may replace or remove an upstream source that we
+        # would not otherwise resolve. An unsuperseded value still has to pass
+        # the registry identity/range check below.
+        name, prefix, bound, operator = parsed or (alias, "", requirement, None)
+        pin = Pin("", (), alias, name, requirement, prefix, bound, operator)
+        allowed = effective_requirements(
+            workspace, pin, parent=parent, versions=lambda: evidence.get(name)[1]
+        )
+        if alias not in children and not allowed:
+            continue
+        if target is None or not any(
+            target[0] == actual and Version(target[1]) in NpmSpec(bound)
+            for actual, bound in allowed
+        ):
+            raise ValueError(
+                f"Registry dependency {parent[0]}>{alias} violates its declared range or override"
+            )
 
 
 def audit_peers(workspace, evidence, options):
@@ -1418,6 +1489,9 @@ def audit_peers(workspace, evidence, options):
                             )
             else:
                 peers, metadata = evidence.peers(actual, version, manifest=manifest)
+                audit_registry_children(
+                    workspace, evidence, (actual, version), children
+                )
             for peer, requirement in peers.items():
                 requirement = peer_range(requirement)
                 if peer_ignored(options, manifest, actual, peer):

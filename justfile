@@ -76,6 +76,10 @@ bootstrap-test engine="docker":
 control-test:
     @./scripts/enter.sh control python3 scripts/control_test.py
 
+javascript-test:
+    @./scripts/enter.sh javascript env CHAINMAN_TEST_PNPM=1 python3 -B -m unittest discover -s tests -p 'test_javascript*.py' -v
+    @./scripts/enter.sh javascript python3 -B -m unittest discover -s tests -p test_pnpm_runtime.py -v
+
 # Static consumer validation; never executes project workflows.
 consumer-check +args:
     @./scripts/enter.sh core python3 scripts/consumer_contract.py "$@"

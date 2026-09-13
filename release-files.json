@@ -182,6 +182,7 @@
     "tests/test_ecosystem_updates.py",
     "tests/test_go_selection.py",
     "tests/test_gradle_resolution.py",
+    "tests/test_javascript_native.py",
     "tests/test_javascript_updates.py",
     "tests/test_lock_adapters.py",
     "tests/test_module_updates.py",

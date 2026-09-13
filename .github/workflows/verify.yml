@@ -70,6 +70,9 @@ jobs:
       - name: Report project cache use
         if: always()
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- cache-status
+      - name: Qualify native JavaScript update validation
+        if: matrix.mode == 'host-nix' && matrix.module == 'javascript'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
       - name: Qualify native service ownership and backend
         if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test

@@ -1945,6 +1945,38 @@ class JavaScriptTests(unittest.TestCase):
             self.resolve(tamper)
         self.assertFalse((self.root / "pnpm-lock.yaml").exists())
 
+    def test_invalid_registry_edges_are_not_published_after_native_success(self):
+        self.manifest("package.json", {"library": "1.0.0"})
+        self.release("library", "1.0.0", children={"transitive": "1.0.0"})
+        self.release("transitive", "1.0.0")
+        self.release("transitive", "2.0.0")
+        original = (self.root / "package.json").read_bytes()
+        for fault in ("wrong version", "missing edge"):
+            with self.subTest(fault=fault):
+
+                def malformed(*args, **kwargs):
+                    result = self.fake_pnpm(*args, **kwargs)
+                    path = kwargs["cwd"] / "pnpm-lock.yaml"
+                    lock = json.loads(path.read_text())
+                    dependencies = lock["snapshots"]["library@1.0.0"]["dependencies"]
+                    if fault == "missing edge":
+                        dependencies.pop("transitive", None)
+                    else:
+                        dependencies["transitive"] = "2.0.0"
+                        lock["snapshots"]["transitive@2.0.0"] = {}
+                        lock["packages"]["transitive@2.0.0"] = {
+                            "resolution": self.metadata["transitive"]["versions"][
+                                "2.0.0"
+                            ]["dist"]
+                        }
+                    path.write_text(json.dumps(lock))
+                    return result
+
+                with self.assertRaisesRegex(ValueError, "library>transitive"):
+                    self.resolve(malformed)
+                self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+                self.assertEqual((self.root / "package.json").read_bytes(), original)
+
     def test_resolved_transitive_peer_is_checked_per_importer(self):
         self.manifest("package.json", {"renderer": "1.0.0"})
         self.release(

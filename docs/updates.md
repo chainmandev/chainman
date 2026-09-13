@@ -391,8 +391,8 @@ a new or changed artifact, including through a security maturity exception. Its
 metadata remains available to audit unchanged direct and transitive dependencies;
 constraints, safe floors, peer compatibility and exception expiry still apply.
 The JavaScript evidence cache retains the complete version inventory, publication
-dates, artifact identities and peer metadata. It discards unrelated parsed release
-manifest payloads after validation so transitive checks do not accumulate every
+dates, artifact identities and dependency/peer ranges. It discards unrelated parsed
+release manifest payloads after validation so transitive checks do not accumulate every
 historical README, script and development dependency declaration. This does not
 change registry transport limits or eligibility rules.
 
@@ -430,6 +430,11 @@ candidate is frozen. Only importer/catalog specifiers and override metadata may
 change; every selected identity, artifact and dependency edge must stay unchanged.
 Normalization failure or input drift aborts the update. The subsequent frozen
 lock check and full audits never regenerate files or retry verification.
+pnpm's frozen check alone does not prove that transitive versions satisfy their
+parents. Chainman also compares registry dependency edges with published ranges
+and declared overrides, and rejects missing required children. Optional omissions
+and explicit dependency removal overrides remain valid. Bundled children belong
+to the parent's hashed archive and do not require separate registry lock entries.
 
 Local `file:`, `link:` and `workspace:` dependencies must bind their package names
 to included workspace manifests within the adopted project. Directory lock entries
