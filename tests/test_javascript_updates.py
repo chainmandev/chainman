@@ -2039,6 +2039,55 @@ class JavaScriptTests(unittest.TestCase):
         )
         self.assertNotIn("pnpm-workspace.yaml", result["changed_files"])
 
+    def test_npm_invalid_resolver_entry_stops_before_ci_or_publication(self):
+        self.spec["manager"] = "npm"
+        manifest = self.manifest("package.json", {"library": "^1.0.0"})
+        self.release("library", "2.0.0")
+        original = manifest.read_bytes()
+        calls = []
+
+        def malformed(root, profile, argv, *, cwd, **kwargs):
+            calls.append(argv[1])
+            result = self.fake_npm(root, profile, argv, cwd=cwd, **kwargs)
+            if argv[1] == "install":
+                path = cwd / "package-lock.json"
+                lock = json.loads(path.read_text())
+                lock["packages"]["node_modules/library"] = []
+                path.write_text(json.dumps(lock))
+            return result
+
+        with self.assertRaisesRegex(ValueError, "npm package.*must be an object"):
+            self.resolve(malformed)
+        self.assertEqual(calls, ["install"])
+        self.assertEqual(manifest.read_bytes(), original)
+        self.assertFalse((self.root / "package-lock.json").exists())
+
+    def test_npm_publication_preserves_native_metadata_while_restoring_ranges(self):
+        self.spec["manager"] = "npm"
+        self.manifest("package.json", {"library": "^1.0.0"})
+        self.release("library", "2.0.0")
+        extension = {"future-native-field": ["keep", {"nested": True}]}
+
+        def extended(root, profile, argv, *, cwd, **kwargs):
+            result = self.fake_npm(root, profile, argv, cwd=cwd, **kwargs)
+            if argv[1] == "install":
+                path = cwd / "package-lock.json"
+                lock = json.loads(path.read_text())
+                lock["native-metadata"] = extension
+                for entry in lock["packages"].values():
+                    entry["native-metadata"] = extension
+                path.write_text(json.dumps(lock))
+            return result
+
+        result = self.resolve(extended)
+        self.assertIn("package-lock.json", result["changed_files"])
+        lock = json.loads((self.root / "package-lock.json").read_text())
+        self.assertEqual(lock["native-metadata"], extension)
+        for entry in lock["packages"].values():
+            self.assertEqual(entry["native-metadata"], extension)
+        self.assertEqual(lock["packages"][""]["dependencies"], {"library": "^2.0.0"})
+        self.assertEqual(lock["packages"]["node_modules/library"]["version"], "2.0.0")
+
     def test_npm_v2_and_v3_identity_and_unrecognized_sources(self):
         import javascript_npm
 

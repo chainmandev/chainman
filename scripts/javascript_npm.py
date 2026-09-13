@@ -4,43 +4,43 @@ import json
 import re
 import subprocess
 import tempfile
-from datetime import timedelta
+from collections.abc import Sequence
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import javascript_updates as js
 import registry
+import adapter_data as inputs
 from dependency_identity import Identity
 import toolchain as tc
 from semantic_version import NpmSpec, Version
 
 
-def read(workspace):
+def read(workspace: js.Workspace) -> inputs.NpmLock:
     path = tc.contained(workspace.directory, workspace.lock)
     if not path.exists():
         return {"lockfileVersion": 3, "packages": {}}
-    value = json.loads(tc.regular_input(workspace.directory, workspace.lock))
-    if value.get("lockfileVersion") not in (2, 3) or not isinstance(
-        value.get("packages"), dict
-    ):
-        raise ValueError("npm auditing requires package-lock version 2 or 3")
+    value = inputs.npm_lock(
+        json.loads(tc.regular_input(workspace.directory, workspace.lock))
+    )
     for location in value["packages"]:
         tc.contained(workspace.directory, location or ".")
     return value
 
 
-def local_locations(workspace):
+def local_locations(workspace: js.Workspace) -> set[str]:
     return {
         "" if Path(name).parent == Path(".") else Path(name).parent.as_posix()
         for name in workspace.manifests
     }
 
 
-def name_at(location, item):
+def name_at(location: str, item: inputs.NpmPackage) -> str:
     suffix = location.rsplit("node_modules/", 1)[-1]
     return js.package_name(item.get("name", suffix))
 
 
-def identities(workspace) -> set[Identity]:
+def identities(workspace: js.Workspace) -> set[Identity]:
     result: set[Identity] = set()
     lock = read(workspace)
     locals = local_locations(workspace)
@@ -53,9 +53,8 @@ def identities(workspace) -> set[Identity]:
             manifest = workspace.documents[
                 (location + "/" if location else "") + "package.json"
             ][0]
-            if any(
-                key in item and item[key] != manifest.get(key)
-                for key in ("name", "version")
+            if ("name" in item and item["name"] != manifest.get("name")) or (
+                "version" in item and item["version"] != manifest.get("version")
             ):
                 raise ValueError(
                     "npm local package identity disagrees with its declared manifest"
@@ -64,7 +63,7 @@ def identities(workspace) -> set[Identity]:
         if item.get("link") is True:
             if item.get("resolved") not in locals or set(item) - {"resolved", "link"}:
                 raise ValueError("npm link must name one declared local workspace")
-            target = item["resolved"]
+            target = inputs.text(item.get("resolved"), "npm workspace link target")
             manifest = workspace.documents[
                 (target + "/" if target else "") + "package.json"
             ][0]
@@ -77,7 +76,10 @@ def identities(workspace) -> set[Identity]:
             continue
         if not re.search(r"(?:^|/)node_modules/", location):
             raise ValueError("npm lock contains an undeclared local package")
-        name, version = name_at(location, item), item.get("version")
+        name, version = (
+            name_at(location, item),
+            inputs.text(item.get("version"), "npm version"),
+        )
         if registry.lock_version("npm", version) is None:
             raise ValueError("npm lock lacks a stable registry version")
         result.add(
@@ -85,14 +87,20 @@ def identities(workspace) -> set[Identity]:
                 provider="npm",
                 package=name,
                 version=version,
-                url=registry.artifact_url(item.get("resolved")),
-                digest=registry.digest(item.get("integrity"), npm=True),
+                url=registry.artifact_url(
+                    inputs.text(item.get("resolved"), "npm resolved")
+                ),
+                digest=registry.digest(
+                    inputs.text(item.get("integrity"), "npm integrity"), npm=True
+                ),
             )
         )
     return result
 
 
-def locate(packages, source, name):
+def locate(
+    packages: dict[str, inputs.NpmPackage], source: str, name: str
+) -> str | None:
     js.package_name(name)
     path = Path(source or ".")
     for parent in [path, *path.parents]:
@@ -101,14 +109,16 @@ def locate(packages, source, name):
         key = (parent / "node_modules" / name).as_posix().removeprefix("./")
         if key in packages:
             if packages[key].get("link") is True:
-                key = packages[key].get("resolved")
+                key = inputs.text(
+                    packages[key].get("resolved"), "npm workspace link target"
+                )
                 if key not in packages or packages[key].get("link"):
                     raise ValueError("Invalid or recursive npm workspace link")
             return key
     return None
 
 
-def allowed(workspace, pin):
+def allowed(workspace: js.Workspace, pin: js.Pin) -> list[tuple[str, str]]:
     result = js.effective_requirements(workspace, pin)
     replacement = (
         workspace.documents["package.json"][0].get("overrides", {}).get(pin.alias)
@@ -122,10 +132,12 @@ def allowed(workspace, pin):
     return result
 
 
-def audit(workspace, before, policy, now):
+def audit(
+    workspace: js.Workspace, before: dict, policy: dict, now: datetime
+) -> list[str]:
     lock, evidence = read(workspace), js.Evidence(policy, now)
     packages, options = lock["packages"], policy.get("javascript", {})
-    scopes = {}
+    scopes: dict[tuple[str, str], list[str]] = {}
     locals = local_locations(workspace)
     for manifest, refs in workspace.refs.items():
         importer = (
@@ -142,7 +154,10 @@ def audit(workspace, before, policy, now):
             if location is None:
                 raise ValueError("npm lock is missing a declared dependency")
             item = packages[location]
-            actual, version = name_at(location, item), item.get("version")
+            actual, version = (
+                name_at(location, item),
+                inputs.text(item.get("version"), "npm version"),
+            )
             if not any(
                 actual == name and Version(version) in NpmSpec(bound)
                 for name, bound in allowed(workspace, pin)
@@ -247,7 +262,14 @@ def audit(workspace, before, policy, now):
     return js.audit_artifacts(workspace, before, policy, now, scopes)
 
 
-def resolve(workspace, before, evidence, selected, policy, now):
+def resolve(
+    workspace: js.Workspace,
+    before: dict,
+    evidence: js.Evidence,
+    selected: Sequence[str],
+    policy: dict,
+    now: datetime,
+) -> dict:
     root, spec = workspace.root, workspace.spec
     options = policy.get("javascript", {})
     active = [
@@ -327,19 +349,25 @@ def resolve(workspace, before, evidence, selected, policy, now):
                     workspace.modes.get(relative, 0o644),
                 )
         path = tc.contained(temporary, workspace.lock)
-        lock = json.loads(tc.regular_input(temporary, workspace.lock))
+        lock = inputs.table(
+            json.loads(tc.regular_input(temporary, workspace.lock)), "npm lock"
+        )
+        inputs.npm_lock(lock)
+        packages = inputs.table(lock["packages"], "npm packages")
         for manifest in workspace.manifests:
             key = (
                 ""
                 if Path(manifest).parent == Path(".")
                 else Path(manifest).parent.as_posix()
             )
-            entry = lock.get("packages", {}).get(key)
-            if entry is None:
+            if key not in packages:
                 raise ValueError("npm resolver omitted a declared workspace")
+            entry = inputs.table(packages[key], "npm workspace entry")
             for section in js.SECTIONS:
                 if section in workspace.documents[manifest][0]:
                     entry[section] = workspace.documents[manifest][0][section]
+            packages[key] = entry
+        lock["packages"] = packages
         tc.atomic_bytes(path, (json.dumps(lock, indent=2) + "\n").encode(), 0o644)
         checked = js.chainman.execute(
             root,

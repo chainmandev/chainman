@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal, TypedDict
 import json
 from pathlib import Path
 import re
@@ -13,7 +16,8 @@ from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
 import registry
-from dependency_identity import Identity
+from dependency_identity import Identity, inventory
+import adapter_data as data
 from toolchain import (
     contained,
     environment,
@@ -33,7 +37,7 @@ def paths(root: Path, directory: Path, filename: str) -> list[Path]:
 
 def native(
     root: Path, profile: str, argv: list[str], *, workspace: bool = False
-) -> dict:
+) -> data.Table:
     env = environment(root)
     env.update(
         TOOLCHAIN_FRESH="1",
@@ -67,10 +71,10 @@ def native(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-    return json.loads(result.stdout)
+    return data.table(json.loads(result.stdout), "Native adapter output")
 
 
-def go_query(root: Path, package: str, value: str) -> dict:
+def go_query(root: Path, package: str, value: str) -> data.GoQuery:
     registry.go_path(package)
     if value != "latest" and not registry.go_version(value):
         raise ValueError("Invalid Go query version")
@@ -78,24 +82,26 @@ def go_query(root: Path, package: str, value: str) -> dict:
     item = native(
         root, "go", ["go", "list", "-m", "-json", *flags, package + "@" + value]
     )
-    if (
-        item.get("Path") != package
-        or item.get("Error")
-        or (value != "latest" and item.get("Version") != value)
-    ):
-        raise ValueError(
-            "Go returned a different module identity or incomplete evidence"
-        )
-    return item
+    return data.go_query(item, package, value)
 
 
-def go_candidates(root: Path, package: str, **selection) -> list[registry.Release]:
+def go_candidates(
+    root: Path,
+    package: str,
+    *,
+    policy: dict | None = None,
+    now: datetime | None = None,
+    bounds: tuple[str, ...] = (),
+    exact: str | None = None,
+) -> list[registry.Release]:
     # Go itself interprets the latest module's retract directives; never parse
     # Go syntax or infer retraction status from the public proxy's version list.
     available = go_query(root, package, "latest").get("Versions")
     if not isinstance(available, list):
         raise ValueError("Go did not return its unretracted version inventory")
-    return registry.go_releases(package, available, **selection)
+    return registry.go_releases(
+        package, available, policy=policy, now=now, bounds=bounds, exact=exact
+    )
 
 
 def swift_repository(url: str) -> str:
@@ -115,13 +121,55 @@ def swift_repository(url: str) -> str:
     return repository
 
 
-def swift_declarations(root: Path, name: str, *, explicit: bool = False) -> list[dict]:
+class DeclarationSpan(TypedDict):
+    start: int
+    end: int
+
+
+class SwiftLocal(DeclarationSpan):
+    kind: Literal["local"]
+    path: str
+    name: str | None
+
+
+class SwiftRemote(DeclarationSpan):
+    kind: Literal["remote"]
+    package: str
+    version: str
+    style: str
+    bound: str
+    requirement: data.Table
+    value_start: int
+    value_end: int
+    style_start: int
+    style_end: int
+
+
+class SwiftExplicit(DeclarationSpan):
+    kind: Literal["explicit"]
+    reference: str | None
+    value_span: tuple[int, int] | None
+
+
+type SwiftDeclaration = SwiftLocal | SwiftRemote | SwiftExplicit
+
+
+class SwiftPinOwner(TypedDict):
+    value: str
+    span: tuple[int, int]
+    references: list[str]
+
+
+def swift_declarations(
+    root: Path, name: str, *, explicit: bool = False
+) -> list[SwiftDeclaration]:
     """Read only literal package calls; native evaluation verifies their inventory."""
     body = regular_input(root, name).decode()
     # Hide comments and string contents when locating calls, preserving offsets.
     tokens = re.compile(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', re.DOTALL)
     masked = tokens.sub(lambda m: " " * len(m[0]), body)
-    result, seen = [], set()
+    result: list[SwiftDeclaration] = []
+    seen: set[tuple[str, str | int]] = set()
     for call in re.finditer(r"\.package\b", masked):
         opening = re.match(r"\s*\(", masked[call.end() :])
         if opening is None:
@@ -144,9 +192,12 @@ def swift_declarations(root: Path, name: str, *, explicit: bool = False) -> list
             r'(?P<style>from|exact)\s*:\s*"(?P<version>[^"\\\n]+)"\s*,?\s*',
             arguments,
         )
+        span: DeclarationSpan = {"start": call.start(), "end": end + 1}
+        item: SwiftDeclaration
+        key: tuple[str, str | int]
         if local:
             target = local_source(root, (root / name).parent, local["path"])
-            item = {"kind": "local", "path": str(target), "name": local["name"]}
+            item = {**span, "kind": "local", "path": str(target), "name": local["name"]}
             key = ("local", str(target))
         elif remote:
             package = swift_repository(remote["url"])
@@ -158,6 +209,7 @@ def swift_declarations(root: Path, name: str, *, explicit: bool = False) -> list
                 raise ValueError("Swift dependencies require a stable release version")
             upper = str(int(value.split(".")[0]) + 1) + ".0.0"
             item = {
+                **span,
                 "kind": "remote",
                 "package": package,
                 "version": value,
@@ -183,6 +235,7 @@ def swift_declarations(root: Path, name: str, *, explicit: bool = False) -> list
             # Existing explicit pins may own evaluated exact remote declarations.
             # Native inventory and the configured field, not this call text, bind them.
             item = {
+                **span,
                 "kind": "explicit",
                 "reference": configured["reference"],
                 "value_span": (
@@ -200,12 +253,12 @@ def swift_declarations(root: Path, name: str, *, explicit: bool = False) -> list
         if key in seen:
             raise ValueError("Duplicate Swift dependency declaration")
         seen.add(key)
-        result.append({**item, "start": call.start(), "end": end + 1})
+        result.append(item)
     return result
 
 
-def swift_explicit_requirements(root: Path, spec: dict) -> dict:
-    result = {}
+def swift_explicit_requirements(root: Path, spec: dict) -> dict[str, SwiftPinOwner]:
+    result: dict[str, SwiftPinOwner] = {}
     name = str((contained(root, spec["directory"]) / "Package.swift").relative_to(root))
     body = regular_input(root, name).decode()
     # A named exact argument must refer to the configured literal initializer;
@@ -261,7 +314,7 @@ def swift_explicit_requirements(root: Path, spec: dict) -> dict:
     return result
 
 
-def swift_local_manifests(root: Path, spec: dict) -> dict:
+def swift_local_manifests(root: Path, spec: dict) -> dict[str, list[SwiftDeclaration]]:
     """Read the project-local closure without expanding configured pin ownership."""
     pending = [contained(root, spec["directory"]) / "Package.swift"]
     result = {}
@@ -280,7 +333,7 @@ def swift_local_manifests(root: Path, spec: dict) -> dict:
     return result
 
 
-def swift_manifest_state(root: Path, spec: dict) -> dict:
+def swift_manifest_state(root: Path, spec: dict) -> dict[str, list[str | int] | None]:
     return {
         name: [
             hashlib.sha256(regular_input(root, name)).hexdigest(),
@@ -299,7 +352,7 @@ def swift_lock_path(root: Path, spec: dict) -> Path:
     )
 
 
-def swift_validation_state(root: Path, spec: dict) -> dict:
+def swift_validation_state(root: Path, spec: dict) -> dict[str, list[str | int] | None]:
     result = swift_manifest_state(root, spec)
     path = swift_lock_path(root, spec)
     name = str(path.relative_to(root))
@@ -312,8 +365,10 @@ def swift_validation_state(root: Path, spec: dict) -> dict:
 
 
 def maven_repository(spec: dict, package: str) -> str:
-    declared = spec.get("maven_repositories", ["central"])
-    if not isinstance(declared, list) or set(declared) - {
+    declared = data.strings(
+        spec.get("maven_repositories", ["central"]), "Maven repositories"
+    )
+    if set(declared) - {
         "central",
         "google",
         "plugins",
@@ -324,9 +379,9 @@ def maven_repository(spec: dict, package: str) -> str:
         if package.split(":")[0].startswith(("androidx.", "com.android."))
         else "central"
     )
-    plugins = spec.get("maven_plugin_packages", [])
-    if not isinstance(plugins, list) or any(not isinstance(p, str) for p in plugins):
-        raise ValueError("Plugin Portal routing requires an exact coordinate list")
+    plugins = data.strings(
+        spec.get("maven_plugin_packages", []), "Maven plugin packages"
+    )
     for plugin in plugins:
         registry.maven_prefix(plugin, "plugins")
     if package in plugins:
@@ -336,12 +391,8 @@ def maven_repository(spec: dict, package: str) -> str:
     return name
 
 
-def local_gradle_projects(root: Path, spec: dict) -> dict:
-    declared = spec.get("local_projects", {})
-    if not isinstance(declared, dict):
-        raise ValueError(
-            "Local Gradle projects require exact coordinate-to-directory bindings"
-        )
+def local_gradle_projects(root: Path, spec: dict) -> dict[str, str]:
+    declared = data.string_map(spec.get("local_projects", {}), "Local Gradle projects")
     for package, relative in declared.items():
         registry.maven_prefix(package)
         if not isinstance(relative, str) or not relative:
@@ -357,20 +408,30 @@ def local_gradle_projects(root: Path, spec: dict) -> dict:
     return declared
 
 
-def validate_gradle_projects(root: Path, spec: dict, reports: list) -> dict:
+class GradleProjects(TypedDict):
+    projects: dict[str, str]
+    edges: list[data.Table]
+
+
+def validate_gradle_projects(root: Path, spec: dict, reports: object) -> GradleProjects:
     """Join native build-tree identities to actual paths before admitting locals."""
     local = local_gradle_projects(root, spec)
-    projects, edges = {}, []
+    projects: dict[str, str] = {}
+    edges: list[data.Table] = []
+    reports = data.array(reports, "Gradle project reports")
     if not reports:
         raise ValueError("Gradle resolution did not report its native project graph")
-    for report in reports:
+    for raw_report in reports:
+        report = data.table(raw_report, "Gradle project report")
         if (
-            report.get("schema") != 1
+            type(report.get("schema")) is not int
+            or report.get("schema") != 1
             or not isinstance(report.get("projects"), list)
             or not isinstance(report.get("edges"), list)
         ):
             raise ValueError("Malformed Gradle project graph evidence")
-        for project in report["projects"]:
+        for raw_project in data.array(report["projects"], "Gradle projects"):
+            project = data.table(raw_project, "Gradle project")
             identity, location = project.get("id"), project.get("directory")
             if (
                 not isinstance(identity, str)
@@ -388,12 +449,17 @@ def validate_gradle_projects(root: Path, spec: dict, reports: list) -> dict:
             if identity in projects and projects[identity] != relative:
                 raise ValueError("Ambiguous native Gradle build-tree identity")
             projects[identity] = relative
-        edges.extend(report["edges"])
+        edges.extend(
+            data.table(edge, "Gradle project edge")
+            for edge in data.array(report["edges"], "Gradle edges")
+        )
     for edge in edges:
-        selected, coordinate = edge.get("selected"), edge.get("coordinate")
+        selected = data.text(edge.get("selected"), "Gradle selected project")
+        coordinate = edge.get("coordinate")
         if selected not in projects:
             raise ValueError("Gradle selected an unreported native project")
         if coordinate is not None:
+            coordinate = data.text(coordinate, "Gradle coordinate")
             if coordinate not in local or projects[selected] != local[coordinate]:
                 raise ValueError(
                     "Gradle module substitution differs from its declared local project binding"
@@ -521,18 +587,18 @@ def identities(root: Path, spec: dict) -> set[Identity]:
             )
         covered = set()
         seen = set()
-        for component in document.findall(f"{ns}components/{ns}component"):
-            package = component.get("group", "") + ":" + component.get("name", "")
+        for element in document.findall(f"{ns}components/{ns}component"):
+            package = element.get("group", "") + ":" + element.get("name", "")
             if package in local:
                 raise ValueError(
                     "Declared local Gradle project has external artifact metadata"
                 )
-            value = component.get("version", "")
+            value = element.get("version", "")
             repository = maven_repository(spec, package)
             prefix = registry.maven_prefix(package, repository)
             if registry.version("maven", value) is None:
                 raise ValueError("Unsupported Maven verification version")
-            artifacts = component.findall(ns + "artifact")
+            artifacts = element.findall(ns + "artifact")
             if not artifacts:
                 raise ValueError("Maven component lacks artifact checksums")
             for artifact in artifacts:
@@ -566,9 +632,10 @@ def identities(root: Path, spec: dict) -> set[Identity]:
 
 
 def evidence(
-    root: Path, provider: str, package: str, items: set
+    root: Path, provider: str, package: str, items: object
 ) -> list[registry.Release]:
-    values = {i[2] for i in items}
+    identities = inventory(items)
+    values = {i.version for i in identities}
     if provider == "go":
         result = []
         for value in values:
@@ -593,7 +660,7 @@ def evidence(
                 )
                 artifacts = tuple(
                     registry.Artifact(url, "git:" + revision, published)
-                    for _, _, value, url, _ in items
+                    for _, _, value, url, _ in identities
                     if value == release.version
                 )
                 result.append(
@@ -603,8 +670,8 @@ def evidence(
     if provider == "maven":
         result = []
         for value in values:
-            artifacts = []
-            for _, _, locked, url, _ in items:
+            maven_artifacts = []
+            for _, _, locked, url, _ in identities:
                 if locked != value:
                     continue
                 repository = maven_source(url)
@@ -615,12 +682,12 @@ def evidence(
                     raise ValueError(
                         "Maven lock source differs from its official evidence"
                     )
-                artifacts.append(artifact)
+                maven_artifacts.append(artifact)
             result.append(
                 registry.Release(
                     value,
-                    max(a.published for a in artifacts),
-                    artifacts=tuple(artifacts),
+                    max(a.published for a in maven_artifacts),
+                    artifacts=tuple(maven_artifacts),
                 )
             )
         return result
@@ -638,10 +705,39 @@ def maven_source(url: str) -> str:
     raise ValueError("Unrecognized Maven artifact source")
 
 
-def validate_go_sources(root: Path, spec: dict, items: set) -> None:
+@dataclass(frozen=True)
+class LocalReplacement:
+    base: Path
+    source: str
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return str((self.base / self.source).resolve()), ""
+
+
+@dataclass(frozen=True)
+class RemoteReplacement:
+    reference: data.GoReference
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        return self.reference.path, self.reference.version
+
+
+type ReplacementTarget = LocalReplacement | RemoteReplacement
+type Replacements = dict[data.GoReference, ReplacementTarget]
+
+
+def validate_go_sources(root: Path, spec: dict, items: object) -> None:
+    identities = inventory(items)
     directory = contained(root, spec["directory"])
     manifests = [
-        (p, native(root, "go", ["go", "mod", "edit", "-json", str(p)]))
+        (
+            p,
+            data.GoFile.decode(
+                native(root, "go", ["go", "mod", "edit", "-json", str(p)])
+            ),
+        )
         for p in paths(root, directory, "go.mod")
     ]
 
@@ -670,7 +766,9 @@ def validate_go_sources(root: Path, spec: dict, items: set) -> None:
     active = selection.get("GOWORK")
     if not isinstance(active, str):
         raise ValueError("Go did not identify the active command workspace")
-    workpath, work = None, {}
+    workpath = None
+    work = data.GoFile.decode({}, workspace=True)
+    used: set[Path] = set()
     if active not in ("", "off"):
         candidate = Path(active)
         if not candidate.is_absolute() or not candidate.is_relative_to(root):
@@ -678,84 +776,82 @@ def validate_go_sources(root: Path, spec: dict, items: set) -> None:
         workpath = contained(root, str(candidate.relative_to(root)))
         if not workpath.is_file():
             raise ValueError("Active Go workspace does not exist")
-        work = native(root, "go", ["go", "work", "edit", "-json", str(workpath)])
-    used = {
-        local_path(workpath.parent, entry["DiskPath"])
-        for entry in work.get("Use") or []
-    }
+        work = data.GoFile.decode(
+            native(root, "go", ["go", "work", "edit", "-json", str(workpath)]),
+            workspace=True,
+        )
+        used = {local_path(workpath.parent, source) for source in work.uses}
     by_directory = {path.parent.resolve(): (path, body) for path, body in manifests}
     if used - by_directory.keys():
         raise ValueError("Go workspace use entry lacks a declared module")
 
-    def replacements(path: Path, body: dict) -> dict:
-        result = {}
-        for entry in body.get("Replace") or []:
-            old = entry["Old"]
-            key = (old["Path"], old.get("Version") or "")
-            target = entry["New"]
+    def replacements(path: Path, body: data.GoFile) -> Replacements:
+        result: Replacements = {}
+        for entry in body.replacements:
+            target = entry.new
             # Normalize local target identities for cross-member conflict checks;
             # scope/existence is checked only for the effective replacement.
-            value = (
-                (
-                    str((path.parent / target["Path"]).resolve()),
-                    "",
-                    path.parent,
-                    target["Path"],
-                )
-                if not target.get("Version")
-                else (target["Path"], target["Version"], None, None)
+            value: ReplacementTarget = (
+                LocalReplacement(base=path.parent, source=target.path)
+                if not target.version
+                else RemoteReplacement(reference=target)
             )
-            if key in result and result[key][:2] != value[:2]:
+            if entry.old in result and result[entry.old].identity != value.identity:
                 raise ValueError("Conflicting Go replacement directives")
-            result[key] = value
+            result[entry.old] = value
         return result
 
-    def matching(mapping: dict, package: str, value: str):
-        return mapping.get((package, value), mapping.get((package, "")))
+    def matching(
+        mapping: Replacements, reference: data.GoReference
+    ) -> ReplacementTarget | None:
+        return mapping.get(reference, mapping.get(data.GoReference(reference.path, "")))
 
     workspace_replacements = replacements(workpath, work) if workpath else {}
-    member_replacements = {}
+    member_replacements: Replacements = {}
     for path, body in (by_directory[member] for member in used):
         for key, target in replacements(path, body).items():
-            if matching(workspace_replacements, *key) is not None:
+            if matching(workspace_replacements, key) is not None:
                 continue
             if (
                 key in member_replacements
-                and member_replacements[key][:2] != target[:2]
+                and member_replacements[key].identity != target.identity
             ):
                 raise ValueError(
                     "Conflicting Go workspace member replacements need a go.work override"
                 )
             member_replacements[key] = target
-    local = {by_directory[member][1]["Module"]["Path"] for member in used}
+    local = {by_directory[member][1].module for member in used}
     for path, body in manifests:
         member = path.parent.resolve() in used
         own = member_replacements if member else replacements(path, body)
-        for entry in body.get("Require") or []:
-            package, value = entry["Path"], entry["Version"]
-            if member and package in local:
+        for reference in body.requires:
+            if member and reference.path in local:
                 continue
             replacement = (
-                matching(workspace_replacements, package, value) if member else None
+                matching(workspace_replacements, reference) if member else None
             )
             if replacement is None:
-                replacement = matching(own, package, value)
+                replacement = matching(own, reference)
             if replacement is not None:
-                if replacement[1]:
+                if isinstance(replacement, RemoteReplacement):
                     raise ValueError(
                         "Go remote replacement needs an explicit supported source contract"
                     )
-                location = local_path(replacement[2], replacement[3])
+                location = local_path(replacement.base, replacement.source)
                 if location not in by_directory:
                     raise ValueError("Go local replacement lacks a declared module")
                 continue
-            if not any(i[1:3] == (package, value) for i in items):
+            if not any(
+                (i.package, i.version) == (reference.path, reference.version)
+                for i in identities
+            ):
                 raise ValueError("Go requirement lacks a checksum lock identity")
 
 
 def swift_declared_sources(
-    root: Path, spec: dict, items: set, *, require_locked: bool = True
-) -> set:
+    root: Path, spec: dict, items: object, *, require_locked: bool = True
+) -> set[tuple[str, str]]:
+    identities = inventory(items)
     directory = contained(root, spec["directory"])
     declarations = swift_declarations(
         root,
@@ -771,11 +867,12 @@ def swift_declared_sources(
     dependencies = body.get("dependencies") if isinstance(body, dict) else None
     if not isinstance(dependencies, list):
         raise ValueError("SwiftPM native dependency inventory is missing or malformed")
-    expected = {
-        (item["kind"], item.get("package", item.get("path"))): item
-        for item in declarations
-        if item["kind"] != "explicit"
-    }
+    expected: dict[tuple[str, str], SwiftLocal | SwiftRemote] = {}
+    for declaration in declarations:
+        if declaration["kind"] == "local":
+            expected[("local", declaration["path"])] = declaration
+        elif declaration["kind"] == "remote":
+            expected[("remote", declaration["package"])] = declaration
     explicit_count = sum(item["kind"] == "explicit" for item in declarations)
     explicit_seen = set()
     seen = set()
@@ -790,7 +887,7 @@ def swift_declared_sources(
             or not isinstance(sources[0], dict)
         ):
             raise ValueError("Malformed SwiftPM native dependency source")
-        source = sources[0]
+        source = data.table(sources[0], "SwiftPM dependency source")
         if kind == "fileSystem":
             path = source.get("path")
             if not isinstance(path, str) or not Path(path).is_absolute():
@@ -801,6 +898,7 @@ def swift_declared_sources(
             declared = expected.get(key)
             if (
                 declared is None
+                or declared["kind"] != "local"
                 or source.get("nameForTargetDependencyResolutionOnly")
                 != declared["name"]
             ):
@@ -816,10 +914,18 @@ def swift_declared_sources(
                 or not isinstance(remote[0], dict)
             ):
                 raise ValueError("SwiftPM dependency requires a public GitHub remote")
-            package = swift_repository(remote[0].get("urlString"))
+            package = swift_repository(
+                data.text(remote[0].get("urlString"), "SwiftPM remote URL")
+            )
             key = ("remote", package)
-            declared = expected.get(key)
-            if declared is None and package in configured:
+            remote_declared = expected.get(key)
+            if remote_declared is not None:
+                if remote_declared["kind"] != "remote":
+                    raise ValueError("SwiftPM remote resolved to a local declaration")
+                bound = remote_declared["bound"]
+                requirement = remote_declared["requirement"]
+                declared_version = remote_declared["version"]
+            elif package in configured:
                 owner = configured[package]
                 calls = [
                     item
@@ -835,10 +941,10 @@ def swift_declared_sources(
                         "Explicit Swift pin lacks unique declaration ownership"
                     )
                 explicit_seen.add(calls[0]["start"])
-                requirement = source.get("requirement")
-                exact = (
-                    requirement.get("exact") if isinstance(requirement, dict) else None
+                requirement = data.table(
+                    source.get("requirement"), "SwiftPM requirement"
                 )
+                exact = requirement.get("exact")
                 if (
                     not isinstance(exact, list)
                     or len(exact) != 1
@@ -850,30 +956,35 @@ def swift_declared_sources(
                     raise ValueError(
                         "Explicit Swift dependencies require evaluated exact releases"
                     )
-                declared = {"bound": exact[0], "requirement": requirement}
-            if declared is None or source.get("requirement") != declared["requirement"]:
+                bound = declared_version = exact[0]
+            else:
+                raise ValueError(
+                    "SwiftPM native requirement differs from its literal declaration"
+                )
+            if source.get("requirement") != requirement:
                 raise ValueError(
                     "SwiftPM native requirement differs from its literal declaration"
                 )
             if package in configured:
-                if declared.get("kind") == "remote" and configured[package]["span"] != (
-                    declared["value_start"],
-                    declared["value_end"],
+                if remote_declared is not None and configured[package]["span"] != (
+                    remote_declared["value_start"],
+                    remote_declared["value_end"],
                 ):
                     raise ValueError(
                         "Explicit Swift pin does not own its literal declaration"
                     )
-                value = declared["requirement"].get("exact", [None])[0]
-                if value is None:
-                    value = declared["requirement"]["range"][0]["lowerBound"]
-                if value != configured[package]["value"]:
+                if declared_version != configured[package]["value"]:
                     raise ValueError(
                         "Swift native requirement differs from its configured pin"
                     )
-            locked = [item for item in items if item[:2] == ("swift", package)]
+            locked = [
+                item
+                for item in identities
+                if (item.provider, item.package) == ("swift", package)
+            ]
             if require_locked and (
                 len(locked) != 1
-                or not registry.compatible("swift", locked[0][2], declared["bound"])
+                or not registry.compatible("swift", locked[0].version, bound)
             ):
                 raise ValueError(
                     "SwiftPM manifest dependency lacks its required resolved identity"
@@ -895,42 +1006,38 @@ def swift_declared_sources(
     return seen
 
 
-def validate_swift_graph(root: Path, spec: dict, items: set, edges: dict) -> None:
+def validate_swift_graph(
+    root: Path, spec: dict, items: object, edges: dict[str, set[tuple[str, str]]]
+) -> None:
+    identities = inventory(items)
     directory = contained(root, spec["directory"])
     key = hashlib.sha256(str(directory).encode()).hexdigest()
     work = Path(environment(root)["TOOLCHAIN_WORK"])
     scratch = contained(root, str((work / "swift-audit" / key).relative_to(root)))
-    graph = native(
-        root,
-        spec.get("profile", "swift"),
-        [
-            "swift",
-            "package",
-            "--package-path",
-            str(directory),
-            "--scratch-path",
-            str(scratch),
-            "--skip-update",
-            "--force-resolved-versions",
-            "show-dependencies",
-            "--format",
-            "json",
-        ],
+    graph = data.swift_node(
+        native(
+            root,
+            spec.get("profile", "swift"),
+            [
+                "swift",
+                "package",
+                "--package-path",
+                str(directory),
+                "--scratch-path",
+                str(scratch),
+                "--skip-update",
+                "--force-resolved-versions",
+                "show-dependencies",
+                "--format",
+                "json",
+            ],
+        )
     )
-    remote, local, names = set(), set(), {}
+    remote: set[tuple[str, str]] = set()
+    local: set[str] = set()
+    names: dict[str, tuple[str, str, str]] = {}
 
-    def identity(node):
-        if (
-            not isinstance(node, dict)
-            or set(node)
-            != {"identity", "name", "url", "version", "path", "dependencies"}
-            or any(
-                not isinstance(node[field], str) or not node[field]
-                for field in ("identity", "name", "url", "version", "path")
-            )
-            or not isinstance(node["dependencies"], list)
-        ):
-            raise ValueError("Malformed SwiftPM resolved graph node")
+    def identity(node: data.SwiftNode) -> tuple[str, str]:
         path = Path(node["path"])
         if not path.is_absolute():
             raise ValueError("SwiftPM graph requires an absolute source path")
@@ -957,7 +1064,8 @@ def validate_swift_graph(root: Path, spec: dict, items: set, edges: dict) -> Non
         if node["identity"] in names and names[node["identity"]] != resolved:
             raise ValueError("Conflicting SwiftPM graph package identity")
         names[node["identity"]] = resolved
-        children = [identity(child) for child in node["dependencies"]]
+        child_nodes = [data.swift_node(child) for child in node["dependencies"]]
+        children = [identity(child) for child in child_nodes]
         if len(children) != len(set(children)):
             raise ValueError("Duplicate SwiftPM graph dependency edge")
         if kind == "local":
@@ -966,8 +1074,10 @@ def validate_swift_graph(root: Path, spec: dict, items: set, edges: dict) -> Non
                 raise ValueError("SwiftPM graph omits or changes a declared dependency")
         else:
             remote.add((source, node["version"]))
-        pending.extend(node["dependencies"])
-    locked = {(item[1], item[2]) for item in items if item[0] == "swift"}
+        pending.extend(child_nodes)
+    locked = {
+        (item.package, item.version) for item in identities if item.provider == "swift"
+    }
     if local != set(edges) or remote != locked:
         raise ValueError(
             "SwiftPM resolved graph differs from the command-root lock inventory"
@@ -975,8 +1085,9 @@ def validate_swift_graph(root: Path, spec: dict, items: set, edges: dict) -> Non
 
 
 def validate_swift_sources(
-    root: Path, spec: dict, items: set, *, require_locked: bool = True
+    root: Path, spec: dict, items: object, *, require_locked: bool = True
 ) -> None:
+    locked = inventory(items)
     before = swift_validation_state(root, spec)
     original = None
     try:
@@ -986,14 +1097,14 @@ def validate_swift_sources(
             edges[str(contained(root, directory))] = swift_declared_sources(
                 root,
                 {**spec, "directory": directory},
-                items,
+                locked,
                 require_locked=require_locked,
             )
         if require_locked:
             # Caller-supplied or recursively aggregated identities cannot discharge
             # this command root's lock obligation.
             actual = identities(root, spec)
-            if actual != items:
+            if actual != locked:
                 raise ValueError(
                     "SwiftPM audit identities differ from the command-root lock"
                 )

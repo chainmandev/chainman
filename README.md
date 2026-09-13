@@ -109,11 +109,11 @@ cache lifetimes or managed release files. The development environment runs trust
 project code with declared access; it is not a sandbox for hostile source.
 
 `just verify` includes Ruff correctness checks across Python source and tests, plus
-`just type-check` for the runtime/control modules listed in `mypy.ini`. Mypy checks
-unannotated function bodies in that scope, with strict flags for configuration
-composition, resource policies, transaction checkpoint decoding and dependency
-identity records. Hypothesis contracts run in the ordinary unit
-gate. This is not a repository-wide strict typing claim. Adapter signatures are
-visible to the gate, while expanding coverage of their implementations remains
-separate work. All checkers come from pinned Nix. See the
-[test evidence and remaining gaps](docs/testing.md).
+`just type-check` for the runtime/control and adapter modules listed in `mypy.ini`.
+Mypy checks unannotated function bodies in that scope, with strict flags for
+configuration composition, resource policies, transaction checkpoint decoding,
+dependency identity records and native input projections. Native lock and npm
+adapter bodies also pass the gate with complete function annotations; their
+configuration and some imported APIs remain dynamic. Hypothesis contracts run in
+the ordinary unit gate. This is not a repository-wide strict typing claim. All
+checkers come from pinned Nix. See the [test evidence and remaining gaps](docs/testing.md).

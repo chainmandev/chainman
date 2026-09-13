@@ -9,18 +9,23 @@ portion. To run the generated contracts alone:
 just exec python3 -B -m unittest discover -s tests -p test_properties.py -v
 just exec python3 -B -m unittest discover -s tests -p test_transaction_state.py -v
 just exec python3 -B -m unittest discover -s tests -p test_dependency_identity.py -v
+just exec python3 -B -m unittest discover -s tests -p test_adapter_data.py -v
 ```
 
-The configuration compiler, resource policy, transaction checkpoint codec and
-dependency identity modules enforce the pinned mypy strict flags, plus rejection
-of explicit `Any` and unreachable code. Decoded values enter as `object` and are
-narrowed by validation. Resource execution uses an immutable policy with typed
-fields. The transaction coordinator and source workflow require complete function
-annotations and pass decoded records through their decisions. Their configuration
-inputs and imported operations still have dynamic types. The other modules listed
-in `mypy.ini` check unannotated bodies but still permit untyped calls and dynamic
-payloads. Identity producers have named fields and typed return signatures, but
-the adapter implementations are not yet in the mypy gate.
+The configuration compiler, resource policy, transaction checkpoint codec,
+dependency identity and native input projection modules enforce the pinned mypy
+strict flags, plus rejection of explicit `Any` and unreachable code. Decoded values
+enter as `object` and are narrowed by validation. Resource execution uses an
+immutable policy with typed fields. The transaction coordinator, source workflow,
+native lock adapter and npm adapter require complete function annotations and
+pass decoded records through their decisions. Their configuration inputs and some
+imported operations still have dynamic types. The other modules listed in
+`mypy.ini` check unannotated bodies
+but still permit untyped calls and dynamic payloads. The gate checks 20 source
+files, including five with the strict flags.
+Adapter implementations outside that explicit list are not counted as checked.
+The unstubbed third-party `semantic_version` import has a scoped missing-import
+exception; its API remains a dynamic boundary, not an adapter-wide suppression.
 This is incremental coverage, not a claim that all Python is strictly typed.
 
 Hypothesis is pinned through the development Python shell. It is absent from
@@ -47,6 +52,10 @@ The generated oracles cover:
   states, exact JSON compatibility and independence from later input mutation.
 - Dependency records against the existing five-string tuple/JSON contract,
   including named-field order, hash/equality compatibility and duplicate removal.
+- Go native records against explicit module/replacement coordinates, preserving
+  requirement order and duplicate entries and remaining independent of later
+  input mutation. This checks the data boundary, not Go replacement precedence;
+  disposable native Go fixtures check that separately.
 
 These have deliberately bounded vocabularies. They do not establish complete
 SemVer/PEP 440 correctness, lock graph correctness or platform behavior.
@@ -132,6 +141,15 @@ ran in separate Python processes without changing repository files. The codec
 checks have explicit field assertions in addition to round trips, so a paired
 encoder/decoder mistake cannot silently validate itself.
 
+The adapter follow-up injected four more faults in temporary Python processes:
+accepting malformed falsey Go lists as empty, swapping old/new Go replacement
+coordinates, serializing the npm projection and losing unknown native metadata,
+and deferring npm entry validation until after the frozen native check. All four
+were detected by the new tests. The npm cases exercise the production resolver
+and assert published lock contents or preserved original inputs, in addition to
+native call ordering. Their native processes remain fault-injection fixtures;
+the pinned npm/pnpm gate supplies separate real-binary evidence.
+
 ## Boundary guarantees and next improvements
 
 Typed checkpoints now reject malformed records before operational decisions;
@@ -141,11 +159,17 @@ before finalization. The persisted flat schema and dependency identity wire form
 remain compatible. Records have frozen fields, with copied mutable collections
 inside the transaction state; they are not deeply immutable.
 
-Continue from these boundaries into adapter configuration/evidence types and
-their implementation checks. A diagnostic mypy probe of `lock_adapters` and
-`javascript_npm` reported 19 errors, mostly heterogeneous variable reuse, missing
-collection annotations, optional values and an unstubbed third-party import.
-Those modules are not silently counted as checked. Splitting large modules for
+Native input projections now validate npm package records, Go manifests/queries
+and Swift graph nodes before their fields drive adapter decisions. Go local and
+remote replacements use distinct records; Swift declarations use a tagged union.
+Go's native `null` list form remains valid; other falsey malformed values no
+longer silently mean no dependencies. npm retains the raw lock document for
+serialization, so validating a projection does not drop unknown native metadata.
+Go records have immutable fields and tuple collections; Swift graph children are
+decoded one level at a time during iterative traversal, not deeply frozen.
+
+Remaining typing work is concentrated in adapter configuration, registry APIs and
+the other adapter implementations outside the gate. Splitting large modules for
 size alone is a lower priority than replacing dynamic decision inputs.
 
 Add differential tests against native resolvers when changing their adapters.
