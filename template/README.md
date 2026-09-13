@@ -38,7 +38,7 @@ with future public home chainman.dev. Publication is separate from local adoptio
 |---|---|
 | `just setup` | Prepare selected modules, reusing valid fingerprints and readiness artifacts |
 | `just exec COMMAND...` | Execute literal arguments in the project's core profile |
-| `just exec --profile rust -- COMMAND...` / `just shell --profile rust` | Select one language profile |
+| `just shell --profile rust -- COMMAND...` / `just shell --profile rust` | Select one language profile |
 | `just build` / `just test` / `just verify` | Run selected module commands |
 | `just format` / `just format-check` | Generate, format, check and commit / check formatting |
 | `just module NAME verify` | Exercise an optional module without enabling it globally |
