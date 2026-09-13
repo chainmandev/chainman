@@ -188,11 +188,13 @@ def select(
     candidates = registry.maturity("npm", releases, policy, package, now)
     candidates += registry.active_exceptions("npm", releases, policy, package, now)
     latest = max(
-        candidates, key=lambda r: registry.version("npm", r.version), default=None
+        candidates,
+        key=lambda r: registry.stable_version("npm", r.version),
+        default=None,
     )
-    if latest is None or registry.version("npm", latest.version) < registry.version(
-        "npm", source["version"]
-    ):
+    if latest is None or registry.stable_version(
+        "npm", latest.version
+    ) < registry.stable_version("npm", source["version"]):
         latest = observed
     retained = (
         sdk.evidence(tool, latest, latest.version) == before

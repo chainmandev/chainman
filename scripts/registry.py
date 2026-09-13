@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from contextlib import contextmanager
 import base64
 import binascii
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+from email.message import Message
 from functools import lru_cache
 import json
 import hashlib
@@ -17,6 +18,7 @@ from http.client import HTTPException
 import re
 import time
 from threading import Lock
+from typing import IO, Literal, NoReturn, Protocol, Self, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
@@ -27,18 +29,19 @@ from packaging.version import InvalidVersion, Version as PythonVersion
 from packaging.utils import canonicalize_name
 from semantic_version import NpmSpec, Version as Semver
 import adapter_data
+from adapter_data import array, table, text
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_RETRY_WAIT_SECONDS = 60
 _crates_request_lock = Lock()
-_crates_last_request = None
+_crates_last_request: float | None = None
 _github_context_unset = object()
 _github_context = _github_context_unset
 _github_context_lock = Lock()
 
 
 @contextmanager
-def request_window(host: str):
+def request_window(host: str) -> Iterator[None]:
     """Leave one second after each crates.io response before the next request."""
     global _crates_last_request
     if host != "crates.io":
@@ -77,7 +80,7 @@ class Artifact:
     digest: str
     published: datetime
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         validate_publication(self.published)
 
 
@@ -90,7 +93,7 @@ class Release:
     artifacts: tuple[Artifact, ...] = ()
     deprecated: bool = False
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         validate_publication(self.published)
 
 
@@ -105,9 +108,9 @@ class RegistryHTTPError(ValueError):
         super().__init__(f"Registry HTTP {status} from {host}{suffix}")
 
 
-def retry_delay(value, attempt: int, status: int, host: str) -> float:
+def retry_delay(value: object, attempt: int, status: int, host: str) -> float:
     """Bound server-requested waits without retrying earlier than a valid hint."""
-    delay = 2**attempt
+    delay = float(2**attempt)
     if isinstance(value, str):
         value = value.strip()
         if re.fullmatch(r"[0-9]+", value):
@@ -247,9 +250,16 @@ def github_token() -> str:
 class GitHubNoRedirect(HTTPRedirectHandler):
     """Reject before urllib parses Location or constructs a successor request."""
 
-    def http_error_302(self, request, response, code, message, headers):
+    def http_error_302(
+        self,
+        req: Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+    ) -> NoReturn:
         try:
-            response.close()
+            fp.close()
         finally:
             raise RegistryHTTPError(code, "api.github.com") from None
 
@@ -262,7 +272,7 @@ def _fetch(
     method: str = "GET",
     *,
     fresh: bool = False,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, str]]:
     token = github_token()
     parsed = urlparse(url)
     if (
@@ -282,7 +292,7 @@ def _fetch(
     except ValueError:
         raise ValueError("Registry URL has an invalid port") from None
     for attempt in range(3):
-        delay = 2**attempt
+        delay = float(2**attempt)
         try:
             request = Request(
                 url,
@@ -341,14 +351,14 @@ def _fetch(
 @lru_cache(maxsize=2048)
 def _cached_fetch(
     url: str, accept: str = "application/json", method: str = "GET"
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, str]]:
     return _fetch(url, accept, method)
 
 
 class RegistryFetch:
     def __call__(
         self, url: str, accept: str = "application/json", method: str = "GET"
-    ) -> tuple[bytes, dict]:
+    ) -> tuple[bytes, dict[str, str]]:
         github_token()  # Check before a cache hit can return the command's evidence.
         return _cached_fetch(url, accept, method)
 
@@ -360,15 +370,36 @@ class RegistryFetch:
 fetch = RegistryFetch()
 
 
-def data(url: str):
+def data(url: str) -> object:
     return json.loads(fetch(url)[0])
 
 
-def _fresh_data(url: str):
+def _fresh_data(url: str) -> object:
     return json.loads(_fetch(url, fresh=True)[0])
 
 
-def version(provider: str, text: str):
+class VersionRank(Protocol):
+    """Library values ordered within one provider; providers are never mixed."""
+
+    def __lt__(self, other: Self, /) -> bool: ...
+    def __le__(self, other: Self, /) -> bool: ...
+    def __gt__(self, other: Self, /) -> bool: ...
+    def __ge__(self, other: Self, /) -> bool: ...
+
+
+type SemanticProvider = Literal[
+    "npm", "go", "github", "docker", "crates", "pub", "swift"
+]
+type PythonProvider = Literal["pypi", "maven"]
+
+
+@overload
+def version(provider: SemanticProvider, text: str) -> Semver | None: ...
+@overload
+def version(provider: PythonProvider, text: str) -> PythonVersion | None: ...
+@overload
+def version(provider: str, text: str) -> VersionRank | None: ...
+def version(provider: str, text: str) -> VersionRank | None:
     try:
         if provider == "maven":
             # Maven Central also publishes stable two- and four-component versions.
@@ -389,6 +420,14 @@ def version(provider: str, text: str):
         return None
 
 
+def stable_version(provider: str, value: str) -> VersionRank:
+    """Rank a candidate after selection has required a stable release."""
+    result = version(provider, value)
+    if result is None:
+        raise ValueError(f"Expected a stable {provider} version: {value}")
+    return result
+
+
 def compatible(
     provider: str, value: str, constraint: str | tuple[str, ...] | list[str]
 ) -> bool:
@@ -403,7 +442,13 @@ def compatible(
     return Semver(value.removeprefix("v")) in NpmSpec(constraint)
 
 
-def lock_version(provider: str, value: str):
+@overload
+def lock_version(provider: SemanticProvider, value: str) -> Semver | None: ...
+@overload
+def lock_version(provider: PythonProvider, value: str) -> PythonVersion | None: ...
+@overload
+def lock_version(provider: str, value: str) -> VersionRank | None: ...
+def lock_version(provider: str, value: str) -> VersionRank | None:
     """Parse existing npm prereleases without making them selectable releases."""
     if provider != "npm":
         return version(provider, value)
@@ -437,8 +482,22 @@ def policy_exceptions(
         yield adapter_data.AgeException.decode(exception)
 
 
-def minimum_safe(provider: str, policy: Mapping[str, object], name: str):
-    floors = []
+@overload
+def minimum_safe(
+    provider: SemanticProvider, policy: Mapping[str, object], name: str
+) -> Semver | None: ...
+@overload
+def minimum_safe(
+    provider: PythonProvider, policy: Mapping[str, object], name: str
+) -> PythonVersion | None: ...
+@overload
+def minimum_safe(
+    provider: str, policy: Mapping[str, object], name: str
+) -> VersionRank | None: ...
+def minimum_safe(
+    provider: str, policy: Mapping[str, object], name: str
+) -> VersionRank | None:
+    floors: list[VersionRank] = []
     for exception in policy_exceptions(provider, policy, name):
         floor = version(provider, exception.minimum_safe)
         admitted = version(provider, exception.version)
@@ -504,15 +563,16 @@ def active_exceptions(
         admitted = version(provider, exception.version)
         if safe is None or admitted is None or admitted < safe:
             raise ValueError("Invalid exception safe floor")
-        if any(version(provider, release.version) >= safe for release in mature):
+        if any(stable_version(provider, release.version) >= safe for release in mature):
             continue
         if expiry <= now:
             raise ValueError(f"Expired security exception for {name}")
+        assert required_safe is not None  # This same exception contributed a floor.
         for release in releases:
             if (
                 release.version == exception.version
                 and dates[release.version] <= now
-                and version(provider, release.version) >= required_safe
+                and stable_version(provider, release.version) >= required_safe
                 and release.python != "unsupported"
                 and not release.deprecated
                 and compatible(provider, release.version, bound)
@@ -547,7 +607,7 @@ def select(
 ) -> Release:
     return max(
         eligible(provider, releases, policy, name, now),
-        key=lambda item: version(provider, item.version),
+        key=lambda item: stable_version(provider, item.version),
     )
 
 
@@ -561,14 +621,19 @@ def github_releases(repository: str) -> list[Release]:
         )
         if not isinstance(entries, list):
             raise ValueError("Malformed GitHub release response")
-        for item in entries:
+        for raw in entries:
+            item = table(raw, "GitHub release")
             if (
                 not item["draft"]
                 and not item["prerelease"]
-                and version("github", item["tag_name"]) is not None
+                and version("github", text(item["tag_name"], "GitHub release tag"))
+                is not None
             ):
                 releases.append(
-                    Release(item["tag_name"], timestamp(item["published_at"]))
+                    Release(
+                        text(item["tag_name"], "GitHub release tag"),
+                        timestamp(item["published_at"]),
+                    )
                 )
         if len(entries) < 100:
             return releases
@@ -580,17 +645,30 @@ def github_releases(repository: str) -> list[Release]:
 def github_commit(repository: str, tag: str, *, fresh: bool = False) -> str:
     """Resolve a tag, optionally refreshing every hop outside the snapshot cache."""
     read = _fresh_data if fresh else data
-    item = read(
-        f"https://api.github.com/repos/{repository}/git/ref/tags/{quote(tag, safe='')}"
-    )["object"]
+    item = table(
+        table(
+            read(
+                f"https://api.github.com/repos/{repository}/git/ref/tags/{quote(tag, safe='')}"
+            ),
+            "GitHub reference",
+        )["object"],
+        "GitHub object",
+    )
     for _ in range(10):
-        if item["type"] == "commit" and re.fullmatch(r"[a-f0-9]{40}", item["sha"]):
-            return item["sha"]
+        sha = text(item["sha"], "GitHub object SHA")
+        if item["type"] == "commit" and re.fullmatch(r"[a-f0-9]{40}", sha):
+            return sha
         if item["type"] != "tag":
             break
-        item = read(
-            f"https://api.github.com/repos/{repository}/git/tags/{item['sha']}"
-        )["object"]
+        item = table(
+            table(
+                read(
+                    f"https://api.github.com/repos/{repository}/git/tags/{item['sha']}"
+                ),
+                "GitHub tag",
+            )["object"],
+            "GitHub object",
+        )
     raise ValueError("Release tag does not resolve to a bounded commit identity")
 
 
@@ -646,8 +724,11 @@ def go_version(value: str) -> bool:
 def go_info(package: str, value: str) -> Release:
     if not go_version(value):
         raise ValueError("Invalid Go module version")
-    item = data(
-        f"https://proxy.golang.org/{go_path(package)}/@v/{quote(value, safe='')}.info"
+    item = table(
+        data(
+            f"https://proxy.golang.org/{go_path(package)}/@v/{quote(value, safe='')}.info"
+        ),
+        "Go proxy version",
     )
     if item.get("Version") != value:
         raise ValueError("Go proxy version identity mismatch")
@@ -694,10 +775,10 @@ def go_releases(
             and version("go", value) is not None
             and (available is None or value in available)
             and (exact is None or value == exact)
-            and (safe is None or version("go", value) >= safe)
+            and (safe is None or stable_version("go", value) >= safe)
             and all(compatible("go", value, bound) for bound in restrictions)
         },
-        key=lambda value: (version("go", value).precedence_key[:3], value),
+        key=lambda value: (go_precedence(value), value),
         reverse=True,
     )
     result = []
@@ -705,7 +786,7 @@ def go_releases(
     for value in values:
         # Canonical +incompatible metadata does not change SemVer precedence.
         # Read every tied candidate before ruling out lower versions.
-        rank = version("go", value).precedence_key[:3]
+        rank = go_precedence(value)
         if winner is not None and rank < winner:
             break
         # Errors for any potentially winning version remain fatal. Once the
@@ -720,6 +801,13 @@ def go_releases(
         ):
             winner = rank
     return result
+
+
+def go_precedence(value: str) -> tuple[int, int, int]:
+    rank = version("go", value)
+    if rank is None:
+        raise ValueError("Go ranking requires a stable release")
+    return rank.major, rank.minor, rank.patch
 
 
 def go_digest(value: str) -> str:
@@ -858,7 +946,9 @@ def maven_releases(package: str, repository: str = "central") -> list[Release]:
     return result
 
 
-def docker_releases(repository: str, accepts_tag) -> list[Release]:
+def docker_releases(
+    repository: str, accepts_tag: Callable[[str], bool]
+) -> list[Release]:
     """Discover dated tags; callers must validate the selected manifest identity."""
     if isinstance(repository, str):
         repository = repository.removeprefix("docker.io/")
@@ -912,9 +1002,13 @@ def releases(
     if provider == "swift":
         return swift_releases(package)
     if provider == "npm":
-        body = data(f"https://registry.npmjs.org/{quote(package, safe='')}")
+        body = table(
+            data(f"https://registry.npmjs.org/{quote(package, safe='')}"), "npm package"
+        )
         result = []
-        for value, info in body["versions"].items():
+        dates = table(body.get("time", {}), "npm publication times")
+        for value, raw_info in table(body["versions"], "npm versions").items():
+            info = table(raw_info, "npm version")
             parsed = (
                 lock_version(provider, value)
                 if include_prerelease
@@ -923,17 +1017,22 @@ def releases(
             deprecated = bool(info.get("deprecated"))
             if parsed is None or (deprecated and not include_deprecated):
                 continue
-            dist = info.get("dist", {})
+            dist = table(info.get("dist", {}), "npm distribution")
             integrity = dist.get("integrity")
             # Older npm releases expose the registry's SHA-1 tarball checksum.
-            if not integrity and re.fullmatch(r"[a-f0-9]{40}", dist.get("shasum", "")):
+            if not integrity and re.fullmatch(
+                r"[a-f0-9]{40}", text(dist.get("shasum", ""), "npm shasum")
+            ):
                 integrity = (
-                    "sha1-" + base64.b64encode(bytes.fromhex(dist["shasum"])).decode()
+                    "sha1-"
+                    + base64.b64encode(
+                        bytes.fromhex(text(dist["shasum"], "npm shasum"))
+                    ).decode()
                 )
             artifact = Artifact(
-                artifact_url(dist.get("tarball")),
-                digest(integrity, npm=True),
-                timestamp(body.get("time", {}).get(value)),
+                artifact_url(text(dist.get("tarball"), "npm tarball")),
+                digest(text(integrity, "npm artifact digest"), npm=True),
+                timestamp(dates.get(value)),
             )
             result.append(
                 Release(
@@ -945,32 +1044,49 @@ def releases(
             )
         return result
     if provider == "crates":
-        body = data(f"https://crates.io/api/v1/crates/{quote(package, safe='')}")
+        body = table(
+            data(f"https://crates.io/api/v1/crates/{quote(package, safe='')}"),
+            "Crate package",
+        )
         result = []
-        for value in body["versions"]:
-            if value["yanked"] or version(provider, value["num"]) is None:
+        for raw in array(body["versions"], "Crate versions"):
+            crate = table(raw, "Crate version")
+            number = text(crate["num"], "Crate version number")
+            if crate["yanked"] or version(provider, number) is None:
                 continue
             artifact = Artifact(
-                f"https://crates.io/api/v1/crates/{quote(package, safe='')}/{value['num']}/download",
-                digest("sha256:" + value.get("checksum", "")),
-                timestamp(value.get("created_at")),
+                f"https://crates.io/api/v1/crates/{quote(package, safe='')}/{number}/download",
+                digest("sha256:" + text(crate.get("checksum", ""), "Crate checksum")),
+                timestamp(crate.get("created_at")),
             )
-            result.append(
-                Release(value["num"], artifact.published, artifacts=(artifact,))
-            )
+            result.append(Release(number, artifact.published, artifacts=(artifact,)))
         return result
     if provider == "pypi":
         import platform
 
-        body = data(f"https://pypi.org/pypi/{quote(package, safe='')}/json")
+        body = table(
+            data(f"https://pypi.org/pypi/{quote(package, safe='')}/json"),
+            "PyPI package",
+        )
         result = []
-        for name, artifacts in body["releases"].items():
-            available = [a for a in artifacts if not a.get("yanked")]
+        for name, artifacts in table(body["releases"], "PyPI releases").items():
+            records = [
+                table(a, "PyPI artifact") for a in array(artifacts, "PyPI artifacts")
+            ]
+            available = [a for a in records if not a.get("yanked")]
             if version(provider, name) is not None and available:
                 actual = tuple(
                     Artifact(
-                        artifact_url(a.get("url")),
-                        digest("sha256:" + a.get("digests", {}).get("sha256", "")),
+                        artifact_url(text(a.get("url"), "PyPI artifact URL")),
+                        digest(
+                            "sha256:"
+                            + text(
+                                table(a.get("digests", {}), "PyPI digests").get(
+                                    "sha256", ""
+                                ),
+                                "PyPI SHA-256",
+                            )
+                        ),
                         timestamp(a.get("upload_time_iso_8601")),
                     )
                     for a in available
@@ -980,7 +1096,9 @@ def releases(
                 supported = any(
                     not a.get("requires_python")
                     or PythonVersion(platform.python_version())
-                    in SpecifierSet(a["requires_python"])
+                    in SpecifierSet(
+                        text(a["requires_python"], "PyPI Python constraint")
+                    )
                     for a in available
                 )
                 result.append(
@@ -993,19 +1111,25 @@ def releases(
                 )
         return result
     if provider == "pub":
-        body = data(f"https://pub.dev/api/packages/{quote(package, safe='')}")
+        body = table(
+            data(f"https://pub.dev/api/packages/{quote(package, safe='')}"),
+            "Pub package",
+        )
         result = []
-        for value in body["versions"]:
-            if value.get("retracted") or version(provider, value["version"]) is None:
+        for raw in array(body["versions"], "Pub versions"):
+            pub = table(raw, "Pub version")
+            number = text(pub["version"], "Pub version number")
+            if pub.get("retracted") or version(provider, number) is None:
                 continue
             artifact = Artifact(
-                artifact_url(value.get("archive_url")),
-                digest("sha256:" + value.get("archive_sha256", "")),
-                timestamp(value.get("published")),
+                artifact_url(text(pub.get("archive_url"), "Pub archive URL")),
+                digest(
+                    "sha256:"
+                    + text(pub.get("archive_sha256", ""), "Pub archive SHA-256")
+                ),
+                timestamp(pub.get("published")),
             )
-            result.append(
-                Release(value["version"], artifact.published, artifacts=(artifact,))
-            )
+            result.append(Release(number, artifact.published, artifacts=(artifact,)))
         return result
     if provider == "github":
         return github_releases(package)

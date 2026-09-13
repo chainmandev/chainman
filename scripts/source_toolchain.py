@@ -336,7 +336,7 @@ def eligible_tool(
     # expired exceptions remain operative even when no newer release is selected.
     mature = registry.maturity(provider, releases, policy, package, now)
     exceptions = registry.active_exceptions(provider, releases, policy, package, now)
-    rank = registry.version(provider, chosen.version)
+    rank = registry.stable_version(provider, chosen.version)
     safe = registry.minimum_safe(provider, policy, package)
     if (
         chosen.python == "unsupported"

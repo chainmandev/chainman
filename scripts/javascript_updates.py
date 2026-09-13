@@ -867,16 +867,13 @@ def plan(workspace, policy, now, *, before=None):
                         Version(candidate.version) <= floor for candidate in eligible
                     )
                 ]
+        safe_floor = registry.minimum_safe("npm", policy, pin.name)
         pin.candidates = sorted(
             {
                 r.version
                 for r in eligible
                 if all(Version(r.version) in NpmSpec(bound) for bound in pin.ranges)
-                and (
-                    registry.minimum_safe("npm", policy, pin.name) is None
-                    or Version(r.version)
-                    >= registry.minimum_safe("npm", policy, pin.name)
-                )
+                and (safe_floor is None or Version(r.version) >= safe_floor)
             },
             key=Version,
             reverse=True,

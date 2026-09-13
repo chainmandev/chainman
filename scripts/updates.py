@@ -816,7 +816,10 @@ def audit_identities(
                 "A new or changed npm prerelease identity requires explicit project migration"
             )
         safe = registry.minimum_safe(provider, policy, package)
-        if safe is not None and registry.lock_version(provider, value) < safe:
+        locked_rank = registry.lock_version(provider, value)
+        if safe is not None:
+            assert locked_rank is not None  # The identity carries a parsed version.
+        if safe is not None and locked_rank is not None and locked_rank < safe:
             raise ValueError(
                 "Locked artifact is below its declared security safe floor"
             )
@@ -909,7 +912,9 @@ def uv_resolution_options(policy: Mapping[str, object], now: datetime) -> list[s
         candidates = registry.releases("pypi", package)
         admitted = registry.active_exceptions("pypi", candidates, policy, package, now)
         if admitted:
-            chosen = max(admitted, key=lambda r: registry.version("pypi", r.version))
+            chosen = max(
+                admitted, key=lambda r: registry.stable_version("pypi", r.version)
+            )
             options.extend(
                 [
                     "--exclude-newer-package",

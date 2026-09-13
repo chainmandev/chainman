@@ -350,7 +350,7 @@ def runtime_candidate(
         "chainmandev/chainman",
         now,
     )
-    if registry.version("github", selected.version) <= registry.version(
+    if registry.stable_version("github", selected.version) <= registry.stable_version(
         "github", ad.text(old["version"], "Runtime version")
     ):
         return chainman.RUNTIME

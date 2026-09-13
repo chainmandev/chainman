@@ -627,7 +627,7 @@ def query(root: Path, request: Table, *, now: datetime | None = None) -> Table:
         if (
             isinstance(current, str)
             and rank is not None
-            and registry.version(provider, chosen.version) <= rank
+            and registry.stable_version(provider, chosen.version) <= rank
         ):
             for source, bound in (
                 ("request", restriction),

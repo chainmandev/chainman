@@ -28,7 +28,7 @@ annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 46 source
-files, including 42 with the strict flags. Recipe bindings and verification task
+files, including 43 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -104,9 +104,13 @@ configuration, including the same defaults and bounds.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The
-shared registry implementation is also checked: constraint containers are
+shared registry implementation enforces strict flags: constraint containers are
 validated before use, and matching age exceptions become named immutable records
 before version ranking. Its callable cache exposes typed cache operations.
+Version parsing exposes optional results; ranking requires a parsed stable value.
+Comparisons still use the pinned version libraries, with overloads identifying
+the concrete version type for known providers. Registry JSON enters as unknown
+data and is projected into the package and artifact fields consumed by selection.
 pnpm importer edges, package records and snapshot edges are validated before
 baseline identity collection, graph auditing and native lock normalization. Graph
 traversal consumes these typed records; raw workspace documents, adapter

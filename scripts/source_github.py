@@ -87,7 +87,7 @@ def select(
     values = releases(repository, tag_pattern) if values is None else values
     eligible = sorted(
         registry.eligible("github", values, policy, repository, now),
-        key=lambda release: registry.version("github", release.version),
+        key=lambda release: registry.stable_version("github", release.version),
         reverse=True,
     )
     for candidate in eligible:

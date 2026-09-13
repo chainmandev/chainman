@@ -351,7 +351,9 @@ def resolve(
                 )
                 continue
             chosen = select(root, spec, package, current, policy, now)
-            if registry.version("go", chosen.version) > registry.version("go", current):
+            if registry.stable_version("go", chosen.version) > registry.stable_version(
+                "go", current
+            ):
                 arguments.append(package + "@" + chosen.version)
             selections.append(
                 {
