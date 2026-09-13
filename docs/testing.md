@@ -179,6 +179,9 @@ millisecond. Chainman retains uv's conservative behavior. See the
 [pinned uv comparison](https://github.com/astral-sh/uv/blob/0.12.5/crates/uv-resolver/src/version_map.rs#L524-L528).
 
 The public bootstrap suite includes real host-Nix update/recovery lifecycles.
+Bounded bootstrap calls retain captured stdout and stderr in timeout diagnostics,
+including output from cold container startup. A timeout remains a failed check;
+diagnostic reporting does not extend its deadline or retry the operation.
 Combined and runtime-only updates use two independently packaged runtime
 generations. They assert that project resolution and verification run under the
 new runtime while the original checkout retains its old pin until application.

@@ -18,6 +18,28 @@ SOURCE = Path(__file__).resolve().parents[1]
 NIX = shutil.which("nix")
 
 
+def run_captured(command, *, env, cwd=None, timeout=180):
+    """Keep native startup output visible when a bounded qualification times out."""
+    try:
+        return subprocess.run(
+            command,
+            check=False,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        # TimeoutExpired can retain bytes even with text=True.
+        for name, output in (("stdout", error.stdout), ("stderr", error.stderr)):
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            if output:
+                error.add_note(f"Captured {name} before timeout:\n{output}")
+        raise
+
+
 @unittest.skipUnless(NIX, "real Nix is required; no host-language bootstrap fallback")
 class BootstrapTests(unittest.TestCase):
     @classmethod
@@ -144,14 +166,10 @@ class BootstrapTests(unittest.TestCase):
         (self.root / "chainman.lock").write_text(json.dumps(self.lock))
 
     def run_bootstrap(self, *args, check=True, env=None):
-        result = subprocess.run(
+        result = run_captured(
             [str(self.launcher), *args],
-            check=False,
             cwd="/",
             env=env or self.env,
-            capture_output=True,
-            text=True,
-            timeout=180,
         )
         if check and result.returncode:
             self.fail(result.stdout + result.stderr)
@@ -198,12 +216,9 @@ class BootstrapTests(unittest.TestCase):
                 CHAINMAN_MODE="container-nix",
                 CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
             )
-        result = subprocess.run(
+        result = run_captured(
             [str(authority / "chainman.sh"), "config", "show", "--json"],
             env=env,
-            text=True,
-            capture_output=True,
-            timeout=180,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         cfg = json.loads(result.stdout)["configuration"]
@@ -217,12 +232,9 @@ for path in (pathlib.Path(os.environ['CHAINMAN_ENTRY_AUTHORITY']) / 'chainman.lo
     else: raise AssertionError(str(path) + ' was writable')
 print('entry and Git authority are read-only')
 """
-            checked = subprocess.run(
+            checked = run_captured(
                 [str(authority / "chainman.sh"), "exec", "--", "python3", "-c", probe],
                 env=env,
-                text=True,
-                capture_output=True,
-                timeout=180,
             )
             self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
             self.assertIn("entry and Git authority are read-only", checked.stdout)
