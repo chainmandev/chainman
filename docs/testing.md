@@ -15,124 +15,47 @@ just exec python3 -B -m unittest discover -s tests -p test_adapter_data.py -v
 just exec python3 -B -m unittest discover -s tests -p test_application_recovery.py -v
 ```
 
-The configuration compiler, resource policy, transaction checkpoint codec,
-dependency identity, native input projections, timing and distribution/development
-entrypoints enforce the pinned mypy
-strict flags, plus rejection of explicit `Any` and unreachable code. Decoded values
-enter as `object` and are narrowed by validation. Resource execution uses an
-immutable policy with typed fields. The transaction coordinator, native lock
-adapter, source workflow, finite-command adapter and SDK coordination also enforce
-strict flags. Native adapter configuration values are projected into typed paths,
-profiles, pin arrays and policy maps. The npm adapter enforces strict flags and uses typed local dependency sections
-and peer metadata. The JavaScript workspace planner also enforces strict flags,
-including solver states and peer conflict witnesses, serialized snapshots,
-configuration projections and mutable document boundaries. Its catalog rendering
-regression verifies the selected version is written while comments and unknown
-nested metadata survive. The gate checks 48 source files, all with strict flags;
-the native ecosystem update module remains outside that gate. Recipe bindings and verification task
-lists are validated into typed collections before facade generation. Environment
-expansion and service addresses consume typed string collections. Distribution inventories and consumed
-release metadata are validated before use; produced release metadata has a typed
-wire schema. Timing context managers have explicit lifetime and environment types.
-Operation leases and compiler lifetime context managers also expose concrete
-descriptor, stream and yielded-environment types. Managed subprocess options have
-explicit allowed keys and value types, with separate text and binary results.
-Manifest discovery enforces strict flags and produces typed dependency pins and
-Pub workspace records. Shared lookup/editing accepts unknown parsed values and
-narrows mutable mappings and sequences without replacing serializer objects. General
-configuration maps carry unknown values until each consumer projects its fields.
-The shared configuration loader, module runner and cache lifecycle enforce strict
-flags. Cache limits and pruning controls use an immutable policy record; a scalar
-`preserve_environment` is rejected as configuration instead of being interpreted
-as individual characters. Module commands, inputs, artifacts and SDK lists are
-projected before use.
-Bootstrap command projections, public configuration inspection and the consumer
-qualification checker also enforce strict flags. Service declarations expose
-validated named maps; service execution and export narrow their nested records
-before constructing commands. Service planning and lifecycle entrypoints enforce
-strict flags; their exported commands, volumes, readiness checks, watched builds,
-services and plans have named JSON records matching the controller inputs. The
-Python executor distinguishes text and binary subprocess results and shares its
-stream and descriptor options with the lower-level managed subprocess wrapper.
-The consumer entrypoint also enforces strict flags for configuration/profile
-selection, hooks, public dispatch and their return values. Profile maps and
-command argument arrays are projected before execution.
-Module adapter assembly, nonstandard GitHub tag selection and declared artifact
-snapshots also enforce strict flags. Selected tags and artifact identities have
-named records; manifest pointers are copied into snapshot records so callers
-cannot mutate their source configuration through a returned snapshot.
-SDK source pin editing also has strict types for its declaration, selected record
-and serializer callback. A write requires an actual source declaration and retains
-the existing concurrent-edit checks and original file mode.
-SDK synchronization uses named declaration, observation, snapshot and resolution
-records. It validates the saved pin, tool and source inventories before source
-updates begin, including matching array lengths and required source observations.
-The incomplete-baseline regression uses two SDK sources and requires rejection
-before the first write, preserving both source and output manifests.
-Dependency reporting also enforces strict flags and emits typed coverage rows.
-Coverage includes both SDK source declarations and synchronized output pins; its
-regression uses a disposable Git repository and verifies reporting changes no
-files and runs no SDK probe. Workspace discovery checks inferred and explicit
-manifest lists, including exclusions.
-The runtime resolver regression also covers a project whose adapters all require
-explicit selection. Its targeted policy reaches snapshot, resolution and final
-validation; the preliminary plan check must use that same selection.
-Runtime update preparation also enforces strict flags, with named pin and asset
-records and explicit before/after file bytes and modes. Release JSON enters as
-unknown data, including when a saved update rechecks its release metadata.
-Dependency planning and public queries also enforce strict flags. Adapter dispatch
-exposes typed snapshot, resolution and final validation operations; SDK resolution
-can consume the saved baseline. Ordered update tests require every baseline before
-the first mutation and every final validation after generators, including targeted
-updates and failure paths. Policy composition shares the configuration merger.
-The shared update engine enforces strict flags for Git tree entries, source
-snapshots, submodule records, transaction/preview results and verification
-callbacks. Lock inventories and Python resolver settings are projected into
-their consumed types while manifest edits retain the original serializer.
-Retained JavaScript source declarations and lock handling also enforce strict
-flags. They expose named source records, project registry/package metadata before
-use, and edit the original serializer through manifest pointers. The retained
-source resolver test checks that comments and unknown nested metadata survive
-the edit before the frozen native check is invoked.
-The Go source adapter enforces strict flags using the existing native Go
-requirement/replacement/workspace records. Snapshots retain the complete native
-documents for change detection; execution, candidate selection and checksum
-inventories carry concrete types.
-The shared source-update coordinator enforces strict flags for Actions, OCI and
-Nix selection and reconciliation. Action occurrences/selections, OCI inventory
-entries and Nix snapshots have named records. Source JSON and Nix follows paths
-are projected before use; OCI selections preserve extra caller metadata, and
-Nix resolution retains declared flake order.
-Artifact transport callbacks and origin observations also enforce strict flags.
-The urllib constructor/callback options and consumed private standard-library
-attributes are declared explicitly; returned observations have a named wire record.
-The report adapter declares its lane/result records, parser projections and
-execution callback; its unit fixtures replace external tools.
-Task execution and setup readiness enforce the same strict flags. Their setup
-status rows, environment projections, command arrays and yielded lease descriptors
-have concrete types. Service planning shares the task duration validation used by
-configuration, including the same defaults and bounds.
-JavaScript workspace collections and evidence-cache boundaries now have explicit
-types; peer optionality is projected into boolean records when a candidate is
-visited. Unused older peer metadata cannot invalidate a valid selection. The
-shared registry implementation enforces strict flags: constraint containers are
-validated before use, and matching age exceptions become named immutable records
-before version ranking. Its callable cache exposes typed cache operations.
-Version parsing exposes optional results; ranking requires a parsed stable value.
-Comparisons still use the pinned version libraries, with overloads identifying
-the concrete version type for known providers. Registry JSON enters as unknown
-data and is projected into the package and artifact fields consumed by selection.
-pnpm importer edges, package records and snapshot edges are validated before
-baseline identity collection, graph auditing and native lock normalization. Graph
-traversal consumes these typed records; raw workspace documents, adapter
-configuration and solver policy remain dynamic. Inclusion in the gate does not
-imply complete strict typing.
-Adapter implementations outside that explicit list are not counted as checked.
-The unannotated third-party `semantic_version` package uses a local stub for the
-complete-version and npm-range API Chainman consumes. The stub is checked in the
-source archive and formatted with Python sources; it adds no consumer runtime
-code. There is no missing-import suppression for that dependency.
-This is incremental coverage, not a claim that all Python is strictly typed.
+All 49 production Python modules enforce `mypy --strict`, plus rejection of
+explicit `Any` and unreachable code, on both Linux and Darwin. `mypy.ini` checks
+the entire `scripts` directory, so new modules enter the gate automatically.
+There are no per-module exemptions or silent import traversal. CI exercises the
+primary development tools and the older pinned Intel macOS environment.
+An isolated source-copy probe adds a fiftieth module: an annotated control passes,
+while a missing annotation and a wrong return type each fail the ordinary gate.
+
+Decoded configuration, registry payloads and saved update records enter as
+`object`. Each consuming boundary projects the fields it uses into strings,
+collections or named records. Unknown manifest and lockfile fields remain in the
+original documents. Mutable JSON/YAML/TOML edits preserve the serializer objects;
+regressions check both the intended written selection and retention of comments
+and unknown nested metadata. The local `semantic_version` stub describes the
+complete-version and npm-range API Chainman consumes, is included in source
+archives, and adds no consumer runtime code. There is no missing-import
+suppression for that dependency.
+
+Subprocess wrappers distinguish text and binary results and declare their allowed
+options, streams and inherited descriptors. Environment, service address and task
+commands use typed collections. Resource and cache policy use immutable records;
+service exports have named JSON records matching the controller's inputs.
+Configuration maps retain unknown values until the relevant component reads them.
+
+Dependency adapters share typed snapshot, resolution and final validation
+interfaces. SDK records include declarations, observations and selected source
+versions. Actions selections, OCI inventory, Nix snapshots, artifact observations
+and JavaScript snapshots have named records. Version ranking uses the pinned
+version libraries, with parsed non-optional stable versions at ranking sites.
+The JavaScript solver has typed states and peer conflict witnesses. Native
+resolvers declare Cargo node/edge identities, repair choices, Pub search states,
+file bytes/modes, restoration checkpoints and serializer callbacks. Complete raw
+native documents remain available for change detection.
+
+Useful boundary regressions include rejecting an incomplete two-source SDK
+baseline before either write; reporting both SDK source and output pins; retaining
+explicit-only runtime selection; snapshotting all adapters before mutation; and
+performing final validation after generators. Temporary native constraints must
+restore owned public bytes and modes while preserving concurrent changes for
+inspection. Command failures retain their original exit status and diagnostics.
+The report adapter's unit fixtures replace its external tools.
 
 Hypothesis is pinned through the development Python shell. It is absent from
 the consumer bootstrap and update Python environments. Its tests run in ordinary
@@ -447,10 +370,9 @@ snapshot, package and resolved target values.
 Go records have immutable fields and tuple collections; Swift graph children are
 decoded one level at a time during iterative traversal, not deeply frozen.
 
-Remaining typing work is concentrated in adapter configuration, solver policy,
-registry HTTP payloads and adapter implementations outside the gate. Splitting
-large modules for size alone is a lower priority than replacing dynamic decision
-inputs.
+Future data-model changes should retain the global strict gate and validate new
+external fields where they are consumed. Split modules when that creates a useful
+boundary with independent contracts, rather than to meet a line-count target.
 
 Add differential tests against native resolvers when changing their adapters.
 Extend the native fixtures when changing supported resolver behavior. Application

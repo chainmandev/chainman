@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from datetime import datetime
@@ -23,9 +30,21 @@ import chainman
 import lock_adapters
 import manifests
 import registry
-from dependency_identity import inventory as identity_inventory
+from dependency_identity import Identity, inventory as identity_inventory
+import adapter_data as ad
 import toolchain as tc
 import updates
+
+
+type Config = Mapping[str, object]
+type Specs = Mapping[str, ad.Table]
+type Plan = Sequence[tuple[Config, registry.Release | None]]
+type FileImage = tuple[bytes, int]
+type FileStates = dict[str, FileImage | None]
+type ResolutionGraph = dict[str, set[Identity]]
+type CargoNode = tuple[str, str, str]
+type CargoIssue = tuple[str, Identity, list[str]]
+type CargoChoices = list[tuple[str, Identity]]
 
 
 KINDS = {
@@ -45,11 +64,17 @@ def members(root: Path, directory: Path, kind: str) -> list[str]:
     result = {path}
     if kind not in {"rust", "python", "flutter"}:
         return [str(path.relative_to(root))]
-    document = manifests.document(path)[0]
+    document = ad.table(manifests.document(path)[0], "Workspace manifest")
     table = (
-        document.get("workspace", {})
+        ad.table(document.get("workspace", {}), "Cargo workspace")
         if kind == "rust"
-        else document.get("tool", {}).get("uv", {}).get("workspace", {})
+        else ad.table(
+            ad.table(
+                ad.table(document.get("tool", {}), "Python tools").get("uv", {}),
+                "uv settings",
+            ).get("workspace", {}),
+            "uv workspace",
+        )
         if kind == "python"
         else {}
     )
@@ -59,7 +84,7 @@ def members(root: Path, directory: Path, kind: str) -> list[str]:
     excluded = table.get("exclude", [])
     if not isinstance(patterns, list) or not isinstance(excluded, list):
         raise ValueError("Workspace members and exclusions must be declared path lists")
-    removed = set()
+    removed: set[Path] = set()
     for collection, destination in ((patterns, result), (excluded, removed)):
         for pattern in collection:
             tc.contained(directory, pattern)
@@ -72,8 +97,8 @@ def members(root: Path, directory: Path, kind: str) -> list[str]:
     return [str(path.relative_to(root)) for path in sorted(result - removed)]
 
 
-def specifications(root: Path, spec: dict) -> dict:
-    kind = spec["adapter"]
+def specifications(root: Path, spec: Config) -> dict[str, ad.Table]:
+    kind = ad.text(spec["adapter"], "Adapter kind")
     ecosystem, _ = KINDS[kind]
     directories = spec.get("directories", [spec.get("directory", ".")])
     if (
@@ -84,6 +109,7 @@ def specifications(root: Path, spec: dict) -> dict:
         raise ValueError(
             "Native dependency adapters require distinct workspace directories"
         )
+    directories = ad.strings(directories, "Native workspace directories")
     result = {}
     pub_directories = set()
     for index, relative in enumerate(directories):
@@ -103,6 +129,7 @@ def specifications(root: Path, spec: dict) -> dict:
         )
         if not isinstance(inputs, list):
             raise ValueError("Native manifest inputs must be a path list")
+        inputs = ad.strings(inputs, "Native manifest inputs")
         for path in inputs:
             tc.contained(root, path)
         name = f"{kind}-{index}"
@@ -117,14 +144,18 @@ def specifications(root: Path, spec: dict) -> dict:
     return result
 
 
-def snapshot(root: Path, spec: dict) -> dict:
+def snapshot(root: Path, spec: Config) -> ad.Table:
     specs = specifications(root, spec)
     bootstrap = spec.get("bootstrap_verification", False)
-    if type(bootstrap) is not bool or (bootstrap and spec["adapter"] != "gradle"):
+    if type(bootstrap) is not bool or (
+        bootstrap and ad.text(spec["adapter"], "Adapter kind") != "gradle"
+    ):
         raise ValueError("bootstrap_verification is a Gradle-only boolean")
     adopted = {}
     for name, member in specs.items():
-        directory = tc.contained(root, member["directory"])
+        directory = tc.contained(
+            root, ad.text(member["directory"], "Workspace directory")
+        )
         if bootstrap:
             locks = lock_adapters.paths(root, directory, "*.lockfile")
             metadata = tc.contained(
@@ -141,8 +172,8 @@ def snapshot(root: Path, spec: dict) -> dict:
     identities = updates.lock_identities(root, list(adopted), specs=adopted)
     requirements = [
         {
-            "provider": pin["provider"],
-            "name": pin["name"],
+            "provider": ad.text(pin["provider"], "Pin provider"),
+            "name": ad.text(pin["name"], "Pin name"),
             "range": pin.get("bound", old_requirement(root, pin)),
         }
         for pin in pins(root, spec, specs)
@@ -153,16 +184,17 @@ def snapshot(root: Path, spec: dict) -> dict:
     }
 
 
-def swift_pins(root: Path, specs: dict) -> list[dict]:
-    result = []
+def swift_pins(root: Path, specs: Specs) -> list[ad.Table]:
+    result: list[ad.Table] = []
     for spec in specs.values():
-        for name in spec["inputs"]:
+        for name in ad.strings(spec["inputs"], "Workspace inputs"):
             if not name.endswith("Package.swift"):
                 continue
             body = tc.regular_input(root, name).decode()
             for item in lock_adapters.swift_declarations(root, name):
                 if item["kind"] == "local":
                     continue
+                assert item["kind"] == "remote"  # explicit mode was not requested.
                 result.append(
                     {
                         "provider": "swift",
@@ -178,28 +210,34 @@ def swift_pins(root: Path, specs: dict) -> list[dict]:
     return result
 
 
-def swift_input_state(root: Path, specs: dict) -> dict:
-    result = {}
+def swift_input_state(root: Path, specs: Specs) -> ad.Table:
+    result: ad.Table = {}
     for member in specs.values():
         result.update(lock_adapters.swift_manifest_state(root, member))
     return result
 
 
 @contextmanager
-def swift_resolution_pins(root: Path, planned: list, *, explicit: bool = False):
+def swift_resolution_pins(
+    root: Path, planned: Plan, *, explicit: bool = False
+) -> Iterator[None]:
     """Temporarily narrow owned requirements, restoring post-selection public bytes."""
     selected = {}
     for pin, chosen in planned:
-        if pin["provider"] == "swift" and chosen is not None:
-            key = (pin["file"], pin["name"])
+        if ad.text(pin["provider"], "Pin provider") == "swift" and chosen is not None:
+            key = (ad.text(pin["file"], "Pin file"), ad.text(pin["name"], "Pin name"))
             if key in selected:
                 raise ValueError("Ambiguous selected Swift dependency")
             selected[key] = chosen.version
-    before, images = {}, {}
+    before: dict[str, FileImage] = {}
+    images: dict[str, FileImage] = {}
     for name, _ in selected:
         if name in before:
             continue
-        before[name] = cargo_file_state(root, name)
+        state = cargo_file_state(root, name)
+        if state is None:
+            raise ValueError("Missing Swift input manifest")
+        before[name] = state
         body = before[name][0].decode()
         edits, found = [], set()
         for item in lock_adapters.swift_declarations(root, name, explicit=explicit):
@@ -219,7 +257,8 @@ def swift_resolution_pins(root: Path, planned: list, *, explicit: bool = False):
         for start, end, value in sorted(edits, reverse=True):
             body = body[:start] + value + body[end:]
         images[name] = (body.encode(), before[name][1])
-    written, original = {}, None
+    written: dict[str, FileImage] = {}
+    original: BaseException | None = None
     try:
         for name, image in images.items():
             if cargo_file_state(root, name) != before[name]:
@@ -253,14 +292,18 @@ def swift_resolution_pins(root: Path, planned: list, *, explicit: bool = False):
             original.add_note(message)
 
 
-def gradle_pins(root: Path, spec: dict) -> list[dict]:
-    result = []
+def gradle_pins(root: Path, spec: Config) -> list[ad.Table]:
+    result: list[ad.Table] = []
     local = lock_adapters.local_gradle_projects(root, spec)
-    for name in spec.get("catalogs", []):
-        document = manifests.document(tc.contained(root, name))[0]
-        grouped = {}
+    for name in ad.strings(spec.get("catalogs", []), "Gradle catalogs"):
+        document = ad.table(
+            manifests.document(tc.contained(root, name))[0], "Gradle catalog"
+        )
+        grouped: dict[tuple[str, ...], list[str]] = {}
         for section in ("libraries", "plugins"):
-            for alias, item in document.get(section, {}).items():
+            for alias, item in ad.table(
+                document.get(section, {}), "Gradle catalog entries"
+            ).items():
                 if not isinstance(item, Mapping):
                     raise ValueError(
                         "Gradle catalogs require structured library/plugin entries"
@@ -278,9 +321,13 @@ def gradle_pins(root: Path, spec: dict) -> list[dict]:
                     )
                 if package in local:
                     continue
+                package = ad.text(package, "Gradle package coordinate")
                 value = item.get("version")
                 if isinstance(value, Mapping) and set(value) == {"ref"}:
-                    pointer = ["versions", value["ref"]]
+                    pointer = [
+                        "versions",
+                        ad.text(value["ref"], "Gradle version reference"),
+                    ]
                 elif isinstance(value, str):
                     pointer = [section, alias, "version"]
                 elif value is None:
@@ -291,30 +338,36 @@ def gradle_pins(root: Path, spec: dict) -> list[dict]:
                     )
                 key = tuple(pointer)
                 grouped.setdefault(key, []).append(package)
-        for pointer, packages in grouped.items():
+        for grouped_pointer, packages in grouped.items():
             result.append(
                 {
                     "provider": "maven",
                     "name": packages[0],
                     "coordinated": sorted(set(packages)),
                     "file": name,
-                    "pointer": list(pointer),
+                    "pointer": list(grouped_pointer),
                 }
             )
     return result
 
 
-def pins(root: Path, spec: dict, specs: dict) -> list[dict]:
-    kind = spec["adapter"]
-    result = manifests.discover(root, list(specs), specs=specs)
+def pins(root: Path, spec: Config, specs: Specs) -> list[ad.Table]:
+    kind = ad.text(spec["adapter"], "Adapter kind")
+    result = [dict(pin) for pin in manifests.discover(root, list(specs), specs=specs)]
     if kind == "swift" and not spec.get("pins"):
         result.extend(swift_pins(root, specs))
     if kind == "gradle":
         result.extend(gradle_pins(root, spec))
-    result.extend(deepcopy(spec.get("pins", [])))
+    result.extend(
+        ad.table(pin, "Explicit dependency pin")
+        for pin in deepcopy(ad.array(spec.get("pins", []), "Explicit dependency pins"))
+    )
     seen = set()
     for pin in result:
-        key = (pin["file"], json.dumps(pin.get("pointer", pin.get("pattern"))))
+        key = (
+            ad.text(pin["file"], "Pin file"),
+            json.dumps(pin.get("pointer", pin.get("pattern"))),
+        )
         if key in seen:
             raise ValueError(
                 "Dependency target has multiple authoritative declarations"
@@ -323,20 +376,24 @@ def pins(root: Path, spec: dict, specs: dict) -> list[dict]:
     return result
 
 
-def old_requirement(root: Path, pin: dict) -> str:
+def old_requirement(root: Path, pin: Config) -> str:
     if pin.get("format") == "regex":
         matches = list(
             re.finditer(
-                pin["pattern"],
-                tc.regular_input(root, pin["file"]).decode(),
+                ad.text(pin["pattern"], "Pin pattern"),
+                tc.regular_input(root, ad.text(pin["file"], "Pin file")).decode(),
                 re.MULTILINE,
             )
         )
         if len(matches) != 1:
             raise ValueError("Explicit dependency pin must match exactly once")
         return matches[0].group("value")
-    value = manifests.lookup(
-        manifests.document(tc.contained(root, pin["file"]))[0], pin["pointer"]
+    value = ad.text(
+        manifests.lookup(
+            manifests.document(tc.contained(root, ad.text(pin["file"], "Pin file")))[0],
+            manifests.pin_pointer(pin["pointer"]),
+        ),
+        "Dependency requirement",
     )
     if pin.get("representation") == "requirement":
         return str(Requirement(value).specifier)
@@ -353,10 +410,15 @@ def accepts(provider: str, version: str, requirement: str) -> bool:
     return registry.compatible(provider, version, requirement)
 
 
-def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
-    provider, package = pin["provider"], pin["name"]
+def choose(
+    root: Path, pin: Config, spec: Config, policy: Config, now: datetime
+) -> registry.Release | None:
+    provider, package = (
+        ad.text(pin["provider"], "Pin provider"),
+        ad.text(pin["name"], "Pin name"),
+    )
     requirement = old_requirement(root, pin)
-    coordinates = pin.get("coordinated", [package])
+    coordinates = ad.strings(pin.get("coordinated", [package]), "Coordinated packages")
     inventories = []
     for coordinate in coordinates:
         candidates = (
@@ -370,7 +432,11 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
             candidates = [
                 item
                 for item in candidates
-                if accepts(provider, item.version, pin.get("bound", requirement))
+                if accepts(
+                    provider,
+                    item.version,
+                    ad.text(pin.get("bound", requirement), "Dependency bound"),
+                )
             ]
         candidates = [
             item
@@ -429,7 +495,9 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
         raise ValueError(
             f"No eligible version satisfies the declared policy for {provider}:{package}"
         )
-    chosen = max(candidates, key=lambda item: registry.version(provider, item.version))
+    chosen = max(
+        candidates, key=lambda item: registry.stable_version(provider, item.version)
+    )
     if pin.get("pub_override"):
         return chosen  # An override is a constraint, not an installed-version template.
     lower = re.search(
@@ -446,7 +514,9 @@ def choose(root: Path, pin: dict, spec: dict, policy: dict, now: datetime):
     return chosen
 
 
-def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dict:
+def gradle_graph(
+    root: Path, spec: Config, directory: Path, *, write: bool
+) -> lock_adapters.GradleProjects:
     """Ask Gradle for actual local identities; final inspection never rewrites locks."""
     executable = "./gradlew" if (directory / "gradlew").is_file() else "gradle"
     command = [
@@ -472,7 +542,11 @@ def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dic
             "CHAINMAN_GRADLE_REPORT_DIR": reports,
         }
         chainman.execute(
-            root, spec.get("profile", "gradle"), command, cwd=directory, env=env
+            root,
+            ad.text(spec.get("profile", "gradle"), "Adapter profile"),
+            command,
+            cwd=directory,
+            env=env,
         )
         values = [
             json.loads(path.read_text())
@@ -481,8 +555,8 @@ def gradle_graph(root: Path, spec: dict, directory: Path, *, write: bool) -> dic
         return lock_adapters.validate_gradle_projects(root, spec, values)
 
 
-def pub_input_state(root: Path, names) -> dict:
-    result = {}
+def pub_input_state(root: Path, names: Iterable[str]) -> ad.Table:
+    result: ad.Table = {}
     for name in sorted(names):
         path = tc.contained(root, name)
         result[name] = (
@@ -496,7 +570,7 @@ def pub_input_state(root: Path, names) -> dict:
     return result
 
 
-def pub_lock_packages(root: Path, directory: Path) -> Mapping:
+def pub_lock_packages(root: Path, directory: Path) -> ad.Table:
     path = directory / "pubspec.lock"
     if not path.exists():
         raise ValueError("Missing resolved dependency lock: pubspec.lock")
@@ -505,14 +579,19 @@ def pub_lock_packages(root: Path, directory: Path) -> Mapping:
     )[0]
     if not isinstance(value, Mapping) or not isinstance(value.get("packages"), Mapping):
         raise ValueError("Malformed Pub lock package mapping")
-    return value["packages"]
+    return ad.table(value["packages"], "Pub lock packages")
 
 
-def pub_validate_sources(root: Path, specs: dict) -> None:
+def pub_validate_sources(root: Path, specs: Specs) -> None:
     for member in specs.values():
-        directory = tc.contained(root, member["directory"])
+        directory = tc.contained(
+            root, ad.text(member["directory"], "Workspace directory")
+        )
         packages = pub_lock_packages(root, directory)
-        for package, source in member["pub"]["sources"].items():
+        for package, raw_source in ad.table(
+            ad.table(member["pub"], "Pub workspace")["sources"], "Pub sources"
+        ).items():
+            source = ad.table(raw_source, "Pub source")
             item = packages.get(package)
             if item is None and source["kind"] == "workspace":
                 continue  # Pub omits actual workspace members from the shared lock.
@@ -530,20 +609,30 @@ def pub_validate_sources(root: Path, specs: dict) -> None:
                 valid = item.get("source") == "path" and isinstance(
                     description, Mapping
                 )
-                if valid:
-                    actual = tc.local_source(root, directory, description.get("path"))
-                    valid = actual == tc.contained(root, source["path"])
+                if valid and isinstance(description, Mapping):
+                    actual = tc.local_source(
+                        root,
+                        directory,
+                        ad.text(description.get("path"), "Pub path description"),
+                    )
+                    valid = actual == tc.contained(
+                        root, ad.text(source["path"], "Pub source path")
+                    )
             if not valid:
                 raise ValueError(
                     f"Pub resolved source disagrees with its effective declaration: {package}"
                 )
 
 
-def pub_validate_overrides(root: Path, specs: dict, selected: dict) -> None:
+def pub_validate_overrides(
+    root: Path, specs: Specs, selected: Mapping[str, Mapping[str, str]]
+) -> None:
     for group, versions in selected.items():
         if group not in specs:
             raise ValueError("Selected Pub override resolution group is missing")
-        directory = tc.contained(root, specs[group]["directory"])
+        directory = tc.contained(
+            root, ad.text(specs[group]["directory"], "Pub directory")
+        )
         packages = pub_lock_packages(root, directory)
         for package, version in versions.items():
             item = packages.get(package)
@@ -568,35 +657,47 @@ def pub_validate_overrides(root: Path, specs: dict, selected: dict) -> None:
 
 
 @contextmanager
-def pub_resolution_pins(root: Path, planned: list, extra: dict | None = None):
+def pub_resolution_pins(
+    root: Path, planned: Plan, extra: Mapping[tuple[str, str], str] | None = None
+) -> Iterator[None]:
     """Keep public ranges while binding native resolution to the chosen releases."""
-    documents = {}
+    documents: dict[
+        str, tuple[bytes, int, MutableMapping[str, object], Callable[[], str]]
+    ] = {}
 
-    def document(name):
+    def document(name: str) -> MutableMapping[str, object]:
         if name not in documents:
             before = tc.regular_input(root, name)
             path = tc.contained(root, name)
             value, render = manifests.document(path, body=before.decode())
+            if not isinstance(value, MutableMapping):
+                raise ValueError("Pub manifest must be a mutable mapping")
             documents[name] = (before, stat.S_IMODE(path.stat().st_mode), value, render)
         return documents[name][2]
 
     for pin, chosen in planned:
-        if pin["provider"] != "pub" or chosen is None:
+        if ad.text(pin["provider"], "Pin provider") != "pub" or chosen is None:
             continue
         if "pointer" not in pin:
             raise ValueError("Pub resolution requires structured dependency pointers")
-        name = pin["file"]
+        name = ad.text(pin["file"], "Pin file")
         if pin.get("pub_override"):
-            original = manifests.lookup(document(name), pin["pointer"])
-            if original != pin["bound"] or not accepts("pub", chosen.version, original):
+            original = manifests.lookup(
+                document(name), manifests.pin_pointer(pin["pointer"])
+            )
+            if original != pin["bound"] or not accepts(
+                "pub", chosen.version, ad.text(original, "Pub override bound")
+            ):
                 raise ValueError(
                     "Temporary Pub pin must stay within unchanged declared overrides"
                 )
-        manifests.assign(document(name), pin["pointer"], chosen.version)
+        manifests.assign(
+            document(name), manifests.pin_pointer(pin["pointer"]), chosen.version
+        )
     for (name, package), version in (extra or {}).items():
         value = document(name)
         if any(
-            package in value.get(section, {})
+            package in ad.table(value.get(section, {}), "Pub dependencies")
             for section in ("dependencies", "dev_dependencies")
         ):
             raise ValueError(
@@ -604,7 +705,10 @@ def pub_resolution_pins(root: Path, planned: list, extra: dict | None = None):
             )
         # Ordinary constraints participate in Pub's complete native solve. An
         # override here would bypass a parent's range and is deliberately avoided.
-        value.setdefault("dev_dependencies", {})[package] = version
+        dependencies = value.setdefault("dev_dependencies", {})
+        if not isinstance(dependencies, MutableMapping):
+            raise ValueError("Pub development dependencies must be a mapping")
+        dependencies[package] = version
     written = {}
     try:
         for name, (before, mode, _, render) in documents.items():
@@ -645,13 +749,13 @@ PUB_SOLVER_STATES = 64
 
 def pub_resolve(
     root: Path,
-    spec: dict,
-    specs: dict,
-    planned: list,
-    before: dict,
-    policy: dict,
+    spec: Config,
+    specs: Specs,
+    planned: Plan,
+    before: Config,
+    policy: Config,
     now: datetime,
-) -> dict:
+) -> ad.Table:
     """Repair newly ineligible transitives with bounded, ordinary Pub constraints."""
     commands = deepcopy(spec.get("resolve", [["flutter", "pub", "get"]]))
     if (
@@ -665,6 +769,9 @@ def pub_resolve(
         )
     ):
         raise ValueError("Native resolution requires explicit argument-array commands")
+    commands = [
+        ad.strings(command, "Native resolution command") for command in commands
+    ]
     standard = all(
         isinstance(command, list)
         and len(command) >= 3
@@ -674,23 +781,28 @@ def pub_resolve(
     )
     watched = set()
     for member in specs.values():
-        watched.update(member["pub"]["guarded_inputs"])
         watched.update(
-            str(Path(member["directory"]) / name)
+            ad.strings(
+                ad.table(member["pub"], "Pub workspace")["guarded_inputs"],
+                "Pub guarded inputs",
+            )
+        )
+        watched.update(
+            str(Path(ad.text(member["directory"], "Workspace directory")) / name)
             for name in ("pubspec.yaml", "pubspec_overrides.yaml")
         )
-        for name in member["inputs"]:
+        for name in ad.strings(member["inputs"], "Workspace inputs"):
             if name.endswith("pubspec.yaml"):
                 watched.update(
                     (name, str(Path(name).with_name("pubspec_overrides.yaml")))
                 )
 
-    def manifest_state():
+    def manifest_state() -> ad.Table:
         return pub_input_state(root, watched)
 
     expected = manifest_state()
 
-    def unchanged():
+    def unchanged() -> None:
         try:
             equal = manifest_state() == expected
         except (OSError, ValueError):
@@ -700,15 +812,17 @@ def pub_resolve(
                 "Pub manifest or override changed during resolution; preserve and inspect its changes"
             )
 
-    def identities():
+    def identities() -> ResolutionGraph:
         pub_validate_sources(root, specs)
         return {
             name: updates.lock_identities(root, [name], specs=specs) for name in specs
         }
 
-    def run(*, retry=False, offline=False):
+    def run(*, retry: bool = False, offline: bool = False) -> bool:
         for member in specs.values():
-            directory = tc.contained(root, member["directory"])
+            directory = tc.contained(
+                root, ad.text(member["directory"], "Workspace directory")
+            )
             for command in commands:
                 argv = (
                     [*command, "--offline"]
@@ -718,7 +832,7 @@ def pub_resolve(
                 try:
                     result = chainman.execute(
                         root,
-                        spec.get("profile", "flutter"),
+                        ad.text(spec.get("profile", "flutter"), "Adapter profile"),
                         argv,
                         cwd=directory,
                         env={**tc.environment(root), "TOOLCHAIN_FRESH": "1"},
@@ -744,22 +858,23 @@ def pub_resolve(
     baseline = identity_inventory(before["identities"])
     selected_overrides = {
         name: {
-            pin["name"]: chosen.version
+            ad.text(pin["name"], "Pin name"): chosen.version
             for pin, chosen in planned
             if pin.get("pub_override")
             and chosen is not None
-            and pin["pub_directory"] == member["directory"]
+            and pin["pub_directory"]
+            == ad.text(member["directory"], "Workspace directory")
         }
         for name, member in specs.items()
     }
-    inventories = {}
+    inventories: dict[str, list[registry.Release]] = {}
 
-    def inventory(package):
+    def inventory(package: str) -> list[registry.Release]:
         if package not in inventories:
             inventories[package] = registry.releases("pub", package)
         return inventories[package]
 
-    def issue(graph):
+    def issue(graph: ResolutionGraph) -> tuple[tuple[str, str], list[str]] | None:
         for name, current in graph.items():
             for identity in sorted(current):
                 provider, package, version, url, digest = identity
@@ -787,9 +902,9 @@ def pub_resolve(
                 bound = registry.constraint("pub", policy, package)
                 safe = registry.minimum_safe("pub", policy, package)
 
-                def retainable(value):
+                def retainable(value: str) -> bool:
                     return registry.compatible("pub", value, bound) and (
-                        safe is None or registry.version("pub", value) >= safe
+                        safe is None or registry.stable_version("pub", value) >= safe
                     )
 
                 if (identity in baseline and retainable(version)) or version in {
@@ -813,18 +928,25 @@ def pub_resolve(
                 ]
                 values = sorted(
                     {r.version for r in [*allowed, *retained]},
-                    key=lambda value: registry.version("pub", value),
+                    key=lambda value: registry.stable_version("pub", value),
                     reverse=True,
                 )
-                manifest = str(Path(specs[name]["directory"]) / "pubspec.yaml")
+                manifest = str(
+                    Path(ad.text(specs[name]["directory"], "Workspace directory"))
+                    / "pubspec.yaml"
+                )
                 return (manifest, package), values
         return None
 
-    visited = set()
-    frontier = [iter([{}])]
+    visited: set[tuple[tuple[tuple[str, str], str], ...]] = set()
+    frontier: list[Iterator[dict[tuple[str, str], str]]] = [iter([{}])]
     last = ""
 
-    def branches(state, target, values):
+    def branches(
+        state: dict[tuple[str, str], str],
+        target: tuple[str, str],
+        values: Sequence[str],
+    ) -> Iterator[dict[tuple[str, str], str]]:
         for value in values:
             yield {**state, target: value}
 
@@ -886,7 +1008,7 @@ def pub_resolve(
 CARGO_SOLVER_STATES = 64
 
 
-def cargo_file_state(root: Path, name: str):
+def cargo_file_state(root: Path, name: str) -> FileImage | None:
     path = tc.contained(root, name)
     try:
         mode = stat.S_IMODE(path.lstat().st_mode)
@@ -895,7 +1017,12 @@ def cargo_file_state(root: Path, name: str):
     return tc.regular_input(root, name), mode
 
 
-def cargo_restore(root: Path, before: dict, expected: dict, original=None):
+def cargo_restore(
+    root: Path,
+    before: Mapping[str, FileImage | None],
+    expected: FileStates,
+    original: BaseException | None = None,
+) -> None:
     """Restore only known owned postimages; try independent paths after errors."""
     failures = []
     for name, previous in before.items():
@@ -924,40 +1051,45 @@ def cargo_restore(root: Path, before: dict, expected: dict, original=None):
 
 
 @contextmanager
-def cargo_resolution_pins(root: Path, planned: list):
+def cargo_resolution_pins(root: Path, planned: Plan) -> Iterator[None]:
     """Narrow existing direct fields, letting Cargo enforce their exact identity."""
-    documents = {}
+    documents: dict[str, tuple[FileImage, object, Callable[[], str]]] = {}
     for pin, chosen in planned:
-        if pin["provider"] != "crates" or chosen is None:
+        if ad.text(pin["provider"], "Pin provider") != "crates" or chosen is None:
             continue
         if "pointer" not in pin or pin.get("format") == "regex":
             raise ValueError(
                 "Cargo resolution requires existing structured direct pins"
             )
-        name = pin["file"]
+        name = ad.text(pin["file"], "Pin file")
         if name not in documents:
-            before = cargo_file_state(root, name)
-            if before is None:
+            image = cargo_file_state(root, name)
+            if image is None:
                 raise ValueError("Missing Cargo direct manifest")
             value, render = manifests.document(
-                tc.contained(root, name), body=before[0].decode()
+                tc.contained(root, name), body=image[0].decode()
             )
-            documents[name] = (before, value, render)
+            documents[name] = (image, value, render)
         value = documents[name][1]
-        if not isinstance(manifests.lookup(value, pin["pointer"]), str):
+        if not isinstance(
+            manifests.lookup(value, manifests.pin_pointer(pin["pointer"])), str
+        ):
             raise ValueError("Cargo direct pin does not name an existing version field")
-        manifests.assign(value, pin["pointer"], "=" + chosen.version)
+        manifests.assign(
+            value, manifests.pin_pointer(pin["pointer"]), "=" + chosen.version
+        )
     before = {name: entry[0] for name, entry in documents.items()}
-    expected = {}
-    original = None
+    expected: FileStates = {}
+    original: BaseException | None = None
     try:
         for name, (previous, _, render) in documents.items():
             if cargo_file_state(root, name) != previous:
                 raise ValueError(
                     "Cargo manifest changed before temporary direct pinning"
                 )
-            expected[name] = (render().encode(), previous[1])
-            tc.atomic_bytes(tc.contained(root, name), *expected[name])
+            image = (render().encode(), previous[1])
+            expected[name] = image
+            tc.atomic_bytes(tc.contained(root, name), *image)
         yield
     except BaseException as error:
         original = error
@@ -966,20 +1098,24 @@ def cargo_resolution_pins(root: Path, planned: list):
         cargo_restore(root, {n: before[n] for n in expected}, expected, original)
 
 
-def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
+def cargo_input_state(root: Path, specs: Specs, lock_names: set[str]) -> ad.Table:
     """Cargo input closure; Git projects additionally guard all visible sources."""
     names = set()
     pending = []
     for member in specs.values():
-        pending.append(str(Path(member["directory"]) / "Cargo.toml"))
-        for pattern in member["inputs"]:
+        pending.append(
+            str(
+                Path(ad.text(member["directory"], "Workspace directory")) / "Cargo.toml"
+            )
+        )
+        for pattern in ad.strings(member["inputs"], "Workspace inputs"):
             tc.contained(root, pattern)
             pending.extend(str(p.relative_to(root)) for p in root.glob(pattern))
     seen = set()
 
-    sources = {}
+    sources: dict[str, tuple[str, bytes, int] | tuple[str, int] | None] = {}
 
-    def add_tree(path):
+    def add_tree(path: Path) -> None:
         relative = str(path.relative_to(root))
         try:
             metadata = path.lstat()
@@ -998,7 +1134,7 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
         else:
             sources[relative] = ("special", metadata.st_mode)
 
-    def add_source(directory, relative):
+    def add_source(directory: Path, relative: object) -> None:
         if not isinstance(relative, str) or Path(relative).is_absolute():
             raise ValueError("Cargo source paths must be project-relative")
         current = directory
@@ -1026,7 +1162,9 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
         if state is None:
             raise ValueError(f"Missing Cargo input manifest: {name}")
         names.add(name)
-        document = manifests.document(path, body=state[0].decode())[0]
+        document = ad.table(
+            manifests.document(path, body=state[0].decode())[0], "Cargo manifest"
+        )
         directory = path.parent
         parent = directory
         while True:
@@ -1040,16 +1178,21 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
         if "package" in document:
             add_source(directory, "src")
             add_source(directory, "build.rs")
-            build = document["package"].get("build")
+            build = ad.table(document["package"], "Cargo package").get("build")
             if isinstance(build, str):
                 add_source(directory, build)
             for section in ("lib", "bin", "example", "test", "bench"):
                 entries = document.get(section, [])
-                for target in [entries] if isinstance(entries, Mapping) else entries:
+                for raw_target in (
+                    [entries]
+                    if isinstance(entries, Mapping)
+                    else ad.array(entries, "Cargo targets")
+                ):
+                    target = ad.table(raw_target, "Cargo target")
                     if "path" in target:
                         add_source(directory, target["path"])
 
-        def visit(table):
+        def visit(table: Config) -> None:
             for key, value in table.items():
                 if key in (
                     "dependencies",
@@ -1059,7 +1202,7 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
                     "replace",
                 ) and isinstance(value, Mapping):
 
-                    def paths(values):
+                    def paths(values: Config) -> None:
                         for entry in values.values():
                             if isinstance(entry, Mapping):
                                 if "path" in entry:
@@ -1070,14 +1213,16 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
                                         str((local / "Cargo.toml").relative_to(root))
                                     )
                                 else:
-                                    paths(entry)
+                                    paths(ad.table(entry, "Cargo dependency table"))
 
-                    paths(value)
+                    paths(ad.table(value, "Cargo dependency table"))
                 elif isinstance(value, Mapping):
-                    visit(value)
+                    visit(ad.table(value, "Cargo manifest table"))
 
         visit(document)
-    states = {name: cargo_file_state(root, name) for name in sorted(names - lock_names)}
+    states: ad.Table = {
+        name: cargo_file_state(root, name) for name in sorted(names - lock_names)
+    }
     states["cargo-sources"] = sources
     # A non-Git public deps-resolve keeps the explicit Cargo closure above. Do
     # not invent ignore rules or require Git merely to use that public API.
@@ -1091,12 +1236,12 @@ def cargo_input_state(root: Path, specs: dict, lock_names: set[str]) -> dict:
     return states
 
 
-def cargo_lock_graph(body: bytes) -> dict:
+def cargo_lock_graph(body: bytes) -> dict[CargoNode, set[CargoNode]]:
     """Resolve exact native lock edges, including version and source collisions."""
     entries = tomllib.loads(body.decode()).get("package", [])
     if not isinstance(entries, list):
         raise ValueError("Invalid Cargo lock package graph")
-    nodes = {}
+    nodes: dict[CargoNode, ad.Table] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             raise ValueError("Invalid Cargo lock package graph")
@@ -1108,13 +1253,18 @@ def cargo_lock_graph(body: bytes) -> dict:
             or key in nodes
         ):
             raise ValueError("Invalid or duplicate Cargo lock package identity")
-        nodes[key] = entry
-    edges = {}
-    for key, entry in nodes.items():
-        dependencies = entry.get("dependencies", [])
+        typed_key = (
+            ad.text(key[0], "Cargo package name"),
+            ad.text(key[1], "Cargo package version"),
+            ad.text(key[2], "Cargo package source"),
+        )
+        nodes[typed_key] = ad.table(entry, "Cargo lock package")
+    edges: dict[CargoNode, set[CargoNode]] = {}
+    for node_key, node_entry in nodes.items():
+        dependencies = node_entry.get("dependencies", [])
         if not isinstance(dependencies, list):
             raise ValueError("Invalid Cargo lock dependency graph")
-        edges[key] = set()
+        edges[node_key] = set()
         for dependency in dependencies:
             match = (
                 re.fullmatch(
@@ -1142,13 +1292,15 @@ def cargo_lock_graph(body: bytes) -> dict:
                     targets = local
             if len(targets) != 1:
                 raise ValueError("Missing or ambiguous Cargo lock dependency source")
-            edges[key].add(targets[0])
+            edges[node_key].add(targets[0])
     return edges
 
 
-def cargo_repair_order(issues: list, locks: dict[str, bytes]) -> list:
+def cargo_repair_order(
+    issues: Sequence[CargoIssue], locks: Mapping[str, bytes]
+) -> list[CargoIssue]:
     """Try ineligible locked dependents before the prerequisites they constrain."""
-    ancestors = [set() for _ in issues]
+    ancestors: list[set[int]] = [set() for _ in issues]
     for workspace in dict.fromkeys(issue[0] for issue in issues):
         edges = cargo_lock_graph(locks[workspace])
         problems = {}
@@ -1183,7 +1335,7 @@ def cargo_repair_order(issues: list, locks: dict[str, bytes]) -> list:
     ]
 
 
-def cargo_repair_peers(identity: tuple, body: bytes) -> list:
+def cargo_repair_peers(identity: Identity, body: bytes) -> list[CargoNode]:
     """Same-registry parents sharing an exact direct child of this target."""
     edges = cargo_lock_graph(body)
     target = (
@@ -1202,30 +1354,35 @@ def cargo_repair_peers(identity: tuple, body: bytes) -> list:
 
 def cargo_resolve(
     root: Path,
-    spec: dict,
-    specs: dict,
-    planned: list,
-    before: dict,
-    policy: dict,
+    spec: Config,
+    specs: Specs,
+    planned: Plan,
+    before: Config,
+    policy: Config,
     now: datetime,
     max_attempts: int,
-) -> dict:
+) -> ad.Table:
     """Bounded native lock repair, with exact selected direct manifest constraints."""
-    command = spec.get("resolve", [["cargo", "update"]])[0]
+    command = ad.strings(
+        ad.array(spec.get("resolve", [["cargo", "update"]]), "Cargo commands")[0],
+        "Cargo command",
+    )
     lock_names = {
-        name: str(Path(member["directory"]) / "Cargo.lock")
+        name: str(
+            Path(ad.text(member["directory"], "Workspace directory")) / "Cargo.lock"
+        )
         for name, member in specs.items()
     }
     initial = {path: cargo_file_state(root, path) for path in lock_names.values()}
     expected = dict(initial)
     public_inputs = cargo_input_state(root, specs, set(initial))
     baseline = identity_inventory(before["identities"])
-    inventories = {}
+    inventories: dict[str, list[registry.Release]] = {}
     attempts = 0
     visited = set()
     last = ""
 
-    def graph():
+    def graph() -> ResolutionGraph:
         for path in lock_names.values():
             if cargo_file_state(root, path) is None:
                 raise ValueError("Missing resolved dependency lock: Cargo.lock")
@@ -1233,7 +1390,7 @@ def cargo_resolve(
             name: updates.lock_identities(root, [name], specs=specs) for name in specs
         }
 
-    def inspect(current):
+    def inspect(current: ResolutionGraph) -> list[CargoIssue]:
         issues = []
         # Validate every identity before proposing a repair, even when an age
         # issue sorts before a different package's bad checksum or future date.
@@ -1264,9 +1421,10 @@ def cargo_resolve(
                 bound = registry.constraint(provider, policy, package)
                 safe = registry.minimum_safe(provider, policy, package)
 
-                def retainable(version):
+                def retainable(version: str) -> bool:
                     return registry.compatible(provider, version, bound) and (
-                        safe is None or registry.version(provider, version) >= safe
+                        safe is None
+                        or registry.stable_version(provider, version) >= safe
                     )
 
                 if (identity in baseline and retainable(value)) or any(
@@ -1288,23 +1446,23 @@ def cargo_resolve(
                 ]
                 values = sorted(
                     {r.version for r in [*allowed, *retained]},
-                    key=lambda v: registry.version(provider, v),
+                    key=lambda v: registry.stable_version(provider, v),
                     reverse=True,
                 )
                 issues.append((name, identity, values))
         return issues
 
-    def check_inputs():
+    def check_inputs() -> None:
         if cargo_input_state(root, specs, set(initial)) != pinned_inputs:
             raise ValueError(
                 "Cargo resolution changed non-lock inputs; preserve and inspect"
             )
 
-    def restore(checkpoint):
+    def restore(checkpoint: Mapping[str, FileImage | None]) -> None:
         check_inputs()
         cargo_restore(root, checkpoint, expected)
 
-    def run(name, argv, *, retry=False):
+    def run(name: str, argv: list[str], *, retry: bool = False) -> bool:
         check_inputs()
         old = dict(expected)
         for path, state in old.items():
@@ -1316,9 +1474,11 @@ def cargo_resolve(
         try:
             result = chainman.execute(
                 root,
-                spec.get("profile", "rust"),
+                ad.text(spec.get("profile", "rust"), "Adapter profile"),
                 argv,
-                cwd=tc.contained(root, specs[name]["directory"]),
+                cwd=tc.contained(
+                    root, ad.text(specs[name]["directory"], "Workspace directory")
+                ),
                 env={**tc.environment(root), "TOOLCHAIN_FRESH": "1"},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -1339,10 +1499,11 @@ def cargo_resolve(
                     )
                 if old[path] is not None and state is None:
                     raise ValueError("Cargo lock disappeared; preserve and inspect")
+                previous = old[path]
                 if (
-                    old[path] is not None
+                    previous is not None
                     and state is not None
-                    and old[path][1] != state[1]
+                    and previous[1] != state[1]
                 ):
                     raise ValueError("Cargo lock mode changed; preserve and inspect")
             if failure is not None:
@@ -1379,7 +1540,7 @@ def cargo_resolve(
             raise failure
         return True
 
-    def trial(name, argv):
+    def trial(name: str, argv: list[str]) -> bool:
         nonlocal attempts
         if attempts >= max_attempts:
             raise ValueError(
@@ -1388,7 +1549,7 @@ def cargo_resolve(
         attempts += 1
         return run(name, argv, retry=True)
 
-    def search(current, choices):
+    def search(current: ResolutionGraph, choices: CargoChoices) -> bool:
         nonlocal last
         issues = inspect(current)
         if any(identity not in current[name] for name, identity in choices):
@@ -1403,15 +1564,18 @@ def cargo_resolve(
             last = "repeated Cargo artifact graph and repair choices"
             return False
         visited.add(key)
-        name, identity, values = cargo_repair_order(
-            issues, {name: expected[path][0] for name, path in lock_names.items()}
-        )[0]
+        images: dict[str, bytes] = {}
+        for name, path in lock_names.items():
+            image = expected[path]
+            assert image is not None  # graph() requires every lock to exist.
+            images[name] = image[0]
+        name, identity, values = cargo_repair_order(issues, images)[0]
         package, observed = identity[1:3]
         checkpoint = dict(expected)
         kept = {chosen[1:3] for workspace, chosen in choices if workspace == name}
         peers = [
             peer
-            for peer in cargo_repair_peers(identity, checkpoint[lock_names[name]][0])
+            for peer in cargo_repair_peers(identity, images[name])
             if peer[:2] not in kept
         ]
         for value in values:
@@ -1493,11 +1657,11 @@ def cargo_resolve(
             cargo_restore(root, initial, expected, original)
 
 
-def cargo_resolution_settings(spec: dict) -> tuple[bool, int]:
+def cargo_resolution_settings(spec: Config) -> tuple[bool, int]:
     """Validate repair effort before any adapter planning or registry work."""
     cargo_commands = spec.get("resolve", [["cargo", "update"]])
     repair_cargo = (
-        spec["adapter"] == "rust"
+        ad.text(spec["adapter"], "Adapter kind") == "rust"
         and isinstance(cargo_commands, list)
         and len(cargo_commands) == 1
         and isinstance(cargo_commands[0], list)
@@ -1513,25 +1677,32 @@ def cargo_resolution_settings(spec: dict) -> tuple[bool, int]:
         type(cargo_max_attempts) is not int or not 1 <= cargo_max_attempts <= 512
     ):
         raise ValueError("cargo_max_attempts must be an integer from 1 to 512")
-    return repair_cargo, cargo_max_attempts
+    assert isinstance(cargo_max_attempts, int)  # validated above or the default.
+    return bool(repair_cargo), cargo_max_attempts
 
 
-def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
     repair_cargo, cargo_max_attempts = cargo_resolution_settings(spec)
     specs = specifications(root, spec)
     selected = list(specs)
-    if spec["adapter"] == "swift":
+    if ad.text(spec["adapter"], "Adapter kind") == "swift":
         owned = {
             str(
-                (tc.contained(root, member["directory"]) / "Package.swift").relative_to(
-                    root
-                )
+                (
+                    tc.contained(
+                        root, ad.text(member["directory"], "Workspace directory")
+                    )
+                    / "Package.swift"
+                ).relative_to(root)
             )
             for member in specs.values()
         }
-        if any(pin.get("file") not in owned for pin in spec.get("pins", [])):
+        if any(
+            ad.table(pin, "Swift pin").get("file") not in owned
+            for pin in ad.array(spec.get("pins", []), "Swift pins")
+        ):
             raise ValueError("Explicit Swift pin is not owned by a selected manifest")
         for member in specs.values():
             lock_adapters.validate_swift_sources(
@@ -1552,11 +1723,11 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
             and not pin.get("pub_override")
             and manifests.replace(pin, chosen, root)
         ):
-            changed.append(pin["file"])
+            changed.append(ad.text(pin["file"], "Pin file"))
     manifests.configure_build_dependencies(root, selected, specs=specs)
     pub_resolution = (
         pub_resolve(root, spec, specs, planned, before, policy, now)
-        if spec["adapter"] == "flutter"
+        if ad.text(spec["adapter"], "Adapter kind") == "flutter"
         else {}
     )
     cargo_identities = (
@@ -1566,31 +1737,37 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         if repair_cargo
         else None
     )
-    swift_resolution = {}
-    if spec["adapter"] == "swift":
+    swift_resolution: ad.Table = {}
+    swift_selected: dict[str, dict[str, str]] = {}
+    if ad.text(spec["adapter"], "Adapter kind") == "swift":
         if spec.get("pins"):
             for member in specs.values():
                 lock_adapters.validate_swift_sources(
                     root, member, set(), require_locked=False
                 )
         swift_resolution["swift_inputs"] = swift_input_state(root, specs)
-        swift_resolution["swift_selected"] = {
+        swift_selected = {
             name: {
-                pin["name"]: chosen.version
+                ad.text(pin["name"], "Pin name"): chosen.version
                 for pin, chosen in planned
-                if pin["file"] in member["inputs"] and chosen is not None
+                if ad.text(pin["file"], "Pin file")
+                in ad.strings(member["inputs"], "Workspace inputs")
+                and chosen is not None
             }
             for name, member in specs.items()
         }
+        swift_resolution["swift_selected"] = swift_selected
     with (
         swift_resolution_pins(root, planned, explicit=bool(spec.get("pins")))
-        if spec["adapter"] == "swift"
+        if ad.text(spec["adapter"], "Adapter kind") == "swift"
         else nullcontext()
     ):
-        if spec["adapter"] != "flutter" and not repair_cargo:
+        if ad.text(spec["adapter"], "Adapter kind") != "flutter" and not repair_cargo:
             for member in specs.values():
-                directory = tc.contained(root, member["directory"])
-                kind = spec["adapter"]
+                directory = tc.contained(
+                    root, ad.text(member["directory"], "Workspace directory")
+                )
+                kind = ad.text(spec["adapter"], "Adapter kind")
                 default = {
                     "rust": [["cargo", "update"]],
                     "python": [["uv", "lock", "--upgrade"]],
@@ -1611,6 +1788,10 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                     raise ValueError(
                         "Native resolution requires explicit argument-array commands"
                     )
+                commands = [
+                    ad.strings(command, "Native resolution command")
+                    for command in commands
+                ]
                 if kind == "python":
                     options = updates.uv_resolution_options(policy, now)
                     if any(argv[:2] != ["uv", "lock"] for argv in commands):
@@ -1629,7 +1810,11 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                 env["TOOLCHAIN_FRESH"] = "1"
                 for command in commands:
                     chainman.execute(
-                        root, spec.get("profile", kind), command, cwd=directory, env=env
+                        root,
+                        ad.text(spec.get("profile", kind), "Adapter profile"),
+                        command,
+                        cwd=directory,
+                        env=env,
                     )
                 if kind == "gradle":
                     # The ordinary dependencies task visits only one project. Traverse all
@@ -1646,7 +1831,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
             name: [
                 list(item)
                 for item in sorted(lock_adapters.identities(root, member))
-                if item[1] in swift_resolution["swift_selected"][name]
+                if item[1] in swift_selected[name]
             ]
             for name, member in specs.items()
         }
@@ -1668,10 +1853,12 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     }
 
 
-def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
+def audit(
+    root: Path, spec: Config, before: Config, policy: Config, now: datetime
+) -> None:
     specs = specifications(root, spec)
-    if spec["adapter"] == "swift":
-        resolution = before.get("resolution", {})
+    resolution = ad.table(before.get("resolution", {}), "Native resolution")
+    if ad.text(spec["adapter"], "Adapter kind") == "swift":
         if (
             "swift_inputs" in resolution
             and swift_input_state(root, specs) != resolution["swift_inputs"]
@@ -1679,7 +1866,10 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
             raise ValueError(
                 "A native resolver or project hook changed guarded Swift inputs"
             )
-        for name, selected in resolution.get("swift_selected", {}).items():
+        for name, raw_selected in ad.table(
+            resolution.get("swift_selected", {}), "Swift selections"
+        ).items():
+            selected = ad.string_map(raw_selected, "Swift selected versions")
             current = lock_adapters.identities(root, specs[name])
             for package, version in selected.items():
                 matching = [item for item in current if item[1] == package]
@@ -1688,15 +1878,21 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
                         "SwiftPM did not retain the selected direct release"
                     )
             expected = identity_inventory(
-                resolution.get("swift_identities", {}).get(name, [])
+                ad.table(
+                    resolution.get("swift_identities", {}), "Swift identities"
+                ).get(name, [])
             )
             if {item for item in current if item[1] in selected} != expected:
                 raise ValueError(
                     "A project hook changed a selected Swift artifact identity"
                 )
-    if spec["adapter"] == "flutter":
-        expected = before.get("resolution", {}).get("pub_inputs")
-        if expected is not None and pub_input_state(root, expected) != expected:
+    if ad.text(spec["adapter"], "Adapter kind") == "flutter":
+        expected_pub = resolution.get("pub_inputs")
+        if (
+            expected_pub is not None
+            and pub_input_state(root, ad.table(expected_pub, "Pub input state"))
+            != expected_pub
+        ):
             raise ValueError(
                 "A project hook changed a guarded Pub manifest or override"
             )
@@ -1704,35 +1900,54 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
         pub_validate_overrides(
             root,
             specs,
-            before.get("resolution", {}).get("pub_overrides", {}),
+            {
+                name: ad.string_map(value, "Pub selected overrides")
+                for name, value in ad.table(
+                    resolution.get("pub_overrides", {}), "Pub overrides"
+                ).items()
+            },
         )
     if spec.get("bootstrap_verification"):
         for member in specs.values():
             if not lock_adapters.paths(
-                root, tc.contained(root, member["directory"]), "*.lockfile"
+                root,
+                tc.contained(root, ad.text(member["directory"], "Workspace directory")),
+                "*.lockfile",
             ):
                 raise ValueError(
                     "Gradle resolution did not produce its required component locks"
                 )
-    for item in before.get("resolution", {}).get("pins", []):
-        if old_requirement(root, item["pin"]) != item["value"]:
+    for raw_item in ad.array(resolution.get("pins", []), "Native resolution pins"):
+        item = ad.table(raw_item, "Native resolution pin")
+        if (
+            old_requirement(root, ad.table(item["pin"], "Dependency pin"))
+            != item["value"]
+        ):
             raise ValueError("A project hook changed a selected dependency pin")
-    for name, expected in (
-        before.get("resolution", {}).get("cargo_identities", {}).items()
-    ):
+    for name, expected_cargo in ad.table(
+        resolution.get("cargo_identities", {}), "Cargo identities"
+    ).items():
         if name not in specs or updates.lock_identities(
             root, [name], specs=specs
-        ) != identity_inventory(expected):
+        ) != identity_inventory(expected_cargo):
             raise ValueError("A project hook changed the selected Cargo artifact graph")
     if spec.get("mode", "aggressive") == "compatible":
         for provider, package, value, _, _ in updates.lock_identities(
             root, list(specs), specs=specs
         ):
-            for bound in before.get("requirements", []):
+            for raw_bound in ad.array(
+                before.get("requirements", []), "Original requirements"
+            ):
+                bound = ad.table(raw_bound, "Original requirement")
                 if (
                     bound["provider"] == provider
-                    and registry.package_name(provider, bound["name"]) == package
-                    and not accepts(provider, value, bound["range"])
+                    and registry.package_name(
+                        provider, ad.text(bound["name"], "Package name")
+                    )
+                    == package
+                    and not accepts(
+                        provider, value, ad.text(bound["range"], "Package range")
+                    )
                 ):
                     raise ValueError(
                         "Resolved dependency escaped its original compatible range"
@@ -1745,8 +1960,11 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
         now,
         specs=specs,
     )
-    if spec["adapter"] == "gradle":
+    if ad.text(spec["adapter"], "Adapter kind") == "gradle":
         for member in specs.values():
             gradle_graph(
-                root, spec, tc.contained(root, member["directory"]), write=False
+                root,
+                spec,
+                tc.contained(root, ad.text(member["directory"], "Workspace directory")),
+                write=False,
             )
