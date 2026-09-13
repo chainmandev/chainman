@@ -478,13 +478,26 @@ container_init='
 '
 daemon_name=$volume-daemon
 validate_daemon() {
+    expected_image=$image
+    expected_pid=''
+    capability_fields='{{.HostConfig.CapDrop}}'
+    expected_capabilities='[ALL]'
+    if [ "$engine" = podman ]; then
+        # Podman canonicalizes tag@digest to digest and resolves --cap-drop ALL
+        # into its capability sets. Compare its resulting empty sets directly.
+        expected_image=${image%@*}
+        expected_image=${expected_image%:*}@${image#*@}
+        expected_pid=private
+        capability_fields='{{.EffectiveCaps}} {{.BoundingCaps}}'
+        expected_capabilities='[] []'
+    fi
     daemon_identity=$("$engine" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
 {{index .Config.Labels "dev.chainman.store.volume"}}
 {{.Config.Image}}
 {{.Config.User}}
 {{.HostConfig.Privileged}}
 {{.HostConfig.ReadonlyRootfs}}
-{{.HostConfig.CapDrop}}
+'"$capability_fields"'
 {{.HostConfig.SecurityOpt}}
 {{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}}:{{.RW}};{{end}}
 {{len .HostConfig.PortBindings}}
@@ -492,16 +505,16 @@ validate_daemon() {
 pid={{.HostConfig.PidMode}}' "$daemon_name")
     expected_identity="1
 $volume
-$image
+$expected_image
 $container_uid:$container_gid
 false
 true
-[ALL]
+$expected_capabilities
 [no-new-privileges]
 volume:$volume:/nix:true;
 0
 bridge
-pid="
+pid=$expected_pid"
     [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation. Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
 }
 if "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi

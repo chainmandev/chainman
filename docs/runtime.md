@@ -70,6 +70,11 @@ build-purity invariant for trusted workflows, not a sandbox against project code
 the container's root owner can change its own directory permissions.
 A short preparatory
 container owns only its named Nix and download volumes, never a writable host project mount.
+Daemon compatibility checks use each engine's inspection representation: Podman
+normalizes digest-pinned image names and exposes resolved capability sets and an
+explicit private PID mode. A matching daemon can be reused without recreating its
+store volume.
+
 Volumes are scoped by user and explicit architecture; Docker and Podman maintain
 separate engine stores. One unmodified upstream Nix daemon owns each container
 store's state. Project containers connect through its Unix socket in the Nix
