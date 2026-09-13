@@ -193,9 +193,10 @@ URI characters, then provision and execute the native task controller from a
 copied runtime under such a path. The latter asserts child output and exit status.
 SDK recipe tests exercise the actual Just entrypoint with a fixture launcher;
 the macOS job separately runs the real Apple SDK preflight.
-The bundled macOS Swift profile uses the selected Xcode for both its compiler
-and SDK. It refreshes `SDKROOT`, `CC` and `CXX` through `xcrun` so an enclosing Nix
-C shell cannot pair Xcode's Swift with a different Nix SDK.
+The bundled macOS Swift profile uses the Xcode selected by `xcode-select` for both
+its compiler and SDK. It restores `DEVELOPER_DIR` before refreshing `SDKROOT`,
+`CC` and `CXX` through `xcrun`; Nix's Apple SDK hook otherwise changes both the
+developer directory and SDK, including when entering from another Nix C shell.
 
 `just rust-test` runs the production Cargo adapter with a loopback sparse index,
 real crate archives, and isolated source replacement/cache configuration. It

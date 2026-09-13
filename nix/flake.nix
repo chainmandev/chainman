@@ -162,7 +162,10 @@
                 ''
                 + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
                   # Use one selected Xcode for the native compiler and its SDK.
-                  # An outer Nix C shell can otherwise leak a different SDKROOT.
+                  # Nix's Apple SDK hook also sets DEVELOPER_DIR. xcrun honors
+                  # that inherited value even when --sdk macosx is explicit.
+                  DEVELOPER_DIR=$(/usr/bin/xcode-select --print-path)
+                  export DEVELOPER_DIR
                   SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
                   CC=$(/usr/bin/xcrun --find clang)
                   CXX=$(/usr/bin/xcrun --find clang++)
