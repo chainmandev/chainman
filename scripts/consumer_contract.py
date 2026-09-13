@@ -5,29 +5,46 @@ import hashlib
 import json
 from pathlib import Path
 import stat
+from collections.abc import Mapping
+from typing import TypedDict
 
 import chainman
 import chainman_updates
 import config_inspection
 import configuration
 import toolchain as tc
+from adapter_data import table, text
 
 
-def check(root, release, baseline=None):
+class ConsumerStatus(TypedDict):
+    root: str
+    valid: bool
+    runtime_files: int
+    declarations: dict[str, int]
+    baseline_equal: bool
+
+
+def check(
+    root: Path,
+    release: Mapping[str, object],
+    baseline: Mapping[str, object] | None = None,
+) -> ConsumerStatus:
     cfg = config_inspection.validated(root)
     if "recipes" in cfg:
         import recipes
 
         for consumer in recipes.roots(root):
             recipes.sync(consumer, check=True)
-    pin = json.loads(tc.regular_input(root, "chainman.lock"))
+    pin = table(json.loads(tc.regular_input(root, "chainman.lock")), "Runtime pin")
     for field in ("version", "revision", "url", "narHash"):
         if pin.get(field) != release[field]:
             raise ValueError(f"Consumer runtime {field} differs from the candidate")
     bundle = pin.get("bundled_archive")
     if (
         not bundle
-        or hashlib.sha256(tc.regular_input(root, bundle)).hexdigest()
+        or hashlib.sha256(
+            tc.regular_input(root, text(bundle, "Runtime bundle"))
+        ).hexdigest()
         != release["archive_sha256"]
     ):
         raise ValueError("Consumer bundled archive differs from the candidate")
@@ -64,26 +81,36 @@ def check(root, release, baseline=None):
         "root": str(root),
         "valid": True,
         "runtime_files": len(copies),
-        "declarations": {kind: len(cfg.get(kind, {})) for kind in configuration.FIELDS},
+        "declarations": {
+            kind: len(table(cfg.get(kind, {}), kind)) for kind in configuration.FIELDS
+        },
         "baseline_equal": baseline is not None,
     }
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release", required=True, type=Path)
     parser.add_argument("--baselines", type=Path)
     parser.add_argument("roots", nargs="+", type=Path)
     args = parser.parse_args()
-    release = json.loads(args.release.read_text())
-    baselines = json.loads(args.baselines.read_text()) if args.baselines else {}
-    rows = []
+    release = table(json.loads(args.release.read_text()), "Candidate release")
+    baselines = (
+        table(json.loads(args.baselines.read_text()), "Consumer baselines")
+        if args.baselines
+        else {}
+    )
+    rows: list[ConsumerStatus] = []
     for root in args.roots:
         root = root.absolute()
         baseline = baselines.get(str(root / "chainman.toml"))
         if args.baselines and baseline is None:
             raise ValueError(f"Missing explicit baseline for {root}")
-        rows.append(check(root, release, baseline))
+        rows.append(
+            check(
+                root, release, None if baseline is None else table(baseline, "Baseline")
+            )
+        )
     print(json.dumps({"schema": 1, "consumers": rows}, indent=2))
 
 

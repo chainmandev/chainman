@@ -9,6 +9,8 @@ from pathlib import Path
 import secrets
 import subprocess
 from urllib.parse import urlsplit
+from collections.abc import Mapping
+from adapter_data import Table, array, strings, table, text
 
 import chainman
 import toolchain as tc
@@ -96,11 +98,22 @@ def command(argv, root, environment=None):
     return {"argv": argv, "directory": str(root), "environment": selected}
 
 
-def declarations(root, cfg):
-    entries = cfg.get("services", {})
-    if not isinstance(entries, dict):
+def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
+    raw_entries = cfg.get("services", {})
+    if not isinstance(raw_entries, dict):
         raise ValueError("services must contain named declarations")
-    checked_profiles = set()
+    entries = {
+        key: table(spec, f"services.{key}")
+        for key, spec in table(raw_entries, "Services").items()
+    }
+    task_entries = {
+        key: table(spec, f"tasks.{key}")
+        for key, spec in table(cfg.get("tasks", {}), "Tasks").items()
+    }
+    setup_entries = table(cfg.get("setup", {}), "Setup groups")
+    project = table(cfg.get("project", {}), "Project")
+    global_transport = table(cfg.get("container", {}), "Global transport")
+    checked_profiles: set[str] = set()
     for key, spec in entries.items():
         workflows.name(key)
         if not isinstance(spec, dict):
@@ -137,8 +150,9 @@ def declarations(root, cfg):
                 raise ValueError("Repository services cannot bind a worktree path")
         if "command" in spec:
             workflows.commands([spec["command"]])
-            profile = spec.get(
-                "profile", cfg.get("project", {}).get("default_profile", "default")
+            profile = text(
+                spec.get("profile", project.get("default_profile", "default")),
+                "Service profile",
             )
             if profile not in checked_profiles:
                 chainman.profile(root, profile, cfg=cfg)
@@ -164,9 +178,9 @@ def declarations(root, cfg):
                 raise ValueError("Service container images require a SHA256 digest")
             if item.get("command"):
                 workflows.commands([item["command"]])
-        tc.contained(root, spec.get("directory", "."))
+        tc.contained(root, text(spec.get("directory", "."), "Service directory"))
         workflows.names(spec.get("depends_on", []))
-        workflows.order(cfg.get("setup", {}), workflows.names(spec.get("setup", [])))
+        workflows.order(setup_entries, workflows.names(spec.get("setup", [])))
         if spec.get("restart", "no") not in {"no", "always", "on_failure"}:
             raise ValueError("Invalid service restart policy")
         timeout = spec.get("shutdown_seconds", 10)
@@ -209,10 +223,8 @@ def declarations(root, cfg):
                 - {"task", "paths", "ignore", "debounce_ms", "startup_seconds"}
             ):
                 raise ValueError("Invalid service watch declaration")
-            tasks = workflows.order(
-                cfg.get("tasks", {}), [workflows.name(watch.get("task"))]
-            )
-            if any(cfg["tasks"][task].get("services") for task in tasks):
+            tasks = workflows.order(task_entries, [workflows.name(watch.get("task"))])
+            if any(task_entries[task].get("services") for task in tasks):
                 raise ValueError(
                     "A watched build task cannot acquire services recursively"
                 )
@@ -235,25 +247,27 @@ def declarations(root, cfg):
     for spec in entries.values():
         if spec.get("scope") == "repository" and any(
             entries[dependency].get("scope") != "repository"
-            for dependency in spec.get("depends_on", [])
+            for dependency in workflows.names(spec.get("depends_on", []))
         ):
             raise ValueError("Repository services cannot depend on worktree services")
-    for spec in cfg.get("tasks", {}).values():
+    for spec in task_entries.values():
         workflows.order(entries, workflows.names(spec.get("services", [])))
-    for section in (entries, cfg.get("tasks", {})):
+    for section in (entries, task_entries):
         for key, spec in section.items():
             peer = spec.get("network_service")
             if peer is None:
                 continue
-            workflows.name(peer)
+            peer = workflows.name(peer)
             selected = workflows.order(
                 entries,
-                spec.get("depends_on", [])
+                workflows.names(spec.get("depends_on", []))
                 if section is entries
                 else [
                     service
-                    for task in workflows.order(cfg.get("tasks", {}), [key])
-                    for service in cfg["tasks"][task].get("services", [])
+                    for task in workflows.order(task_entries, [key])
+                    for service in workflows.names(
+                        task_entries[task].get("services", [])
+                    )
                 ],
             )
             if peer not in selected:
@@ -265,12 +279,14 @@ def declarations(root, cfg):
                 raise ValueError(
                     "Network owners cannot borrow or automatically restart"
                 )
-            transport = spec.get("container", spec.get("transport", {}))
-            if transport.get("ports") or spec.get("transport", {}).get("host_access"):
+            transport = table(
+                spec.get("container", spec.get("transport", {})), "Service transport"
+            )
+            if transport.get("ports") or table(
+                spec.get("transport", {}), "Transport"
+            ).get("host_access"):
                 raise ValueError("A borrowed network publishes ports only on its owner")
-            if cfg.get("container", {}).get("ports") or cfg.get("container", {}).get(
-                "host_access"
-            ):
+            if global_transport.get("ports") or global_transport.get("host_access"):
                 raise ValueError(
                     "Borrowed networks cannot combine global ports or host aliases"
                 )
@@ -536,7 +552,7 @@ def export(root, arguments):
                 raise ValueError(
                     "Container services require a host Docker or Podman executable"
                 )
-            item = spec["container"]
+            item = table(spec["container"], "Service container")
             argv = [
                 engine,
                 "run",
@@ -561,8 +577,8 @@ def export(root, arguments):
             if item.get("read_only", False):
                 argv.append("--read-only")
             if "user" in item:
-                argv += ["--user", item["user"]]
-            for port in item.get("ports", []):
+                argv += ["--user", text(item["user"], "Container user")]
+            for port in strings(item.get("ports", []), "Container ports"):
                 if not isinstance(port, str) or not port.startswith("127.0.0.1:"):
                     raise ValueError("Service ports must explicitly bind loopback")
                 argv += ["--publish", port]
@@ -570,7 +586,8 @@ def export(root, arguments):
                 item.get("environment", {}), root, planning_env
             ).items():
                 argv += ["--env", key_env + "=" + value]
-            for volume in item.get("volumes", []):
+            for raw_volume in array(item.get("volumes", []), "Service volumes"):
+                volume = table(raw_volume, "Service volume")
                 compatibility = volume_compatibility(root, volume)
                 workflows.name(volume["name"])
                 target_path = volume["target"]
@@ -611,7 +628,10 @@ def export(root, arguments):
                     volumes[declared_volume["name"]] = dict(
                         declared_volume, services=[name]
                     )
-            argv += [item["image"], *item.get("command", [])]
+            argv += [
+                text(item["image"], "Container image"),
+                *strings(item.get("command", []), "Container command"),
+            ]
             launch = command(argv, service_root, env)
             ownership = {"engine": engine, "name": container_name, "token": owner}
         else:
@@ -633,14 +653,14 @@ def export(root, arguments):
             "command": launch,
             "depends_on": [
                 dependency
-                for dependency in spec.get("depends_on", [])
+                for dependency in workflows.names(spec.get("depends_on", []))
                 if (dependency in shared_names) == (name in shared_names)
             ],
             "restart": spec.get("restart", "no"),
             "shutdown_seconds": spec.get("shutdown_seconds", 10),
         }
         if spec.get("network_service") and ownership:
-            peer = declared[spec["network_service"]]
+            peer = declared[workflows.name(spec["network_service"])]
             if mode != "container-nix" and "container" not in peer:
                 raise ValueError(
                     "A data container cannot borrow a host command's network"
@@ -649,11 +669,16 @@ def export(root, arguments):
         if ownership:
             value["container"] = ownership
         if "readiness" in spec:
-            probe = spec["readiness"]
+            probe = table(spec["readiness"], "Service readiness")
             if "http_get" in probe:
                 prepared_probe = {"http_get": http_readiness(probe["http_get"])}
             elif "container" in spec:
-                probe_command = [engine, "exec", container_name, *probe["command"]]
+                probe_command = [
+                    engine,
+                    "exec",
+                    container_name,
+                    *strings(probe["command"], "Readiness command"),
+                ]
             elif mode == "container-nix":
                 probe_command = [
                     engine,
@@ -681,15 +706,23 @@ def export(root, arguments):
             }
         prepared[name] = value
         if "watch" in spec:
-            watch = spec["watch"]
+            watch = table(spec["watch"], "Service watch")
             build = command(
-                [launcher, "_workflow-task", watch["task"], fingerprint],
+                [
+                    launcher,
+                    "_workflow-task",
+                    workflows.name(watch["task"]),
+                    fingerprint,
+                ],
                 root,
                 forwarded,
             )
             value["watch"] = {
                 "build": build,
-                "paths": [str(tc.contained(root, path)) for path in watch["paths"]],
+                "paths": [
+                    str(tc.contained(root, path))
+                    for path in strings(watch["paths"], "Watch paths")
+                ],
                 "ignore": watch.get("ignore", []),
                 "debounce_ms": watch.get("debounce_ms", 100),
                 "startup_seconds": watch.get("startup_seconds", 300),
@@ -775,9 +808,10 @@ def export(root, arguments):
                                 shared_fingerprint,
                                 {
                                     name: literal_environment(
-                                        declared[name]["container"].get(
-                                            "environment", {}
-                                        ),
+                                        table(
+                                            declared[name]["container"],
+                                            "Service container",
+                                        ).get("environment", {}),
                                         root,
                                         planning_env,
                                     )
@@ -912,21 +946,26 @@ def execute_internal(root, action, extra):
             env = workflows.context_environment(root, cfg, context_task, env)
         env.update(literal_environment(spec.get("environment", {}), root, env))
         with workflows.setup_use(root, cfg, spec.get("setup", []), env) as descriptors:
-            profile = spec.get(
-                "profile", cfg.get("project", {}).get("default_profile", "default")
+            profile = text(
+                spec.get(
+                    "profile", cfg.get("project", {}).get("default_profile", "default")
+                ),
+                "Service profile",
             )
+            directory = text(spec.get("directory", "."), "Service directory")
             if action == "_workflow-probe":
-                if "command" not in spec.get("readiness", {}):
+                readiness = table(spec.get("readiness", {}), "Service readiness")
+                if "command" not in readiness:
                     raise ValueError("Service has no readiness command")
                 # The application owns compiler lifetime. A readiness command
                 # uses its declared profile without starting another compiler.
                 return chainman.execute(
                     root,
                     profile,
-                    spec["readiness"]["command"],
+                    strings(readiness["command"], "Readiness command"),
                     env=env,
                     overrides=spec.get("environment", {}),
-                    cwd=tc.contained(root, spec.get("directory", ".")),
+                    cwd=tc.contained(root, directory),
                     pass_fds=descriptors,
                     check=False,
                 ).returncode
@@ -934,10 +973,10 @@ def execute_internal(root, action, extra):
                 return chainman.execute(
                     root,
                     profile,
-                    spec["command"],
+                    strings(spec["command"], "Service command"),
                     env=selected,
                     overrides=spec.get("environment", {}),
-                    cwd=tc.contained(root, spec.get("directory", ".")),
+                    cwd=tc.contained(root, directory),
                     pass_fds=descriptors,
                     check=False,
                 ).returncode

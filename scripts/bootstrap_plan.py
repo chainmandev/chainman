@@ -12,6 +12,7 @@ import sys
 import config_inspection
 import project_environment
 import workflows
+from adapter_data import array, strings, table, text
 
 
 INTERNAL = {
@@ -47,17 +48,19 @@ CONTROLLER = {
 }
 
 
-def line(value):
+def line(value: object) -> str:
     if not isinstance(value, str) or not value or any(c in value for c in "\n\r\0"):
         raise ValueError("Bootstrap options require nonempty single-line strings")
     return value
 
 
-def transport(root, spec):
-    project_environment.transport(spec)
-    result = []
-    for mount in spec.get("mounts", []):
-        target = mount.get("target", "")
+def transport(root: Path, value: object) -> list[str]:
+    project_environment.transport(value)
+    spec = table(value, "Container transport")
+    result: list[str] = []
+    for raw in array(spec.get("mounts", []), "Container mounts"):
+        mount = table(raw, "Container mount")
+        target = text(mount.get("target", ""), "Mount target")
         if target:
             line(target)
         source = line(mount.get("source_env", mount.get("source")))
@@ -72,14 +75,14 @@ def transport(root, spec):
                 "--mount",
                 f"type=bind,src={absolute},dst={target}{',readonly' if readonly else ''}",
             ]
-    for port in spec.get("ports", []):
+    for port in strings(spec.get("ports", []), "Container ports"):
         result += ["--publish", line(port)]
     if spec.get("host_access", False):
         result += ["--add-host", "host.docker.internal:host-gateway"]
     return result
 
 
-def plan(root, request, name):
+def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     # Recovery consumes saved ownership state, never current declarations. Keep
     # nested native-tool export available through the same read-only transport.
     if request in {"services-status", "services-stop"}:
@@ -87,36 +90,42 @@ def plan(root, request, name):
     if request == "_control-export":
         return False, []
     cfg = config_inspection.validated(root)
+    tasks = table(cfg.get("tasks", {}), "Tasks")
+    services = table(cfg.get("services", {}), "Services")
     task = name if request == "run" else request
     controller = request in CONTROLLER or (
         request not in INTERNAL
         and not request.startswith("_")
-        and task in cfg.get("tasks", {})
+        and task in tasks
         and any(
-            cfg["tasks"][key].get("services")
-            for key in workflows.order(cfg.get("tasks", {}), [task])
+            table(tasks[key], "Task").get("services")
+            for key in workflows.order(tasks, [task])
         )
     )
     options = ["--controller", "1"] if controller else []
-    patterns = list(cfg.get("environment", {}).get("pass", []))
-    for spec in cfg.get("tasks", {}).values():
-        patterns += list(spec.get("context_environment", {}))
+    patterns = strings(
+        table(cfg.get("environment", {}), "Project environment").get("pass", []),
+        "Environment pass patterns",
+    )
+    for raw in tasks.values():
+        spec = table(raw, "Task")
+        patterns += list(table(spec.get("context_environment", {}), "Task context"))
     for pattern in dict.fromkeys(patterns):
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_*?]*", line(pattern)):
             raise ValueError("Invalid environment forwarding pattern")
         options += ["--env-pattern", pattern]
     if request in {"_workflow-service", "_workflow-probe"}:
-        selected = cfg.get("services", {}).get(name, {})
+        selected = table(services.get(name, {}), "Service")
     elif request in {"_workflow-task", "run"}:
-        selected = cfg.get("tasks", {}).get(name, {})
+        selected = table(tasks.get(name, {}), "Task")
     else:
-        selected = cfg.get("tasks", {}).get(request, {})
+        selected = table(tasks.get(request, {}), "Task")
     options += transport(root, cfg.get("container", {}))
     options += transport(root, selected.get("transport", {}))
     return controller, options
 
 
-def main():
+def main() -> None:
     root, action = sys.argv[1:]
     controller, options = plan(
         Path(root),

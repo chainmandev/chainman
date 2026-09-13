@@ -27,8 +27,8 @@ profiles, pin arrays and policy maps. The npm adapter requires complete function
 annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 35 source
-files, including 24 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 36 source
+files, including 27 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -40,6 +40,11 @@ Manifest discovery enforces strict flags and produces typed dependency pins and
 Pub workspace records. Shared lookup/editing accepts unknown parsed values and
 narrows mutable mappings and sequences without replacing serializer objects. General
 configuration maps still need further typing.
+Bootstrap command projections, public configuration inspection and the consumer
+qualification checker also enforce strict flags. Service declarations expose
+validated named maps; service execution and export narrow their nested records
+before constructing commands. The rest of service lifecycle code still needs
+complete typing.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The
