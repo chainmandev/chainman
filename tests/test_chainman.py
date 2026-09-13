@@ -627,6 +627,7 @@ outputs=["deps.txt"]
 
     def update(self, *args, root=None):
         root = self.root if root is None else root
+        args = ("--skip-chainman", *args)
         self.stage = Path(tempfile.mkdtemp(dir=self.base, prefix="staged-"))
         for name in ("control", "candidate"):
             (self.stage / name).mkdir()

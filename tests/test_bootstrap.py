@@ -347,7 +347,7 @@ format-check=["format-check"]
 
     def test_public_update_lifecycle_commits_and_cleans_up(self):
         before = self.update_lifecycle()
-        result = self.run_bootstrap("deps-update", "--json")
+        result = self.run_bootstrap("deps-update", "--skip-chainman", "--json")
         accepted = json.loads(result.stdout)
         self.assertEqual(accepted["changed"], ["dependency.lock"])
         self.assertEqual(accepted["verification"], "passed")
@@ -358,14 +358,18 @@ format-check=["format-check"]
         self.assertIn("fixture phase: resolve", result.stderr)
         self.assertIn("fixture phase: verify", result.stderr)
         self.assertEqual(list(self.update_cache.iterdir()), [])
-        unchanged = json.loads(self.run_bootstrap("deps-update", "--json").stdout)
+        unchanged = json.loads(
+            self.run_bootstrap("deps-update", "--skip-chainman", "--json").stdout
+        )
         self.assertEqual(unchanged["verification"], "no changes")
         self.assertIsNone(unchanged["commit"])
         self.assertEqual(list(self.update_cache.iterdir()), [])
 
     def test_public_update_lifecycle_preserves_failure_and_reverifies_resume(self):
         before = self.update_lifecycle(reject=True)
-        rejected = self.run_bootstrap("deps-update", "--json", check=False)
+        rejected = self.run_bootstrap(
+            "deps-update", "--skip-chainman", "--json", check=False
+        )
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("fixture verification rejected", rejected.stderr)
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
@@ -408,7 +412,7 @@ format-check=["format-check"]
 
         with tempfile.TemporaryFile(mode="w+") as output:
             command = subprocess.Popen(
-                [str(self.launcher), "deps-update", "--json"],
+                [str(self.launcher), "deps-update", "--skip-chainman", "--json"],
                 cwd="/",
                 env=self.env,
                 stdout=output,
@@ -481,12 +485,33 @@ format-check=["format-check"]
         self.assertEqual(list(self.update_cache.iterdir()), [])
 
     def test_public_runtime_update_lifecycle_switches_only_after_verification(self):
+        self.runtime_update_lifecycle("chainman-update")
+
+    def test_public_full_update_resolves_and_verifies_with_the_new_runtime(self):
+        self.runtime_update_lifecycle("deps-update")
+
+    def test_public_full_update_failure_resumes_with_the_same_runtime(self):
+        self.runtime_update_lifecycle("deps-update", reject=True)
+
+    def runtime_update_lifecycle(self, action, *, reject=False):
         self.update_lifecycle()
         temporary = tempfile.TemporaryDirectory(prefix="chainman release fixture ")
         self.addCleanup(temporary.cleanup)
         previous = self.root / "real-runtime"
         next_runtime = Path(temporary.name) / "next-runtime"
         shutil.copytree(previous, next_runtime)
+        responses_file = Path(temporary.name) / "release-responses.json"
+        # Transport alone is a fixture. Keeping responses outside the immutable
+        # runtimes avoids a self-referential archive hash and supports fresh
+        # reads by the new runtime when resuming a combined update.
+        for runtime in (previous, next_runtime):
+            with (runtime / "scripts/registry.py").open("a") as stream:
+                stream.write(
+                    f"\n_fixture_responses_file = {str(responses_file)!r}\n"
+                    "def _fetch(url, *args, **kwargs):\n"
+                    "    data = json.loads(__import__('pathlib').Path(_fixture_responses_file).read_text())\n"
+                    "    return base64.b64decode(data[url]), {}\n"
+                )
         (next_runtime / "VERSION").write_text("0.2.0\n")
         with (next_runtime / "bootstrap/chainman.sh").open("a") as stream:
             stream.write("\n# Neutral second-generation bootstrap fixture.\n")
@@ -539,24 +564,25 @@ format-check=["format-check"]
             },
         }.items():
             responses[url] = json.dumps(value).encode()
-        # Replace only the remote transport in the old immutable fixture runtime.
-        # Selection, asset/date/hash checks, Nix unpacking, public orchestration,
-        # candidate verification and application use the actual implementations.
+        # Selection, Nix unpacking, public orchestration, verification and
+        # application use the actual implementations in both generations.
         encoded = {
             url: base64.b64encode(data).decode() for url, data in responses.items()
         }
-        with (previous / "scripts/registry.py").open("a") as stream:
-            stream.write(
-                f"\n_fixture_responses = {encoded!r}\n"
-                "def _fetch(url, *args, **kwargs):\n"
-                "    return base64.b64decode(_fixture_responses[url]), {}\n"
-            )
+        responses_file.write_text(json.dumps(encoded))
         self.bundle_runtime(previous)
         workflow = self.root / "workflow.py"
         workflow.write_text(
-            workflow.read_text().replace(
+            workflow.read_text()
+            .replace(
+                "if action == 'resolve':",
+                "if action == 'resolve':\n"
+                "    assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'VERSION').read_text().strip() == '0.2.0'",
+            )
+            .replace(
                 "assert (root / 'dependency.lock').read_text() == 'accepted\\n', 'fixture verification rejected'",
                 "assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'VERSION').read_text().strip() == '0.2.0'\n"
+                f"    assert not {reject!r} or (root / '.cache/accept-runtime').exists(), 'fixture runtime verification rejected'\n"
                 f"    assert __import__('json').loads(pathlib.Path({str(self.root / 'chainman.lock')!r}).read_text())['version'] == '0.1.0'",
             )
         )
@@ -571,11 +597,27 @@ format-check=["format-check"]
                 "exec", "--profile", "host", "--", "python3", "-c", probe
             ).stdout.strip()
         )
-        result = self.run_bootstrap("chainman-update", "--json")
+        result = self.run_bootstrap(action, "--json", check=not reject)
+        if reject:
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fixture runtime verification rejected", result.stderr)
+            self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+            self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+            self.assertEqual(
+                json.loads((self.root / "chainman.lock").read_text())["version"],
+                "0.1.0",
+            )
+            candidates = list(self.update_cache.glob("candidate.*"))
+            self.assertEqual(len(candidates), 1)
+            candidate = candidates[0] / "candidate"
+            (candidate / ".cache/accept-runtime").touch()
+            result = self.run_bootstrap(action, f"resume={candidates[0]}")
+            self.assertNotIn("fixture phase: resolve", result.stderr)
         accepted = json.loads(result.stdout)
         self.assertEqual(
             set(accepted["changed"]),
-            {"chainman.lock", "bundle.tar.gz", "scripts/chainman.sh"},
+            {"chainman.lock", "bundle.tar.gz", "scripts/chainman.sh"}
+            | ({"dependency.lock"} if action == "deps-update" else set()),
         )
         self.assertEqual(accepted["commit"], self.lifecycle_git("rev-parse", "HEAD"))
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)

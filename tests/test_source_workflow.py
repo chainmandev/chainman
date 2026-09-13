@@ -78,6 +78,23 @@ class SourceWorkflows(unittest.TestCase):
         self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
         self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
 
+    def test_full_source_update_does_not_select_a_self_pin(self):
+        import chainman_updates
+
+        with (
+            patch.object(updates, "perform", side_effect=self.resolve),
+            patch.object(updates, "verify"),
+            patch.object(
+                chainman_updates,
+                "runtime_candidate",
+                side_effect=AssertionError("source self-update"),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            source_workflow.run(self.root, "deps-update", ["targets=all"])
+        self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
+        self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
+
     def test_source_format_failure_preserves_original(self):
         def formatter(root, *, check=False, staged=False):
             if check:

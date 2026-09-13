@@ -176,6 +176,7 @@ class State:
     selected: list[str] | None = None
     inspection: Inspection | None = None
     schema: int = 2
+    runtime_snapshot: dict[str, str] | None = None
 
     def require_inspection(self) -> Inspection:
         if self.inspection is None:
@@ -185,6 +186,8 @@ class State:
     def encode(self) -> dict[str, object]:
         data = asdict(self)
         data["options"] = self.options.encode(legacy=self.schema == 1)
+        if self.runtime_snapshot is None:
+            data.pop("runtime_snapshot")
         data["at"] = self.at.isoformat()
         data.pop("inspection")
         if self.selected is None:
@@ -234,4 +237,9 @@ class State:
             candidate_git=string_map(data.get("candidate_git"), "candidate_git"),
             selected=selected,
             inspection=inspection,
+            runtime_snapshot=(
+                string_map(data["runtime_snapshot"], "runtime_snapshot")
+                if "runtime_snapshot" in data
+                else None
+            ),
         )

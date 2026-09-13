@@ -127,6 +127,15 @@ millisecond. Chainman retains uv's conservative behavior. See the
 [pinned uv comparison](https://github.com/astral-sh/uv/blob/0.12.5/crates/uv-resolver/src/version_map.rs#L524-L528).
 
 The public bootstrap suite includes real host-Nix update/recovery lifecycles.
+Combined and runtime-only updates use two independently packaged runtime
+generations. They assert that project resolution and verification run under the
+new runtime while the original checkout retains its old pin until application.
+Failed-verification resume keeps the prepared runtime, repeats evidence checks
+and verification, and does not rerun project resolution. Only the release
+transport is replaced with fixture responses. Project-only lifecycle cases retain
+their original runtime and exercise interruption, staged formatting and Git
+application independently. Legacy custom resolver arguments are also covered by
+real hook/Git tests; adapter argument validation remains a separate strict gate.
 Separate application tests inject failed writes, deletions and Git index/commit
 operations. They also kill a disposable Python child after its first completed
 write, immediately before branch publication and immediately after it. Assertions

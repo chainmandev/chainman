@@ -10,6 +10,7 @@ import sys
 import tempfile
 
 import chainman_updates
+import dependency_api
 import toolchain as tc
 import update_staging as staging
 import updates
@@ -56,9 +57,12 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         arguments = (["--format"] if action == "format" else []) + arguments
         opts = chainman_updates.options(arguments)
         if opts.extra:
-            raise ValueError(
-                "Source module updates currently resolve their complete declared toolchain; target selection is supported by consumer adapters"
-            )
+            selected = dependency_api.selection_arguments(opts.extra)
+            if selected.targets != "all" or selected.policy or selected.target_policy:
+                raise ValueError(
+                    "Source updates accept only targets=all without adapter policies; "
+                    "target selection is supported by consumer adapters"
+                )
         if opts.only_chainman:
             raise ValueError(
                 "The Chainman source repository does not pin its own runtime"

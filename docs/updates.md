@@ -14,10 +14,23 @@ disposable checkout. The host launcher sequences preparation, resolution,
 inspection, verification and finalization; it needs neither host Python nor a
 container-engine socket inside project containers. `mode=dry-run` stops before applying
 the verified changes. `commit=off` applies them without committing, for a coordinated
-checkpoint. Project dependency updates retain the Chainman pin and never query
-Chainman releases. `just chainman-update` explicitly updates the runtime pin and
-managed bootstrap and recipe facade, followed by consumer verification.
+checkpoint. Untargeted updates and `targets=all` include the Chainman runtime pin,
+bundled archive, managed bootstrap and recipe facades. Explicit application targets
+retain the runtime pin; `--skip-chainman` also selects project-only updates.
+`just chainman-update` updates only the runtime and its managed companions.
+Runtime selection happens before project resolution. Resolution, reconciliation
+and verification use the selected candidate runtime; the original checkout keeps
+its previous runtime until the combined candidate has passed verification.
+The Chainman source repository has no self-pin and updates only its declared tools.
 A missing release source or eligibility date is an error, never an implicit exemption.
+Before an eligible public Chainman release exists, use `--skip-chainman` for
+project-only updates. Development HEAD is never an implicit release source.
+
+Checkpoints retain the resolved runtime selection when resumed, regardless of later
+CLI defaults. A failed runtime preparation can be explicitly retried with `resume=`
+while the candidate still matches its original contents. After preparation succeeds,
+resume retains that runtime, rechecks its changed pin's release evidence, and
+re-audits/reverifies the candidate without rerunning project resolution.
 
 Schema 2 consumers declare `updates.verify_task = "verify"` (or another finite
 task). The launcher runs that ordinary task against the candidate's updated Nix
@@ -587,7 +600,7 @@ lock, launcher, fetch helper and optional bundled archive bytes and modes, using
 the same relative paths as the root. Customized or missing copies are rejected
 before replacement; reconcile their ownership explicitly.
 
-`chainman-update` prepares every declared copy from the verified runtime in the
+Updates that include Chainman prepare every declared copy from the verified runtime in the
 same candidate transaction. The normal project gate verifies the complete change
 before any original files are applied. The original declaration fixes the output
 boundary, and ordinary dependency resolvers cannot change these runtime files.

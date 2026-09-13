@@ -24,7 +24,7 @@ import dependency_api
 import toolchain as tc
 import updates
 import workflows
-from transaction_state import Inspection, State
+from transaction_state import Inspection, RuntimeMode, State
 
 
 def directory(value: str | Path) -> Path:
@@ -159,6 +159,12 @@ def prepare(
     control = directory(destination / "control")
     try:
         opts = runtime_updates.options(args)
+        if source:
+            if opts.only_chainman:
+                raise ValueError(
+                    "The Chainman source repository does not pin its own runtime"
+                )
+            opts = replace(opts, runtime=RuntimeMode.EXCLUDE)
     except SystemExit as result:
         if result.code == 0:
             tc.atomic_bytes(control / "help", b"")
@@ -184,6 +190,9 @@ def prepare(
             policy.pop("verify", None)
         if not policy:
             raise ValueError("Declare project updates and verification first")
+        if not source and not opts.format and not opts.only_chainman:
+            if policy.get("adapters") or policy.get("steps"):
+                dependency_api.plan_steps(root, policy, opts.extra)
         if source and opts.format:
             policy = dict(policy, outputs=["*"])
         verify = verification(root, policy)
@@ -193,6 +202,8 @@ def prepare(
             if opts.only_chainman
             else patterns(root, policy)
         )
+        if opts.runtime is RuntimeMode.INCLUDE:
+            output_patterns += policy.get("reconcile_outputs", [])
         selected = None
         if opts.staged:
             staged = set(
@@ -256,21 +267,66 @@ def prepare(
         tc.atomic_bytes(control / "at", (state.at.isoformat() + "\n").encode())
 
 
+def runtime_snapshot(candidate: Path, names: list[str]) -> dict[str, str]:
+    result = {}
+    for name in names:
+        identity = updates.file_identity(tc.contained(candidate, name))
+        if identity is not None:
+            result[name] = identity
+    return result
+
+
+def prepare_runtime(root: Path, destination: Path) -> None:
+    """Select the runtime before project resolution and retain its exact files."""
+    state, candidate = read_state(root, destination)
+    if state.source or state.options.skip_chainman:
+        return
+    with tc.operation(root):
+        unchanged(root, state)
+    with updates.preview_git_environment(), tc.operation(candidate):
+        candidate_unchanged(candidate, state)
+        if state.runtime_snapshot is not None:
+            raise ValueError("Candidate runtime has already been prepared")
+        if updates.snapshot(candidate) != state.candidate_before:
+            raise ValueError("Candidate changed before runtime preparation")
+        with tc.nix_temporary_directory("chainman-runtime-stage-") as directory:
+            try:
+                runtime = runtime_updates.runtime_candidate(
+                    candidate,
+                    dependency_api.policy(root),
+                    state.at,
+                    gc_root=Path(directory) / "runtime",
+                )
+            except (OSError, ValueError) as error:
+                raise ValueError(
+                    f"Chainman runtime preparation failed: {error}. "
+                    "Use --skip-chainman for project-only dependency updates."
+                ) from error
+            launcher = destination / "resolution-bootstrap"
+            export_bootstrap(runtime, launcher)
+            export_authority(
+                root,
+                candidate,
+                launcher,
+                pin_root=candidate,
+                git_directories=state.candidate_git,
+            )
+        state = replace(
+            state, runtime_snapshot=runtime_snapshot(candidate, state.runtime_files)
+        )
+        tc.atomic_json(destination / "control/state.json", state.encode())
+
+
 def resolve(root: Path, at: str, args: list[str]) -> None:
     opts = runtime_updates.options(args)
     with updates.preview_git_environment(), tc.operation(root):
-        updates.repository(root)
-        if opts.format:
+        updates.repository(root, clean=opts.skip_chainman)
+        if opts.format or opts.only_chainman:
             # Host orchestration runs the ordinary declared task lanes, including
             # service ownership. No project command executes in this phase.
             return
-        runtime_updates.perform(
-            root,
-            dependency_api.policy(root),
-            datetime.fromisoformat(at),
-            opts.extra,
-            only_runtime=opts.only_chainman,
-            skip_runtime=opts.skip_chainman,
+        runtime_updates.resolve_current(
+            root, dependency_api.policy(root), datetime.fromisoformat(at), opts.extra
         )
 
 
@@ -290,6 +346,36 @@ def resume(root: Path, destination: Path) -> None:
         unchanged(root, state)
     with updates.preview_git_environment(), tc.operation(candidate):
         candidate_unchanged(candidate, state)
+        retry_runtime = (
+            state.schema >= 2
+            and not state.source
+            and not state.options.skip_chainman
+            and state.runtime_snapshot is None
+        )
+        if retry_runtime and updates.snapshot(candidate) != state.candidate_before:
+            raise ValueError(
+                "Runtime preparation did not complete; restore the retained candidate "
+                "to its original contents before retrying runtime preparation"
+            )
+        if state.runtime_snapshot is not None:
+            if (
+                runtime_snapshot(candidate, state.runtime_files)
+                != state.runtime_snapshot
+            ):
+                raise ValueError("Candidate runtime changed after preparation")
+            with tc.nix_temporary_directory("chainman-runtime-resume-") as directory:
+                runtime = verified_runtime(
+                    candidate, gc_root=Path(directory) / "runtime"
+                )
+                launcher = destination / "resolution-bootstrap"
+                export_bootstrap(runtime, launcher)
+                export_authority(
+                    root,
+                    candidate,
+                    launcher,
+                    pin_root=candidate,
+                    git_directories=state.candidate_git,
+                )
     state = replace(state, at=datetime.now(timezone.utc), inspection=None)
     opts = state.options
     args = ["--message", opts.message]
@@ -297,6 +383,8 @@ def resume(root: Path, destination: Path) -> None:
         (opts.format, "--format"),
         (opts.staged, "--staged"),
         (opts.only_chainman, "--only-chainman"),
+        (opts.skip_chainman, "--skip-chainman"),
+        (opts.runtime is RuntimeMode.INCLUDE, "--include-chainman"),
         (opts.preview, "--preview"),
         (opts.no_commit, "--no-commit"),
     ):
@@ -308,6 +396,7 @@ def resume(root: Path, destination: Path) -> None:
         raise ValueError("Resumed transaction arguments must be single-line values")
     control = destination / "control"
     tc.atomic_bytes(control / "resume-arguments", ("\n".join(args) + "\n").encode())
+    tc.atomic_bytes(control / "retry-runtime", b"yes\n" if retry_runtime else b"no\n")
     tc.atomic_json(control / "state.json", state.encode())
     tc.atomic_bytes(control / "at", (state.at.isoformat() + "\n").encode())
 
@@ -329,7 +418,9 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
         declared = dependency_api.policy(baseline)
         legacy_modules = not declared.get("steps") and not declared.get("resolver")
         settings = dependency_api.inspection_policy(baseline)
-        if opts.only_chainman:
+        if not opts.skip_chainman and tc.regular_input(
+            root, "chainman.lock"
+        ) != tc.regular_input(baseline, "chainman.lock"):
             import registry
 
             pin = json.loads(tc.regular_input(root, "chainman.lock"))
@@ -364,6 +455,7 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
                 raise ValueError(
                     "Resumed runtime archive differs from release evidence"
                 )
+        if opts.only_chainman:
             return
         if settings.get("resolver"):
             raise ValueError(
@@ -514,7 +606,15 @@ def inspect(root: Path, destination: Path) -> None:
                 "Submodule inputs and metadata require a separate transaction"
             )
         updates.allowed(paths, state.patterns)
-        if not state.options.only_chainman and set(paths) & set(state.runtime_files):
+        if state.runtime_snapshot is not None:
+            if (
+                runtime_snapshot(candidate, state.runtime_files)
+                != state.runtime_snapshot
+            ):
+                raise ValueError("Candidate runtime changed after preparation")
+        elif not state.source and not state.options.skip_chainman and state.schema >= 2:
+            raise ValueError("Candidate runtime has not been prepared")
+        if state.options.skip_chainman and set(paths) & set(state.runtime_files):
             raise ValueError(
                 "Dependency resolvers must not change the runtime; use chainman-update"
             )
@@ -673,6 +773,8 @@ def run(root: Path, action: str, args: list[str]) -> int:
     destination = directory(args[0])
     if action == "_update-prepare":
         prepare(root, destination, args[1:])
+    elif action == "_update-runtime" and len(args) == 1:
+        prepare_runtime(root, destination)
     elif action == "_update-resume" and len(args) == 1:
         resume(root, destination)
     elif action == "_update-inspect" and len(args) == 1:

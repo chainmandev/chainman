@@ -56,6 +56,10 @@ implementations; project doctor and clean tasks supplement those defaults.
 Update options use `commit=auto|off`, `mode=apply|dry-run`, `targets=js,rust`,
 `policy=aggressive|compatible`, `js_policy=compatible`, and `message=TEXT`.
 Values remain arguments, never shell code. The defaults are apply and auto-commit.
+Untargeted updates and `targets=all` update Chainman together with project
+dependencies. Explicit application targets retain the runtime; `--skip-chainman`
+also opts out of runtime updates. Both generations remain separate immutable
+runtimes, and the combined candidate must pass verification before application.
 `chainman-update` does not accept dependency selection options. `format commit=off`
 runs the complete generate/format/check/hygiene sequence in place; `format-write`
 is the narrower formatter-only operation. Native API flags remain available to

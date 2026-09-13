@@ -325,6 +325,7 @@ def main(argv=None):
             "deps-audit",
             "nix-update",
             "_update-prepare",
+            "_update-runtime",
             "_update-resolve",
             "_update-inspect",
             "_update-verify",

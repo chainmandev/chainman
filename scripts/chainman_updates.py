@@ -502,7 +502,15 @@ def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
         )
     else:
         if extra:
-            raise ValueError("Built-in module updates do not accept resolver arguments")
+            selection = dependency_api.selection_arguments(extra)
+            if (
+                selection.targets != "all"
+                or selection.policy
+                or selection.target_policy
+            ):
+                raise ValueError(
+                    "Built-in module updates do not accept target selection or policy overrides"
+                )
         selected = tc.config(root)["modules"]
         updates.perform(root, now, selected)
 
@@ -574,7 +582,16 @@ def options(args: list[str]) -> Options:
         help="Write one schema-1 JSON result; send command output to stderr",
     )
     parser.add_argument("--message", default="chore: update dependencies")
-    parser.add_argument("--only-chainman", action="store_true", help=argparse.SUPPRESS)
+    runtime_flags = parser.add_mutually_exclusive_group()
+    runtime_flags.add_argument(
+        "--only-chainman", action="store_true", help=argparse.SUPPRESS
+    )
+    runtime_flags.add_argument(
+        "--skip-chainman", action="store_true", help="Retain the Chainman runtime pin"
+    )
+    runtime_flags.add_argument(
+        "--include-chainman", action="store_true", help=argparse.SUPPRESS
+    )
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     opts = parser.parse_args(args)
     if opts.staged:
@@ -582,22 +599,32 @@ def options(args: list[str]) -> Options:
             raise ValueError("Staged formatting requires format without preview")
         opts.no_commit = True
     if opts.format:
-        if opts.only_chainman or opts.extra:
+        if opts.only_chainman or opts.include_chainman or opts.extra:
             raise ValueError("Format does not select dependency targets")
         if opts.message == "chore: update dependencies":
             opts.message = "chore: format"
-    # Runtime changes are an explicit operation, never an incidental part of
-    # updating application dependencies.
-    opts.runtime = "only" if opts.only_chainman else "exclude"
     if opts.extra[:1] == ["--"]:
         opts.extra = opts.extra[1:]
     if not opts.message.strip() or "\0" in opts.message:
         raise ValueError("Commit message must be nonempty text without NUL")
     if opts.only_chainman and opts.extra:
         raise ValueError("Runtime updates do not accept dependency resolver arguments")
+    import dependency_api
+
+    if opts.only_chainman:
+        opts.runtime = "only"
+    elif opts.skip_chainman or opts.format:
+        opts.runtime = "exclude"
+    elif opts.include_chainman:
+        opts.runtime = "include"
+    else:
+        selection = dependency_api.selection_arguments(opts.extra, allow_extra=True)
+        opts.runtime = "include" if "all" in selection.targets.split(",") else "exclude"
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start another update")
     del opts.only_chainman
+    del opts.skip_chainman
+    del opts.include_chainman
     return Options.decode(vars(opts))
 
 

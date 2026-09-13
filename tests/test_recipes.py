@@ -3,15 +3,74 @@
 import sys
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+from datetime import datetime, timezone
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import recipes
+import chainman_updates
+import dependency_api
 import test_update_staging as staging
 import updates
 import update_staging
 
 
 class RecipeTests(unittest.TestCase):
+    def test_runtime_selection_uses_the_effective_public_target_arguments(self):
+        cases = [
+            ([], "include"),
+            (["targets=all"], "include"),
+            (["--targets=all"], "include"),
+            (["--targets", "all"], "include"),
+            (["targets=js", "targets=all"], "include"),
+            (["targets=all", "--targets", "js"], "exclude"),
+            (["targets=js,rust"], "exclude"),
+            (["--policy", "compatible"], "include"),
+            (["--skip-chainman"], "exclude"),
+            (["--skip-chainman", "targets=all"], "exclude"),
+            (["--only-chainman"], "only"),
+            (["--format"], "exclude"),
+            (["--format", "--staged"], "exclude"),
+            (["--message", "targets=js"], "include"),
+            (["--", "2.0"], "include"),
+            (["--skip-chainman", "--", "2.0"], "exclude"),
+            (["--", "--custom", "value", "--targets", "js"], "exclude"),
+        ]
+        for arguments, expected in cases:
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    chainman_updates.options(arguments).runtime.value, expected
+                )
+
+    def test_legacy_resolver_arguments_survive_runtime_selection_unchanged(self):
+        extra = ["--custom", "some value", "--targets-extra", "all", "2.0"]
+        for flags in ([], ["--skip-chainman"], ["--include-chainman"]):
+            with self.subTest(flags=flags):
+                opts = chainman_updates.options([*flags, "--", *extra])
+                self.assertEqual(opts.extra, extra)
+                self.assertEqual(opts.skip_chainman, flags == ["--skip-chainman"])
+        # Tolerating legacy passthrough must not relax the actual adapter parser.
+        with self.assertRaises(SystemExit):
+            dependency_api.selection({"adapters": {"js": {}}}, extra)
+
+    def test_builtin_module_update_accepts_explicit_all_without_new_selection(self):
+        root = Path("/module-project")
+        now = datetime.now(timezone.utc)
+        with (
+            patch.object(dependency_api, "policy", return_value={}),
+            patch.object(chainman_updates.tc, "environment", return_value={}),
+            patch.object(
+                chainman_updates.tc, "config", return_value={"modules": ["go"]}
+            ),
+            patch.object(updates, "perform") as perform,
+        ):
+            chainman_updates.resolve_current(root, {}, now, ["--targets", "all"])
+            perform.assert_called_once_with(root, now, ["go"])
+            for extra in (["--targets", "go"], ["--policy", "compatible"]):
+                with self.subTest(extra=extra), self.assertRaises(ValueError):
+                    chainman_updates.resolve_current(root, {}, now, extra)
+            self.assertEqual(perform.call_count, 1)
+
     def test_values_are_opaque_and_last_public_choice_wins(self):
         self.assertEqual(
             recipes.options(

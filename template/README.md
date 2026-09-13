@@ -52,7 +52,8 @@ with future public home chainman.dev. Publication is separate from local adoptio
 | `just sdk-doctor apple` / `just sdk-doctor android` | Check explicit native SDK prerequisites |
 | `just ci-prune --module flutter` | Preview guarded disposable hosted-runner SDK cleanup |
 
-Project updates retain the Chainman runtime pin. `just chainman-update` explicitly
+Full project updates include the Chainman runtime pin. Explicit application targets
+retain it, as does `just deps-update --skip-chainman`. `just chainman-update` explicitly
 updates it; an unavailable release fails rather than silently skipping that request.
 Initialize and commit this directory as its own Git project before applying updates.
 A nested example refuses to adopt its enclosing repository. Preview performs real

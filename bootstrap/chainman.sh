@@ -165,6 +165,10 @@ update_dispatch() {
             "$self" _update-resume "$update_output" >&2
         set --
         while IFS= read -r update_argument; do set -- "$@" "$update_argument"; done < "$update_output/control/resume-arguments"
+        if [ -f "$update_output/control/retry-runtime" ]; then
+            IFS= read -r update_retry_runtime < "$update_output/control/retry-runtime"
+            if [ "$update_retry_runtime" = yes ]; then update_resume=0; fi
+        fi
     else
         CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
             "$self" _update-prepare "$update_output" "$@" >&2
@@ -177,14 +181,22 @@ update_dispatch() {
     IFS= read -r update_at < "$update_output/control/at"
     update_launcher=$update_output/original-bootstrap/chainman.sh
     if [ "$update_resume" = 0 ]; then
-        update_candidate "$update_launcher" _update-resolve "$update_at" "$@" >&2
+        CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+            CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-runtime "$update_output" >&2
     fi
-    update_candidate "$update_launcher" _update-tasks "$@" > "$update_output/control/tasks"
+    update_resolver=$update_launcher
+    if [ -f "$update_output/resolution-bootstrap/chainman.sh" ]; then
+        update_resolver=$update_output/resolution-bootstrap/chainman.sh
+    fi
+    if [ "$update_resume" = 0 ]; then
+        update_candidate "$update_resolver" _update-resolve "$update_at" "$@" >&2
+    fi
+    update_candidate "$update_resolver" _update-tasks "$@" > "$update_output/control/tasks"
     while IFS= read -r update_task; do
-        CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_launcher" run "$update_task" < /dev/null >&2
+        CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_resolver" run "$update_task" < /dev/null >&2
     done < "$update_output/control/tasks"
     if [ "$update_resume" = 1 ] || [ -s "$update_output/control/tasks" ]; then
-        update_candidate "$update_launcher" _update-reaudit "$update_at" "$@" >&2
+        update_candidate "$update_resolver" _update-reaudit "$update_at" "$@" >&2
     fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-inspect "$update_output" >&2

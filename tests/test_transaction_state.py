@@ -53,9 +53,15 @@ class TransactionStateTests(unittest.TestCase):
         st.sampled_from(["exclude", "include", "only"]),
         st.booleans(),
         st.lists(st.text(alphabet="abc 012_-", max_size=12), max_size=4),
+        st.one_of(
+            st.none(),
+            st.dictionaries(
+                st.text(min_size=1, max_size=12), st.text(max_size=20), max_size=4
+            ),
+        ),
     )
     def test_explicit_runtime_selection_round_trips_without_reinterpreting_it(
-        self, runtime, preview, extra
+        self, runtime, preview, extra, runtime_snapshot
     ):
         wire = checkpoint()
         wire["schema"] = 2
@@ -64,6 +70,8 @@ class TransactionStateTests(unittest.TestCase):
         wire["options"].update(
             runtime=runtime, preview=preview, extra=[] if runtime == "only" else extra
         )
+        if runtime_snapshot is not None:
+            wire["runtime_snapshot"] = runtime_snapshot
         expected = deepcopy(wire)
         state = State.decode(wire)
         self.assertEqual(state.options.runtime.value, runtime)
@@ -72,6 +80,8 @@ class TransactionStateTests(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(state.encode())), expected)
         wire["options"]["runtime"] = "changed"
         wire["options"]["extra"].append("changed")
+        if runtime_snapshot is not None:
+            wire["runtime_snapshot"]["new"] = "changed"
         self.assertEqual(json.loads(json.dumps(state.encode())), expected)
 
     def test_checkpoint_versions_do_not_accept_ambiguous_runtime_selection(self):
@@ -178,6 +188,8 @@ class TransactionStateTests(unittest.TestCase):
             {"candidate_modes": {"input.lock": 0o100755}},
             {"before": {"input.lock": False}},
             {"verify": "run check"},
+            {"runtime_snapshot": {"chainman.lock": False}},
+            {"runtime_snapshot": None},
             {"paths": []},
             {"updated": {}},
         ):

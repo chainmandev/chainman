@@ -72,6 +72,10 @@ commands=[["true"]]
         self.addCleanup(mock.stop)
 
     def prepare(self, *args):
+        # Most fixtures exercise project-only transaction behavior without a
+        # release source. Full/runtime updates opt into their own staged fixture.
+        if "--only-chainman" not in args and "--include-chainman" not in args:
+            args = ("--skip-chainman", *args)
         subject.prepare(self.root, self.stage, list(args))
 
     def update(self, *args):
@@ -200,13 +204,109 @@ commands=[["true"]]
         self.add_runtime_copy()
         self.prepare("--only-chainman")
         relative = "templates/common/scripts/chainman.sh"
-        (self.candidate / relative).write_text("verified copy")
+
+        def runtime_candidate(root, policy, now, *, gc_root):
+            (root / relative).write_text("verified copy")
+            return chainman.RUNTIME
+
+        with patch.object(
+            subject.runtime_updates, "runtime_candidate", side_effect=runtime_candidate
+        ):
+            subject.prepare_runtime(self.root, self.stage)
         subject.inspect(self.root, self.stage)
         self.assertEqual(updates.snapshot(self.root), self.before)
         result = self.finish()
         self.assertEqual(result["changed"], [relative])
         self.assertEqual((self.root / relative).read_text(), "verified copy")
         self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
+
+    def test_full_update_stages_runtime_then_combines_verified_project_outputs(self):
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                "[updates]", '[updates]\nreconcile_outputs=["runtime-report.txt"]'
+            )
+        )
+        updates.git(self.root, "add", ".")
+        updates.git(self.root, "commit", "-m", "Declare runtime report")
+        self.before = updates.snapshot(self.root)
+        subject.prepare(self.root, self.stage, [])
+        before_pin = (self.root / "chainman.lock").read_bytes()
+
+        def runtime_candidate(root, policy, now, *, gc_root):
+            pin = json.loads(before_pin)
+            pin["version"] = "0.2.0"
+            (root / "chainman.lock").write_text(json.dumps(pin))
+            return chainman.RUNTIME
+
+        with patch.object(
+            subject.runtime_updates, "runtime_candidate", side_effect=runtime_candidate
+        ):
+            subject.prepare_runtime(self.root, self.stage)
+        state, _ = subject.read_state(self.root, self.stage)
+        self.assertEqual(state.options.runtime.value, "include")
+        self.assertIn("chainman.lock", state.runtime_snapshot)
+        self.assertEqual(
+            json.loads((self.stage / "resolution-bootstrap/chainman.lock").read_text())[
+                "version"
+            ],
+            "0.2.0",
+        )
+        (self.candidate / "dependency.lock").write_text("resolved with new runtime\n")
+        (self.candidate / "runtime-report.txt").write_text(
+            "reconciled runtime report\n"
+        )
+        subject.inspect(self.root, self.stage)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+        subject.resume(self.root, self.stage)
+        resumed = (self.stage / "control/resume-arguments").read_text().splitlines()
+        self.assertEqual(
+            subject.runtime_updates.options(resumed).runtime.value, "include"
+        )
+        subject.inspect(self.root, self.stage)
+        result = self.finish()
+        self.assertEqual(
+            set(result["changed"]),
+            {"chainman.lock", "dependency.lock", "runtime-report.txt"},
+        )
+        self.assertEqual(
+            json.loads((self.root / "chainman.lock").read_text())["version"], "0.2.0"
+        )
+        self.assertEqual(
+            (self.root / "dependency.lock").read_text(), "resolved with new runtime\n"
+        )
+        self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
+
+    def test_full_update_requires_runtime_preparation_before_inspection(self):
+        subject.prepare(self.root, self.stage, [])
+        with self.assertRaisesRegex(ValueError, "runtime has not been prepared"):
+            subject.inspect(self.root, self.stage)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_failed_runtime_preparation_resumes_before_project_resolution(self):
+        subject.prepare(self.root, self.stage, [])
+        with (
+            patch.object(
+                subject.runtime_updates,
+                "runtime_candidate",
+                side_effect=OSError("release unavailable"),
+            ),
+            self.assertRaisesRegex(ValueError, "--skip-chainman"),
+        ):
+            subject.prepare_runtime(self.root, self.stage)
+        self.assertEqual(updates.snapshot(self.candidate), self.before)
+        subject.resume(self.root, self.stage)
+        self.assertEqual((self.stage / "control/retry-runtime").read_text(), "yes\n")
+        with patch.object(
+            subject.runtime_updates, "runtime_candidate", return_value=chainman.RUNTIME
+        ):
+            subject.prepare_runtime(self.root, self.stage)
+        (self.candidate / "dependency.lock").write_text("resolved\n")
+        subject.resume(self.root, self.stage)
+        self.assertEqual((self.stage / "control/retry-runtime").read_text(), "no\n")
+        subject.inspect(self.root, self.stage)
+        self.assertEqual(self.finish()["changed"], ["dependency.lock"])
+        self.assertEqual((self.root / "dependency.lock").read_text(), "resolved\n")
 
     def test_apply_only_after_verification_and_commit_exact_candidate(self):
         self.update()

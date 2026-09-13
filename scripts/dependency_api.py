@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -14,6 +15,7 @@ import sys
 import tomllib
 
 import chainman
+import adapter_data
 import registry
 import toolchain as tc
 import updates
@@ -135,12 +137,37 @@ def effective_policy(settings: dict, spec: dict) -> dict:
     return result
 
 
-def selection(settings: dict, extra: list[str]) -> tuple[set[str], dict[str, str]]:
-    parser = argparse.ArgumentParser(prog="deps-update --")
+@dataclass(frozen=True)
+class SelectionArguments:
+    targets: str
+    policy: str | None
+    target_policy: tuple[str, ...]
+
+
+def selection_arguments(
+    extra: list[str], *, allow_extra: bool = False
+) -> SelectionArguments:
+    parser = argparse.ArgumentParser(prog="deps-update --", allow_abbrev=False)
     parser.add_argument("--targets", default="all")
     parser.add_argument("--policy", choices=("aggressive", "compatible"))
     parser.add_argument("--target-policy", action="append", default=[])
-    args = parser.parse_args(extra)
+    # Legacy project resolvers accept opaque arguments. Only the outer runtime
+    # selection tolerates those; adapter plans still validate the whole command.
+    parsed = vars(
+        parser.parse_known_args(extra)[0] if allow_extra else parser.parse_args(extra)
+    )
+    policy = parsed["policy"]
+    return SelectionArguments(
+        targets=adapter_data.text(parsed["targets"], "Update targets"),
+        policy=None if policy is None else adapter_data.text(policy, "Update policy"),
+        target_policy=tuple(
+            adapter_data.strings(parsed["target_policy"], "Target policies")
+        ),
+    )
+
+
+def selection(settings: dict, extra: list[str]) -> tuple[set[str], dict[str, str]]:
+    args = selection_arguments(extra)
     names = target_names(settings)
     automatic = {
         name
