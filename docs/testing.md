@@ -128,6 +128,32 @@ Container-engine and native controller tests have separate prerequisites/gates;
 skipped tests provide no evidence about those paths. Linux success does not
 establish macOS success.
 
+`just rust-test` runs the production Cargo adapter with a loopback sparse index,
+real crate archives, and isolated source replacement/cache configuration. It
+checks exact direct selection, a native transitive conflict followed by eligible
+fallback, restored manifest syntax/modes, native acceptance with `--locked`,
+unsatisfiable resolution, and rejection/restoration of mismatched checksum
+evidence. The fixture supplies registry publication evidence; it does not qualify
+the crates.io HTTP client.
+
+`just swift-test` runs the production Swift adapter against disposable versioned
+Git repositories. A fixture-only Git transport rewrite preserves the declared
+GitHub URLs, and non-file transport is disabled. Native manifest evaluation,
+update, and frozen dependency graph inspection all use the pinned SwiftPM binary.
+The fixture isolates repository, configuration, fingerprint, and compiler caches.
+It checks direct selection, transitive versions/revisions, public manifest
+restoration, failed resolution, mismatched revision evidence, and read-only
+repeated audit. The fixture supplies GitHub publication evidence.
+
+The Swift test initially reproduced an audit failure after a valid update:
+`--skip-update` reused a shared repository cache lacking the newly selected
+commits. The audit now allows repository refresh while forcing the resolved
+versions and guarding the lock against changes. The native fixture deliberately
+populates its cache before publishing later local tags. Both new gates run in
+their corresponding deliberate CI jobs, including Swift on macOS.
+An isolated mutation restoring `--skip-update` makes the native success case
+fail again with missing Git objects; the test does not rely on checking flags alone.
+
 ## Targeted test-sensitivity experiment
 
 On 2026-09-12, the baseline at `9c54804` passed 98 tests in `test_configuration`,
@@ -201,6 +227,6 @@ the other adapter implementations outside the gate. Splitting large modules for
 size alone is a lower priority than replacing dynamic decision inputs.
 
 Add differential tests against native resolvers when changing their adapters.
-Continue native update qualification with Cargo and SwiftPM fixtures. Application
+Extend the native fixtures when changing supported resolver behavior. Application
 failures deliberately preserve partial results for inspection; the recovery model
 does not introduce automatic rollback or authorize resuming over changed inputs.

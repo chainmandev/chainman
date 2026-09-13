@@ -1257,7 +1257,7 @@ class SwiftGraphTests(unittest.TestCase):
         directory = argv[argv.index("--package-path") + 1]
         if "show-dependencies" in argv:
             self.assertIn("--force-resolved-versions", argv)
-            self.assertIn("--skip-update", argv)
+            self.assertNotIn("--skip-update", argv)
             scratch = Path(argv[argv.index("--scratch-path") + 1])
             self.assertTrue(scratch.is_relative_to(self.root / ".cache/toolchain/work"))
             self.graph_calls.append(argv)

@@ -82,3 +82,9 @@ jobs:
       - name: Qualify native Gradle update validation
         if: matrix.mode == 'host-nix' && matrix.module == 'compose'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- gradle-test
+      - name: Qualify native Cargo update validation
+        if: matrix.mode == 'host-nix' && matrix.module == 'rust'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- rust-test
+      - name: Qualify native SwiftPM update validation
+        if: matrix.mode == 'host-nix' && matrix.module == 'swift'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- swift-test

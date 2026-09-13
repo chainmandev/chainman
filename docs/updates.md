@@ -203,6 +203,9 @@ closure without adding those manifests to configured pin selection. Final audits
 run a forced-resolved native dependency graph in a separate command-root scratch
 cache under `TOOLCHAIN_WORK`. Its remote repository/version inventory must match
 that command root's `Package.resolved`; descendant locks cannot substitute for it.
+The frozen graph command may refresh repository objects: a shared cache populated
+before an update can lack the newly locked commits. It keeps
+`--force-resolved-versions`, and the input guard rejects any lock rewrite.
 Native graph success alone does not prove lock completeness. An absent lock is
 valid only for a complete all-local graph. Manifest closure, lock bytes and full
 modes must remain unchanged by validation; unexpected changes are preserved and

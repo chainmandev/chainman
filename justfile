@@ -83,6 +83,12 @@ javascript-test:
 python-test:
     @./scripts/enter.sh python env CHAINMAN_TEST_UV=1 python3 -B -m unittest discover -s tests -p test_python_native.py -v
 
+rust-test:
+    @./scripts/enter.sh rust env CHAINMAN_TEST_CARGO=1 python3 -B -m unittest discover -s tests -p test_cargo_native.py -v
+
+swift-test:
+    @./scripts/enter.sh swift env CHAINMAN_TEST_SWIFT=1 python3 -B -m unittest discover -s tests -p test_swift_native.py -v
+
 gradle-test:
     @./scripts/enter.sh compose env CHAINMAN_TEST_GRADLE=1 python3 -B -m unittest discover -s tests -p test_gradle_resolution.py -v
 

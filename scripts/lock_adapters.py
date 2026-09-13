@@ -1025,7 +1025,9 @@ def validate_swift_graph(
                 str(directory),
                 "--scratch-path",
                 str(scratch),
-                "--skip-update",
+                # The shared repository cache can predate the just-resolved
+                # revision. Fetch missing objects while keeping lock selection
+                # frozen; skipping updates can make a valid new lock unauditable.
                 "--force-resolved-versions",
                 "show-dependencies",
                 "--format",

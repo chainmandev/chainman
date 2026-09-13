@@ -64,6 +64,8 @@ just module rust verify
 just module javascript verify
 just javascript-test
 just python-test
+just rust-test
+just swift-test
 just gradle-test
 just bootstrap-test docker
 just bootstrap-test podman
@@ -84,6 +86,12 @@ and requires no public registry downloads.
 `just python-test` uses pinned uv with a disposable loopback package index and
 real fixture wheels to check maturity cutoffs, transitive resolution, no-op
 retention and manifest/lock consistency. It requires no public registry downloads.
+`just rust-test` qualifies Cargo selection, transitive repair, failed resolution
+and restored manifests against real local crate archives and a loopback index.
+`just swift-test` qualifies SwiftPM selection, failed resolution and frozen graph
+audits against disposable Git repositories, including a stale repository cache.
+Both run the production adapter with fixture registry evidence and require no
+public package downloads.
 `just gradle-test` uses pinned Gradle with disposable offline Maven and composite
 build fixtures to check transitive locks, local source bindings, read-only graph
 inspection and build JVM lifetime.
