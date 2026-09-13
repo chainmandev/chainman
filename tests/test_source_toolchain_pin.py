@@ -123,6 +123,31 @@ class SourcePinTests(unittest.TestCase):
             json.loads((self.root / "sources.json").read_text())["other"], 1
         )
 
+    def test_incomplete_baseline_is_rejected_before_any_source_update(self):
+        second = copy.deepcopy(self.tool)
+        second["source_pin"]["pointer"] = ["second"]
+        second["pins"][0]["pointer"] = ["second"]
+        self.spec["tools"].append(second)
+        current = source.record(self.tool, self.releases[0])
+        self.write("sources.json", {"sdk": current, "second": current})
+        self.write("package.json", {"sdk": "1.0.0", "second": "1.0.0"})
+        before = sdk.snapshot(self.root, self.spec)
+        before["sources"].pop()
+        self.releases.append(self.release("2.0.0"))
+        original = {
+            file: (self.root / file).read_bytes()
+            for file in ("sources.json", "package.json")
+        }
+        with (
+            patch.object(source, "write", wraps=source.write) as write,
+            self.assertRaisesRegex(ValueError, "source inventory changed"),
+        ):
+            sdk.resolve(self.root, self.spec, {}, NOW, before=before)
+        write.assert_not_called()
+        self.assertEqual(
+            original, {file: (self.root / file).read_bytes() for file in original}
+        )
+
     def test_changed_young_digest_cannot_retain_baseline_age(self):
         before = sdk.snapshot(self.root, self.spec)
         self.releases = [self.release("1.0.0", YOUNG, "b")]

@@ -98,6 +98,10 @@ def read(root: Path, tool: Mapping[str, object]) -> SourceRecord | None:
         return None
     _, value, _ = document(root, pin)
     source = manifests.lookup(value, pin["pointer"])
+    return decode(source)
+
+
+def decode(source: object) -> SourceRecord:
     if (
         not isinstance(source, dict)
         or set(source) != {"version", "url", "hash"}
@@ -167,7 +171,7 @@ def inventory(
 
 
 def select(
-    tool: ad.Table,
+    tool: Mapping[str, object],
     before: Mapping[str, object] | None,
     source: SourceRecord,
     pins: list[str],
