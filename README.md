@@ -62,6 +62,7 @@ just setup
 just verify
 just module rust verify
 just module javascript verify
+just javascript-test
 just bootstrap-test docker
 just bootstrap-test podman
 just release
@@ -69,9 +70,15 @@ just example
 ```
 
 `just verify` runs syntax/format checks, unit tests, real neutral Git transactions,
-real host-Nix bootstrap tests, and the tiny deterministic demo build. Container
-tests opt into an installed engine. `just bootstrap-test` exposes the host engine
-client to the Nix test process; it does not use a host language interpreter.
+real host-Nix bootstrap tests, and the tiny deterministic demo build.
+The bootstrap suite includes public dependency/runtime updates, failed and
+interrupted verification with resume, and preservation of partial staging.
+Container tests opt into an installed engine. `just bootstrap-test` exposes the
+host engine client to the Nix test process; it does not use a host language interpreter.
+`just javascript-test` uses the pinned npm and pnpm binaries against a disposable
+local registry to qualify dependency resolution, overrides and frozen lock checks.
+It includes the JavaScript unit suite and local pnpm installation/receipt checks,
+and requires no public registry downloads.
 Optional modules cover JavaScript/TypeScript, Rust, Python, Go, Flutter/Dart,
 SwiftPM/SwiftUI and Gradle/Compose. They are loaded only when requested. The manually
 dispatched workflow contains portable and native Apple lanes; running one lane is

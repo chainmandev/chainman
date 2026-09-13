@@ -1,5 +1,6 @@
 """Bootstrap qualification uses real Nix and neutral temporary runtime archives."""
 
+import base64
 import hashlib
 import json
 import os
@@ -244,6 +245,10 @@ print('entry and Git authority are read-only')
             target = runtime / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(SOURCE / name, target)
+        self.bundle_runtime(runtime)
+        return runtime
+
+    def bundle_runtime(self, runtime):
         self.lock["narHash"] = subprocess.check_output(
             [
                 NIX,
@@ -258,7 +263,336 @@ print('entry and Git authority are read-only')
         with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
             archive.add(runtime, arcname="runtime")
         self.write_lock()
-        return runtime
+
+    def lifecycle_git(self, *args):
+        return subprocess.check_output(
+            ["git", "-C", str(self.root), *args], text=True, env=self.env
+        ).strip()
+
+    def update_lifecycle(self, *, reject=False, block=False):
+        runtime = self.use_real_runtime()
+        self.lock["version"] = (runtime / "VERSION").read_text().strip()
+        self.write_lock()
+        self.launcher.chmod(0o755)
+        (self.root / "scripts/chainman-fetch.nix").chmod(0o644)
+        # Reuse only the fixture's Nix/download cache between cases. Each test
+        # owns its consumer and clears its transaction directory during cleanup.
+        cache = Path(self.shared.name) / "lifecycle cache"
+        self.env["XDG_CACHE_HOME"] = str(cache)
+        self.update_cache = cache / "chainman/updates"
+        self.addCleanup(shutil.rmtree, self.update_cache, ignore_errors=True)
+        (self.root / ".gitignore").write_text(".cache/\nreal-runtime/\n")
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[updates]
+profile="host"
+outputs=["dependency.lock"]
+targets=["assets"]
+verify_task="verify"
+[[updates.steps]]
+targets=["assets"]
+commands=[["python3", "workflow.py", "resolve"]]
+[tasks.verify]
+commands=[["python3", "workflow.py", "verify"]]
+[tasks.format-write]
+commands=[["python3", "workflow.py", "format-write"]]
+[tasks.format-check]
+commands=[["python3", "workflow.py", "format-check"]]
+[recipes]
+format-write=["format-write"]
+format-check=["format-check"]
+""")
+        (self.root / "dependency.lock").write_text("old\n")
+        for name in ("selected.txt", "excluded.txt", "partial.txt"):
+            (self.root / name).write_text("original\n")
+        (self.root / "workflow.py").write_text(
+            "import os, pathlib, sys, time\n"
+            "root = pathlib.Path.cwd()\n"
+            # Every project command must execute in the isolated candidate.
+            f"assert str(root) != {str(self.root)!r}\n"
+            "action = sys.argv[1]\n"
+            "if action == 'resolve':\n"
+            f"    (root / 'dependency.lock').write_text({'rejected\n' if reject else 'accepted\n'!r})\n"
+            "elif action == 'verify':\n"
+            "    assert sys.stdin.read() == ''\n"
+            f"    if {block!r} and not (root / '.cache/continue').exists():\n"
+            "        (root / '.cache/verifier.pid').write_text(str(os.getpid()))\n"
+            "        time.sleep(120)\n"
+            "    assert (root / 'dependency.lock').read_text() == 'accepted\\n', 'fixture verification rejected'\n"
+            "elif action == 'format-write':\n"
+            "    for name in ('selected.txt', 'excluded.txt', 'partial.txt'):\n"
+            "        path = root / name\n"
+            "        path.write_text(path.read_text().strip() + '\\n')\n"
+            "elif action == 'format-check':\n"
+            "    assert (root / 'selected.txt').read_text() == 'selected\\n'\n"
+            "    assert (root / 'excluded.txt').read_text() == 'excluded  \\n'\n"
+            "    assert (root / 'partial.txt').read_text() == 'unstaged  \\n'\n"
+            "print('fixture phase: ' + action, file=sys.stderr)\n"
+        )
+        subprocess.run(
+            ["python3", str(runtime / "scripts/recipes.py"), str(self.root)],
+            check=True,
+            env=self.env,
+            capture_output=True,
+        )
+        self.lifecycle_git("init", "-b", "main")
+        self.lifecycle_git("config", "user.name", "Fixture")
+        self.lifecycle_git("config", "user.email", "fixture@example.invalid")
+        self.lifecycle_git("config", "commit.gpgsign", "false")
+        self.lifecycle_git("config", "core.hooksPath", "/dev/null")
+        self.lifecycle_git("add", ".")
+        self.lifecycle_git("commit", "-m", "Initial fixture")
+        return self.lifecycle_git("rev-parse", "HEAD")
+
+    def test_public_update_lifecycle_commits_and_cleans_up(self):
+        before = self.update_lifecycle()
+        result = self.run_bootstrap("deps-update", "--json")
+        accepted = json.loads(result.stdout)
+        self.assertEqual(accepted["changed"], ["dependency.lock"])
+        self.assertEqual(accepted["verification"], "passed")
+        self.assertEqual(accepted["commit"], self.lifecycle_git("rev-parse", "HEAD"))
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+        self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+        self.assertEqual((self.root / "dependency.lock").read_text(), "accepted\n")
+        self.assertIn("fixture phase: resolve", result.stderr)
+        self.assertIn("fixture phase: verify", result.stderr)
+        self.assertEqual(list(self.update_cache.iterdir()), [])
+        unchanged = json.loads(self.run_bootstrap("deps-update", "--json").stdout)
+        self.assertEqual(unchanged["verification"], "no changes")
+        self.assertIsNone(unchanged["commit"])
+        self.assertEqual(list(self.update_cache.iterdir()), [])
+
+    def test_public_update_lifecycle_preserves_failure_and_reverifies_resume(self):
+        before = self.update_lifecycle(reject=True)
+        rejected = self.run_bootstrap("deps-update", "--json", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("fixture verification rejected", rejected.stderr)
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+        self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
+        candidates = list(self.update_cache.glob("candidate.*"))
+        self.assertEqual(len(candidates), 1)
+        candidate = candidates[0] / "candidate"
+        self.assertEqual((candidate / "dependency.lock").read_text(), "rejected\n")
+        (candidate / "dependency.lock").write_text("accepted\n")
+        resumed = self.run_bootstrap("deps-update", f"resume={candidates[0]}")
+        self.assertEqual(json.loads(resumed.stdout)["verification"], "passed")
+        self.assertIn("fixture phase: verify", resumed.stderr)
+        self.assertNotIn("fixture phase: resolve", resumed.stderr)
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+        self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+        self.assertEqual((self.root / "dependency.lock").read_text(), "accepted\n")
+        self.assertEqual(list(self.update_cache.iterdir()), [])
+
+    def test_public_update_lifecycle_interruption_can_resume(self):
+        before = self.update_lifecycle(block=True)
+
+        def running(pid):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            if Path("/proc").is_dir():
+                try:
+                    return (
+                        Path(f"/proc/{pid}/stat")
+                        .read_text()
+                        .rpartition(") ")[2]
+                        .split()[0]
+                        != "Z"
+                    )
+                except FileNotFoundError:
+                    return False
+            return True
+
+        with tempfile.TemporaryFile(mode="w+") as output:
+            command = subprocess.Popen(
+                [str(self.launcher), "deps-update", "--json"],
+                cwd="/",
+                env=self.env,
+                stdout=output,
+                stderr=output,
+                start_new_session=True,
+            )
+            pid = None
+            try:
+                deadline = time.monotonic() + 120
+                markers = []
+                while command.poll() is None and time.monotonic() < deadline:
+                    markers = list(
+                        self.update_cache.glob(
+                            "candidate.*/candidate/.cache/verifier.pid"
+                        )
+                    )
+                    if markers:
+                        break
+                    time.sleep(0.05)
+                if not markers:
+                    output.seek(0)
+                    self.fail("Verifier did not start: " + output.read())
+                pid = int(markers[0].read_text())
+                transaction = markers[0].parents[2]
+                os.killpg(command.pid, signal.SIGTERM)
+                command.wait(timeout=15)
+                self.assertNotEqual(command.returncode, 0)
+                self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+                self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+                self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
+                deadline = time.monotonic() + 5
+                while running(pid) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(running(pid), "Interrupted verifier is still running")
+                (markers[0].parent / "continue").touch()
+                result = self.run_bootstrap("deps-update", f"resume={transaction}")
+                self.assertEqual(json.loads(result.stdout)["verification"], "passed")
+                self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+                self.assertEqual(list(self.update_cache.iterdir()), [])
+            finally:
+                if command.poll() is None:
+                    os.killpg(command.pid, signal.SIGKILL)
+                    command.wait(timeout=15)
+                if pid is not None and running(pid):
+                    os.kill(pid, signal.SIGKILL)
+
+    def test_public_update_lifecycle_staged_format_preserves_other_bytes_and_index(
+        self,
+    ):
+        before = self.update_lifecycle()
+        (self.root / "selected.txt").write_text("selected  \n")
+        (self.root / "partial.txt").write_text("staged  \n")
+        self.lifecycle_git("add", "selected.txt", "partial.txt")
+        (self.root / "partial.txt").write_text("unstaged  \n")
+        (self.root / "excluded.txt").write_text("excluded  \n")
+        partial = self.lifecycle_git("ls-files", "--stage", "partial.txt")
+        result = self.run_bootstrap("format", "--staged", "--json")
+        accepted = json.loads(result.stdout)
+        self.assertEqual(accepted["changed"], ["selected.txt"])
+        self.assertIsNone(accepted["commit"])
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+        self.assertEqual((self.root / "selected.txt").read_text(), "selected\n")
+        self.assertEqual(self.lifecycle_git("show", ":selected.txt"), "selected")
+        self.assertEqual((self.root / "excluded.txt").read_text(), "excluded  \n")
+        self.assertEqual((self.root / "partial.txt").read_text(), "unstaged  \n")
+        self.assertEqual(
+            self.lifecycle_git("ls-files", "--stage", "partial.txt"), partial
+        )
+        self.assertIn("fixture phase: format-check", result.stderr)
+        self.assertEqual(list(self.update_cache.iterdir()), [])
+
+    def test_public_runtime_update_lifecycle_switches_only_after_verification(self):
+        self.update_lifecycle()
+        temporary = tempfile.TemporaryDirectory(prefix="chainman release fixture ")
+        self.addCleanup(temporary.cleanup)
+        previous = self.root / "real-runtime"
+        next_runtime = Path(temporary.name) / "next-runtime"
+        shutil.copytree(previous, next_runtime)
+        (next_runtime / "VERSION").write_text("0.2.0\n")
+        with (next_runtime / "bootstrap/chainman.sh").open("a") as stream:
+            stream.write("\n# Neutral second-generation bootstrap fixture.\n")
+        self.bundle_runtime(next_runtime)
+        body = (self.root / "bundle.tar.gz").read_bytes()
+        revision = "b" * 40
+        metadata = dict(
+            schema=1,
+            version="0.2.0",
+            revision=revision,
+            url="https://example.invalid/chainman-0.2.0.tar.gz",
+            narHash=self.lock["narHash"],
+            archive_sha256=hashlib.sha256(body).hexdigest(),
+        )
+        published = "2026-01-01T00:00:00Z"
+        release = dict(
+            tag_name="v0.2.0",
+            draft=False,
+            prerelease=False,
+            published_at=published,
+            assets=[],
+        )
+        api = "https://api.github.com/repos/chainmandev/chainman"
+        responses = {}
+        for number, name, data in (
+            (1, "chainman-release.json", json.dumps(metadata).encode()),
+            (2, "chainman-0.2.0.tar.gz", body),
+        ):
+            release["assets"].append(
+                dict(
+                    id=number,
+                    name=name,
+                    state="uploaded",
+                    size=len(data),
+                    digest="sha256:" + hashlib.sha256(data).hexdigest(),
+                    created_at=published,
+                    updated_at=published,
+                )
+            )
+            responses[f"{api}/releases/assets/{number}"] = data
+        for url, value in {
+            f"{api}/releases?per_page=100&page=1": [release],
+            f"{api}/releases/tags/v0.2.0": release,
+            f"{api}/git/ref/tags/v0.2.0": {
+                "object": {"type": "commit", "sha": revision}
+            },
+            f"{api}/commits/{revision}": {
+                "sha": revision,
+                "commit": {"committer": {"date": published}},
+            },
+        }.items():
+            responses[url] = json.dumps(value).encode()
+        # Replace only the remote transport in the old immutable fixture runtime.
+        # Selection, asset/date/hash checks, Nix unpacking, public orchestration,
+        # candidate verification and application use the actual implementations.
+        encoded = {
+            url: base64.b64encode(data).decode() for url, data in responses.items()
+        }
+        with (previous / "scripts/registry.py").open("a") as stream:
+            stream.write(
+                f"\n_fixture_responses = {encoded!r}\n"
+                "def _fetch(url, *args, **kwargs):\n"
+                "    return base64.b64decode(_fixture_responses[url]), {}\n"
+            )
+        self.bundle_runtime(previous)
+        workflow = self.root / "workflow.py"
+        workflow.write_text(
+            workflow.read_text().replace(
+                "assert (root / 'dependency.lock').read_text() == 'accepted\\n', 'fixture verification rejected'",
+                "assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'VERSION').read_text().strip() == '0.2.0'\n"
+                f"    assert __import__('json').loads(pathlib.Path({str(self.root / 'chainman.lock')!r}).read_text())['version'] == '0.1.0'",
+            )
+        )
+        self.lifecycle_git("add", ".")
+        self.lifecycle_git(
+            "commit", "-m", "Declare immutable release transport fixture"
+        )
+        before = self.lifecycle_git("rev-parse", "HEAD")
+        probe = "import os; print(os.environ['CHAINMAN_RUNTIME'])"
+        old_path = Path(
+            self.run_bootstrap(
+                "exec", "--profile", "host", "--", "python3", "-c", probe
+            ).stdout.strip()
+        )
+        result = self.run_bootstrap("chainman-update", "--json")
+        accepted = json.loads(result.stdout)
+        self.assertEqual(
+            set(accepted["changed"]),
+            {"chainman.lock", "bundle.tar.gz", "scripts/chainman.sh"},
+        )
+        self.assertEqual(accepted["commit"], self.lifecycle_git("rev-parse", "HEAD"))
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+        self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+        self.assertEqual(
+            json.loads((self.root / "chainman.lock").read_text())["version"], "0.2.0"
+        )
+        new_path = Path(
+            self.run_bootstrap(
+                "exec", "--profile", "host", "--", "python3", "-c", probe
+            ).stdout.strip()
+        )
+        self.assertNotEqual(old_path, new_path)
+        self.assertEqual((old_path / "VERSION").read_text(), "0.1.0\n")
+        self.assertEqual((new_path / "VERSION").read_text(), "0.2.0\n")
+        self.assertIn("fixture phase: verify", result.stderr)
+        self.assertEqual(list(self.update_cache.iterdir()), [])
 
     def schema_three_recovery(self, mode):
         self.use_real_runtime()
