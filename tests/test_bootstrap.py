@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import shlex
 import signal
 import subprocess
 import tarfile
@@ -1231,6 +1232,60 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
                 [nix_store, "--query", "--roots", str(runtime)], text=True
             ),
         )
+
+    def test_failed_root_inventory_requires_successful_reregistration(self):
+        cache = self.root / "private-cache"
+        env = dict(self.env, XDG_CACHE_HOME=str(cache))
+        self.run_bootstrap("first", env=env)
+        runtime = self.records()[0]["runtime"]
+        root = (
+            cache
+            / "chainman/runtime-roots"
+            / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
+        )
+        wrappers = self.root / "observed nix"
+        wrappers.mkdir()
+        attempted = self.root / "registration-attempted"
+        fail = self.root / "fail-registration"
+        (wrappers / "nix").write_text(
+            "#!/bin/sh\nset -eu\n"
+            "for argument do\n"
+            ' if [ "$argument" = --out-link ]; then\n'
+            f"  printf attempt >> {shlex.quote(str(attempted))}\n"
+            f"  [ ! -f {shlex.quote(str(fail))} ] || exit 23\n"
+            " fi\ndone\n"
+            f'exec {shlex.quote(NIX)} "$@"\n'
+        )
+        # A failed global roots inventory cannot establish whether this runtime
+        # is rooted. All fetch/build/registration operations still use real Nix.
+        (wrappers / "nix-store").write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = --query ] && [ "$2" = --roots ]; then\n'
+            " echo 'fixture: root inventory unavailable' >&2\n exit 31\nfi\n"
+            f'exec {shlex.quote(str(Path(NIX).resolve().with_name("nix-store")))} "$@"\n'
+        )
+        for executable in wrappers.iterdir():
+            executable.chmod(0o755)
+        env["CHAINMAN_NIX_BIN"] = str(wrappers / "nix")
+        self.run_bootstrap("repair", env=env)
+        self.assertEqual(attempted.read_text(), "attempt")
+        self.assertEqual(root.readlink(), Path(runtime))
+        roots = subprocess.check_output(
+            [
+                str(Path(NIX).resolve().with_name("nix-store")),
+                "--query",
+                "--roots",
+                runtime,
+            ],
+            text=True,
+        )
+        self.assertIn(str(root), roots)
+        self.assertEqual(len(self.records()), 2)
+        fail.touch()
+        result = self.run_bootstrap("failed-repair", env=env, check=False)
+        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+        self.assertEqual(attempted.read_text(), "attemptattempt")
+        self.assertEqual(len(self.records()), 2)
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),

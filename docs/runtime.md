@@ -36,6 +36,10 @@ entry still fetches and verifies the selected archive and checks the exact root
 target. This avoids temporary-link collisions between equal PIDs in separate
 containers sharing a Nix volume. Concurrent first registration can reuse another
 writer's completed root only after the same verification succeeds.
+If the root inventory is unavailable, bootstrap re-fetches and registers the
+verified runtime before dispatch. A failed registration remains a failed command.
+This handles the reproduced Nix temporary-root inventory race without assuming
+that an existing symlink alone proves registration or retrying project commands.
 
 A stop request announces a durable cancellation ticket before acquiring the
 service mutation lock. Startup checks that ticket while waiting for readiness,

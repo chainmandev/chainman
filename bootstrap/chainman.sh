@@ -376,8 +376,11 @@ EOF
     [ "$(readlink "$runtime_root")" = "$store" ] || fail 'Runtime GC root does not match the verified source.'
     # A process killed between creating the link and registering its indirect
     # root must not leave a permanently unregistered warm-cache entry.
-    registered_roots=$("$CHAINMAN_RUNTIME_NIX_BIN/nix-store" --query --roots "$store")
-    if ! printf '%s\n' "$registered_roots" | grep -F -x -q -- "$runtime_root -> $store"; then
+    # Concurrent Nix root inventories can race while marking stale temporary
+    # roots. An unavailable inventory leaves registration unconfirmed, just like
+    # a missing entry. Re-fetch and register successfully before dispatching.
+    if ! registered_roots=$("$CHAINMAN_RUNTIME_NIX_BIN/nix-store" --query --roots "$store") \
+        || ! printf '%s\n' "$registered_roots" | grep -F -x -q -- "$runtime_root -> $store"; then
         store=$(fetch_runtime --out-link "$runtime_root")
     fi
     actual=$("$nix_bin" --extra-experimental-features nix-command hash path "$store")
