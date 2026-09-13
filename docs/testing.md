@@ -28,7 +28,7 @@ annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 43 source
-files, including 36 with the strict flags. Recipe bindings and verification task
+files, including 37 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -43,8 +43,11 @@ configuration maps still need further typing.
 Bootstrap command projections, public configuration inspection and the consumer
 qualification checker also enforce strict flags. Service declarations expose
 validated named maps; service execution and export narrow their nested records
-before constructing commands. The rest of service lifecycle code still needs
-complete typing.
+before constructing commands. Service planning and lifecycle entrypoints enforce
+strict flags; their exported commands, volumes, readiness checks, watched builds,
+services and plans have named JSON records matching the controller inputs. The
+Python executor distinguishes text and binary subprocess results and shares its
+stream and descriptor options with the lower-level managed subprocess wrapper.
 Module adapter assembly, nonstandard GitHub tag selection and declared artifact
 snapshots also enforce strict flags. Selected tags and artifact identities have
 named records; manifest pointers are copied into snapshot records so callers

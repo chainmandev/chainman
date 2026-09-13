@@ -10,6 +10,7 @@ import secrets
 import subprocess
 from urllib.parse import urlsplit
 from collections.abc import Mapping
+from typing import Literal, NotRequired, TypedDict
 from adapter_data import Table, array, strings, table, text
 
 import chainman
@@ -18,7 +19,97 @@ import workflows
 import project_environment
 
 
-def http_readiness(value):
+class Command(TypedDict):
+    argv: list[str]
+    directory: str
+    environment: dict[str, str]
+
+
+class Container(TypedDict):
+    engine: str
+    name: str
+    token: str
+
+
+class Volume(TypedDict):
+    engine: str
+    name: str
+    scope: str
+    compatibility: str
+    policy: str
+    services: list[str]
+
+
+class HTTPProbe(TypedDict):
+    port: int
+    path: str
+    status_code: int
+
+
+class Probe(TypedDict):
+    command: NotRequired[Command]
+    http_get: NotRequired[HTTPProbe]
+    period_seconds: int
+    timeout_seconds: int
+    failure_threshold: int
+
+
+class Watch(TypedDict):
+    build: Command
+    paths: list[str]
+    ignore: list[str]
+    debounce_ms: int
+    startup_seconds: int
+    container: NotRequired[Container]
+
+
+class Service(TypedDict):
+    command: Command
+    depends_on: list[str]
+    restart: str
+    shutdown_seconds: int
+    network_service: NotRequired[str]
+    container: NotRequired[Container]
+    readiness: NotRequired[Probe]
+    watch: NotRequired[Watch]
+
+
+class Bridge(TypedDict):
+    engine: str
+    name: str
+    scope: str
+
+
+class Plan(TypedDict):
+    schema: Literal[1]
+    root: str
+    state: str
+    backend: str
+    licenses: dict[str, str]
+    fingerprint: str
+    services: dict[str, Service]
+    requested: list[str]
+    watcher: NotRequired[str]
+    volumes: NotRequired[list[Volume]]
+    prepare: NotRequired[Command]
+    task: NotRequired[Command]
+    wait_for_services: NotRequired[bool]
+    exclusive_services: NotRequired[bool]
+    own_task: NotRequired[bool]
+    task_shutdown_seconds: NotRequired[int]
+    resources: NotRequired[list[Plan]]
+    bridge: NotRequired[Bridge]
+    task_network_service: NotRequired[str]
+    task_container: NotRequired[Container]
+
+
+def integer(value: object, field: str) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field} must be an integer")
+    return value
+
+
+def http_readiness(value: object) -> HTTPProbe:
     if not isinstance(value, dict) or set(value) - {"port", "path", "status_code"}:
         raise ValueError("Invalid HTTP readiness declaration")
     port, path, status = (
@@ -43,7 +134,7 @@ def http_readiness(value):
     return {"port": port, "path": path, "status_code": status}
 
 
-def volume_compatibility(root, volume):
+def volume_compatibility(root: Path, volume: object) -> str:
     allowed = {"name", "target", "policy", "format", "inputs"}
     if not isinstance(volume, dict) or set(volume) - allowed:
         raise ValueError("Invalid service volume declaration")
@@ -82,7 +173,9 @@ def volume_compatibility(root, volume):
     return digest.hexdigest()
 
 
-def command(argv, root, environment=None):
+def command(
+    argv: list[str], root: Path, environment: Mapping[str, str] | None = None
+) -> Command:
     workflows.commands([argv])
     selected = dict(environment or {})
     # Preserve architecture when a saved controller plan is restarted by a caller
@@ -293,24 +386,33 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
     return entries
 
 
-def literal_environment(values, root, env=None):
+def literal_environment(
+    values: object, root: Path, env: Mapping[str, str] | None = None
+) -> dict[str, str]:
     return project_environment.expand(values, root, os.environ if env is None else env)
 
 
-def config_fingerprint(root, cfg, *, include_volume_inputs=True, env=None):
+def config_fingerprint(
+    root: Path,
+    cfg: Mapping[str, object],
+    *,
+    include_volume_inputs: bool = True,
+    env: Mapping[str, str] | None = None,
+) -> str:
     env = os.environ if env is None else env
-    declared = cfg.get("services", {})
-    workflow_specs = [*declared.values(), *cfg.get("tasks", {}).values()]
+    declared = workflows.declarations(cfg, "services")
+    tasks = workflows.declarations(cfg, "tasks")
+    workflow_specs = [*declared.values(), *tasks.values()]
     profiles = sorted(
         {
-            spec.get(
-                "profile", cfg.get("project", {}).get("default_profile", "default")
+            text(
+                spec.get("profile", workflows.default_profile(cfg)), "Workflow profile"
             )
             for spec in workflow_specs
             if "command" in spec or "commands" in spec
         }
     )
-    material = [
+    material: list[object] = [
         str(chainman.RUNTIME),
         tc.context_id(),
         os.environ.get("CHAINMAN_CONTAINER_PLATFORM", ""),
@@ -319,15 +421,21 @@ def config_fingerprint(root, cfg, *, include_volume_inputs=True, env=None):
         cfg.get("environment", {}),
         cfg.get("container", {}),
         cfg.get("tasks", {}),
-        project_environment.file_fingerprint(root, cfg.get("environment", {}), env),
+        project_environment.file_fingerprint(
+            root, table(cfg.get("environment", {}), "Project environment"), env
+        ),
     ]
     material += [
         chainman.profile_fingerprint(root, name, chainman.profile(root, name)[0])
         for name in profiles
     ]
     groups = workflows.order(
-        cfg.get("setup", {}),
-        [group for spec in workflow_specs for group in spec.get("setup", [])],
+        workflows.declarations(cfg, "setup"),
+        [
+            group
+            for spec in workflow_specs
+            for group in workflows.names(spec.get("setup", []))
+        ],
     )
     material += [
         workflows.fingerprint(root, workflows.group_spec(cfg, name), env)
@@ -337,12 +445,15 @@ def config_fingerprint(root, cfg, *, include_volume_inputs=True, env=None):
         material += [
             volume_compatibility(root, volume)
             for spec in declared.values()
-            for volume in spec.get("container", {}).get("volumes", [])
+            for volume in array(
+                table(spec.get("container", {}), "Container").get("volumes", []),
+                "Service volumes",
+            )
         ]
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
-def scope_key(host_state, root, mode):
+def scope_key(host_state: str | Path, root: Path, mode: str) -> str:
     # The host's private cache domain is stable across host/container UID mapping
     # and keeps distinct OS users from claiming the same rootful engine names.
     return hashlib.sha256(
@@ -350,7 +461,9 @@ def scope_key(host_state, root, mode):
     ).hexdigest()[:24]
 
 
-def repository_scope(root, host_state, declared):
+def repository_scope(
+    root: Path, host_state: str | Path, declared: Mapping[str, Table]
+) -> tuple[Path, str, str] | None:
     shared = {
         name: spec
         for name, spec in declared.items()
@@ -381,7 +494,10 @@ def repository_scope(root, host_state, declared):
         [
             volume_compatibility(root, volume)
             for spec in shared.values()
-            for volume in spec["container"].get("volumes", [])
+            for volume in array(
+                table(spec["container"], "Container").get("volumes", []),
+                "Service volumes",
+            )
         ],
     ]
     return (
@@ -391,7 +507,7 @@ def repository_scope(root, host_state, declared):
     )
 
 
-def bridge_scope(root, host_state):
+def bridge_scope(root: Path, host_state: str | Path) -> tuple[Path, str]:
     # Only an adopted Git root may share resources with its linked worktrees.
     # An embedded standalone consumer must not borrow an enclosing repository.
     common = root.resolve()
@@ -417,7 +533,7 @@ def bridge_scope(root, host_state):
     return common, scope_key(host_state, common, "network")
 
 
-def export(root, arguments):
+def export(root: Path, arguments: list[str]) -> int:
     if len(arguments) < 6:
         raise ValueError("Invalid internal controller export request")
     output, target, host_state, engine, launcher, action, *extra = arguments
@@ -537,8 +653,8 @@ def export(root, arguments):
     shared_scope = (
         repository_scope(root, host_state, declared) if shared_requested else None
     )
-    prepared = {}
-    volumes: dict[str, dict] = {}
+    prepared: dict[str, Service] = {}
+    volumes: dict[str, Volume] = {}
     for name, spec in declared.items():
         if name in shared_names and not shared_requested:
             continue
@@ -585,10 +701,10 @@ def export(root, arguments):
                 if not isinstance(port, str) or not port.startswith("127.0.0.1:"):
                     raise ValueError("Service ports must explicitly bind loopback")
                 argv += ["--publish", port]
-            for key_env, value in literal_environment(
+            for key_env, environment_value in literal_environment(
                 item.get("environment", {}), root, planning_env
             ).items():
-                argv += ["--env", key_env + "=" + value]
+                argv += ["--env", key_env + "=" + environment_value]
             for raw_volume in array(item.get("volumes", []), "Service volumes"):
                 volume = table(raw_volume, "Service volume")
                 compatibility = volume_compatibility(root, volume)
@@ -610,7 +726,7 @@ def export(root, arguments):
                     "name": f"chainman-{service_key}-{volume['name']}",
                     "scope": service_key,
                     "compatibility": compatibility,
-                    "policy": volume.get("policy", "preserve"),
+                    "policy": text(volume.get("policy", "preserve"), "Volume policy"),
                 }
                 previous = volumes.get(declared_volume["name"])
                 if (
@@ -628,15 +744,24 @@ def export(root, arguments):
                 if previous:
                     previous["services"].append(name)
                 else:
-                    volumes[declared_volume["name"]] = dict(
-                        declared_volume, services=[name]
-                    )
+                    volumes[declared_volume["name"]] = {
+                        "engine": declared_volume["engine"],
+                        "name": declared_volume["name"],
+                        "scope": declared_volume["scope"],
+                        "compatibility": declared_volume["compatibility"],
+                        "policy": declared_volume["policy"],
+                        "services": [name],
+                    }
             argv += [
                 text(item["image"], "Container image"),
                 *strings(item.get("command", []), "Container command"),
             ]
             launch = command(argv, service_root, env)
-            ownership = {"engine": engine, "name": container_name, "token": owner}
+            ownership: Container | None = {
+                "engine": engine,
+                "name": container_name,
+                "token": owner,
+            }
         else:
             launch = command(
                 [launcher, "_workflow-service", name, fingerprint], root, env
@@ -652,15 +777,15 @@ def export(root, arguments):
                     CHAINMAN_CONTAINER_ALIAS=service_endpoints.alias(root, name),
                 )
                 ownership = {"engine": engine, "name": container_name, "token": owner}
-        value = {
+        value: Service = {
             "command": launch,
             "depends_on": [
                 dependency
                 for dependency in workflows.names(spec.get("depends_on", []))
                 if (dependency in shared_names) == (name in shared_names)
             ],
-            "restart": spec.get("restart", "no"),
-            "shutdown_seconds": spec.get("shutdown_seconds", 10),
+            "restart": text(spec.get("restart", "no"), "Service restart"),
+            "shutdown_seconds": workflows.task_seconds(spec, "shutdown_seconds"),
         }
         if spec.get("network_service") and ownership:
             peer = declared[workflows.name(spec["network_service"])]
@@ -668,13 +793,24 @@ def export(root, arguments):
                 raise ValueError(
                     "A data container cannot borrow a host command's network"
                 )
-            value["network_service"] = spec["network_service"]
+            value["network_service"] = text(spec["network_service"], "Network service")
         if ownership:
             value["container"] = ownership
         if "readiness" in spec:
             probe = table(spec["readiness"], "Service readiness")
+            prepared_probe: Probe = {
+                "period_seconds": integer(
+                    probe.get("period_seconds", 1), "Probe period"
+                ),
+                "timeout_seconds": integer(
+                    probe.get("timeout_seconds", 2), "Probe timeout"
+                ),
+                "failure_threshold": integer(
+                    probe.get("failure_threshold", 30), "Probe failures"
+                ),
+            }
             if "http_get" in probe:
-                prepared_probe = {"http_get": http_readiness(probe["http_get"])}
+                prepared_probe["http_get"] = http_readiness(probe["http_get"])
             elif "container" in spec:
                 probe_command = [
                     engine,
@@ -700,13 +836,8 @@ def export(root, arguments):
                     fingerprint,
                 ]
             if "http_get" not in probe:
-                prepared_probe = {"command": command(probe_command, service_root, env)}
-            value["readiness"] = {
-                **prepared_probe,
-                "period_seconds": probe.get("period_seconds", 1),
-                "timeout_seconds": probe.get("timeout_seconds", 2),
-                "failure_threshold": probe.get("failure_threshold", 30),
-            }
+                prepared_probe["command"] = command(probe_command, service_root, env)
+            value["readiness"] = prepared_probe
         prepared[name] = value
         if "watch" in spec:
             watch = table(spec["watch"], "Service watch")
@@ -726,9 +857,11 @@ def export(root, arguments):
                     str(tc.contained(root, path))
                     for path in strings(watch["paths"], "Watch paths")
                 ],
-                "ignore": watch.get("ignore", []),
-                "debounce_ms": watch.get("debounce_ms", 100),
-                "startup_seconds": watch.get("startup_seconds", 300),
+                "ignore": strings(watch.get("ignore", []), "Watch ignores"),
+                "debounce_ms": integer(watch.get("debounce_ms", 100), "Watch debounce"),
+                "startup_seconds": integer(
+                    watch.get("startup_seconds", 300), "Watch startup"
+                ),
             }
             if mode == "container-nix":
                 build_owner = secrets.token_hex(16)
@@ -743,7 +876,7 @@ def export(root, arguments):
                     "name": build_name,
                     "token": build_owner,
                 }
-    plan = {
+    plan: Plan = {
         "schema": 1,
         "root": str(root),
         "state": state,
@@ -853,7 +986,7 @@ def export(root, arguments):
         if networks:
             plan["task_network_service"] = networks.pop()
         owner = secrets.token_hex(16)
-        task_container = {
+        task_container: Container = {
             "engine": engine,
             "name": "chainman-" + key + "-task-" + owner[:8],
             "token": owner,
@@ -868,7 +1001,7 @@ def export(root, arguments):
     return 0
 
 
-def prepare_requested(root, arguments):
+def prepare_requested(root: Path, arguments: list[str]) -> int:
     if len(arguments) != 1:
         raise ValueError("Service preparation requires one task")
     cfg = workflows.configuration(root)
@@ -883,26 +1016,44 @@ def prepare_requested(root, arguments):
     return result
 
 
-def prepare_setup(root, cfg, entries, name, *, context_task=None):
-    tasks = workflows.order(cfg.get("tasks", {}), [name])
+def prepare_setup(
+    root: Path,
+    cfg: Mapping[str, object],
+    entries: Mapping[str, Table],
+    name: str,
+    *,
+    context_task: str | None = None,
+) -> int:
+    task_entries = workflows.declarations(cfg, "tasks")
+    tasks = workflows.order(task_entries, [name])
     requested = [
-        service for task in tasks for service in cfg["tasks"][task].get("services", [])
+        service
+        for task in tasks
+        for service in workflows.names(task_entries[task].get("services", []))
     ]
     selected = workflows.order(entries, requested)
     tasks = workflows.order(
-        cfg.get("tasks", {}),
+        task_entries,
         [
             *tasks,
             *(
-                entries[service]["watch"]["task"]
+                workflows.name(
+                    table(entries[service]["watch"], "Service watch")["task"]
+                )
                 for service in selected
                 if "watch" in entries[service]
             ),
         ],
     )
-    groups = [group for task in tasks for group in cfg["tasks"][task].get("setup", [])]
+    groups = [
+        group
+        for task in tasks
+        for group in workflows.names(task_entries[task].get("setup", []))
+    ]
     groups += [
-        group for service in selected for group in entries[service].get("setup", [])
+        group
+        for service in selected
+        for group in workflows.names(entries[service].get("setup", []))
     ]
     return (
         workflows.run(
@@ -916,7 +1067,7 @@ def prepare_setup(root, cfg, entries, name, *, context_task=None):
     )
 
 
-def execute_internal(root, action, extra):
+def execute_internal(root: Path, action: str, extra: list[str]) -> int:
     if len(extra) < 2:
         raise ValueError("Internal workflow execution requires a name")
     name, expected, *arguments = extra

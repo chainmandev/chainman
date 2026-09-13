@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+from typing import Literal, Unpack, overload
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import toolchain as tc
@@ -155,18 +156,76 @@ def profile_environment(
     return selected
 
 
+class ExecuteOptions(tc.ProcessIOOptions, total=False):
+    capture_output: bool
+    timeout: float | None
+
+
+@overload
 def execute(
     root: Path,
     name: str,
     argv: list[str],
     *,
-    env=None,
-    overrides=None,
-    check=True,
+    text: Literal[True],
+    input: str | None = None,
+    env: Mapping[str, str] | None = None,
+    overrides: object = None,
+    check: bool = True,
     cwd: Path | None = None,
     gc_root: Path | None = None,
-    **kwargs,
-):
+    **kwargs: Unpack[ExecuteOptions],
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def execute(
+    root: Path,
+    name: str,
+    argv: list[str],
+    *,
+    text: Literal[False] = False,
+    input: bytes | None = None,
+    env: Mapping[str, str] | None = None,
+    overrides: object = None,
+    check: bool = True,
+    cwd: Path | None = None,
+    gc_root: Path | None = None,
+    **kwargs: Unpack[ExecuteOptions],
+) -> subprocess.CompletedProcess[bytes]: ...
+
+
+@overload
+def execute(
+    root: Path,
+    name: str,
+    argv: list[str],
+    *,
+    text: bool,
+    input: str | bytes | None = None,
+    env: Mapping[str, str] | None = None,
+    overrides: object = None,
+    check: bool = True,
+    cwd: Path | None = None,
+    gc_root: Path | None = None,
+    **kwargs: Unpack[ExecuteOptions],
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]: ...
+
+
+def execute(
+    root: Path,
+    name: str,
+    argv: list[str],
+    *,
+    text: bool = False,
+    input: str | bytes | None = None,
+    env: Mapping[str, str] | None = None,
+    overrides: object = None,
+    check: bool = True,
+    cwd: Path | None = None,
+    gc_root: Path | None = None,
+    **kwargs: Unpack[ExecuteOptions],
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
     if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
         raise ValueError("Commands must be nonempty argument arrays")
     cfg = configuration(root)
@@ -263,7 +322,15 @@ def execute(
     selected.update(CHAINMAN_ACTIVE_PROFILE=name, CHAINMAN_ACTIVE_FINGERPRINT=token)
     selected.pop("TOOLCHAIN_FRESH", None)
     try:
-        return tc.managed_run(command, cwd=target, env=selected, check=check, **kwargs)
+        return tc.managed_run(
+            command,
+            cwd=target,
+            env=selected,
+            check=check,
+            text=text,
+            input=input,
+            **kwargs,
+        )
     finally:
         if timing_operation is not None:
             timing.emit("command", "end", timing_operation)

@@ -36,17 +36,20 @@ _COMPILER_STARTUP_SECONDS = 120
 type OperationState = tuple[int | None, int | None, str, int | None, tuple[int, ...]]
 
 
-class ProcessOptions(TypedDict, total=False):
-    """The process controls used by managed runtime children."""
-
-    cwd: str | Path | None
-    env: Mapping[str, str] | None
+class ProcessIOOptions(TypedDict, total=False):
     stdin: int | IO[str] | IO[bytes] | None
     stdout: int | IO[str] | IO[bytes] | None
     stderr: int | IO[str] | IO[bytes] | None
     pass_fds: Sequence[int]
     start_new_session: bool
     close_fds: bool
+
+
+class ProcessOptions(ProcessIOOptions, total=False):
+    """The process controls used by managed runtime children."""
+
+    cwd: str | Path | None
+    env: Mapping[str, str] | None
 
 
 class RunOptions(ProcessOptions, total=False):
