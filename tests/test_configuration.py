@@ -21,7 +21,7 @@ import bootstrap_plan
 class CompositionTests(unittest.TestCase):
     def test_malformed_cache_is_rejected_as_configuration_error(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             for value in ("false", "0", '"none"', "[]"):
                 (root / "chainman.toml").write_text(f"schema=3\ncache={value}\n")
                 with (
@@ -32,7 +32,7 @@ class CompositionTests(unittest.TestCase):
 
     def test_inspection_validates_environment_without_resolving_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = 'schema=3\n[project]\ndefault_profile="host"\n[tasks.check]\ncommands=[["true"]]\n'
             path = root / "chainman.toml"
             path.write_text(source + '[environment.values]\nSECRET="{env:MISSING}"\n')
@@ -51,7 +51,7 @@ class CompositionTests(unittest.TestCase):
 
     def test_bootstrap_and_explain_include_inherited_services_and_watched_setup(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "chainman.toml").write_text("""schema=3
 [project]
 default_profile="host"
@@ -156,7 +156,7 @@ extends="base"
 
     def test_execution_and_inspection_use_the_same_config_without_side_effects(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "chainman.toml").write_text("""schema=3
 [project]
 default_profile="host"
@@ -194,7 +194,7 @@ extends="base"
         import bootstrap_plan
 
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "chainman.toml").write_text(
                 'schema=3\n[templates.tasks.broken]\nextends="missing"\n'
             )
@@ -210,7 +210,7 @@ extends="base"
 
     def test_schema_three_keeps_full_validation(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             for declaration in (
                 '[tasks.bad]\nextends="base"\nsetup=["missing"]',
                 '[services.bad]\nextends="base"',
@@ -224,7 +224,7 @@ extends="base"
 
     def test_all_kinds_expand_and_template_changes_invalidate_fingerprints(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             body = """schema=3
 [project]
 default_profile="host"

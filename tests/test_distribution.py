@@ -63,7 +63,7 @@ class DistributionTests(unittest.TestCase):
 
     def test_example_keeps_one_runtime_implementation_and_its_own_sdk_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             source = {
                 "bootstrap/chainman.sh": (b"#!/bin/sh\n", 0o755),
                 "bootstrap/fetch.nix": (b"verified fetcher", 0o644),
@@ -142,7 +142,7 @@ class DistributionTests(unittest.TestCase):
                 },
             ),
         ):
-            root = Path(temporary) / "source"
+            root = Path(temporary).resolve() / "source"
             root.mkdir()
             git = package.git
             git(root, "init", "-b", "main")
@@ -189,7 +189,7 @@ class DistributionTests(unittest.TestCase):
                         git(root, "checkout", "--detach", later)
                 return result
 
-            output = Path(temporary) / "release"
+            output = Path(temporary).resolve() / "release"
             with patch.object(package, "git", side_effect=advancing_git):
                 metadata = package.release(root, output)
             self.assertEqual(metadata["revision"], original)

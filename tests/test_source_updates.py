@@ -31,7 +31,7 @@ class Fixture(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="source update fixture ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.write("chainman.toml", 'schema=1\n[project]\ndefault_profile="host"\n')
 
     def write(self, name, body):

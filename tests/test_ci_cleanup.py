@@ -14,7 +14,7 @@ class CleanupTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory(prefix="hosted SDK fixture ")
         self.addCleanup(tmp.cleanup)
-        self.base = Path(tmp.name)
+        self.base = Path(tmp.name).resolve()
         self.root, self.fs = self.base / "project", self.base / "filesystem"
         (self.root / "modules").mkdir(parents=True)
         (self.root / "toolchain.toml").write_text(

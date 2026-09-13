@@ -48,7 +48,7 @@ class ReportTests(unittest.TestCase):
             patch.object(dependency_audit.chainman, "execute", side_effect=execute),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(dependency_audit.run(Path(temporary), []), 0)
+            self.assertEqual(dependency_audit.run(Path(temporary).resolve(), []), 0)
         self.assertEqual(len(roots), 1)
         self.assertFalse(roots[0].parent.exists())
 
@@ -77,7 +77,7 @@ class ReportTests(unittest.TestCase):
             patch.object(dependency_audit.chainman, "execute") as execute,
         ):
             with self.assertRaisesRegex(ValueError, "JavaScript adapter"):
-                dependency_audit.run(Path(temporary), [])
+                dependency_audit.run(Path(temporary).resolve(), [])
             execute.assert_not_called()
 
     def test_selected_audit_executes_only_its_ecosystem_and_propagates_failure(self):
@@ -104,7 +104,7 @@ class ReportTests(unittest.TestCase):
         ):
             output = io.StringIO()
             with redirect_stdout(output):
-                status = dependency_audit.run(Path(temporary), ["targets=js"])
+                status = dependency_audit.run(Path(temporary).resolve(), ["targets=js"])
             self.assertEqual(status, 1)
             self.assertEqual(execute.call_count, 1)
             report = json.loads(output.getvalue())
@@ -113,7 +113,7 @@ class ReportTests(unittest.TestCase):
 
     def test_coverage_distinguishes_managed_excluded_and_missing(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "fixture").mkdir()
             (root / "fixture/package.json").write_text("{}")
             (root / "go.mod").write_text("module example.invalid/demo\ngo 1.23\n")

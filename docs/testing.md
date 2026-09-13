@@ -193,6 +193,10 @@ URI characters, then provision and execute the native task controller from a
 copied runtime under such a path. The latter asserts child output and exit status.
 SDK recipe tests exercise the actual Just entrypoint with a fixture launcher;
 the macOS job separately runs the real Apple SDK preflight.
+Temporary fixture roots are canonicalized immediately after allocation: macOS
+can return `/tmp` through its `/private/tmp` alias, whereas Git and subprocesses
+report physical paths. Explicit alias and symlink cases construct their own links
+after that common fixture setup.
 The bundled macOS Swift profile uses the Xcode selected by `xcode-select` for both
 its compiler and SDK. It restores `DEVELOPER_DIR` before refreshing `SDKROOT`,
 `CC` and `CXX` through `xcrun`; Nix's Apple SDK hook otherwise changes both the

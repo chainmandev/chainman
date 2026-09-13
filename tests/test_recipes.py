@@ -22,7 +22,7 @@ import update_staging
 class RecipeTests(unittest.TestCase):
     def test_public_sdk_recipe_routes_each_platform_without_nested_shell_parsing(self):
         with tempfile.TemporaryDirectory(prefix="chainman SDK recipe ") as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             shutil.copyfile(
                 Path(__file__).resolve().parents[1] / "justfile", root / "justfile"
             )

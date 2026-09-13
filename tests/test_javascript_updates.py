@@ -28,7 +28,7 @@ class JavaScriptTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="javascript fixture ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.spec = {"directory": ".", "profile": "host"}
         self.now = datetime(2026, 9, 7, tzinfo=timezone.utc)
         self.policy = {"minimum_age_days": 30}

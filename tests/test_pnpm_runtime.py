@@ -18,7 +18,7 @@ import toolchain
 class PnpmRuntimeTests(unittest.TestCase):
     def test_ci_transition_preserves_setup_and_stale_dependencies_fail_closed(self):
         with tempfile.TemporaryDirectory(prefix="chainman pnpm policy ") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
             dependency = root / "dependency"
             dependency.mkdir()

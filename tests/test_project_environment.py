@@ -53,7 +53,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_conditional_files_do_not_load_an_unselected_provider(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "local.env").write_text("AUTH_MODE=local\n")
             spec = {
                 "files": [
@@ -84,7 +84,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_file_conditions_reject_ambiguous_selector_mutation(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "change.env").write_text("MODE=changed\n")
             for condition in ({}, {"MODE": True}, {"CHAINMAN_MODE": "host-nix"}):
                 with self.subTest(condition=condition), self.assertRaises(ValueError):
@@ -102,7 +102,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_explicit_file_pnpm_setting_reaches_nested_script_aliases(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "pnpm.env").write_text("PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=warn\n")
             inherited = dict.fromkeys(pe.tc.PNPM_SETTING_VARIABLES[2], "error")
             selected = pe.apply(
@@ -141,7 +141,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_profile_planning_does_not_execute_project_git_fsmonitor(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             subprocess.run(["git", "init", "-q", str(root)], check=True)
             (root / "chainman.toml").write_text(
                 'schema=2\n[profiles.default]\nflake="flake.nix#default"\n'
@@ -163,7 +163,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_literal_files_precedence_modes_and_dependent_bindings(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "local.env").write_text(
                 "USER_VALUE=file\nLITERAL=$(touch forbidden) 'quoted' {root}\nEMPTY=\n"
             )
@@ -209,7 +209,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_invalid_files_bindings_and_ownership_overrides_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             for body in (
                 "A=one\nA=two\n",
                 "export A=one\n",
@@ -231,7 +231,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_optional_file_creation_and_byte_changes_invalidate_fingerprint(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             spec = {"files": [{"path": "local.env"}]}
             missing = pe.file_fingerprint(root, spec)
             (root / "local.env").write_text("SETTING=one\n")
@@ -241,7 +241,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_host_environment_is_filtered_data_and_never_executed(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             data = b"APP_VALUE=two lines\nsecond\0UNDECLARED_SECRET=hidden\0BASH_ENV=/project/hook\0PYTHONPATH=/project\0"
             (root / "host-environment").write_bytes(data)
             before = dict(os.environ)
@@ -254,7 +254,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     def test_service_transport_ports_are_selected_without_task_port_collisions(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "chainman.lock").write_text(
                 json.dumps(
                     {

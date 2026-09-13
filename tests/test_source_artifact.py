@@ -357,7 +357,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_artifact_adapter_preserves_baseline_and_freezes_selected_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             path = root / "sources.json"
             path.write_text(json.dumps({"sdk": {"url": URL, "digest": DIGEST}}))
             spec = {
@@ -379,7 +379,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_artifact_adapter_does_not_repair_missing_evidence_or_escape_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             path = root / "sources.json"
             original = json.dumps({"sdk": {"url": URL, "digest": DIGEST}})
             path.write_text(original)

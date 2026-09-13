@@ -21,7 +21,7 @@ class ServiceExportTests(unittest.TestCase):
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="chainman export ")
         cls.addClassCleanup(cls.temporary.cleanup)
-        base = Path(cls.temporary.name)
+        base = Path(cls.temporary.name).resolve()
         package = base / "package"
         (package / "bin").mkdir(parents=True)
         for name in ("chainman-control", "process-compose", "watchexec"):
@@ -45,7 +45,7 @@ class ServiceExportTests(unittest.TestCase):
 
     def test_project_values_stay_out_of_all_host_command_environments(self):
         with tempfile.TemporaryDirectory(prefix="chainman candidate ") as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             root, output = base / "project", base / "private-output"
             root.mkdir()
             output.mkdir()

@@ -31,7 +31,7 @@ class ManifestPointerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             for suffix, body in bodies.items():
                 with self.subTest(format=suffix):
-                    path = Path(temporary) / ("manifest." + suffix)
+                    path = Path(temporary).resolve() / ("manifest." + suffix)
                     value, render = manifests.document(path, body=body)
                     self.assertEqual(
                         manifests.lookup(value, ["items", 0, "version"]), "1.0.0"
@@ -55,7 +55,7 @@ class SDKTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="sdk-contract-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.targets = []
         self.specs = {}
         self.versions = {}
@@ -465,7 +465,7 @@ class BuildDependencyTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="build-contract-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "modules").mkdir()
         (self.root / "python/member").mkdir(parents=True)
         (self.root / "modules/python.toml").write_text(

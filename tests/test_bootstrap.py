@@ -22,7 +22,7 @@ class BootstrapTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.shared = tempfile.TemporaryDirectory(prefix="chainman bootstrap assets ")
-        cls.tree = Path(cls.shared.name) / "runtime"
+        cls.tree = Path(cls.shared.name).resolve() / "runtime"
         (cls.tree / "scripts").mkdir(parents=True)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
@@ -71,7 +71,7 @@ class BootstrapTests(unittest.TestCase):
             " (pathlib.Path.home() / 'home-marker').write_text('persistent')\n"
             "if '--hold-profile' in sys.argv:\n"
             " held = tempfile.TemporaryDirectory(prefix='chainman-held-profile-')\n"
-            " profile = str(pathlib.Path(held.name) / 'profile')\n"
+            " profile = str(pathlib.Path(held.name).resolve() / 'profile')\n"
             " expression = 'derivation { name = \"chainman-held-profile\"; system = builtins.currentSystem; builder = ' + json.dumps(str(pathlib.Path(shutil.which('bash')).resolve())) + '; args = [ \"-c\" \"echo held > $out\" ]; identity = ' + json.dumps(str(root)) + '; }'\n"
             " output = subprocess.check_output(['nix', '--extra-experimental-features', 'nix-command', 'build', '--impure', '--expr', expression, '--out-link', profile, '--print-out-paths'], text=True).strip()\n"
             " (root / 'held.json').write_text(json.dumps(dict(profile=profile, output=output)))\n"
@@ -102,7 +102,7 @@ class BootstrapTests(unittest.TestCase):
             ],
             text=True,
         ).strip()
-        cls.archive = Path(cls.shared.name) / "runtime archive.tar.gz"
+        cls.archive = Path(cls.shared.name).resolve() / "runtime archive.tar.gz"
         with tarfile.open(cls.archive, "w:gz") as archive:
             archive.add(cls.tree, arcname="runtime")
 
@@ -115,7 +115,7 @@ class BootstrapTests(unittest.TestCase):
             prefix="chainman consumer fixture "
         )
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "scripts").mkdir()
         self.launcher = self.root / "scripts/chainman.sh"
         shutil.copy2(SOURCE / "bootstrap/chainman.sh", self.launcher)
@@ -168,7 +168,7 @@ class BootstrapTests(unittest.TestCase):
         (self.root / "chainman.toml").write_text(original)
         exported = tempfile.TemporaryDirectory(prefix="chainman entry authority ")
         self.addCleanup(exported.cleanup)
-        authority = Path(exported.name)
+        authority = Path(exported.name).resolve()
         for source, name in (
             (SOURCE / "bootstrap/chainman.sh", "chainman.sh"),
             (SOURCE / "bootstrap/fetch.nix", "chainman-fetch.nix"),
@@ -277,7 +277,7 @@ print('entry and Git authority are read-only')
         (self.root / "scripts/chainman-fetch.nix").chmod(0o644)
         # Reuse only the fixture's Nix/download cache between cases. Each test
         # owns its consumer and clears its transaction directory during cleanup.
-        cache = Path(self.shared.name) / "lifecycle cache"
+        cache = Path(self.shared.name).resolve() / "lifecycle cache"
         self.env["XDG_CACHE_HOME"] = str(cache)
         self.update_cache = cache / "chainman/updates"
         self.addCleanup(shutil.rmtree, self.update_cache, ignore_errors=True)
@@ -498,9 +498,9 @@ format-check=["format-check"]
         temporary = tempfile.TemporaryDirectory(prefix="chainman release fixture ")
         self.addCleanup(temporary.cleanup)
         previous = self.root / "real-runtime"
-        next_runtime = Path(temporary.name) / "next-runtime"
+        next_runtime = Path(temporary.name).resolve() / "next-runtime"
         shutil.copytree(previous, next_runtime)
-        responses_file = Path(temporary.name) / "release-responses.json"
+        responses_file = Path(temporary.name).resolve() / "release-responses.json"
         # Transport alone is a fixture. Keeping responses outside the immutable
         # runtimes avoids a self-referential archive hash and supports fresh
         # reads by the new runtime when resuming a combined update.
@@ -695,7 +695,7 @@ format-check=["format-check"]
         self.use_real_runtime()
         outside = tempfile.TemporaryDirectory(prefix="chainman composed mount ")
         self.addCleanup(outside.cleanup)
-        sdk = Path(outside.name) / "literal $(never-executed) SDK"
+        sdk = Path(outside.name).resolve() / "literal $(never-executed) SDK"
         sdk.write_text("composed SDK")
         program = "import os,pathlib; p=pathlib.Path(os.environ['DEMO_SDK_FILE']); print(p.read_text());\ntry: p.write_text('wrong')\nexcept OSError as e: assert e.errno == 30\nelse: raise AssertionError('mount was writable')"
         (self.root / "chainman.toml").write_text(
@@ -1535,7 +1535,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
     def test_real_container_environment_mount_is_literal_readonly_and_required(self):
         outside = tempfile.TemporaryDirectory(prefix="chainman explicit SDK ")
         self.addCleanup(outside.cleanup)
-        sdk = Path(outside.name) / "literal $(never-executed) SDK"
+        sdk = Path(outside.name).resolve() / "literal $(never-executed) SDK"
         sdk.write_text("explicit SDK fixture")
         (self.root / "chainman.toml").write_text(
             'schema=2\n[environment]\npass=["DEMO_SDK_FILE"]\n[tasks.probe]\ncommands=[["true"]]\n[tasks.probe.transport]\nmounts=[{source_env="DEMO_SDK_FILE"}]\n'

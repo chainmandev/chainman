@@ -16,7 +16,7 @@ class ModuleTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="module adapter spaces ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
 
     def test_native_commands_and_coordinated_pins_retain_module_policy(self):
         module = {

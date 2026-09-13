@@ -28,7 +28,7 @@ class ConsumerFixture(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="chainman consumer spaces ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "project with spaces"
         self.root.mkdir()
         env = {
@@ -916,7 +916,7 @@ class RuntimeReleaseTests(ConsumerFixture):
             with tempfile.TemporaryDirectory(
                 prefix="chainman release fixture "
             ) as directory:
-                source = Path(directory) / "candidate"
+                source = Path(directory).resolve() / "candidate"
                 source.mkdir()
                 for directory in ("bootstrap", "scripts", "nix", "tests"):
                     (source / directory).mkdir()

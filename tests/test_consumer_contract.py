@@ -17,7 +17,7 @@ class ConsumerContractTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.release = {
             "version": "0.1.0",
             "revision": "a" * 40,

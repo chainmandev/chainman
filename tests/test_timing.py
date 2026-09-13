@@ -15,7 +15,7 @@ import chainman
 class TimingTests(unittest.TestCase):
     def test_opt_in_records_phases_without_argv_or_environment(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "chainman.toml").write_text(
                 'schema=2\n[project]\ndefault_profile="host"\n'
             )

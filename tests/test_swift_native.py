@@ -27,7 +27,7 @@ class NativeSwiftTests(unittest.TestCase):
         self.assertIsNotNone(shutil.which("swift"), "swift-test requires pinned Swift")
         temporary = tempfile.TemporaryDirectory(prefix="chainman swift fixture ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "project"
         self.root.mkdir()
         self.now = datetime(2026, 8, 1, tzinfo=timezone.utc)

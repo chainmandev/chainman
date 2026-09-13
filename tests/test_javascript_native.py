@@ -33,7 +33,7 @@ class NativeJavaScriptTests(unittest.TestCase):
             self.assertIsNotNone(shutil.which(binary), binary)
         temporary = tempfile.TemporaryDirectory(prefix="native registry fixture ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         environment = patch.dict(
             os.environ,
             TOOLCHAIN_DOWNLOAD_CACHE=str(self.root / "downloads"),

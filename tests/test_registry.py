@@ -1249,7 +1249,7 @@ class ArtifactTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="registry artifacts ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "modules").mkdir()
         for provider in self.providers:
             (self.root / provider).mkdir()

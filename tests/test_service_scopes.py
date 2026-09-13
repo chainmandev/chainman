@@ -14,7 +14,7 @@ class ServiceScopeTests(unittest.TestCase):
         self,
     ):
         with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             first, second = base / "first", base / "second"
             first.mkdir()
             subprocess.run(["git", "init", "-q", str(first)], check=True)
@@ -99,7 +99,7 @@ class ServiceScopeTests(unittest.TestCase):
 
     def test_repository_service_rejects_worktree_bindings_and_dependencies(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             original = {
                 "scope": "repository",
                 "container": {"image": "example.invalid/db@sha256:" + "a" * 64},

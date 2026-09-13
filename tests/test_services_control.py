@@ -28,7 +28,7 @@ class ServiceControlTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="chainman service ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "project"
         self.root.mkdir()
         self.state = self.base / "state {{literal}}"

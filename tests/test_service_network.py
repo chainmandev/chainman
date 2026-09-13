@@ -14,7 +14,7 @@ import project_environment
 class ServiceNetworkTests(unittest.TestCase):
     def test_addresses_use_published_host_ports_and_stable_container_dns(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             cfg = {
                 "services": {
                     "database": {
@@ -97,7 +97,7 @@ class ServiceNetworkTests(unittest.TestCase):
 
     def test_borrowing_requires_an_acquired_stable_owner_and_one_port_publisher(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / "chainman.toml").write_text(
                 'schema=2\n[project]\ndefault_profile="host"\n'
             )

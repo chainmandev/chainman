@@ -34,7 +34,7 @@ class NativeTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="native workspace ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         (self.root / "chainman.toml").write_text("schema=1\n")
 
     def put(self, name, body):

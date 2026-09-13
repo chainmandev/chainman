@@ -23,7 +23,7 @@ class NixReferenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(
             prefix="chainman native runtime "
         ) as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             runtime = root / "runtime # ? % ü"
             shutil.copytree(toolchain.RUNTIME / "nix", runtime / "nix")
             with patch.object(native_tasks.chainman, "RUNTIME", runtime):
@@ -46,7 +46,7 @@ class NixReferenceTests(unittest.TestCase):
 
     def test_nix_resolves_runtime_paths_with_spaces_and_uri_characters(self):
         with tempfile.TemporaryDirectory(prefix="chainman reference ") as temporary:
-            root = Path(temporary) / "runtime # ? % ü"
+            root = Path(temporary).resolve() / "runtime # ? % ü"
             root.mkdir()
             (root / "flake.nix").write_text(
                 '{ outputs = { self }: { answer = "correct runtime"; }; }'
@@ -92,7 +92,7 @@ class RuntimeTests(unittest.TestCase):
         self.addCleanup(isolated.stop)
         self.temporary = tempfile.TemporaryDirectory(prefix="toolchain runtime ")
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         (self.root / "toolchain.toml").write_text(
             'schema=1\nmodules=["core"]\n[cache]\nbuild_limit_gib=0\nstale_hours=0\n'
         )

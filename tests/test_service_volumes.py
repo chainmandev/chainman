@@ -11,7 +11,7 @@ import workflows
 class VolumeCompatibilityTests(unittest.TestCase):
     def test_setup_can_produce_a_volume_identity_before_planning(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "seed-input").write_text("canonical seed")
             (root / "prepare.py").write_text(
                 "from pathlib import Path\n"
@@ -47,7 +47,7 @@ commands=[["true"]]
 
     def test_content_identity_is_independent_of_worktree_path(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             trees = [root / "one", root / "another worktree"]
             for tree in trees:
                 (tree / "migrations/nested").mkdir(parents=True)
@@ -60,10 +60,10 @@ commands=[["true"]]
 
     def test_missing_inputs_and_symlink_escapes_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / "root"
+            root = Path(temporary).resolve() / "root"
             root.mkdir()
-            (Path(temporary) / "outside").write_text("private")
-            (root / "linked").symlink_to(Path(temporary) / "outside")
+            (Path(temporary).resolve() / "outside").write_text("private")
+            (root / "linked").symlink_to(Path(temporary).resolve() / "outside")
             for inputs in (["missing"], ["linked"]):
                 with self.assertRaises(ValueError):
                     services.volume_compatibility(

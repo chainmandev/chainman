@@ -24,7 +24,7 @@ class SourcePinTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="SDK source fixture ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.tool = {
             "provider": "npm",
             "name": "sample-sdk",

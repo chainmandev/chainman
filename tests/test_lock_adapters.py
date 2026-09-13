@@ -42,7 +42,7 @@ class NativeLockTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="native-lock-evidence-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "toolchain.toml").write_text('schema=1\nmodules=["swift"]\n')
         for kind in ("go", "swift", "maven"):
             self.write(
@@ -733,7 +733,7 @@ class GoReplacementTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="go-replacement-contract-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.write(
             "go/sub/go.mod",
             f"module example.test/local\n\ngo 1.24\nrequire {GO} v1.6.0\n",
@@ -976,7 +976,7 @@ class GoReplacementTests(unittest.TestCase):
 
     def test_explicit_workspace_outside_project_is_rejected(self):
         with tempfile.TemporaryDirectory(prefix="external-go-workspace-") as tmp:
-            work = Path(tmp) / "external.work"
+            work = Path(tmp).resolve() / "external.work"
             work.write_text(
                 f"go 1.24\nuse {self.root / 'go/sub'}\nreplace {GO} => {self.root / 'go/replacement'}\n"
             )
@@ -995,7 +995,7 @@ class SwiftSourceTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="swift declarations ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "toolchain.toml").write_text('schema=1\nmodules=["swift"]\n')
         (self.root / "app").mkdir()
         (self.root / "local").mkdir()
@@ -1213,7 +1213,7 @@ class SwiftGraphTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="swift local graph ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "toolchain.toml").write_text('schema=1\nmodules=["swift"]\n')
         self.spec = {
             "directory": "app",

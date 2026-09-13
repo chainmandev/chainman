@@ -24,7 +24,7 @@ class GradleResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(
             prefix="chainman gradle lifetime "
         ) as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
             (root / "settings.gradle").write_text("rootProject.name='lifetime'\n")
             (root / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx256m\n")
@@ -66,7 +66,7 @@ class GradleResolutionTests(unittest.TestCase):
 
     def test_composite_graph_binds_actual_sources_and_inspection_is_read_only(self):
         with tempfile.TemporaryDirectory(prefix="gradle composite ") as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "settings.gradle").write_text(
                 "rootProject.name='app'\nincludeBuild('library')\n"
             )
@@ -168,7 +168,7 @@ class GradleResolutionTests(unittest.TestCase):
 
     def test_child_configuration_and_transitive_locks_and_resolution_failure(self):
         with tempfile.TemporaryDirectory(prefix="gradle project ") as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             repository = root / "local repository"
             for name in ("direct", "transitive"):
                 directory = repository / "org/example" / name / "1.0.0"

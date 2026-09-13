@@ -20,7 +20,7 @@ class WorkflowTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="chainman workflow ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         env = {
             k: v
             for k, v in os.environ.items()

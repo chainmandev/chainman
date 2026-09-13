@@ -20,7 +20,7 @@ class ConcurrencyTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="chainman concurrent ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "chainman.toml").write_text(
             'schema=1\n[project]\ndefault_profile="host"\n'
             "[cache]\nbuild_limit_gib=0\nstale_hours=0\n"

@@ -28,7 +28,7 @@ class NativePythonTests(unittest.TestCase):
         self.assertIsNotNone(shutil.which("uv"), "python-test requires pinned uv")
         temporary = tempfile.TemporaryDirectory(prefix="chainman uv fixture ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         self.files, self.packages = {}, {}
         fixture = self
 

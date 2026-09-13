@@ -29,7 +29,7 @@ class NativeCargoTests(unittest.TestCase):
         self.assertIsNotNone(shutil.which("cargo"), "rust-test requires pinned Cargo")
         temporary = tempfile.TemporaryDirectory(prefix="chainman cargo fixture ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "project"
         self.root.mkdir()
         self.files, self.index, self.releases, self.calls = {}, {}, {}, []

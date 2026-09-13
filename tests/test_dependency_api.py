@@ -22,7 +22,7 @@ NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 class PlanTests(unittest.TestCase):
     def test_public_plan_checks_unselected_adapters_without_running_hooks(self):
         with tempfile.TemporaryDirectory(prefix="consumer plan ") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             config = root / "chainman.toml"
             body = """schema=1
 [updates]
@@ -74,7 +74,7 @@ class QueryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="dependency queries ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         (self.root / "chainman.toml").write_text(
             "schema=1\n[updates]\nminimum_age_days=30\n"
         )
@@ -714,7 +714,7 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ordered dependencies ")
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         (self.root / "chainman.toml").write_text("schema=1\n")
         self.events = []
         self.settings = {

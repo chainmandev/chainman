@@ -26,7 +26,7 @@ class SelfUpdateTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="chainman candidate data ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "project"
         self.root.mkdir()
         (self.root / "scripts").mkdir()
@@ -504,7 +504,7 @@ class FreshReleaseTagTests(unittest.TestCase):
         self.addCleanup(registry.fetch.cache_clear)
         temporary = tempfile.TemporaryDirectory(prefix="fresh tag control ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "scripts").mkdir()
         self.lock = self.root / "chainman.lock"
         self.lock.write_text('{"schema":1,"version":"1.0.0"}\n')

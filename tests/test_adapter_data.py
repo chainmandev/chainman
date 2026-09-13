@@ -270,7 +270,7 @@ class AdapterDataTests(unittest.TestCase):
         self,
     ):
         with tempfile.TemporaryDirectory(prefix="go-native-input-") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             (root / "go.mod").write_text("module neutral.local/root\n")
             for field in ("Require", "Replace"):
 
@@ -374,7 +374,7 @@ class AdapterDataTests(unittest.TestCase):
 
     def test_gradle_graph_decodes_edges_without_losing_source_bindings(self):
         with tempfile.TemporaryDirectory(prefix="gradle-native-input-") as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             library = root / "library"
             library.mkdir()
             (library / "build.gradle.kts").write_text("")

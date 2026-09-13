@@ -18,7 +18,7 @@ class SourceWorkflows(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "source"
         self.root.mkdir()
         (self.root / ".gitignore").write_text(".cache/\n.chainman/\n")

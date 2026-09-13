@@ -24,7 +24,7 @@ class GoSelectionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="Go selection fixture ")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.root = Path(temporary.name).resolve()
         (self.root / "chainman.toml").write_text("schema=1\n[updates]\n")
         self.inventory = ["v1.0.0", "v3.0.0", "v2.0.0"]
         self.available = list(self.inventory)

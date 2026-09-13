@@ -22,7 +22,7 @@ class StagingTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="update staging ")
         self.addCleanup(temporary.cleanup)
-        self.base = Path(temporary.name)
+        self.base = Path(temporary.name).resolve()
         self.root = self.base / "original"
         self.stage = self.base / "transaction"
         self.root.mkdir()
