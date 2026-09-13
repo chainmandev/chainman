@@ -21,7 +21,7 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,7 +47,7 @@ def package_name(value: object) -> str:
     return value
 
 
-def rule_range(rule):
+def rule_range(rule: object) -> str:
     if not isinstance(rule, Mapping) or not str(rule.get("reason", "")).strip():
         raise ValueError("JavaScript compatibility rules require a reason")
     value = rule.get("range")
@@ -468,7 +468,7 @@ class Workspace:
 
 
 class Evidence:
-    def __init__(self, policy: dict, now: datetime) -> None:
+    def __init__(self, policy: Mapping[str, object], now: datetime) -> None:
         if now.tzinfo is None:
             raise ValueError("JavaScript update time requires a timezone")
         registry.minimum_age(policy)
@@ -538,7 +538,10 @@ class Evidence:
             # An exception belongs to one importer edge, never the cached
             # package. Keep structural validation even for excepted ranges.
             if manifest is None or not peer_ignored(
-                self.policy.get("javascript", {}), manifest, name, peer
+                inputs.table(self.policy.get("javascript", {}), "JavaScript policy"),
+                manifest,
+                name,
+                peer,
             ):
                 NpmSpec(value)
         return peers, inputs.peer_metadata(info.get("peerDependenciesMeta", {}))
@@ -572,9 +575,12 @@ def peer_ignored(options: dict, manifest: str, source: str, peer: str) -> bool:
     return ignored
 
 
-def compatibility(pin, options):
-    ranges = []
-    for prefix in options.get("prefix_constraints", []):
+def compatibility(pin: Pin, options: Mapping[str, object]) -> list[str]:
+    ranges: list[str] = []
+    for raw in inputs.array(
+        options.get("prefix_constraints", []), "JavaScript prefix constraints"
+    ):
+        prefix = inputs.table(raw, "Prefix constraint")
         if not isinstance(prefix.get("prefix"), str) or not prefix["prefix"]:
             raise ValueError("Compatibility prefixes must be explicit nonempty strings")
         bound = rule_range(prefix)
@@ -584,23 +590,35 @@ def compatibility(pin, options):
             for name in excluded
         ):
             raise ValueError("Prefix exclusions must identify exact package names")
-        if pin.name.startswith(prefix["prefix"]) and pin.name not in excluded:
+        if (
+            pin.name.startswith(inputs.text(prefix["prefix"], "Compatibility prefix"))
+            and pin.name not in excluded
+        ):
             ranges.append(bound)
-    packages = options.get("package_constraints", {})
+    packages = inputs.table(
+        options.get("package_constraints", {}), "JavaScript package constraints"
+    )
     for user in pin.users:
-        rule = packages.get(user, {}).get(pin.alias)
+        rule = inputs.table(packages.get(user, {}), "Manifest package constraints").get(
+            pin.alias
+        )
         if rule:
             ranges.append(rule_range(rule))
     if pin.catalog:
-        rule = (
-            options.get("catalog_constraints", {}).get(pin.catalog, {}).get(pin.alias)
+        catalogs = inputs.table(
+            options.get("catalog_constraints", {}), "Catalog constraints"
         )
+        rule = inputs.table(
+            catalogs.get(pin.catalog, {}), "Catalog package constraints"
+        ).get(pin.alias)
         if rule:
             ranges.append(rule_range(rule))
     return ranges
 
 
-def scoped_policy(policy, name, ranges):
+def scoped_policy(
+    policy: Mapping[str, object], name: str, ranges: Sequence[str]
+) -> inputs.Table:
     common = registry.constraint("npm", policy, name)
     inherited = common if isinstance(common, tuple) else ((common,) if common else ())
     terms = [*inherited, *ranges]
@@ -613,7 +631,7 @@ def scoped_policy(policy, name, ranges):
     return {
         **policy,
         "constraints": {
-            **policy.get("constraints", {}),
+            **inputs.table(policy.get("constraints", {}), "Version constraints"),
             "npm:" + name: {
                 "range": combined,
                 "reason": "Intersection of the active JavaScript compatibility contracts.",
@@ -622,12 +640,25 @@ def scoped_policy(policy, name, ranges):
     }
 
 
-def compatible_scope(pin, before, *, spec, check_declaration=False):
+def compatible_scope(
+    pin: Pin,
+    before: Mapping[str, object],
+    *,
+    spec: Mapping[str, object],
+    check_declaration: bool = False,
+) -> str:
+    requirements = [
+        inputs.table(value, "Original dependency requirement")
+        for value in inputs.array(
+            before.get("requirements", []), "Original dependency requirements"
+        )
+    ]
     originals = [
         value
-        for value in before.get("requirements", [])
+        for value in requirements
         if value["file"] == pin.file
-        and tuple(value["pointer"]) == pin.pointer
+        and tuple(inputs.strings(value["pointer"], "Original dependency pointer"))
+        == pin.pointer
         and value["name"] == pin.name
     ]
     if (
@@ -642,14 +673,15 @@ def compatible_scope(pin, before, *, spec, check_declaration=False):
         # contract. Join only this exact selector and package to its old owner.
         originals = [
             value
-            for value in before.get("requirements", [])
+            for value in requirements
             if value["file"] == "package.json"
-            and tuple(value["pointer"]) == ("pnpm", "overrides", pin.pointer[1])
+            and tuple(inputs.strings(value["pointer"], "Original dependency pointer"))
+            == ("pnpm", "overrides", pin.pointer[1])
             and value["name"] == pin.name
         ]
     if len(originals) != 1:
         raise ValueError("Missing or ambiguous original compatible dependency scope")
-    original = originals[0]["requirement"]
+    original = inputs.text(originals[0]["requirement"], "Original dependency range")
     simple = re.fullmatch(r"([~^]?)([0-9]+\.[0-9]+\.[0-9]+)", original)
     bound = (simple[1] or "^") + simple[2] if simple else original
     NpmSpec(bound)
@@ -1079,11 +1111,11 @@ def solve(workspace, evidence, options, initial=None):
     )
 
 
-def lock_spec(spec):
+def lock_spec(spec: Mapping[str, object]) -> inputs.Table:
     return {**spec, "ecosystem": "npm"}
 
 
-def locked_identities(workspace):
+def locked_identities(workspace: Workspace) -> set[Identity]:
     if workspace.manager == "npm":
         import javascript_npm
 
@@ -1093,11 +1125,13 @@ def locked_identities(workspace):
     )
 
 
-def baseline_maturity_exclusions(before, evidence):
+def baseline_maturity_exclusions(
+    before: Mapping[str, object], evidence: Evidence
+) -> list[str]:
     return sorted(
         {
             f"{name}@{version}"
-            for provider, name, version, *_ in before["identities"]
+            for provider, name, version, *_ in identity_inventory(before["identities"])
             if provider == "npm"
             and any(
                 r.version == version
@@ -1275,12 +1309,23 @@ def lock_target(
     raise ValueError("Unrecognized pnpm dependency context")
 
 
-def effective_requirements(workspace, pin, *, parent=None, versions=None):
+def effective_requirements(
+    workspace: Workspace,
+    pin: Pin,
+    *,
+    parent: tuple[str, str] | None = None,
+    versions: Iterable[str] | Callable[[], Iterable[str]] | None = None,
+) -> list[tuple[str, str]]:
     """A declared override can supersede a direct range, including an npm alias."""
     allowed = [(pin.name, pin.requirement)]
+    pnpm = inputs.table(
+        workspace.documents["package.json"][0].get("pnpm", {}), "pnpm manifest settings"
+    )
     overrides = {
-        **workspace.documents["package.json"][0].get("pnpm", {}).get("overrides", {}),
-        **workspace.settings.get("overrides", {}),
+        **inputs.string_map(pnpm.get("overrides", {}), "pnpm overrides"),
+        **inputs.string_map(
+            workspace.settings.get("overrides", {}), "Workspace overrides"
+        ),
     }
     # pnpm gives a matching parent-specific override precedence over generic
     # overrides, regardless of their declaration order.
@@ -1582,18 +1627,30 @@ def audit_peers(
     return scopes
 
 
-def audit_artifacts(workspace, before, policy, now, scopes):
+def audit_artifacts(
+    workspace: Workspace,
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+    scopes: Mapping[tuple[str, str], Sequence[str]],
+) -> list[str]:
     identities = locked_identities(workspace)
     old = identity_inventory(before["identities"])
-    exclusions = set()
+    exclusions: set[str] = set()
+    options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
     groups: dict[tuple[str, tuple[str, ...]], set[Identity]] = {}
     for identity in identities:
         provider, name, version, *_ = identity
         bounds = list(scopes.get((name, version), [])) if provider == "npm" else []
         if provider == "npm":
-            for rule in policy.get("javascript", {}).get("prefix_constraints", []):
-                if name.startswith(rule["prefix"]) and name not in rule.get(
-                    "exclude", []
+            for raw in inputs.array(
+                options.get("prefix_constraints", []), "JavaScript prefix constraints"
+            ):
+                rule = inputs.table(raw, "Prefix constraint")
+                if name.startswith(
+                    inputs.text(rule["prefix"], "Compatibility prefix")
+                ) and name not in inputs.strings(
+                    rule.get("exclude", []), "Prefix exclusions"
                 ):
                     bounds.append(rule_range(rule))
         key = (name if bounds else "", tuple(sorted(set(bounds))))
@@ -1612,7 +1669,13 @@ def audit_artifacts(workspace, before, policy, now, scopes):
     return sorted(exclusions)
 
 
-def direct_scope(pin, spec, options, version, before):
+def direct_scope(
+    pin: Pin,
+    spec: Mapping[str, object],
+    options: Mapping[str, object],
+    version: str,
+    before: Mapping[str, object],
+) -> list[str]:
     bounds = compatibility(pin, options)
     if pin.operator is None or pin.held:
         bounds.append(pin.requirement)

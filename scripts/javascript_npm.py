@@ -4,11 +4,12 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import javascript_updates as js
+import chainman
 import registry
 import adapter_data as inputs
 from dependency_identity import Identity
@@ -133,10 +134,16 @@ def allowed(workspace: js.Workspace, pin: js.Pin) -> list[tuple[str, str]]:
 
 
 def audit(
-    workspace: js.Workspace, before: dict, policy: dict, now: datetime
+    workspace: js.Workspace,
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
 ) -> list[str]:
     lock, evidence = read(workspace), js.Evidence(policy, now)
-    packages, options = lock["packages"], policy.get("javascript", {})
+    packages, options = (
+        lock["packages"],
+        inputs.table(policy.get("javascript", {}), "JavaScript policy"),
+    )
     scopes: dict[tuple[str, str], list[str]] = {}
     locals = local_locations(workspace)
     for manifest, refs in workspace.refs.items():
@@ -186,30 +193,49 @@ def audit(
                 raise ValueError("npm graph exceeds its audit bound")
             item = packages[location]
             if location in locals:
-                info = workspace.documents[
-                    (location + "/" if location else "") + "package.json"
-                ][0]
-                actual = info["name"]
+                info = inputs.table(
+                    workspace.documents[
+                        (location + "/" if location else "") + "package.json"
+                    ][0],
+                    "Local npm manifest",
+                )
+                actual = inputs.text(info["name"], "Local npm package name")
                 peers, metadata = (
-                    info.get("peerDependencies", {}),
-                    info.get("peerDependenciesMeta", {}),
+                    inputs.string_map(
+                        info.get("peerDependencies", {}), "Local npm peers"
+                    ),
+                    inputs.peer_metadata(info.get("peerDependenciesMeta", {})),
                 )
                 for section in js.SECTIONS:
                     if item.get(section, {}) != info.get(section, {}):
                         raise ValueError(
                             "npm local dependency declarations disagree with their manifest"
                         )
-                dependencies: inputs.NpmPackage | dict = info
+                dependencies: inputs.NpmPackage = {}
+                for section in js.SECTIONS:
+                    if section in info:
+                        dependencies[section] = inputs.string_map(
+                            info[section], "Local npm dependencies"
+                        )
             else:
                 dependencies = item
                 actual = name_at(location, item)
                 peers, metadata = evidence.peers(
                     actual, item["version"], manifest=manifest
                 )
-                for rule in options.get("prefix_constraints", []):
+                for raw in inputs.array(
+                    options.get("prefix_constraints", []),
+                    "JavaScript prefix constraints",
+                ):
+                    rule = inputs.table(raw, "Prefix constraint")
                     if (
-                        actual.startswith(rule["prefix"])
-                        and actual not in rule.get("exclude", [])
+                        actual.startswith(
+                            inputs.text(rule["prefix"], "Compatibility prefix")
+                        )
+                        and actual
+                        not in inputs.strings(
+                            rule.get("exclude", []), "Prefix exclusions"
+                        )
                         and Version(item["version"]) not in NpmSpec(js.rule_range(rule))
                     ):
                         raise ValueError(
@@ -264,20 +290,28 @@ def audit(
 
 def resolve(
     workspace: js.Workspace,
-    before: dict,
+    before: Mapping[str, object],
     evidence: js.Evidence,
     selected: Sequence[str],
-    policy: dict,
+    policy: Mapping[str, object],
     now: datetime,
-) -> dict:
+) -> inputs.Table:
     root, spec = workspace.root, workspace.spec
-    options = policy.get("javascript", {})
+    options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
+    exceptions = [
+        inputs.table(e, "Version exception")
+        for e in inputs.array(policy.get("exceptions", []), "Version exceptions")
+    ]
     active = [
         r
-        for e in policy.get("exceptions", [])
-        if e.get("package", "").startswith("npm:")
+        for e in exceptions
+        if inputs.text(e.get("package", ""), "Exception package").startswith("npm:")
         for r in registry.active_exceptions(
-            "npm", evidence.get(e["package"][4:])[0], policy, e["package"][4:], now
+            "npm",
+            evidence.get(inputs.text(e["package"], "Exception package")[4:])[0],
+            policy,
+            inputs.text(e["package"], "Exception package")[4:],
+            now,
         )
     ]
     # npm has one cutoff. With exact security exceptions, admit candidates at
@@ -287,8 +321,8 @@ def resolve(
         now
         if active
         or any(
-            e.get("package", "").startswith("npm:")
-            for e in policy.get("exceptions", [])
+            inputs.text(e.get("package", ""), "Exception package").startswith("npm:")
+            for e in exceptions
         )
         or js.baseline_maturity_exclusions(before, evidence)
         else now - timedelta(days=registry.minimum_age(policy))
@@ -317,7 +351,7 @@ def resolve(
             "--before=" + cutoff.isoformat(),
             peer_option,
         ]
-        result = js.chainman.execute(
+        result = chainman.execute(
             root,
             spec.get("profile", "javascript"),
             command,
@@ -369,7 +403,7 @@ def resolve(
             packages[key] = entry
         lock["packages"] = packages
         tc.atomic_bytes(path, (json.dumps(lock, indent=2) + "\n").encode(), 0o644)
-        checked = js.chainman.execute(
+        checked = chainman.execute(
             root,
             spec.get("profile", "javascript"),
             [
