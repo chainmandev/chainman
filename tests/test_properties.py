@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import configuration
 import registry
 import resources
+import workflows
 
 GENERATED = settings(max_examples=200, derandomize=True, deadline=None)
 TEXT = st.text(alphabet="abc xyz_-", max_size=12)
@@ -33,6 +34,69 @@ TASK_LAYER = st.fixed_dictionaries(
         ),
     },
 )
+
+
+@st.composite
+def workflow_graphs(draw):
+    count = draw(st.integers(min_value=1, max_value=8))
+    acyclic = draw(st.booleans())
+    graph = {}
+    for index in range(count):
+        # DAGs supply successful closures; arbitrary graphs also contain cycles
+        # and one possible missing name. Repeated edges and requests are allowed.
+        choices = list(range(index if acyclic else count + 1))
+        dependencies = (
+            draw(st.lists(st.sampled_from(choices), max_size=6)) if choices else []
+        )
+        graph[f"task{index}"] = {
+            "depends_on": [f"task{dependency}" for dependency in dependencies]
+        }
+    requests = draw(st.lists(st.integers(min_value=0, max_value=count), max_size=6))
+    return graph, [f"task{index}" for index in requests]
+
+
+class WorkflowProperties(unittest.TestCase):
+    @GENERATED
+    @given(workflow_graphs())
+    def test_order_covers_only_requested_closure_once_after_dependencies(self, case):
+        graph, requested = case
+        original = deepcopy(graph)
+        # Compute reachability with a worklist, then remove ready vertices. This
+        # is independent of the implementation's recursive depth-first walk.
+        reachable, pending = set(), list(requested)
+        missing = False
+        while pending:
+            key = pending.pop()
+            if key in reachable:
+                continue
+            reachable.add(key)
+            if key not in graph:
+                missing = True
+            else:
+                pending.extend(graph[key]["depends_on"])
+        remaining = set(reachable)
+        while not missing and remaining:
+            ready = {
+                key
+                for key in remaining
+                if not remaining.intersection(graph[key]["depends_on"])
+            }
+            if not ready:
+                break
+            remaining.difference_update(ready)
+        if missing or remaining:
+            with self.assertRaises(ValueError):
+                workflows.order(graph, requested)
+        else:
+            result = workflows.order(graph, requested)
+            self.assertEqual(set(result), reachable)
+            self.assertEqual(len(result), len(reachable))
+            positions = {key: index for index, key in enumerate(result)}
+            for key in result:
+                for dependency in graph[key]["depends_on"]:
+                    self.assertLess(positions[dependency], positions[key])
+            self.assertEqual(workflows.order(graph, requested), result)
+        self.assertEqual(graph, original)
 
 
 class CompositionProperties(unittest.TestCase):

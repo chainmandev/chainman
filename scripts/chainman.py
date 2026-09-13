@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import hashlib
 import importlib.util
 import json
@@ -15,6 +16,7 @@ import sys
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import toolchain as tc
+from adapter_data import table, strings
 
 RUNTIME = Path(__file__).resolve().parents[1]
 
@@ -120,18 +122,26 @@ def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
     return digest.hexdigest()
 
 
-def profile_environment(root, spec, inherited, overrides=None, *, cfg=None):
+def profile_environment(
+    root: Path,
+    spec: Mapping[str, object],
+    inherited: Mapping[str, str],
+    overrides: object = None,
+    *,
+    cfg: Mapping[str, object] | None = None,
+) -> dict[str, str]:
     """Resolve declared environment identically for execution and input hashing."""
     import project_environment
 
     selected = dict(inherited)
     cfg = configuration(root) if cfg is None else cfg
-    selected = project_environment.apply(root, cfg.get("environment", {}), selected)
+    environment = table(cfg.get("environment", {}), "Project environment")
+    selected = project_environment.apply(root, environment, selected)
     for values in (spec.get("environment", {}), overrides or {}):
         expanded = project_environment.expand(values, root, selected)
         selected.update(expanded)
         tc.pnpm_environment(selected, expanded)
-    for key in cfg.get("environment", {}).get("unset", []):
+    for key in strings(environment.get("unset", []), "Environment unset entries"):
         if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
             raise ValueError("Environment unset entries must be variable names")
         if key.startswith(("CHAINMAN_", "TOOLCHAIN_")) or key in {

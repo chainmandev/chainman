@@ -128,8 +128,9 @@ def verification(root: Path, policy: Mapping[str, object]) -> list[str]:
         if not selected_tasks or len(selected_tasks) != len(set(selected_tasks)):
             raise ValueError("Update verification requires distinct finite tasks")
         cfg = workflows.configuration(root)
-        order = workflows.order(cfg.get("tasks", {}), selected_tasks)
-        if any(cfg["tasks"][name].get("wait_for_services") for name in order):
+        tasks_by_name = workflows.declarations(cfg, "tasks")
+        order = workflows.order(tasks_by_name, selected_tasks)
+        if any(tasks_by_name[name].get("wait_for_services") for name in order):
             raise ValueError("Update verification must be a finite task")
         return [argument for task in selected_tasks for argument in ("run", task)]
     if tc.config(root)["schema"] in (2, 3) and not policy.get("verify"):

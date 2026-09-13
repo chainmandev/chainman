@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 import fcntl
 import fnmatch
 import hashlib
@@ -12,12 +12,45 @@ import os
 from pathlib import Path
 import re
 import stat
+from types import FrameType
+from typing import NotRequired, TypedDict
 
 import chainman
 import toolchain as tc
 import project_environment
 import timing
-from adapter_data import strings, table
+from adapter_data import Table, array, string_map, strings, table, text
+
+
+class SetupDetail(TypedDict):
+    current: bool
+    reason: str
+    recovery: NotRequired[list[str]]
+
+
+def declarations(cfg: Mapping[str, object], section: str) -> dict[str, Table]:
+    return {
+        key: table(value, f"{section}.{key}")
+        for key, value in table(cfg.get(section, {}), section).items()
+    }
+
+
+def default_profile(cfg: Mapping[str, object]) -> str:
+    return text(
+        table(cfg.get("project", {}), "Project").get("default_profile", "default"),
+        "Default profile",
+    )
+
+
+def task_seconds(spec: Mapping[str, object], field: str) -> int:
+    default, lower, upper = {
+        "timeout_seconds": (0, 0, 86400),
+        "shutdown_seconds": (10, 1, 300),
+    }[field]
+    value = spec.get(field, default)
+    if type(value) is not int or not lower <= value <= upper:
+        raise ValueError(f"Invalid task {field}")
+    return value
 
 
 def name(value: object) -> str:
@@ -49,13 +82,13 @@ def commands(value: object) -> list[list[str]]:
     return [strings(argv, "Workflow command") for argv in value]
 
 
-def configuration(root: Path) -> dict:
+def configuration(root: Path) -> Table:
     cfg = tc.config(root)
     if cfg["schema"] not in (2, 3):
         raise ValueError("Named workflows require configuration schema=2 or schema=3")
-    checked_profiles = set()
+    checked_profiles: set[str] = set()
 
-    def check_profile(profile):
+    def check_profile(profile: str) -> None:
         if profile not in checked_profiles:
             chainman.profile(root, profile, cfg=cfg)
             checked_profiles.add(profile)
@@ -162,13 +195,8 @@ def configuration(root: Path) -> dict:
                     raise ValueError("cleanup_children must be a boolean")
                 if type(spec.get("wait_for_services", False)) is not bool:
                     raise ValueError("wait_for_services must be a boolean")
-                for field, default, lower, upper in (
-                    ("timeout_seconds", 0, 0, 86400),
-                    ("shutdown_seconds", 10, 1, 300),
-                ):
-                    value = spec.get(field, default)
-                    if type(value) is not int or not lower <= value <= upper:
-                        raise ValueError(f"Invalid task {field}")
+                for field in ("timeout_seconds", "shutdown_seconds"):
+                    task_seconds(spec, field)
         order(entries, list(entries))
     for spec in cfg.get("tasks", {}).values():
         order(cfg.get("setup", {}), spec.get("setup", []))
@@ -188,7 +216,7 @@ def configuration(root: Path) -> dict:
             task.get("services") for task in graph
         ):
             raise ValueError("exclusive_services requires a service-bearing task")
-    return cfg
+    return table(cfg, "Workflow configuration")
 
 
 def order(entries: Mapping[str, object], requested: Iterable[str]) -> list[str]:
@@ -215,49 +243,63 @@ def order(entries: Mapping[str, object], requested: Iterable[str]) -> list[str]:
     return result
 
 
-def group_spec(cfg, key):
-    spec = dict(cfg["setup"][key])
+def group_spec(cfg: Mapping[str, object], key: str) -> Table:
+    spec = declarations(cfg, "setup")[key]
     spec.setdefault("directory", ".")
-    spec.setdefault("profile", cfg.get("project", {}).get("default_profile", "default"))
+    spec.setdefault("profile", default_profile(cfg))
     return spec
 
 
-def group_specs(root, cfg, requested, env=None):
+def group_specs(
+    root: Path,
+    cfg: Mapping[str, object],
+    requested: Iterable[str],
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Table]:
     specs = {
-        key: group_spec(cfg, key) for key in order(cfg.get("setup", {}), requested)
+        key: group_spec(cfg, key)
+        for key in order(declarations(cfg, "setup"), requested)
     }
     for spec in specs.values():
         spec["dependency_fingerprints"] = {
             dependency: fingerprint(root, specs[dependency], env)
-            for dependency in spec.get("depends_on", [])
+            for dependency in names(spec.get("depends_on", []))
         }
     return specs
 
 
-def fingerprint(root, spec, env=None):
+def fingerprint(
+    root: Path, spec: Mapping[str, object], env: Mapping[str, str] | None = None
+) -> str:
     digest = hashlib.sha256(
         json.dumps([1, tc.context_id(), spec], sort_keys=True).encode()
     )
-    ref, profile = chainman.profile(root, spec["profile"])
+    profile_name = text(spec["profile"], "Setup profile")
+    ref, profile = chainman.profile(root, profile_name)
     if spec.get("environment_inputs"):
         selected = chainman.profile_environment(
             root, profile, os.environ if env is None else env
         )
         digest.update(
             json.dumps(
-                {key: selected.get(key) for key in spec["environment_inputs"]},
+                {
+                    key: selected.get(key)
+                    for key in strings(
+                        spec["environment_inputs"], "Setup environment inputs"
+                    )
+                },
                 sort_keys=True,
             ).encode()
         )
-    digest.update(chainman.profile_fingerprint(root, spec["profile"], ref).encode())
-    paths = set()
-    for pattern in spec["inputs"]:
+    digest.update(chainman.profile_fingerprint(root, profile_name, ref).encode())
+    paths: set[Path] = set()
+    for pattern in strings(spec["inputs"], "Setup inputs"):
         paths.update(root.glob(pattern))
     for path in sorted(paths):
         relative = path.relative_to(root).as_posix()
         if any(
             fnmatch.fnmatchcase(relative, pattern)
-            for pattern in spec.get("exclude_inputs", [])
+            for pattern in strings(spec.get("exclude_inputs", []), "Setup exclusions")
         ):
             continue
         tc.contained(root, relative)
@@ -266,23 +308,25 @@ def fingerprint(root, spec, env=None):
     return digest.hexdigest()
 
 
-def stamp_path(root, key):
+def stamp_path(root: Path, key: str) -> Path:
     return tc.contained(root, f".cache/toolchain/setup-groups/{name(key)}.json")
 
 
-def current(root, key, spec, env):
+def current(
+    root: Path, key: str, spec: Mapping[str, object], env: dict[str, str]
+) -> bool:
     return setup_detail(root, key, spec, env)["current"]
 
 
-def artifact_ready(root, item, env):
+def artifact_ready(root: Path, item: object, env: dict[str, str]) -> bool:
     if isinstance(item, dict) and item.get("digest") is True:
         return tc.contained(root, item["path"]).is_file()
     return tc.artifact_ready(root, item, env)
 
 
-def artifact_digests(root, spec):
-    result = {}
-    for item in spec["artifacts"]:
+def artifact_digests(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for item in array(spec["artifacts"], "Setup artifacts"):
         if isinstance(item, dict) and item.get("digest") is True:
             path = tc.contained(root, item["path"])
             digest = hashlib.sha256()
@@ -294,7 +338,9 @@ def artifact_digests(root, spec):
 
 
 @contextmanager
-def setup_use(root, cfg, requested, env):
+def setup_use(
+    root: Path, cfg: Mapping[str, object], requested: Iterable[str], env: dict[str, str]
+) -> Iterator[tuple[int, ...]]:
     with timing.span("setup_validation", env):
         specs = group_specs(root, cfg, requested, env)
     if not specs:
@@ -325,17 +371,20 @@ def setup_use(root, cfg, requested, env):
                 if current(root, key, spec, env):
                     continue
                 expected = fingerprint(root, spec, env)
-                for argv in spec["commands"]:
+                for argv in commands(spec["commands"]):
                     chainman.execute(
                         root,
-                        spec["profile"],
+                        text(spec["profile"], "Setup profile"),
                         argv,
                         env=env,
-                        cwd=tc.contained(root, spec["directory"]),
+                        cwd=tc.contained(
+                            root, text(spec["directory"], "Setup directory")
+                        ),
                         pass_fds=(lease.fileno(),),
                     )
                 if not all(
-                    artifact_ready(root, item, env) for item in spec["artifacts"]
+                    artifact_ready(root, item, env)
+                    for item in array(spec["artifacts"], "Setup artifacts")
                 ):
                     raise ValueError(
                         f"Setup group {key} did not create its declared artifacts"
@@ -356,7 +405,7 @@ def setup_use(root, cfg, requested, env):
 
 
 @contextmanager
-def inspection_lock(root, name):
+def inspection_lock(root: Path, name: str) -> Iterator[None]:
     """Borrow an existing lock without creating or touching project state."""
     path = tc.contained(root, f".cache/toolchain/{name}")
     try:
@@ -376,7 +425,9 @@ def inspection_lock(root, name):
         yield
 
 
-def setup_detail(root, key, spec, env):
+def setup_detail(
+    root: Path, key: str, spec: Mapping[str, object], env: dict[str, str]
+) -> SetupDetail:
     try:
         recorded = json.loads(stamp_path(root, key).read_text())
     except FileNotFoundError:
@@ -388,7 +439,10 @@ def setup_detail(root, key, spec, env):
             reason = "invalid-record"
         elif recorded.get("fingerprint") != fingerprint(root, spec, env):
             reason = "inputs-changed"
-        elif not all(artifact_ready(root, item, env) for item in spec["artifacts"]):
+        elif not all(
+            artifact_ready(root, item, env)
+            for item in array(spec["artifacts"], "Setup artifacts")
+        ):
             reason = "artifact-missing-or-incompatible"
         elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
             reason = "artifact-content-changed"
@@ -397,12 +451,14 @@ def setup_detail(root, key, spec, env):
     return {"current": False, "reason": reason, "recovery": ["setup", key]}
 
 
-def setup_status(root, requested):
+def setup_status(root: Path, requested: list[str]) -> int:
     """Inspect readiness without creating caches, installing or blessing outputs."""
     cfg = configuration(root)
     with inspection_lock(root, "writer.lock"), inspection_lock(root, "setup-use.lock"):
         env = tc.environment(root, create=False)
-        specs = group_specs(root, cfg, requested or list(cfg.get("setup", {})), env)
+        specs = group_specs(
+            root, cfg, requested or list(declarations(cfg, "setup")), env
+        )
         details = {
             key: setup_detail(root, key, spec, env) for key, spec in specs.items()
         }
@@ -421,7 +477,7 @@ def setup_status(root, requested):
 
 
 @contextmanager
-def serial_use(root, spec):
+def serial_use(root: Path, spec: Mapping[str, object]) -> Iterator[tuple[int, ...]]:
     """Serialize a task's command phase using a worktree-local kernel lease.
 
     The inherited descriptor protects live children even if their Python parent
@@ -442,19 +498,24 @@ def serial_use(root, spec):
         yield (lease.fileno(),)
 
 
-def context_environment(root, cfg, task, inherited):
+def context_environment(
+    root: Path, cfg: Mapping[str, object], task: str, inherited: Mapping[str, str]
+) -> dict[str, str]:
     """Select graph-wide inherited values without changing the planner process.
 
     All tasks in one dependency closure share one graph. Conflicting declarations
     are rejected instead of depending on task execution order.
     """
     values: dict[str, str] = {}
-    for key in order(cfg.get("tasks", {}), [task]):
-        for variable, value in cfg["tasks"][key].get("context_environment", {}).items():
+    tasks = declarations(cfg, "tasks")
+    for key in order(tasks, [task]):
+        for variable, value in string_map(
+            tasks[key].get("context_environment", {}), "Task context environment"
+        ).items():
             if variable in values and values[variable] != value:
                 raise ValueError(f"Conflicting task context value: {variable}")
             values[variable] = value
-    spec = cfg.get("environment", {})
+    spec = table(cfg.get("environment", {}), "Project environment")
     # Literal task selectors apply before reading provider-specific files.
     # Values containing references resolve against the configured environment.
     literal = {
@@ -474,14 +535,15 @@ def run(
     action: str,
     extra: list[str],
     *,
-    service_context=False,
-    context_task=None,
-):
+    service_context: bool = False,
+    context_task: str | None = None,
+) -> int:
     cfg = configuration(root)
-    task_names = order(cfg.get("tasks", {}), [action]) if action != "setup" else []
-    exclusive = any(cfg["tasks"][key].get("exclusive", False) for key in task_names)
+    tasks = declarations(cfg, "tasks")
+    task_names = order(tasks, [action]) if action != "setup" else []
+    exclusive = any(tasks[key].get("exclusive", False) for key in task_names)
     if exclusive and (
-        service_context or any(cfg["tasks"][key].get("services") for key in task_names)
+        service_context or any(tasks[key].get("services") for key in task_names)
     ):
         raise ValueError(
             "Exclusive maintenance tasks cannot acquire or borrow services"
@@ -490,7 +552,10 @@ def run(
         root,
         exclusive=exclusive,
         new_execution=True,
-        automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+        automatic_prune=table(cfg.get("cache", {}), "Cache").get(
+            "automatic_prune", True
+        )
+        is True,
     ):
         # Managed paths and compiler ownership belong to this execution. Apply
         # the requesting graph's project values only after creating its lease.
@@ -500,44 +565,51 @@ def run(
         if action != "setup":
             env = context_environment(root, cfg, action, env)
         if action == "setup":
-            with setup_use(root, cfg, extra or list(cfg.get("setup", {})), env):
+            with setup_use(root, cfg, extra or list(declarations(cfg, "setup")), env):
                 return 0
         if not service_context and any(
-            cfg["tasks"][key].get("services") for key in task_names
+            tasks[key].get("services") for key in task_names
         ):
             raise ValueError("Service tasks require the checked-in host bootstrap")
         groups = list(
             dict.fromkeys(
                 group
                 for task in task_names
-                for group in cfg["tasks"][task].get("setup", [])
+                for group in names(tasks[task].get("setup", []))
             )
         )
         with setup_use(root, cfg, groups, env) as descriptors:
             for key in task_names:
-                spec = dict(cfg["tasks"][key])
+                spec = dict(tasks[key])
                 if "timeout_env" in spec:
                     configured = project_environment.apply(
-                        root, cfg.get("environment", {}), env
+                        root,
+                        table(cfg.get("environment", {}), "Project environment"),
+                        env,
                     )
                     configured.update(
                         project_environment.expand(
                             spec.get("environment", {}), root, configured
                         )
                     )
-                    value = configured.get(spec["timeout_env"])
+                    value = configured.get(
+                        text(spec["timeout_env"], "Task timeout variable")
+                    )
                     if value is not None:
                         if not value.isdecimal() or not 1 <= int(value) <= 86400:
                             raise ValueError(
                                 f"{spec['timeout_env']} must be an integer between 1 and 86400"
                             )
                         spec["timeout_seconds"] = int(value)
-                profile = spec.get(
-                    "profile", cfg.get("project", {}).get("default_profile", "default")
+                profile = text(
+                    spec.get("profile", default_profile(cfg)), "Task profile"
                 )
                 with tc.compiler_cache(profile, env, root) as selected:
                     with serial_use(root, spec) as serial_descriptors:
-                        arguments = [list(argv) for argv in spec.get("commands", [])]
+                        arguments = [
+                            strings(argv, "Task command")
+                            for argv in array(spec.get("commands", []), "Task commands")
+                        ]
                         if key == action and extra and not arguments:
                             raise ValueError(
                                 "A task without commands takes no arguments"
@@ -557,7 +629,12 @@ def run(
                                     argv,
                                     env=selected,
                                     overrides=spec.get("environment", {}),
-                                    cwd=tc.contained(root, spec.get("directory", ".")),
+                                    cwd=tc.contained(
+                                        root,
+                                        text(
+                                            spec.get("directory", "."), "Task directory"
+                                        ),
+                                    ),
                                     pass_fds=(*descriptors, *serial_descriptors),
                                 )
                         else:
@@ -568,7 +645,12 @@ def run(
                                     argv,
                                     env=selected,
                                     overrides=spec.get("environment", {}),
-                                    cwd=tc.contained(root, spec.get("directory", ".")),
+                                    cwd=tc.contained(
+                                        root,
+                                        text(
+                                            spec.get("directory", "."), "Task directory"
+                                        ),
+                                    ),
                                     pass_fds=(*descriptors, *serial_descriptors),
                                 )
                     if spec.get("wait_for_services", False):
@@ -576,11 +658,11 @@ def run(
     return 0
 
 
-def wait_for_services():
+def wait_for_services() -> None:
     """Retain project/setup leases while the host observes backend availability."""
     import signal
 
-    def stopped(number, _frame):
+    def stopped(number: int, _frame: FrameType | None) -> None:
         raise SystemExit(128 + number)
 
     previous = {

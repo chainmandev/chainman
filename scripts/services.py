@@ -475,7 +475,9 @@ def export(root, arguments):
         if action in {"run", "services-run", "services-up", "services-reset"} and extra
         else action
     )
-    input_env = project_environment.host_inputs(destination, cfg.get("environment", {}))
+    input_env = project_environment.host_inputs(
+        destination, table(cfg.get("environment", {}), "Project environment")
+    )
     planning_env = dict(input_env, CHAINMAN_MODE=mode)
     for name in (
         "TOOLCHAIN_DOWNLOAD_CACHE",
@@ -509,12 +511,13 @@ def export(root, arguments):
     )
     if task_args[:1] == ["--"]:
         task_args = task_args[1:]
-    task_order = workflows.order(cfg.get("tasks", {}), [task])
+    tasks_by_name = workflows.declarations(cfg, "tasks")
+    task_order = workflows.order(tasks_by_name, [task])
     requested = list(
         dict.fromkeys(
             service
             for name in task_order
-            for service in cfg["tasks"][name].get("services", [])
+            for service in workflows.names(tasks_by_name[name].get("services", []))
         )
     )
     if not requested:
@@ -762,14 +765,15 @@ def export(root, arguments):
             [launcher, "_workflow-task", task, fingerprint, *task_args], root, forwarded
         ),
         "wait_for_services": any(
-            cfg["tasks"][name].get("wait_for_services", False) for name in task_order
+            tasks_by_name[name].get("wait_for_services", False) for name in task_order
         ),
         "exclusive_services": any(
-            cfg["tasks"][name].get("exclusive_services", False) for name in task_order
+            tasks_by_name[name].get("exclusive_services", False) for name in task_order
         ),
         "own_task": True,
         "task_shutdown_seconds": max(
-            cfg["tasks"][name].get("shutdown_seconds", 10) for name in task_order
+            workflows.task_seconds(tasks_by_name[name], "shutdown_seconds")
+            for name in task_order
         ),
     }
     if needs_bridge:
@@ -838,9 +842,9 @@ def export(root, arguments):
         )
     if mode == "container-nix" and action != "services-up":
         networks = {
-            cfg["tasks"][name]["network_service"]
+            text(tasks_by_name[name]["network_service"], "Task network service")
             for name in task_order
-            if cfg["tasks"][name].get("network_service")
+            if tasks_by_name[name].get("network_service")
         }
         if len(networks) > 1:
             raise ValueError(
@@ -945,11 +949,11 @@ def execute_internal(root, action, extra):
         if context_task:
             env = workflows.context_environment(root, cfg, context_task, env)
         env.update(literal_environment(spec.get("environment", {}), root, env))
-        with workflows.setup_use(root, cfg, spec.get("setup", []), env) as descriptors:
+        with workflows.setup_use(
+            root, cfg, workflows.names(spec.get("setup", [])), env
+        ) as descriptors:
             profile = text(
-                spec.get(
-                    "profile", cfg.get("project", {}).get("default_profile", "default")
-                ),
+                spec.get("profile", workflows.default_profile(cfg)),
                 "Service profile",
             )
             directory = text(spec.get("directory", "."), "Service directory")

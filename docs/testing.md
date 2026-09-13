@@ -28,7 +28,7 @@ annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
 but still permit untyped calls and dynamic payloads. The gate checks 42 source
-files, including 33 with the strict flags. Recipe bindings and verification task
+files, including 34 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -62,6 +62,10 @@ Coverage includes both SDK source declarations and synchronized output pins; its
 regression uses a disposable Git repository and verifies reporting changes no
 files and runs no SDK probe. Workspace discovery checks inferred and explicit
 manifest lists, including exclusions.
+Task execution and setup readiness enforce the same strict flags. Their setup
+status rows, environment projections, command arrays and yielded lease descriptors
+have concrete types. Service planning shares the task duration validation used by
+configuration, including the same defaults and bounds.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The
@@ -89,6 +93,10 @@ perform no network requests, Nix evaluation or native package-manager operations
 
 The generated oracles cover:
 
+- Workflow ordering against worklist reachability and iterative removal of ready
+  vertices: requested closure only, dependencies first, no duplicate execution,
+  missing names and reachable cycles. Both acyclic and arbitrary graphs are
+  generated, including duplicate edges and requests.
 - Task inheritance against a small field-by-field reference: array replacement,
   empty tables, nested overrides, exact origins, unchanged input and independence
   of sibling results after mutation.
