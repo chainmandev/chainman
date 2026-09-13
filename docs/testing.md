@@ -155,6 +155,11 @@ and qualifying Chainman's Gradle adapter are separate checks.
 Container-engine and native controller tests have separate prerequisites/gates;
 skipped tests provide no evidence about those paths. Linux success does not
 establish macOS success.
+Core tests evaluate an actual Nix flake under a directory containing spaces and
+URI characters, then provision and execute the native task controller from a
+copied runtime under such a path. The latter asserts child output and exit status.
+SDK recipe tests exercise the actual Just entrypoint with a fixture launcher;
+the macOS job separately runs the real Apple SDK preflight.
 
 `just rust-test` runs the production Cargo adapter with a loopback sparse index,
 real crate archives, and isolated source replacement/cache configuration. It

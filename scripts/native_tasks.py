@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from pathlib import Path
 import platform
+import subprocess
 
 import chainman
 import toolchain as tc
@@ -22,14 +23,14 @@ def command(root, commands, spec):
                 "--extra-experimental-features",
                 "nix-command flakes",
                 "build",
-                f"path:{chainman.RUNTIME / 'nix'}#task-{target}",
+                tc.nix_path_reference(chainman.RUNTIME / "nix", f"task-{target}"),
                 "--out-link",
                 str(Path(directory) / "runtime"),
                 "--print-out-paths",
                 "--no-write-lock-file",
             ],
             check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
             text=True,
         ).stdout.strip()
         if not package.startswith("/nix/store/") or "\n" in package:

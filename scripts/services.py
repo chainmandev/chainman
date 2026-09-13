@@ -421,14 +421,14 @@ def export(root, arguments):
                 "--extra-experimental-features",
                 "nix-command flakes",
                 "build",
-                f"path:{chainman.RUNTIME / 'nix'}#control-{target}",
+                tc.nix_path_reference(chainman.RUNTIME / "nix", f"control-{target}"),
                 "--out-link",
                 str(Path(directory) / "nix-package"),
                 "--print-out-paths",
                 "--no-write-lock-file",
             ],
             check=True,
-            capture_output=True,
+            stdout=subprocess.PIPE,
             text=True,
         ).stdout.strip()
         package = Path(package_output)

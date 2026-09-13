@@ -62,7 +62,7 @@ ci-prune *args:
     @./scripts/enter.sh core python3 scripts/ci_cleanup.py "$@"
 
 sdk-doctor platform:
-    @./scripts/enter.sh "$(case "$1" in apple) echo swift;; android) echo flutter;; *) exit 2;; esac)" python3 scripts/native_sdks.py "$1"
+    @case "$1" in apple) profile=swift;; android) profile=flutter;; *) exit 2;; esac; ./scripts/enter.sh "$profile" python3 scripts/native_sdks.py "$1"
 
 release output="dist/release":
     @./scripts/enter.sh core python3 scripts/package.py --output "$1"

@@ -20,6 +20,7 @@ import tempfile
 import time
 import tomllib
 import uuid
+from urllib.parse import quote
 
 RUNTIME = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
@@ -29,6 +30,11 @@ _operation_id = ""
 _operation_compat_fd: int | None = None
 _ancestor_fds: tuple[int, ...] = ()
 _COMPILER_STARTUP_SECONDS = 120
+
+
+def nix_path_reference(directory: Path, attribute: str) -> str:
+    """Encode filesystem characters before using a path as a Nix flake URI."""
+    return f"path:{quote(str(directory), safe='/')}#{attribute}"
 
 
 def nix_command(env=None) -> str:

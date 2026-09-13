@@ -60,7 +60,7 @@ def tools_path(root, kind, *, gc_root):
                     "--extra-experimental-features",
                     "nix-command flakes",
                     "build",
-                    f"path:{chainman.RUNTIME}/nix#audit-{kind}",
+                    tc.nix_path_reference(chainman.RUNTIME / "nix", f"audit-{kind}"),
                     "--out-link",
                     str(gc_root),
                     "--print-out-paths",

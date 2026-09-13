@@ -18,6 +18,57 @@ import toolchain
 import native_tasks
 
 
+class NixReferenceTests(unittest.TestCase):
+    def test_native_task_from_copied_runtime_keeps_output_and_exit_status(self):
+        with tempfile.TemporaryDirectory(
+            prefix="chainman native runtime "
+        ) as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime # ? % ü"
+            shutil.copytree(toolchain.RUNTIME / "nix", runtime / "nix")
+            with patch.object(native_tasks.chainman, "RUNTIME", runtime):
+                with native_tasks.command(
+                    root,
+                    [
+                        [
+                            sys.executable,
+                            "-c",
+                            "print('native fixture'); raise SystemExit(7)",
+                        ]
+                    ],
+                    {},
+                ) as command:
+                    result = toolchain.managed_run(
+                        command, text=True, capture_output=True, timeout=30
+                    )
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertEqual(result.stdout, "native fixture\n")
+
+    def test_nix_resolves_runtime_paths_with_spaces_and_uri_characters(self):
+        with tempfile.TemporaryDirectory(prefix="chainman reference ") as temporary:
+            root = Path(temporary) / "runtime # ? % ü"
+            root.mkdir()
+            (root / "flake.nix").write_text(
+                '{ outputs = { self }: { answer = "correct runtime"; }; }'
+            )
+            result = subprocess.run(
+                [
+                    toolchain.nix_command(),
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "eval",
+                    "--raw",
+                    "--no-write-lock-file",
+                    toolchain.nix_path_reference(root, "answer"),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "correct runtime")
+
+
 class RuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

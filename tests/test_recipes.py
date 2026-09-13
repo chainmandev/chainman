@@ -1,6 +1,10 @@
 """Canonical recipe behavior, isolated formatting, and source protection."""
 
 import sys
+import json
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -16,6 +20,37 @@ import update_staging
 
 
 class RecipeTests(unittest.TestCase):
+    def test_public_sdk_recipe_routes_each_platform_without_nested_shell_parsing(self):
+        with tempfile.TemporaryDirectory(prefix="chainman SDK recipe ") as temporary:
+            root = Path(temporary)
+            shutil.copyfile(
+                Path(__file__).resolve().parents[1] / "justfile", root / "justfile"
+            )
+            scripts = root / "scripts"
+            scripts.mkdir()
+            entry = scripts / "enter.sh"
+            entry.write_text(
+                f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+            )
+            entry.chmod(0o755)
+            for platform, profile in (("apple", "swift"), ("android", "flutter")):
+                result = subprocess.run(
+                    ["just", "sdk-doctor", platform],
+                    cwd=root,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    [profile, "python3", "scripts/native_sdks.py", platform],
+                )
+            invalid = subprocess.run(
+                ["just", "sdk-doctor", "unknown"], cwd=root, capture_output=True
+            )
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertEqual(invalid.stdout, b"")
+
     def test_runtime_selection_uses_the_effective_public_target_arguments(self):
         cases = [
             ([], "include"),

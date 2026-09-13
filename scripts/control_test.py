@@ -30,7 +30,7 @@ def main() -> None:
                 "--extra-experimental-features",
                 "nix-command flakes",
                 "build",
-                f"path:{ROOT / 'nix'}#control-{target}",
+                tc.nix_path_reference(ROOT / "nix", f"control-{target}"),
                 "--out-link",
                 str(Path(directory) / "runtime"),
                 "--print-out-paths",
