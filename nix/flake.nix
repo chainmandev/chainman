@@ -23,13 +23,15 @@
       devShells = each (
         pkgs:
         let
-          python = pkgs.python3.withPackages (p: [
+          pythonPackages = p: [
             p.packaging
             p.tomlkit
             p.pyyaml
             p.semantic-version
             p.ruamel-yaml
-          ]);
+          ];
+          python = pkgs.python3.withPackages pythonPackages;
+          testPython = pkgs.python3.withPackages (p: pythonPackages p ++ [ p.hypothesis ]);
           # Package wrappers otherwise embed nixpkgs' default Node even when a
           # newer node executable leads PATH, splitting engine checks from builds.
           nodejs = pkgs.nodejs_latest;
@@ -65,15 +67,17 @@
             cacert
           ];
           updateBase = [ python ] ++ runtimeBase;
-          base =
-            updateBase
-            ++ (with pkgs; [
-              nixfmt
-              shellcheck
-              shfmt
-              ruff
-              mypy
-            ]);
+          base = [
+            testPython
+          ]
+          ++ runtimeBase
+          ++ (with pkgs; [
+            nixfmt
+            shellcheck
+            shfmt
+            ruff
+            mypy
+          ]);
           shellWith =
             builder: base: name: packages: extra:
             builder {

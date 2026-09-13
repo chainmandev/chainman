@@ -187,7 +187,7 @@ def config(root: Path = ROOT) -> dict:
     import configuration
 
     data, _ = configuration.compile(data)
-    cache = data.get("cache", {})
+    cache = configuration.table(data.get("cache", {}), "cache")
     for key, default in (
         ("build_limit_gib", 12),
         ("compiler_limit_gib", 8),
@@ -195,7 +195,8 @@ def config(root: Path = ROOT) -> dict:
     ):
         value = cache.get(key, default)
         if (
-            type(value) not in (int, float)
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
             or not math.isfinite(value)
             or value < 0
             or (key == "compiler_limit_gib" and value == 0)

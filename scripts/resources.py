@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+from collections.abc import MutableMapping
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import platform
@@ -12,7 +14,7 @@ import subprocess
 GIB = 1024**3
 
 
-def positive_integer(text):
+def positive_integer(text: str) -> int | None:
     try:
         value = int(text)
     except (TypeError, ValueError):
@@ -20,15 +22,18 @@ def positive_integer(text):
     return value if value > 0 else None
 
 
-def read(path):
+def read(path: Path) -> str:
     try:
         return path.read_text().strip()
     except OSError:
         return ""
 
 
-def linux_limits(proc=Path("/proc"), cgroups=Path("/sys/fs/cgroup")):
-    memory, cpu = [], []
+def linux_limits(
+    proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")
+) -> tuple[int | None, int | None]:
+    memory: list[int] = []
+    cpu: list[int] = []
     for line in read(proc / "meminfo").splitlines():
         if line.startswith("MemAvailable:"):
             parts = line.split()
@@ -54,14 +59,14 @@ def linux_limits(proc=Path("/proc"), cgroups=Path("/sys/fs/cgroup")):
             if amount and period:
                 cpu.append(max(1, math.ceil(amount / period)))
     # Retain support for the v1 container layout used by older engines.
-    limit = positive_integer(read(cgroups / "memory/memory.limit_in_bytes"))
+    v1_limit = positive_integer(read(cgroups / "memory/memory.limit_in_bytes"))
     used = read(cgroups / "memory/memory.usage_in_bytes")
-    if limit and used.isdecimal():
-        memory.append(max(0, limit - int(used)))
+    if v1_limit and used.isdecimal():
+        memory.append(max(0, v1_limit - int(used)))
     return (min(memory) if memory else None, min(cpu) if cpu else None)
 
 
-def detected():
+def detected() -> tuple[int, int | None]:
     try:
         cpus = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
@@ -83,36 +88,27 @@ def detected():
     return max(1, cpus), memory
 
 
-def budget(settings, cpus, memory):
-    maximum = settings.get("max_jobs", cpus)
-    per_job = settings.get("memory_per_job_gib")
-    if type(maximum) is not int or maximum < 1:
-        raise ValueError("resources.max_jobs must be a positive integer")
-    jobs = min(maximum, max(1, cpus))
-    if per_job is not None:
-        if (
-            type(per_job) not in (int, float)
-            or not math.isfinite(per_job)
-            or per_job <= 0
-        ):
-            raise ValueError("resources.memory_per_job_gib must be positive and finite")
-        if memory is not None:
-            jobs = min(jobs, max(1, int(memory // (per_job * GIB))))
-    return jobs
+@dataclass(frozen=True)
+class Policy:
+    maximum: int | None
+    per_job: int | float | None
+    variables: tuple[str, ...]
 
 
-def validate(settings):
-    if not settings:
-        return
+def policy(settings: object, *, require_variables: bool = True) -> Policy:
+    """Decode once so resource detection and export consume validated values."""
     if not isinstance(settings, dict) or set(settings) - {
         "max_jobs",
         "memory_per_job_gib",
         "job_variables",
     }:
         raise ValueError("Unknown resource policy field")
-    variables = settings.get("job_variables", [])
-    if not isinstance(variables, list) or not variables:
+    variables: object = settings.get("job_variables", [])
+    if not isinstance(variables, list) or (
+        settings and require_variables and not variables
+    ):
         raise ValueError("Resource policy requires explicit job_variables")
+    names: list[str] = []
     for variable in variables:
         if (
             not isinstance(variable, str)
@@ -120,19 +116,49 @@ def validate(settings):
             or variable.startswith(("CHAINMAN_", "TOOLCHAIN_"))
         ):
             raise ValueError("Invalid resource job variable")
-    budget(settings, 1, None)
+        names.append(variable)
+    maximum: int | None = None
+    if "max_jobs" in settings:
+        value: object = settings["max_jobs"]
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError("resources.max_jobs must be a positive integer")
+        maximum = value
+    per_job: object = settings.get("memory_per_job_gib")
+    if per_job is not None and (
+        not isinstance(per_job, (int, float))
+        or isinstance(per_job, bool)
+        or (isinstance(per_job, float) and not math.isfinite(per_job))
+        or per_job <= 0
+    ):
+        raise ValueError("resources.memory_per_job_gib must be positive and finite")
+    return Policy(maximum, per_job, tuple(names))
 
 
-def apply(settings, env):
-    validate(settings)
-    if not settings:
+def _budget(policy: Policy, cpus: int, memory: int | None) -> int:
+    jobs = min(policy.maximum or max(1, cpus), max(1, cpus))
+    per_job = policy.per_job
+    if per_job is not None and memory is not None:
+        jobs = min(jobs, max(1, int(memory // (per_job * GIB))))
+    return jobs
+
+
+def budget(settings: object, cpus: int, memory: int | None) -> int:
+    return _budget(policy(settings, require_variables=False), cpus, memory)
+
+
+def validate(settings: object) -> None:
+    policy(settings)
+
+
+def apply(settings: object, env: MutableMapping[str, str]) -> None:
+    configured = policy(settings)
+    if not configured.variables:
         return
-    variables = settings["job_variables"]
-    for variable in variables:
+    for variable in configured.variables:
         if variable in env and positive_integer(env[variable]) is None:
             raise ValueError(
                 f"{variable} must be a positive integer when explicitly configured"
             )
-    jobs = budget(settings, *detected())
-    for variable in variables:
+    jobs = _budget(configured, *detected())
+    for variable in configured.variables:
         env.setdefault(variable, str(jobs))

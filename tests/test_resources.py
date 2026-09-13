@@ -69,6 +69,18 @@ class ResourceTests(unittest.TestCase):
                 resources.apply({"job_variables": ["CARGO_BUILD_JOBS"], **setting}, env)
             self.assertFalse(env)
 
+    def test_falsey_non_tables_are_not_silently_treated_as_no_policy(self):
+        for setting in (False, 0, "", [], None):
+            env = {"KEEP": "unchanged"}
+            with (
+                self.subTest(setting=setting),
+                patch.object(resources, "detected") as detect,
+            ):
+                with self.assertRaisesRegex(ValueError, "resource policy"):
+                    resources.apply(setting, env)
+                self.assertEqual(env, {"KEEP": "unchanged"})
+                detect.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

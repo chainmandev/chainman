@@ -5,8 +5,19 @@ belong here. Execution and inspection share this compiler.
 """
 
 from copy import deepcopy
+from collections.abc import Iterator, Mapping, Set
 import re
 import math
+
+Table = dict[str, object]
+Origins = dict[str, str]
+
+
+def table(value: object, location: str) -> Table:
+    """Narrow decoded input at the boundary instead of propagating Any."""
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError(f"{location} must be a table with string keys")
+    return {key: item for key, item in value.items()}
 
 
 FIELDS = {
@@ -44,7 +55,7 @@ NUMBERS = set(
 )
 
 
-def name(value):
+def name(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9_-]*", value
     ):
@@ -54,10 +65,9 @@ def name(value):
     return value
 
 
-def fields(spec, allowed, location):
+def fields(value: object, allowed: Set[str], location: str) -> Table:
     """Check partial declarations too, including unused template fields."""
-    if not isinstance(spec, dict):
-        raise ValueError(f"{location} must be a table")
+    spec = table(value, location)
     unknown = set(spec) - allowed
     if unknown:
         raise ValueError(f"Unknown fields in {location}: {', '.join(sorted(unknown))}")
@@ -88,59 +98,71 @@ def fields(spec, allowed, location):
                 if any(not isinstance(v, str) or "\0" in v for v in value):
                     raise ValueError(f"{path} requires strings")
         elif key in NUMBERS:
-            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+            ):
                 raise ValueError(f"{path} must be a nonnegative number")
         elif not isinstance(value, str) or "\0" in value:
             raise ValueError(f"{path} must be a string")
+    return spec
 
 
-def merge(base, override):
-    result = deepcopy(base)
+def merge(base: Mapping[str, object], override: Mapping[str, object]) -> Table:
+    result = deepcopy(dict(base))
     for key, value in override.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = merge(result[key], value)
+        inherited = result.get(key)
+        if isinstance(value, dict) and isinstance(inherited, dict):
+            result[key] = merge(table(inherited, key), table(value, key))
         else:
             result[key] = deepcopy(value)
     return result
 
 
-def leaves(spec, prefix=()):
+def leaves(
+    spec: Mapping[str, object], prefix: tuple[str, ...] = ()
+) -> Iterator[tuple[str, ...]]:
     for key, value in spec.items():
         path = (*prefix, key)
         if isinstance(value, dict) and value:
-            yield from leaves(value, path)
+            yield from leaves(table(value, ".".join(path)), path)
         else:
             yield path
 
 
-def compile(data):
+def compile(data: Mapping[str, object]) -> tuple[Table, dict[str, Origins]]:
     """Return independent effective declarations and per-field source origins."""
-    result = deepcopy(data)
+    result = deepcopy(dict(data))
     templates = result.pop("templates", {})
     if data.get("schema") != 3:
-        if "templates" in data or any(
-            isinstance(spec, dict) and "extends" in spec
-            for kind in FIELDS
-            if isinstance(data.get(kind, {}), dict)
-            for spec in data.get(kind, {}).values()
-        ):
+        composition = "templates" in data
+        for kind in FIELDS:
+            entries = data.get(kind, {})
+            if isinstance(entries, dict):
+                composition |= any(
+                    isinstance(spec, dict) and "extends" in spec
+                    for spec in entries.values()
+                )
+        if composition:
             raise ValueError("Composition requires configuration schema=3")
         return result, {}
-    if not isinstance(templates, dict) or set(templates) - set(FIELDS):
+    templates = table(templates, "Templates")
+    if set(templates) - set(FIELDS):
         raise ValueError("Templates must contain tasks, services, setup or profiles")
-    origins = {}
+    origins: dict[str, Origins] = {}
     for kind, allowed in FIELDS.items():
-        definitions = templates.get(kind, {})
-        entries = result.get(kind, {})
-        if not isinstance(definitions, dict) or not isinstance(entries, dict):
-            raise ValueError(f"{kind} declarations must be tables")
-        resolved = {}
-        active = set()
+        definitions = table(templates.get(kind, {}), f"templates.{kind}")
+        entries = table(result.get(kind, {}), f"{kind} declarations")
+        resolved: dict[str, tuple[Table, Origins]] = {}
+        active: set[str] = set()
 
-        def expand(spec, location):
-            fields(spec, allowed | {"extends"}, location)
+        def expand(value: object, location: str) -> tuple[Table, Origins]:
+            spec = fields(value, allowed | {"extends"}, location)
             own = {k: v for k, v in spec.items() if k != "extends"}
-            base, sources = ({}, {})
+            base: Table = {}
+            sources: Origins = {}
             if "extends" in spec:
                 base, sources = template(name(spec["extends"]))
             effective = merge(base, own)
@@ -153,7 +175,7 @@ def compile(data):
             }
             return effective, sources
 
-        def template(key):
+        def template(key: str) -> tuple[Table, Origins]:
             if key in active:
                 raise ValueError(f"Template inheritance cycle in {kind}: {key}")
             if key not in definitions:
@@ -171,4 +193,6 @@ def compile(data):
             effective, sources = expand(spec, location)
             entries[key] = effective
             origins[location] = sources
+        if kind in result:
+            result[kind] = entries
     return result, origins

@@ -19,6 +19,17 @@ import bootstrap_plan
 
 
 class CompositionTests(unittest.TestCase):
+    def test_malformed_cache_is_rejected_as_configuration_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for value in ("false", "0", '"none"', "[]"):
+                (root / "chainman.toml").write_text(f"schema=3\ncache={value}\n")
+                with (
+                    self.subTest(value=value),
+                    self.assertRaisesRegex(ValueError, "cache must be a table"),
+                ):
+                    tc.config(root)
+
     def test_inspection_validates_environment_without_resolving_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
