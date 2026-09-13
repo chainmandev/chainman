@@ -73,6 +73,7 @@ def main() -> None:
     for path in (root / ".github/workflows").glob("*.yml"):
         contained(root, path.relative_to(root).as_posix())
         yaml.safe_load(path.read_text())
+    subprocess.run(["actionlint"], cwd=root, check=True)
 
 
 if __name__ == "__main__":

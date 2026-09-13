@@ -23,8 +23,8 @@ native lock adapter and npm adapter require complete function annotations and
 pass decoded records through their decisions. Their configuration inputs and some
 imported operations still have dynamic types. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 31 source
-files, including 14 with the strict flags. Distribution inventories and consumed
+but still permit untyped calls and dynamic payloads. The gate checks 32 source
+files, including 15 with the strict flags. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
 wire schema. Timing context managers have explicit lifetime and environment types.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
@@ -155,6 +155,16 @@ and qualifying Chainman's Gradle adapter are separate checks.
 Container-engine and native controller tests have separate prerequisites/gates;
 skipped tests provide no evidence about those paths. Linux success does not
 establish macOS success.
+`just control-test` runs Go vet and the Go tests with the race detector, then the
+native controller/backend fixtures and four target cross-builds. Cross-builds
+establish compilation only. The deliberate CI matrix runs core and controller
+qualification natively on both Linux and macOS, on ARM64 and x86-64 runners.
+The formatting gate includes Actionlint's workflow and embedded-command checks;
+PyYAML stubs are pinned in the development shell alongside its implementation.
+Distribution tests compare the explicit source inventory with production Python,
+Go and test files, and check that statically imported local Python modules are
+present in the runtime archive. Dynamic imports and external commands still need
+their behavioral and packaged-runtime checks.
 Core tests evaluate an actual Nix flake under a directory containing spaces and
 URI characters, then provision and execute the native task controller from a
 copied runtime under such a path. The latter asserts child output and exit status.

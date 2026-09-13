@@ -22,7 +22,13 @@ def main() -> None:
     )
     if formatted:
         raise ValueError("Go files require gofmt:\n" + formatted)
-    subprocess.run(["go", "test", "-mod=readonly", "./..."], cwd=source, check=True)
+    subprocess.run(["go", "vet", "-mod=readonly", "./..."], cwd=source, check=True)
+    subprocess.run(
+        ["go", "test", "-race", "-mod=readonly", "./..."],
+        cwd=source,
+        env=dict(os.environ, CGO_ENABLED="1"),
+        check=True,
+    )
     with tempfile.TemporaryDirectory(prefix="chainman-control-test-") as directory:
         package = subprocess.check_output(
             [

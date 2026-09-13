@@ -1,6 +1,7 @@
 """Distribution identity and extraction behavior independently of the launcher."""
 
 import hashlib
+import ast
 import io
 import json
 import os
@@ -17,6 +18,49 @@ import package
 
 
 class DistributionTests(unittest.TestCase):
+    def test_distribution_inventory_covers_sources_and_runtime_import_closure(self):
+        inventory = json.loads((package.ROOT / "release-files.json").read_text())
+        sources = set(inventory["files"])
+        runtime = set(inventory["runtime_files"])
+        self.assertEqual(len(sources), len(inventory["files"]))
+        self.assertEqual(len(runtime), len(inventory["runtime_files"]))
+        self.assertFalse(runtime - sources)
+        required = {
+            path.relative_to(package.ROOT).as_posix()
+            for directory, pattern in (
+                ("scripts", "*.py"),
+                ("tests", "*.py"),
+                ("nix/control", "*.go"),
+            )
+            for path in (package.ROOT / directory).glob(pattern)
+        }
+        self.assertFalse(
+            required - sources,
+            f"Source inventory omissions: {sorted(required - sources)}",
+        )
+        modules = {
+            path.stem: path.relative_to(package.ROOT).as_posix()
+            for path in (package.ROOT / "scripts").glob("*.py")
+        }
+        for name in sorted(runtime):
+            if not name.startswith("scripts/") or not name.endswith(".py"):
+                continue
+            tree = ast.parse((package.ROOT / name).read_text(), filename=name)
+            dependencies = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    dependencies.update(item.name.split(".")[0] for item in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    dependencies.add(node.module.split(".")[0])
+            missing = {
+                modules[dependency]
+                for dependency in dependencies
+                if dependency in modules
+            } - runtime
+            self.assertFalse(
+                missing, f"Runtime imports omitted from {name}: {sorted(missing)}"
+            )
+
     def test_example_keeps_one_runtime_implementation_and_its_own_sdk_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

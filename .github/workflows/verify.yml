@@ -19,6 +19,9 @@ jobs:
       matrix:
         include:
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
+          - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
+          - {runner: macos-15, mode: host-nix, module: core, engine: docker}
+          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}
@@ -58,7 +61,7 @@ jobs:
           TOOLCHAIN_MODE: host-nix
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-prune --module "$MODULE" --apply --sudo
       - name: Apple SDK preflight
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && matrix.module == 'swift'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- sdk-doctor apple
       - name: Verify using the local command
         run: |

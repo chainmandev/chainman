@@ -31,7 +31,14 @@
             p.ruamel-yaml
           ];
           python = pkgs.python3.withPackages pythonPackages;
-          testPython = pkgs.python3.withPackages (p: pythonPackages p ++ [ p.hypothesis ]);
+          testPython = pkgs.python3.withPackages (
+            p:
+            pythonPackages p
+            ++ [
+              p.hypothesis
+              p.types-pyyaml
+            ]
+          );
           # Package wrappers otherwise embed nixpkgs' default Node even when a
           # newer node executable leads PATH, splitting engine checks from builds.
           nodejs = pkgs.nodejs_latest;
@@ -77,6 +84,7 @@
             shfmt
             ruff
             mypy
+            actionlint
           ]);
           shellWith =
             builder: base: name: packages: extra:
@@ -132,7 +140,7 @@
           ] "";
           python = shell "python" [ pkgs.uv pkgs.ruff ] "";
           go = shell "go" [ pkgs.go_latest pkgs.stdenv.cc ] "";
-          control = shell "control" [ pkgs.go_latest ] "";
+          control = shell "control" [ pkgs.go_latest pkgs.stdenv.cc ] "";
           flutter = shell "flutter" [ flutterPkgs.flutter ] "";
           swift =
             shell "swift"
