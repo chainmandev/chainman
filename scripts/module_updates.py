@@ -11,7 +11,7 @@ import dependency_api
 import sdk_versions
 import source_updates
 import toolchain as tc
-from adapter_data import Table, array, table
+from adapter_data import Table, array, table, text
 
 
 def nix_spec(policy: Mapping[str, object]) -> Table | None:
@@ -43,9 +43,11 @@ def nix_spec(policy: Mapping[str, object]) -> Table | None:
     }
 
 
-def adapters(root: Path, selected: list[str], policy: dict) -> dict:
-    configured = {}
-    explicit = policy.get("pins", [])
+def adapters(root: Path, selected: list[str], policy: Table) -> dict[str, Table]:
+    configured: dict[str, Table] = {}
+    explicit = [
+        table(pin, "Module pin") for pin in array(policy.get("pins", []), "Module pins")
+    ]
     actions = set()
     for pin in explicit:
         if pin.get("module"):
@@ -54,7 +56,7 @@ def adapters(root: Path, selected: list[str], policy: dict) -> dict:
             raise ValueError(
                 "Non-module pins require an explicitly configured shared adapter"
             )
-        actions.add(pin["file"])
+        actions.add(text(pin["file"], "Action pin file"))
     if actions:
         configured["actions"] = {
             "adapter": "actions",
@@ -71,11 +73,11 @@ def adapters(root: Path, selected: list[str], policy: dict) -> dict:
         "go": "go",
     }
     for name in selected:
-        module = tc.module(name, root)
+        module = table(tc.module(name, root), "Example module")
         ecosystem = module.get("ecosystem")
         if ecosystem is None:
             continue
-        if ecosystem not in kinds:
+        if not isinstance(ecosystem, str) or ecosystem not in kinds:
             raise ValueError(
                 "Example module needs a supported shared ecosystem adapter"
             )
@@ -97,8 +99,9 @@ def adapters(root: Path, selected: list[str], policy: dict) -> dict:
                 )
             spec["directories"] = [module["directory"]]
         else:
-            if module.get("commands", {}).get("resolve"):
-                spec["resolve"] = module["commands"]["resolve"]
+            commands = table(module.get("commands", {}), "Module commands")
+            if commands.get("resolve"):
+                spec["resolve"] = commands["resolve"]
             if kind == "gradle" and not pins:
                 raise ValueError(
                     "The Compose module must declare coordinated version catalog pins"
@@ -107,8 +110,8 @@ def adapters(root: Path, selected: list[str], policy: dict) -> dict:
     return configured
 
 
-def image_snapshot(root: Path, policy: dict):
-    spec = policy.get("docker", {})
+def image_snapshot(root: Path, policy: Table) -> dict[str, str] | None:
+    spec = table(policy.get("docker", {}), "Docker update policy")
     if not spec.get("enabled", True):
         return None
     text = tc.regular_input(root, "nix/container-image.txt").decode().strip()
@@ -128,7 +131,7 @@ def image_snapshot(root: Path, policy: dict):
     }
 
 
-def resolve(root: Path, selected: list[str], policy: dict, now: datetime):
+def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> None:
     configured = adapters(root, selected, policy)
     before = {
         name: dependency_api.implementation(spec).snapshot(root, spec)
@@ -170,6 +173,6 @@ def resolve(root: Path, selected: list[str], policy: dict, now: datetime):
         if image_before is not None:
             expected = source_updates.select_oci(image_before, {}, policy, now)
             actual = image_snapshot(root, policy)
-            if any(actual[key] != expected[key] for key in actual):
+            if actual is None or any(actual[key] != expected[key] for key in actual):
                 raise ValueError("Runtime image drifted from its audited selection")
         sdk_versions.synchronize(root, selected, check=True)

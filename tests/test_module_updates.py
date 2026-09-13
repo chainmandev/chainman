@@ -113,6 +113,21 @@ class ModuleTests(unittest.TestCase):
                 self.root, [], {"pins": [{"provider": "npm", "name": "sample"}]}
             )
 
+    def test_malformed_pin_inventory_is_rejected_before_module_loading(self):
+        for pins in (
+            None,
+            "pin",
+            [None],
+            [{"provider": "github", "representation": "action", "file": 4}],
+        ):
+            with (
+                self.subTest(pins=pins),
+                patch.object(modules.tc, "module") as load,
+                self.assertRaises(ValueError),
+            ):
+                modules.adapters(self.root, ["core"], {"pins": pins})
+            load.assert_not_called()
+
     def test_all_original_snapshots_precede_sdk_edits_and_final_audits_follow_resolvers(
         self,
     ):

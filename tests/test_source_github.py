@@ -61,6 +61,13 @@ class GitHubTagTests(unittest.TestCase):
         result = source_github.select("example/language", PATTERN, {}, NOW)
         self.assertEqual(result["release"].version, "6.2.0")
 
+    def test_malformed_inventory_entry_has_a_registry_diagnostic(self):
+        with (
+            patch.object(registry, "data", return_value=[None]),
+            self.assertRaisesRegex(ValueError, "GitHub release must be an object"),
+        ):
+            source_github.releases("example/language", PATTERN)
+
     def test_constraints_do_not_admit_an_immature_tag(self):
         with self.assertRaisesRegex(ValueError, "No eligible"):
             source_github.select(

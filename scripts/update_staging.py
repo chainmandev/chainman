@@ -477,7 +477,9 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
                         image_before, {}, settings, now
                     )
                     actual = module_updates.image_snapshot(root, settings)
-                    if any(actual[key] != expected[key] for key in actual):
+                    if actual is None or any(
+                        actual[key] != expected[key] for key in actual
+                    ):
                         raise ValueError(
                             "Resumed runtime image differs from fresh eligibility evidence"
                         )

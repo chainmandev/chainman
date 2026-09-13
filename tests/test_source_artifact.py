@@ -377,6 +377,34 @@ class ArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "selected artifact identity"):
                 adapter.audit(root, spec, before, {}, NOW)
 
+    def test_snapshot_projects_nested_array_pointer_without_aliasing_configuration(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            path = root / "sources.json"
+            body = json.dumps({"sdk": [{"url": URL, "digest": DIGEST}]})
+            path.write_text(body)
+            spec = {"entries": [{"file": "sources.json", "pointer": ["sdk", 0]}]}
+            result = adapter.snapshot(root, spec)
+            self.assertEqual(
+                result,
+                {
+                    "entries": [
+                        {
+                            "file": "sources.json",
+                            "pointer": ["sdk", 0],
+                            "url": URL,
+                            "digest": DIGEST,
+                            "max_bytes": artifacts.MAX_BYTES,
+                        }
+                    ]
+                },
+            )
+            result["entries"][0]["pointer"].append("changed")
+            self.assertEqual(spec["entries"][0]["pointer"], ["sdk", 0])
+            self.assertEqual(path.read_text(), body)
+
     def test_artifact_adapter_does_not_repair_missing_evidence_or_escape_paths(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

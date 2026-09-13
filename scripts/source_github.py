@@ -1,8 +1,11 @@
 """Dated GitHub releases whose public tags wrap a stable numeric version."""
 
 import re
+from collections.abc import Mapping
 from datetime import datetime
+from typing import TypedDict
 
+import adapter_data as ad
 import registry
 import source_updates
 
@@ -14,7 +17,12 @@ VERSION_FORMS = {
 }
 
 
-def pattern(value: str):
+class Selection(TypedDict):
+    release: registry.Release
+    tag: str
+
+
+def pattern(value: str) -> re.Pattern[str]:
     if not isinstance(value, str) or len(value) > 256:
         raise ValueError("GitHub tag pattern must be a bounded string")
     match = re.fullmatch(
@@ -39,7 +47,8 @@ def releases(repository: str, tag_pattern: str) -> list[registry.Release]:
         )
         if not isinstance(values, list):
             raise ValueError("Malformed GitHub release inventory")  # noqa: TRY004
-        for value in values:
+        for raw in values:
+            value = ad.table(raw, "GitHub release")
             tag = value.get("tag_name")
             if not isinstance(tag, str) or len(tag) > 128:
                 raise ValueError("GitHub release tag exceeds its bounded identity")
@@ -68,8 +77,13 @@ def bind(repository: str, release: registry.Release) -> registry.Release:
 
 
 def select(
-    repository: str, tag_pattern: str, policy: dict, now: datetime, *, values=None
-) -> dict:
+    repository: str,
+    tag_pattern: str,
+    policy: Mapping[str, object],
+    now: datetime,
+    *,
+    values: list[registry.Release] | None = None,
+) -> Selection:
     values = releases(repository, tag_pattern) if values is None else values
     eligible = sorted(
         registry.eligible("github", values, policy, repository, now),
@@ -86,7 +100,7 @@ def select(
     raise ValueError("No eligible GitHub release with mature immutable contents")
 
 
-def metadata(repository: str, tag_pattern: str, value: str) -> dict:
+def metadata(repository: str, tag_pattern: str, value: str) -> Selection:
     values = releases(repository, tag_pattern)
     exact = [release for release in values if release.identity == value]
     matches = exact or [release for release in values if release.version == value]
