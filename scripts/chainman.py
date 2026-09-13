@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import hashlib
 import importlib.util
 import json
@@ -17,13 +17,13 @@ from typing import Literal, Unpack, overload
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import toolchain as tc
-from adapter_data import table, strings
+from adapter_data import Table, table, strings, text as field_text
 
 RUNTIME = Path(__file__).resolve().parents[1]
 
 
-def configuration(root: Path) -> dict:
-    return tc.config(root)
+def configuration(root: Path) -> Table:
+    return table(tc.config(root), "Project configuration")
 
 
 def flake_reference(root: Path, location: Path, attribute: str) -> str:
@@ -64,14 +64,16 @@ def flake_reference(root: Path, location: Path, attribute: str) -> str:
     return f"path:{quote(str(location), safe='/')}#{attribute}"
 
 
-def profile(root: Path, name: str, *, cfg=None) -> tuple[str | None, dict]:
+def profile(
+    root: Path, name: str, *, cfg: Mapping[str, object] | None = None
+) -> tuple[str | None, Table]:
     if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         raise ValueError("Invalid profile name")
     cfg = configuration(root) if cfg is None else cfg
-    spec = cfg.get("profiles", {}).get(name)
+    raw = table(cfg.get("profiles", {}), "Profiles").get(name)
     if name == "host":
         return None, {}
-    if spec is None:
+    if raw is None:
         # Built-in modules remain available without loading them by default.
         if name not in {
             "default",
@@ -86,9 +88,10 @@ def profile(root: Path, name: str, *, cfg=None) -> tuple[str | None, dict]:
             "browser",
         }:
             raise ValueError(f"Profile {name!r} is not declared")
-        spec = {"runtime_profile": "core" if name == "default" else name}
+        raw = {"runtime_profile": "core" if name == "default" else name}
+    spec = table(raw, "Profile")
     if "flake" in spec:
-        path, sep, attribute = spec["flake"].partition("#")
+        path, sep, attribute = field_text(spec["flake"], "Profile flake").partition("#")
         if not path or not sep or not re.fullmatch(r"[A-Za-z0-9_.-]+", attribute):
             raise ValueError("A project profile must select a flake path#shell")
         if path.endswith("/flake.nix") or path == "flake.nix":
@@ -97,7 +100,7 @@ def profile(root: Path, name: str, *, cfg=None) -> tuple[str | None, dict]:
         tc.regular_input(location, "flake.nix")
     else:
         location = RUNTIME / "nix"
-        attribute = spec.get("runtime_profile", "core")
+        attribute = field_text(spec.get("runtime_profile", "core"), "Runtime profile")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", attribute):
             raise ValueError("Invalid runtime shell")
     return flake_reference(root, location, attribute), spec
@@ -336,17 +339,27 @@ def execute(
             timing.emit("command", "end", timing_operation)
 
 
-def run_hook(root: Path, commands, *, name="default", extra=(), env=None):
+def run_hook(
+    root: Path,
+    commands: object,
+    *,
+    name: str = "default",
+    extra: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+) -> None:
     if not isinstance(commands, list) or not commands:
         raise ValueError("A hook must declare at least one argument-array command")
     for index, command in enumerate(commands):
         if not isinstance(command, list) or not command:
             raise ValueError("Hook commands must be nonempty argument arrays")
-        argv = [*command, *(extra if index == len(commands) - 1 else [])]
+        argv = [
+            *strings(command, "Hook command"),
+            *(extra if index == len(commands) - 1 else []),
+        ]
         execute(root, name, argv, env=env)
 
 
-def run_project(root: Path, action: str, extra: list[str]):
+def run_project(root: Path, action: str, extra: list[str]) -> int | None:
     cfg = configuration(root)
     if cfg["schema"] in (2, 3):
         import workflows
@@ -354,31 +367,41 @@ def run_project(root: Path, action: str, extra: list[str]):
         return workflows.run(root, action, extra)
     with tc.operation(
         root,
-        exclusive=action == "setup" or action not in cfg.get("commands", {}),
+        exclusive=action == "setup"
+        or action not in table(cfg.get("commands", {}), "Project commands"),
         new_execution=True,
-        automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+        automatic_prune=table(cfg.get("cache", {}), "Cache").get(
+            "automatic_prune", True
+        )
+        is True,
     ):
         env = tc.environment(root)
-        if action in cfg.get("commands", {}) and action != "setup":
-            name = cfg.get("command_profiles", {}).get(
-                action, cfg.get("project", {}).get("default_profile", "default")
+        commands = table(cfg.get("commands", {}), "Project commands")
+        if action in commands and action != "setup":
+            name = field_text(
+                table(cfg.get("command_profiles", {}), "Command profiles").get(
+                    action,
+                    table(cfg.get("project", {}), "Project").get(
+                        "default_profile", "default"
+                    ),
+                ),
+                "Command profile",
             )
             with tc.compiler_cache(name, env, root) as owned:
-                run_hook(
-                    root, cfg["commands"][action], name=name, extra=extra, env=owned
-                )
-            return
+                run_hook(root, commands[action], name=name, extra=extra, env=owned)
+            return None
         if extra:
             raise ValueError("Module actions do not accept extra arguments")
-        for name in cfg["modules"]:
+        for name in strings(cfg["modules"], "Modules"):
             spec = tc.module(name, root)
             if action != "format":
                 tc.setup(spec, env, root)
             if action != "setup":
                 tc.run_commands(spec, action, env, root)
+    return None
 
 
-def main(argv=None):
+def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--root", type=Path, default=Path(os.environ.get("CHAINMAN_ROOT", os.getcwd()))
@@ -504,7 +527,12 @@ def main(argv=None):
             reuse = rest[:1] == ["--reuse-operation"]
             if reuse:
                 rest = rest[1:]
-            name = cfg.get("project", {}).get("default_profile", "default")
+            name = field_text(
+                table(cfg.get("project", {}), "Project").get(
+                    "default_profile", "default"
+                ),
+                "Default profile",
+            )
             if rest[:1] == ["--profile"]:
                 if len(rest) < 2:
                     raise ValueError("--profile requires a name")
@@ -519,7 +547,10 @@ def main(argv=None):
                 root,
                 exclusive=False,
                 new_execution=not reuse,
-                automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+                automatic_prune=table(cfg.get("cache", {}), "Cache").get(
+                    "automatic_prune", True
+                )
+                is True,
             ):
                 env = tc.environment(root)
                 if env.get("CHAINMAN_COMPILER_OWNER") == str(root):
@@ -584,7 +615,7 @@ def main(argv=None):
                     raise ValueError(
                         "modules requires setup, build, test, verify or format"
                     )
-                selected, action = cfg["modules"], rest[0]
+                selected, action = strings(cfg["modules"], "Modules"), rest[0]
             elif len(rest) not in (1, 2):
                 raise ValueError("module requires a name and optional action")
             else:
@@ -593,7 +624,10 @@ def main(argv=None):
                 root,
                 exclusive=True,
                 new_execution=True,
-                automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
+                automatic_prune=table(cfg.get("cache", {}), "Cache").get(
+                    "automatic_prune", True
+                )
+                is True,
             ):
                 env = tc.environment(root)
                 for module_name in selected:
@@ -668,7 +702,7 @@ def main(argv=None):
                         "project": str(root),
                         "runtime": str(RUNTIME),
                         "mode": os.environ.get("CHAINMAN_MODE", "host-nix"),
-                        "profiles": list(cfg.get("profiles", {})),
+                        "profiles": list(table(cfg.get("profiles", {}), "Profiles")),
                         "modules": cfg["modules"],
                         "configuration_schema": cfg["schema"],
                         "nix_policy": "shared-container-daemon"

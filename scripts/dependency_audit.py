@@ -77,12 +77,12 @@ def tools_path(root, kind, *, gc_root):
     )
 
 
-def run(root, arguments):
+def run(root: Path, arguments: list[str]) -> int:
     with tc.nix_temporary_directory("chainman-audit-tools-") as directory:
         return run_retained(root, arguments, Path(directory))
 
 
-def run_retained(root, arguments, roots):
+def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
     import recipes
 
     cfg = tc.config(root)

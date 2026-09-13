@@ -383,7 +383,10 @@ def run_steps(
             chainman.run_hook(
                 root,
                 step["commands"],
-                name=step.get("profile", settings.get("profile", "default")),
+                name=text(
+                    step.get("profile", settings.get("profile", "default")),
+                    "Hook profile",
+                ),
                 env=env,
             )
         for name, (spec, chosen_policy) in adapters.items():

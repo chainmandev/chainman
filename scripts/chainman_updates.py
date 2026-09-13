@@ -526,9 +526,14 @@ def resolve_current(
         chainman.run_hook(
             root,
             policy["resolver"],
-            name=policy.get(
-                "profile",
-                tc.config(root).get("project", {}).get("default_profile", "default"),
+            name=ad.text(
+                policy.get(
+                    "profile",
+                    tc.config(root)
+                    .get("project", {})
+                    .get("default_profile", "default"),
+                ),
+                "Resolver profile",
             ),
             extra=extra,
             env=env,
@@ -588,9 +593,14 @@ def verify_current(root: Path) -> None:
         chainman.run_hook(
             root,
             policy["verify"],
-            name=policy.get(
-                "profile",
-                tc.config(root).get("project", {}).get("default_profile", "default"),
+            name=ad.text(
+                policy.get(
+                    "profile",
+                    tc.config(root)
+                    .get("project", {})
+                    .get("default_profile", "default"),
+                ),
+                "Verification profile",
             ),
             env=env,
         )

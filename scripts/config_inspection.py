@@ -26,7 +26,12 @@ def validated(root: Path) -> dict[str, object]:
     for profile in cfg.get("profiles", {}):
         _, spec = chainman.profile(root, profile, cfg=cfg)
         project_environment.values(spec.get("environment", {}))
-        resources.validate({**cfg.get("resources", {}), **spec.get("resources", {})})
+        resources.validate(
+            {
+                **table(cfg.get("resources", {}), "Project resources"),
+                **table(spec.get("resources", {}), "Profile resources"),
+            }
+        )
     if "recipes" in cfg:
         import recipes
 
