@@ -121,9 +121,9 @@ def locate(
 
 def allowed(workspace: js.Workspace, pin: js.Pin) -> list[tuple[str, str]]:
     result = js.effective_requirements(workspace, pin)
-    replacement = (
-        workspace.documents["package.json"][0].get("overrides", {}).get(pin.alias)
-    )
+    replacement = inputs.table(
+        workspace.documents["package.json"][0].get("overrides", {}), "npm overrides"
+    ).get(pin.alias)
     if isinstance(replacement, dict):
         replacement = replacement.get(".")
     if isinstance(replacement, str) and not replacement.startswith("$"):
@@ -353,7 +353,7 @@ def resolve(
         ]
         result = chainman.execute(
             root,
-            spec.get("profile", "javascript"),
+            inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),
             command,
             cwd=temporary,
             env=tc.environment(root),
@@ -405,7 +405,7 @@ def resolve(
         tc.atomic_bytes(path, (json.dumps(lock, indent=2) + "\n").encode(), 0o644)
         checked = chainman.execute(
             root,
-            spec.get("profile", "javascript"),
+            inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),
             [
                 "npm",
                 "ci",

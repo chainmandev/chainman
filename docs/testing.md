@@ -24,12 +24,12 @@ immutable policy with typed fields. The transaction coordinator, native lock
 adapter, source workflow, finite-command adapter and SDK coordination also enforce
 strict flags. Native adapter configuration values are projected into typed paths,
 profiles, pin arrays and policy maps. The npm adapter enforces strict flags and uses typed local dependency sections
-and peer metadata. Shared JavaScript range, override and compatibility helpers
-expose their input/output types and project their configuration values; the
-workspace planner still has dynamic operations. The other modules listed in
-`mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 48 source
-files, including 47 with the strict flags. Recipe bindings and verification task
+and peer metadata. The JavaScript workspace planner also enforces strict flags,
+including solver states and peer conflict witnesses, serialized snapshots,
+configuration projections and mutable document boundaries. Its catalog rendering
+regression verifies the selected version is written while comments and unknown
+nested metadata survive. The gate checks 48 source files, all with strict flags;
+the native ecosystem update module remains outside that gate. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed

@@ -517,7 +517,7 @@ class JavaScriptTests(unittest.TestCase):
         self.manifest("package.json", {"@neutral/library": "catalog:shared"})
         self.write(
             "pnpm-workspace.yaml",
-            "# retained comment\npackages: []\ncatalogs:\n  shared:\n    '@neutral/library': ^1.0.0\n",
+            "# retained comment\npackages: []\ncatalogs:\n  shared:\n    '@neutral/library': ^1.0.0\nfutureMetadata: {records: ['keep', {value: 3}]}\n",
         )
         for version in ("1.0.0", "1.3.0", "1.4.0", "2.0.0"):
             self.release("@neutral/library", version)
@@ -540,10 +540,13 @@ class JavaScriptTests(unittest.TestCase):
         }
         workspace, selected = self.selected()
         self.assertEqual(selected["@neutral/library"], "1.3.0")
-        self.assertIn(
-            "# retained comment",
-            workspace.render(tuple(selected.values()))["pnpm-workspace.yaml"].decode(),
-        )
+        rendered = workspace.render(tuple(selected.values()))[
+            "pnpm-workspace.yaml"
+        ].decode()
+        self.assertIn("# retained comment", rendered)
+        written = js.document(Path("pnpm-workspace.yaml"), rendered)[0]
+        self.assertEqual(written["catalogs"]["shared"]["@neutral/library"], "^1.3.0")
+        self.assertEqual(written["futureMetadata"], {"records": ["keep", {"value": 3}]})
 
     def test_compatible_mode_preserves_original_nonbreaking_bounds(self):
         self.spec["mode"] = "compatible"

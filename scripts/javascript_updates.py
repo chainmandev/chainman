@@ -21,15 +21,24 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+    Sequence,
+)
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Literal, TypedDict
 from urllib.parse import quote
 
 import chainman
 import adapter_data as inputs
+import manifests
 import registry
 from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
@@ -57,7 +66,9 @@ def rule_range(rule: object) -> str:
     return value
 
 
-def bounded(options, name, default, maximum):
+def bounded(
+    options: Mapping[str, object], name: str, default: int, maximum: int
+) -> int:
     value = options.get(name, default)
     if type(value) is not int or not 1 <= value <= maximum:
         raise ValueError(f"{name} must be between 1 and {maximum}")
@@ -92,9 +103,22 @@ def parse_requirement(
     return actual, prefix, requirement, simple.group(1) if simple else None
 
 
-def document(path: Path, body: str) -> tuple[dict, Callable[[], str]]:
+def mutable_table(value: object) -> MutableMapping[str, object]:
+    """Keep the serializer's actual mapping, including YAML comments and style."""
+    if not isinstance(value, MutableMapping) or any(
+        not isinstance(key, str) for key in value
+    ):
+        raise ValueError(
+            "JavaScript manifests and workspace settings must be objects with string keys"
+        )
+    return value
+
+
+def document(
+    path: Path, body: str
+) -> tuple[MutableMapping[str, object], Callable[[], str]]:
     if path.suffix == ".json":
-        value = json.loads(body)
+        value = mutable_table(json.loads(body))
         whitespace = re.search(r"\n([ \t]+)\"", body)
         indent = whitespace[1] if whitespace else 2
         return (
@@ -103,9 +127,9 @@ def document(path: Path, body: str) -> tuple[dict, Callable[[], str]]:
         )
     yaml = YAML()
     yaml.preserve_quotes = True
-    value = yaml.load(body) or {}
+    value = mutable_table(yaml.load(body) or {})
 
-    def render():
+    def render() -> str:
         buffer = io.StringIO()
         yaml.dump(value, buffer)
         return buffer.getvalue()
@@ -167,15 +191,21 @@ def manifest_paths(
 
 
 class Workspace:
-    def __init__(self, root: Path, spec: dict) -> None:
+    def __init__(self, root: Path, spec: Mapping[str, object]) -> None:
         self.root, self.spec = root, spec
-        self.directory = tc.contained(root, spec.get("directory", "."))
-        self.manager = spec.get("manager", "pnpm")
+        self.directory = tc.contained(
+            root, inputs.text(spec.get("directory", "."), "JavaScript directory")
+        )
+        self.manager = inputs.text(spec.get("manager", "pnpm"), "JavaScript manager")
         if self.manager not in ("npm", "pnpm"):
             raise ValueError("JavaScript manager must be npm or pnpm")
-        self.workspace = spec.get("workspace", "pnpm-workspace.yaml")
+        self.workspace = inputs.text(
+            spec.get("workspace", "pnpm-workspace.yaml"), "JavaScript workspace"
+        )
         self.lock = "package-lock.json" if self.manager == "npm" else "pnpm-lock.yaml"
-        self.documents: dict[str, tuple[dict, Callable[[], str]]] = {}
+        self.documents: dict[
+            str, tuple[MutableMapping[str, object], Callable[[], str]]
+        ] = {}
         self.original: dict[str, bytes] = {}
         self.modes: dict[str, int] = {}
         self.pins: list[Pin] = []
@@ -183,7 +213,7 @@ class Workspace:
         self.locals: dict[str, str] = {}
         self.duplicates: list[tuple[int, int]] = []
         self.patches: dict[str, str] = {}
-        self.source_contents: dict[str, dict] = {}
+        self.source_contents: dict[str, inputs.Table] = {}
         root_manifest = self.load("package.json")
         workspace_path = tc.contained(self.directory, self.workspace)
         self.settings = (
@@ -211,17 +241,22 @@ class Workspace:
                 )
             content = self.load(path)
             if content.get("name"):
-                if content["name"] in self.locals:
+                package = inputs.text(content["name"], "Local package name")
+                if package in self.locals:
                     raise ValueError("Duplicate local workspace package name")
-                self.locals[content["name"]] = path
+                self.locals[package] = path
         for name, loaded in list(self.documents.items()):
             value = loaded[0]
             patched = (
                 value.get("patchedDependencies", {})
                 if name == self.workspace
-                else value.get("pnpm", {}).get("patchedDependencies", {})
+                else inputs.table(value.get("pnpm", {}), "pnpm settings").get(
+                    "patchedDependencies", {}
+                )
             )
-            for selector, relative in patched.items():
+            for selector, relative in inputs.table(
+                patched, "Patched dependencies"
+            ).items():
                 if isinstance(relative, Mapping):
                     relative = relative.get("path")
                 if not isinstance(relative, str):
@@ -230,7 +265,9 @@ class Workspace:
                     )
                 self.keep(relative)
                 self.patches[selector] = relative
-        for pattern in spec.get("copy_inputs", []):
+        for pattern in inputs.strings(
+            spec.get("copy_inputs", []), "JavaScript copy inputs"
+        ):
             tc.contained(self.directory, pattern)
             for copy_path in self.directory.glob(pattern):
                 if copy_path.is_dir():
@@ -247,7 +284,10 @@ class Workspace:
             javascript_sources.configured(self)
 
     def apply_held(self) -> None:
-        for rule in self.spec.get("held_dependencies", []):
+        for raw in inputs.array(
+            self.spec.get("held_dependencies", []), "Held dependencies"
+        ):
+            rule = inputs.table(raw, "Held dependency")
             if (
                 set(rule) != {"manifest", "package", "reason"}
                 or not str(rule["reason"]).strip()
@@ -274,28 +314,24 @@ class Workspace:
         self.modes[relative] = path.stat().st_mode & 0o777
         return data
 
-    def load(self, relative: str) -> dict:
+    def load(self, relative: str) -> MutableMapping[str, object]:
         if relative not in self.documents:
             self.documents[relative] = document(
                 Path(relative), self.keep(relative).decode()
             )
-        result = self.documents[relative][0]
-        if not isinstance(result, Mapping):
-            raise ValueError(
-                "JavaScript manifests and workspace settings must be objects"
-            )
-        return result
+        return self.documents[relative][0]
 
     def add(
         self,
         file: str,
         pointer: Sequence[str],
         alias: str,
-        value: str,
+        value: object,
         *,
         catalog: str | None = None,
         user: str | None = None,
     ) -> int | None:
+        value = inputs.text(value, "JavaScript dependency requirement")
         if isinstance(value, str) and value.startswith(
             ("file:", "link:", "workspace:")
         ):
@@ -362,12 +398,14 @@ class Workspace:
         return manifest
 
     def discover(self) -> None:
-        catalogs = {}
+        catalogs: dict[tuple[str, str], int | None] = {}
         for name, entries in [
             ("default", self.settings.get("catalog", {})),
-            *self.settings.get("catalogs", {}).items(),
+            *inputs.table(
+                self.settings.get("catalogs", {}), "JavaScript catalogs"
+            ).items(),
         ]:
-            for alias, value in entries.items():
+            for alias, value in inputs.table(entries, "JavaScript catalog").items():
                 pointer = (
                     ("catalog", alias)
                     if name == "default" and "catalog" in self.settings
@@ -380,7 +418,9 @@ class Workspace:
             value = self.documents[file][0]
             self.refs[file] = {}
             for section in SECTIONS:
-                for alias, requirement in value.get(section, {}).items():
+                for alias, requirement in inputs.table(
+                    value.get(section, {}), "JavaScript dependencies"
+                ).items():
                     if isinstance(requirement, str) and requirement.startswith(
                         "catalog:"
                     ):
@@ -401,22 +441,32 @@ class Workspace:
                             self.duplicates.append((self.refs[file][alias], index))
                         else:
                             self.refs[file][alias] = index
-            for selector, requirement in (
-                value.get("pnpm", {}).get("overrides", {}).items()
-            ):
+            for selector, requirement in inputs.table(
+                inputs.table(value.get("pnpm", {}), "pnpm settings").get(
+                    "overrides", {}
+                ),
+                "pnpm overrides",
+            ).items():
                 self.override(
                     file, ("pnpm", "overrides", selector), selector, requirement
                 )
             if self.manager == "npm":
-                self.npm_overrides(file, ("overrides",), value.get("overrides", {}))
-        for selector, requirement in self.settings.get("overrides", {}).items():
+                self.npm_overrides(
+                    file,
+                    ("overrides",),
+                    inputs.table(value.get("overrides", {}), "npm overrides"),
+                )
+        for selector, requirement in inputs.table(
+            self.settings.get("overrides", {}), "pnpm overrides"
+        ).items():
             self.override(
                 self.workspace, ("overrides", selector), selector, requirement
             )
 
     def override(
-        self, file: str, pointer: Sequence[str], selector: str, requirement: str
+        self, file: str, pointer: Sequence[str], selector: str, requirement: object
     ) -> None:
+        requirement = inputs.text(requirement, "pnpm override requirement")
         if self.spec.get("retained_sources"):
             import javascript_sources
 
@@ -435,7 +485,7 @@ class Workspace:
         self,
         file: str,
         pointer: Sequence[str],
-        table: Mapping,
+        table: Mapping[str, object],
         parent: str | None = None,
     ) -> None:
         for selector, requirement in table.items():
@@ -444,7 +494,12 @@ class Workspace:
             if not match:
                 raise ValueError("Unsupported npm override selector")
             if isinstance(requirement, Mapping):
-                self.npm_overrides(file, (*pointer, selector), requirement, target)
+                self.npm_overrides(
+                    file,
+                    (*pointer, selector),
+                    inputs.table(requirement, "npm override"),
+                    target,
+                )
             else:
                 self.add(file, (*pointer, selector), match[1], requirement)
 
@@ -453,13 +508,14 @@ class Workspace:
     ) -> dict[str, bytes]:
         # An empty selection serializes existing declarations without repinning.
         for pin, version in zip(self.pins, selected, strict=False):
-            table = self.documents[pin.file][0]
-            for component in pin.pointer[:-1]:
-                table = table[component]
-            table[pin.pointer[-1]] = (
-                pin.prefix + version
-                if resolver_pins and pin.operator is None
-                else pin.replacement(version)
+            manifests.assign(
+                self.documents[pin.file][0],
+                pin.pointer,
+                (
+                    pin.prefix + version
+                    if resolver_pins and pin.operator is None
+                    else pin.replacement(version)
+                ),
             )
         result = dict(self.original)
         for file, (_, render) in self.documents.items():
@@ -555,9 +611,12 @@ def peer_range(value: object) -> str:
     return re.sub(r"(?<=[<>=~^])\s+(?=[v0-9xX*])", "", value)
 
 
-def peer_ignored(options: dict, manifest: str, source: str, peer: str) -> bool:
+def peer_ignored(
+    options: Mapping[str, object], manifest: str, source: str, peer: str
+) -> bool:
     ignored = False
-    for rule in options.get("peer_exceptions", []):
+    for raw in inputs.array(options.get("peer_exceptions", []), "Peer exceptions"):
+        rule = inputs.table(raw, "Peer exception")
         if (
             set(rule) != {"manifest", "source", "peer", "reason"}
             or not str(rule["reason"]).strip()
@@ -565,11 +624,10 @@ def peer_ignored(options: dict, manifest: str, source: str, peer: str) -> bool:
             raise ValueError(
                 "Peer exceptions require exact manifest/source/peer and reason"
             )
-        if any(
-            not isinstance(rule[k], str) or any(c in rule[k] for c in "*?!")
-            for k in ("manifest", "source", "peer")
-        ):
-            raise ValueError("Peer exceptions cannot use wildcard scope")
+        for key in ("manifest", "source", "peer"):
+            value = rule[key]
+            if not isinstance(value, str) or any(c in value for c in "*?!"):
+                raise ValueError("Peer exceptions cannot use wildcard scope")
         if (rule["manifest"], rule["source"], rule["peer"]) == (manifest, source, peer):
             ignored = True
     return ignored
@@ -697,7 +755,13 @@ def compatible_scope(
     return bound
 
 
-def selected_policy(workspace, pin, selected, evidence, options):
+def selected_policy(
+    workspace: Workspace,
+    pin: Pin,
+    selected: Sequence[str],
+    evidence: Evidence,
+    options: Mapping[str, object],
+) -> inputs.Table:
     ranges = list(pin.ranges)
     for manifest in pin.users:
         for index in workspace.refs[manifest].values():
@@ -712,18 +776,30 @@ def selected_policy(workspace, pin, selected, evidence, options):
     return scoped_policy(evidence.policy, pin.name, ranges)
 
 
-def reconcile_policy(workspace, policy, *, check=False):
+def reconcile_policy(
+    workspace: Workspace, policy: Mapping[str, object], *, check: bool = False
+) -> None:
     """Apply declared shared catalog/range policy without project-specific code."""
     if not workspace.spec.get("reconcile_policy"):
         return
     if workspace.manager != "pnpm":
         raise ValueError("Catalog policy reconciliation requires pnpm")
-    options = policy.get("javascript", {})
-    catalogs = options.get("catalog_constraints", {})
-    packages = options.get("package_constraints", {})
+    options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
+    catalogs = {
+        name: inputs.table(rules, "Catalog constraints")
+        for name, rules in inputs.table(
+            options.get("catalog_constraints", {}), "Catalog constraints"
+        ).items()
+    }
+    packages = {
+        name: inputs.table(rules, "Package constraints")
+        for name, rules in inputs.table(
+            options.get("package_constraints", {}), "Package constraints"
+        ).items()
+    }
     changed = False
 
-    def assign(table, key, expected):
+    def assign(table: MutableMapping[str, object], key: str, expected: object) -> None:
         nonlocal changed
         changed |= table.get(key) != expected
         table[key] = expected
@@ -735,9 +811,13 @@ def reconcile_policy(workspace, policy, *, check=False):
         workspace.settings = workspace.documents[workspace.workspace][0]
     for name, rules in catalogs.items():
         table = (
-            workspace.settings.setdefault("catalog", {})
+            mutable_table(workspace.settings.setdefault("catalog", {}))
             if name == "default"
-            else workspace.settings.setdefault("catalogs", {}).setdefault(name, {})
+            else mutable_table(
+                mutable_table(workspace.settings.setdefault("catalogs", {})).setdefault(
+                    name, {}
+                )
+            )
         )
         for alias, rule in rules.items():
             package_name(alias)
@@ -745,19 +825,25 @@ def reconcile_policy(workspace, policy, *, check=False):
     for file in workspace.manifests:
         content = workspace.documents[file][0]
         for section in SECTIONS:
-            for alias, value in content.get(section, {}).items():
+            for alias, value in inputs.string_map(
+                content.get(section, {}), "JavaScript dependencies"
+            ).items():
                 exception = packages.get(file, {}).get(alias)
                 if exception:
-                    assign(content[section], alias, rule_range(exception))
+                    assign(
+                        mutable_table(content[section]), alias, rule_range(exception)
+                    )
                 elif alias in catalogs.get("default", {}) and not value.startswith(
                     ("workspace:", "file:", "link:", "catalog:")
                 ):
-                    assign(content[section], alias, "catalog:")
-    overrides = options.get("override_constraints", {})
+                    assign(mutable_table(content[section]), alias, "catalog:")
+    overrides = inputs.table(
+        options.get("override_constraints", {}), "Override constraints"
+    )
     manifest = workspace.documents["package.json"][0]
-    legacy_settings = manifest.get("pnpm", {})
-    legacy = legacy_settings.get("overrides", {})
-    effective = workspace.settings.get("overrides", {})
+    legacy_settings = mutable_table(manifest.get("pnpm", {}))
+    legacy = inputs.table(legacy_settings.get("overrides", {}), "Legacy pnpm overrides")
+    effective = inputs.table(workspace.settings.get("overrides", {}), "pnpm overrides")
     # pnpm 11 no longer reads package.json configuration. Preserve every legacy
     # override, but do not guess precedence when two declarations disagree.
     if any(
@@ -767,9 +853,9 @@ def reconcile_policy(workspace, policy, *, check=False):
             "Conflicting pnpm override declarations require reconciliation"
         )
     if "overrides" in legacy_settings or overrides:
-        table = workspace.settings.setdefault("overrides", {})
-        for selector, value in legacy.items():
-            assign(table, selector, value)
+        table = mutable_table(workspace.settings.setdefault("overrides", {}))
+        for selector, legacy_value in legacy.items():
+            assign(table, selector, legacy_value)
         if "overrides" in legacy_settings:
             del legacy_settings["overrides"]
             if not legacy_settings:
@@ -796,8 +882,14 @@ def reconcile_policy(workspace, policy, *, check=False):
             pin.operator = None
 
 
-def plan(workspace, policy, now, *, before=None):
-    options = policy.get("javascript", {})
+def plan(
+    workspace: Workspace,
+    policy: Mapping[str, object],
+    now: datetime,
+    *,
+    before: Mapping[str, object] | None = None,
+) -> tuple[Evidence, tuple[str, ...]]:
+    options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
     mode = workspace.spec.get("mode", options.get("mode", "aggressive"))
     if mode not in ("aggressive", "compatible"):
         raise ValueError("JavaScript update mode must be aggressive or compatible")
@@ -823,6 +915,7 @@ def plan(workspace, policy, now, *, before=None):
         if pin.held:
             pin.ranges.append(pin.requirement)
         elif mode == "compatible":
+            assert before is not None
             pin.ranges.append(compatible_scope(pin, before, spec=workspace.spec))
         floor_match = re.match(
             r"(?:[~^]|>=?)?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?", pin.requirement
@@ -849,8 +942,11 @@ def plan(workspace, policy, now, *, before=None):
             for r in releases
             if not r.deprecated
             and any(
-                e.get("package") == "npm:" + pin.name and e.get("version") == r.version
-                for e in policy.get("exceptions", [])
+                inputs.table(e, "Release exception").get("package") == "npm:" + pin.name
+                and inputs.table(e, "Release exception").get("version") == r.version
+                for e in inputs.array(
+                    policy.get("exceptions", []), "Release exceptions"
+                )
             )
         ]
         baseline_versions = {
@@ -917,18 +1013,28 @@ def plan(workspace, policy, now, *, before=None):
     return evidence, solve(workspace, evidence, options)
 
 
-def solve(workspace, evidence, options, initial=None):
+type PeerWitness = tuple[str, int, int, str, str]
+
+
+def solve(
+    workspace: Workspace,
+    evidence: Evidence,
+    options: Mapping[str, object],
+    initial: Sequence[str] | None = None,
+) -> tuple[str, ...]:
     ceiling = bounded(options, "solver_states", 256, 4096)
     initial = initial or tuple(pin.candidates[0] for pin in workspace.pins)
     visited: set[tuple[str, ...]] = set()
-    metadata_error = None
+    metadata_error: str | None = None
     # A baseline is fixed for this solve. Index availability once; the final
     # artifact audit separately binds every selected URL and digest.
-    baseline_versions = {
-        identity[:3] for identity in getattr(evidence, "baseline", set())
-    }
+    baseline_versions = {identity[:3] for identity in evidence.baseline}
 
-    def revisions(selected, conflict, witness):
+    def revisions(
+        selected: tuple[str, ...],
+        conflict: tuple[int, ...],
+        witness: PeerWitness | None,
+    ) -> Iterator[tuple[str, ...]]:
         order = tuple(reversed(conflict))
         if witness:
             _, source, target, peer, requirement = witness
@@ -944,7 +1050,7 @@ def solve(workspace, evidence, options, initial=None):
                     )
                     if not isinstance(peers, Mapping):
                         continue
-                    for name, bound in peers.items():
+                    for name, bound in inputs.table(peers, "Peer dependencies").items():
                         if refs.get(name) == target and not peer_ignored(
                             options, manifest, pin.name, name
                         ):
@@ -972,7 +1078,8 @@ def solve(workspace, evidence, options, initial=None):
                     revised = tuple(revised_values)
                     if revised in visited:
                         continue
-                    if direct:
+                    if direct and witness is not None:
+                        _, _, target, peer, requirement = witness
                         if index == target:
                             if Version(candidate) not in NpmSpec(requirement):
                                 continue
@@ -1003,7 +1110,7 @@ def solve(workspace, evidence, options, initial=None):
 
     # Lazy depth-first expansion spends the bound on visited states, never on
     # hundreds of queued siblings that prevent a promising repair from advancing.
-    frontier = [iter([tuple(initial)])]
+    frontier: list[Iterator[tuple[str, ...]]] = [iter([tuple(initial)])]
     while frontier:
         try:
             selected = next(frontier[-1])
@@ -1018,8 +1125,8 @@ def solve(workspace, evidence, options, initial=None):
                 + (f": {metadata_error}" if metadata_error else "")
             )
         visited.add(selected)
-        witness = None
-        conflict = next(
+        witness: PeerWitness | None = None
+        conflict: tuple[int, ...] | None = next(
             (
                 pair
                 for pair in workspace.duplicates
@@ -1083,8 +1190,11 @@ def solve(workspace, evidence, options, initial=None):
         if conflict is None:
             for index, pin in enumerate(workspace.pins):
                 if not any(
-                    e.get("package") == "npm:" + pin.name
-                    for e in evidence.policy.get("exceptions", [])
+                    inputs.table(e, "Release exception").get("package")
+                    == "npm:" + pin.name
+                    for e in inputs.array(
+                        evidence.policy.get("exceptions", []), "Release exceptions"
+                    )
                 ):
                     continue
                 scoped = selected_policy(workspace, pin, selected, evidence, options)
@@ -1143,7 +1253,26 @@ def baseline_maturity_exclusions(
     )
 
 
-def snapshot(root: Path, spec: dict) -> dict:
+class PatchSnapshot(TypedDict):
+    path: str
+    sha256: str
+
+
+class RequirementSnapshot(TypedDict):
+    file: str
+    pointer: list[str]
+    name: str
+    requirement: str
+
+
+class Snapshot(TypedDict):
+    schema: Literal[1]
+    identities: list[list[str]]
+    patches: dict[str, PatchSnapshot]
+    requirements: list[RequirementSnapshot]
+
+
+def snapshot(root: Path, spec: Mapping[str, object]) -> Snapshot:
     workspace = Workspace(root, spec)
     identities = locked_identities(workspace)
     return {
@@ -1240,7 +1369,10 @@ def local_registry_entries(
                         )
                 else:
                     continue
-                declared = workspace.documents[manifest][0].get(section, {}).get(alias)
+                declared = inputs.table(
+                    workspace.documents[manifest][0].get(section, {}),
+                    "JavaScript dependencies",
+                ).get(alias)
                 if (
                     not isinstance(declared, str)
                     or not declared.startswith(("workspace:", "file:", "link:"))
@@ -1380,9 +1512,16 @@ def effective_requirements(
     return allowed
 
 
-def audit_registry_children(workspace, evidence, parent, children):
+def audit_registry_children(
+    workspace: Workspace,
+    evidence: Evidence,
+    parent: tuple[str, str],
+    children: Mapping[str, LockTarget | None],
+) -> None:
     """pnpm's frozen lock check does not verify registry dependency ranges."""
-    info = evidence.get(parent[0])[1][parent[1]]
+    info = inputs.table(
+        evidence.get(parent[0])[1][parent[1]], "Registry dependency metadata"
+    )
     required = info.get("dependencies", {})
     optional = info.get("optionalDependencies", {})
     if not isinstance(required, Mapping) or not isinstance(optional, Mapping):
@@ -1394,7 +1533,10 @@ def audit_registry_children(workspace, evidence, parent, children):
         not isinstance(name, str) for name in bundled
     ):
         raise ValueError("Bundled dependencies must be names or a boolean")
-    for alias, requirement in {**required, **optional}.items():
+    for alias, requirement in {
+        **inputs.table(required, "Registry dependencies"),
+        **inputs.table(optional, "Registry optional dependencies"),
+    }.items():
         package_name(alias)
         target = children.get(alias)
         # A bundled child is part of its parent's hashed archive, not a separate
@@ -1411,7 +1553,10 @@ def audit_registry_children(workspace, evidence, parent, children):
             local_version = workspace.documents[workspace.locals[alias]][0].get(
                 "version"
             )
-            if registry.lock_version("npm", local_version) is not None:
+            if (
+                isinstance(local_version, str)
+                and registry.lock_version("npm", local_version) is not None
+            ):
                 target = (alias, local_version, "")
         if not isinstance(requirement, str):
             raise ValueError("Registry dependency requirements must be strings")
@@ -1439,7 +1584,7 @@ def audit_registry_children(workspace, evidence, parent, children):
 
 
 def audit_peers(
-    workspace: Workspace, evidence: Evidence, options: dict
+    workspace: Workspace, evidence: Evidence, options: Mapping[str, object]
 ) -> dict[tuple[str, str], list[str]]:
     import javascript_sources
 
@@ -1476,17 +1621,21 @@ def audit_peers(
                 raise ValueError(
                     "JavaScript lock dependency graph exceeds its audit bound"
                 )
-            for rule in options.get("prefix_constraints", []):
+            for raw_rule in inputs.array(
+                options.get("prefix_constraints", []), "Prefix constraints"
+            ):
+                rule = inputs.table(raw_rule, "Prefix constraint")
                 if (
-                    actual.startswith(rule["prefix"])
-                    and actual not in rule.get("exclude", [])
+                    actual.startswith(inputs.text(rule["prefix"], "Prefix"))
+                    and actual
+                    not in inputs.strings(rule.get("exclude", []), "Prefix exclusions")
                     and Version(version) not in NpmSpec(rule_range(rule))
                 ):
                     raise ValueError(
                         "Resolved transitive dependency violates JavaScript prefix compatibility"
                     )
             local = "@file:" in context
-            source_content = getattr(workspace, "source_contents", {}).get(context)
+            source_content = workspace.source_contents.get(context)
             if (
                 not local
                 and source_content is None
@@ -1504,16 +1653,28 @@ def audit_peers(
             }
             if source_content is not None:
                 peers, metadata = (
-                    source_content.get("peerDependencies", {}),
-                    source_content.get("peerDependenciesMeta", {}),
+                    inputs.string_map(
+                        source_content.get("peerDependencies", {}),
+                        "Source peer dependencies",
+                    ),
+                    inputs.peer_metadata(
+                        source_content.get("peerDependenciesMeta", {})
+                    ),
                 )
                 declared = {
-                    **source_content.get("dependencies", {}),
-                    **source_content.get("optionalDependencies", {}),
+                    **inputs.string_map(
+                        source_content.get("dependencies", {}), "Source dependencies"
+                    ),
+                    **inputs.string_map(
+                        source_content.get("optionalDependencies", {}),
+                        "Source optional dependencies",
+                    ),
                     **peers,
                 }
                 if set(dependencies) - set(declared) or set(
-                    source_content.get("dependencies", {})
+                    inputs.table(
+                        source_content.get("dependencies", {}), "Source dependencies"
+                    )
                 ) - set(dependencies):
                     raise ValueError(
                         "Retained source dependency graph differs from its archive manifest"
@@ -1551,16 +1712,23 @@ def audit_peers(
                 source = workspace.locals[actual]
                 content = workspace.documents[source][0]
                 peers, metadata = (
-                    content.get("peerDependencies", {}),
-                    content.get("peerDependenciesMeta", {}),
+                    inputs.string_map(
+                        content.get("peerDependencies", {}), "Local peer dependencies"
+                    ),
+                    inputs.peer_metadata(content.get("peerDependenciesMeta", {})),
                 )
                 declared = {
-                    **content.get("dependencies", {}),
-                    **content.get("optionalDependencies", {}),
+                    **inputs.string_map(
+                        content.get("dependencies", {}), "Local dependencies"
+                    ),
+                    **inputs.string_map(
+                        content.get("optionalDependencies", {}),
+                        "Local optional dependencies",
+                    ),
                     **peers,
                 }
                 if set(dependencies) - set(declared) or set(
-                    content.get("dependencies", {})
+                    inputs.table(content.get("dependencies", {}), "Local dependencies")
                 ) - set(dependencies):
                     raise ValueError(
                         "Local pnpm dependency graph differs from its manifest"
@@ -1692,7 +1860,13 @@ def direct_scope(
     return bounds
 
 
-def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
+def audit_details(
+    root: Path,
+    spec: Mapping[str, object],
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> list[str]:
     if before.get("schema") != 1:
         raise ValueError("Unsupported JavaScript audit baseline")
     workspace = Workspace(root, spec)
@@ -1719,7 +1893,7 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
     )
     workspace.source_contents = javascript_sources.audit(workspace, before, policy, now)
     evidence = Evidence(policy, now)
-    options = policy.get("javascript", {})
+    options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
     if spec.get("mode", options.get("mode", "aggressive")) == "compatible":
         for pin in workspace.pins:
             if "overrides" in pin.pointer and not pin.held:
@@ -1762,11 +1936,19 @@ def audit_details(root: Path, spec: dict, before: dict, policy: dict, now: datet
     return audit_artifacts(workspace, before, policy, now, scopes)
 
 
-def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> None:
+def audit(
+    root: Path,
+    spec: Mapping[str, object],
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> None:
     audit_details(root, spec, before, policy, now)
 
 
-def fallback(workspace, selected, message, temporary):
+def fallback(
+    workspace: Workspace, selected: Sequence[str], message: str, temporary: Path
+) -> tuple[str, ...] | None:
     if not re.search(r"minimumReleaseAge|minimum-release-age", message):
         return None
     parent = re.search(
@@ -1811,23 +1993,28 @@ def fallback(workspace, selected, message, temporary):
     return tuple(revised)
 
 
-def normalization_graph(lock):
+def normalization_graph(lock: Mapping[str, object]) -> inputs.Table:
     """Retain every graph field while excluding native declaration metadata."""
-    graph = deepcopy(lock)
+    graph = deepcopy(dict(lock))
     graph.pop("overrides", None)
-    for importer in graph.get("importers", {}).values():
+    for raw in inputs.table(graph.get("importers", {}), "pnpm importers").values():
+        importer = inputs.table(raw, "pnpm importer")
         for section in SECTIONS:
-            for entry in importer.get(section, {}).values():
+            for entry in inputs.table(
+                importer.get(section, {}), "pnpm dependencies"
+            ).values():
                 if isinstance(entry, MutableMapping):
                     entry.pop("specifier", None)
-    for catalog in graph.get("catalogs", {}).values():
-        for entry in catalog.values():
+    for catalog in inputs.table(graph.get("catalogs", {}), "pnpm catalogs").values():
+        for entry in inputs.table(catalog, "pnpm catalog").values():
             if isinstance(entry, MutableMapping):
                 entry.pop("specifier", None)
     return graph
 
 
-def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve(
+    root: Path, spec: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> inputs.Table:
     workspace = Workspace(root, spec)
     before = snapshot(root, spec)
     reconcile_policy(workspace, policy)
@@ -1838,7 +2025,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         return javascript_npm.resolve(
             workspace, before, evidence, selected, policy, now
         )
-    options = policy.get("javascript", {})
+    options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
     attempts = bounded(options, "fallback_attempts", 20, 100)
     if not workspace.settings:
         # pnpm's release policy belongs in a workspace file even for one package.
@@ -1849,8 +2036,13 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     workspace.settings["minimumReleaseAge"] = registry.minimum_age(policy) * 1440
     workspace.settings["minimumReleaseAgeIgnoreMissingTime"] = False
     excludes: list[str] = []
-    for exception in policy.get("exceptions", []):
-        provider, _, name = exception.get("package", "").partition(":")
+    for raw_exception in inputs.array(
+        policy.get("exceptions", []), "Release exceptions"
+    ):
+        exception = inputs.table(raw_exception, "Release exception")
+        provider, _, name = inputs.text(
+            exception.get("package", ""), "Exception package"
+        ).partition(":")
         if provider == "npm":
             excludes.extend(
                 f"{name}@{r.version}"
@@ -1882,7 +2074,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
             tc.contained(temporary, workspace.lock).unlink(missing_ok=True)
             result = chainman.execute(
                 root,
-                spec.get("profile", "javascript"),
+                inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),
                 [
                     "pnpm",
                     "install",
@@ -1951,7 +2143,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         inputs.pnpm_lock(resolved_lock)
         normalized = chainman.execute(
             root,
-            spec.get("profile", "javascript"),
+            inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),
             [
                 "pnpm",
                 "install",
@@ -1999,7 +2191,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
                 )
         checked = chainman.execute(
             root,
-            spec.get("profile", "javascript"),
+            inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),
             [
                 "pnpm",
                 "install",
