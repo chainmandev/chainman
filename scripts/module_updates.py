@@ -116,7 +116,9 @@ def image_snapshot(root: Path, policy: Table) -> dict[str, str] | None:
         return None
     reference = tc.regular_input(root, "nix/container-image.txt").decode().strip()
     repository = text(spec.get("repository", "nixos/nix"), "Docker repository")
-    match = re.fullmatch(r"docker\.io/([^:@]+):([^@]+)@(sha256:[a-f0-9]{64})", reference)
+    match = re.fullmatch(
+        r"docker\.io/([^:@]+):([^@]+)@(sha256:[a-f0-9]{64})", reference
+    )
     if not match or match[1] != repository:
         raise ValueError(
             "Runtime image must match its declared repository and immutable identity"
