@@ -681,6 +681,28 @@ func inspectContainer(c *Container) (*ContainerState, error) {
 	}
 	return &ContainerState{id, *entries[0].State.Running}, nil
 }
+
+func containerProbe(c *Container, command Command) (Command, error) {
+	if c == nil {
+		return command, nil
+	}
+	if len(command.Argv) < 4 || command.Argv[0] != c.Engine || command.Argv[1] != "exec" || command.Argv[2] != c.Name {
+		return Command{}, fmt.Errorf("container probe must execute in its declared owner")
+	}
+	info, e := inspectContainer(c)
+	if e != nil {
+		return Command{}, e
+	}
+	if info == nil || !info.Running {
+		return Command{}, fmt.Errorf("container probe owner is not running")
+	}
+	// A replacement can reuse the name even after inspection. Bind this exec to
+	// the owned immutable ID without rewriting any of the probe's literal args.
+	command.Argv = append([]string(nil), command.Argv...)
+	command.Argv[2] = info.ID
+	return command, nil
+}
+
 func engineIdentity(engine string) (string, error) {
 	format := "{{.ID}}"
 	if filepath.Base(engine) == "podman" {
@@ -1220,7 +1242,10 @@ func owned(state, name string, probe bool, generation string) int {
 		if s.Readiness.HTTPGet != nil {
 			return exitCode(fmt.Errorf("HTTP readiness is evaluated by Process Compose"))
 		}
-		command = s.Readiness.Command
+		command, e = containerProbe(s.Container, s.Readiness.Command)
+		if e != nil {
+			return exitCode(e)
+		}
 	}
 	if !probe && s.NetworkService != "" {
 		var plan Plan

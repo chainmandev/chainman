@@ -49,6 +49,10 @@ Controller export similarly retains its Nix package until the standalone binarie
 have been copied. The temporary directories, including their roots, are removed
 when these operations finish or fail; Nix handles later collection normally.
 
+Container command probes validate the engine, owner label and running state, then
+execute against the inspected immutable container ID. A stopped, missing or replaced
+container cannot satisfy readiness merely by reusing a service's name.
+
 The container maps project commands to the calling user's ownership: rootful Docker
 uses the caller's UID/GID, rootless Docker uses its mapped `0:0`, and Podman uses
 `keep-id`. A failed Docker identity probe stops before execution. Nix runs without a
