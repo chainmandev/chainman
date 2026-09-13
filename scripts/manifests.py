@@ -7,12 +7,43 @@ import io
 import json
 from pathlib import Path
 import re
+from typing import Literal, NotRequired, TYPE_CHECKING, TypedDict
 import tomlkit
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 from ruamel.yaml import YAML
 
 from toolchain import contained, local_source, module, regular_input
+import adapter_data as ad
+
+if TYPE_CHECKING:
+    from registry import Release
+
+
+class Pin(TypedDict):
+    provider: Literal["npm", "crates", "pypi", "pub"]
+    name: str
+    file: str
+    pointer: list[str | int]
+    prefix: NotRequired[str]
+    representation: NotRequired[str]
+    pub_directory: NotRequired[str]
+    pub_override: NotRequired[bool]
+    bound: NotRequired[str]
+
+
+class PubSource(TypedDict):
+    kind: Literal["path", "sdk", "workspace"]
+    path: NotRequired[str]
+    sdk: NotRequired[str]
+
+
+class PubWorkspace(TypedDict):
+    directory: str
+    inputs: list[str]
+    guarded_inputs: list[str]
+    sources: dict[str, PubSource]
+    pins: list[Pin]
 
 
 def document(
@@ -66,7 +97,9 @@ def assign(value: object, pointer: Sequence[str | int], replacement: object) -> 
         raise ValueError("A manifest pointer must select a mutable container")
 
 
-def js_pin(file: str, pointer: list, name: str, value: str):
+def js_pin(
+    file: str, pointer: Sequence[str | int], name: str, value: object
+) -> Pin | None:
     if not isinstance(value, str):
         raise ValueError("Expected a dependency version string")
     if value.startswith(("workspace:", "catalog:", "file:", "link:")):
@@ -88,25 +121,25 @@ def js_pin(file: str, pointer: list, name: str, value: str):
         "provider": "npm",
         "name": name,
         "file": file,
-        "pointer": pointer,
+        "pointer": list(pointer),
         "prefix": prefix + (value[0] if value[:1] in ("^", "~") else ""),
     }
 
 
-def pub_workspace(root: Path, directory: Path) -> dict:
+def pub_workspace(root: Path, directory: Path) -> PubWorkspace:
     """Read one native Pub resolution group without importing dependency overrides."""
-    guarded = set()
-    documents = {}
+    guarded: set[str] = set()
+    documents: dict[Path, tuple[ad.Table, dict[str, Path]]] = {}
 
-    def read(path):
+    def read(path: Path) -> ad.Table:
         name = path.relative_to(root).as_posix()
         guarded.add(name)
         value = document(path, body=regular_input(root, name).decode())[0]
         if not isinstance(value, Mapping):
             raise ValueError(f"Pub manifest must be a mapping: {name}")
-        return value
+        return ad.table(dict(value), "Pub manifest")
 
-    def effective(path):
+    def effective(path: Path) -> tuple[ad.Table, dict[str, Path]]:
         if path not in documents:
             value = dict(read(path))
             owners = {key: path for key in value}
@@ -125,7 +158,7 @@ def pub_workspace(root: Path, directory: Path) -> dict:
             documents[path] = value, owners
         return documents[path]
 
-    def members(path):
+    def members(path: Path) -> list[Path]:
         value, _ = effective(path)
         entries = value.get("workspace", [])
         if not isinstance(entries, list) or any(
@@ -134,7 +167,7 @@ def pub_workspace(root: Path, directory: Path) -> dict:
         ):
             raise ValueError("Pub workspace requires literal member directories")
         found = [path]
-        for item in entries:
+        for item in ad.strings(entries, "Pub workspace members"):
             child = contained(
                 root,
                 str((contained(path.parent, item) / "pubspec.yaml").relative_to(root)),
@@ -149,7 +182,7 @@ def pub_workspace(root: Path, directory: Path) -> dict:
 
     entry = contained(root, str((directory / "pubspec.yaml").relative_to(root)))
     value, _ = effective(entry)
-    owner = entry
+    owner: Path | None = entry
     if value.get("resolution") == "workspace":
         owner = None
         for parent in directory.parents:
@@ -162,13 +195,12 @@ def pub_workspace(root: Path, directory: Path) -> dict:
             if candidate.exists() and entry in members(candidate):
                 owner = candidate
                 break
-        if owner is None:
-            raise ValueError(
-                "Pub workspace member has no declared containing workspace"
-            )
+    if owner is None:
+        raise ValueError("Pub workspace member has no declared containing workspace")
     paths = members(owner)
-    overrides = {}
-    local_members = {}
+    resolution_directory = owner.parent.relative_to(root).as_posix()
+    overrides: dict[str, tuple[object, Path]] = {}
+    local_members: dict[str, Path] = {}
     for path in paths:
         value, owners = effective(path)
         package = value.get("name")
@@ -178,17 +210,25 @@ def pub_workspace(root: Path, directory: Path) -> dict:
         declared = value.get("dependency_overrides", {})
         if not isinstance(declared, Mapping):
             raise ValueError("Pub dependency_overrides must be a mapping")
-        for package, requirement in declared.items():
+        for package, requirement in ad.table(dict(declared), "Pub overrides").items():
             if package in overrides:
                 raise ValueError("Duplicate effective Pub workspace override")
             overrides[package] = (requirement, owners["dependency_overrides"])
 
-    sources = {}
-    pins = []
+    sources: dict[str, PubSource] = {}
+    pins: list[Pin] = []
 
-    def classify(package, requirement, path, pointer, *, override=False):
+    def classify(
+        package: str,
+        requirement: object,
+        path: Path,
+        pointer: list[str | int],
+        *,
+        override: bool = False,
+    ) -> None:
         if not isinstance(package, str) or not package:
             raise ValueError("Pub dependency requires a package name")
+        source: PubSource
         if isinstance(requirement, Mapping):
             if set(requirement) == {"path"}:
                 relative = requirement["path"]
@@ -211,17 +251,18 @@ def pub_workspace(root: Path, directory: Path) -> dict:
             return
         if not isinstance(requirement, str) or not requirement.strip():
             raise ValueError("Pub hosted dependency requires a version range")
-        pins.append(
-            {
-                "provider": "pub",
-                "name": package,
-                "file": path.relative_to(root).as_posix(),
-                "pointer": pointer,
-                "prefix": "^",
-                "pub_directory": owner.parent.relative_to(root).as_posix(),
-                **({"pub_override": True, "bound": requirement} if override else {}),
-            }
-        )
+        pin: Pin = {
+            "provider": "pub",
+            "name": package,
+            "file": path.relative_to(root).as_posix(),
+            "pointer": pointer,
+            "prefix": "^",
+            "pub_directory": resolution_directory,
+        }
+        if override:
+            pin["pub_override"] = True
+            pin["bound"] = requirement
+        pins.append(pin)
 
     for package, (requirement, path) in overrides.items():
         classify(
@@ -233,7 +274,9 @@ def pub_workspace(root: Path, directory: Path) -> dict:
             table = value.get(section, {})
             if not isinstance(table, Mapping):
                 raise ValueError("Pub dependency sections must be mappings")
-            for package, requirement in table.items():
+            for package, requirement in ad.table(
+                dict(table), "Pub dependencies"
+            ).items():
                 if package in overrides:
                     continue
                 if (
@@ -248,7 +291,7 @@ def pub_workspace(root: Path, directory: Path) -> dict:
                     continue
                 classify(package, requirement, path, [section, package])
     return {
-        "directory": owner.parent.relative_to(root).as_posix(),
+        "directory": resolution_directory,
         "inputs": [path.relative_to(root).as_posix() for path in paths],
         "guarded_inputs": sorted(guarded),
         "sources": sources,
@@ -257,24 +300,29 @@ def pub_workspace(root: Path, directory: Path) -> dict:
 
 
 def discover(
-    root: Path, selected: list[str], *, specs: dict | None = None
-) -> list[dict]:
-    pins = []
+    root: Path,
+    selected: list[str],
+    *,
+    specs: Mapping[str, Mapping[str, object]] | None = None,
+) -> list[Pin]:
+    pins: list[Pin] = []
 
-    def add(pin):
+    def add(pin: Pin | None) -> None:
         if pin:
             pins.append(pin)
 
     for name in selected:
         spec = module(name, root) if specs is None else specs[name]
         kind = spec.get("ecosystem")
-        directory = contained(root, spec["directory"])
+        directory = contained(root, ad.text(spec["directory"], "Module directory"))
         if kind == "npm":
             manifests = {directory / "package.json"}
             workspace_file = directory / "pnpm-workspace.yaml"
-            workspace = {}
+            workspace: ad.Table = {}
             if workspace_file.exists():
-                workspace = document(workspace_file)[0]
+                workspace = ad.table(
+                    document(workspace_file)[0], "JavaScript workspace"
+                )
                 patterns = workspace.get("packages", [])
             else:
                 patterns = json.loads((directory / "package.json").read_text()).get(
@@ -282,8 +330,9 @@ def discover(
                 )
                 if isinstance(patterns, dict):
                     patterns = patterns.get("packages", [])
-            included, excluded = set(), set()
-            for pattern in patterns:
+            included: set[Path] = set()
+            excluded: set[Path] = set()
+            for pattern in ad.strings(patterns, "JavaScript workspace patterns"):
                 negative = pattern.startswith("!")
                 pattern = pattern.removeprefix("!")
                 contained(directory, pattern)
@@ -293,18 +342,23 @@ def discover(
             for path in sorted(manifests):
                 rel = path.relative_to(root).as_posix()
                 contained(root, rel)
-                content = document(path)[0]
+                content = ad.table(document(path)[0], "JavaScript manifest")
                 for section in (
                     "dependencies",
                     "devDependencies",
                     "optionalDependencies",
                     "peerDependencies",
                 ):
-                    for dependency, requirement in content.get(section, {}).items():
+                    for dependency, requirement in ad.table(
+                        content.get(section, {}), section
+                    ).items():
                         add(js_pin(rel, [section, dependency], dependency, requirement))
-                for dependency, requirement in (
-                    content.get("pnpm", {}).get("overrides", {}).items()
-                ):
+                for dependency, requirement in ad.table(
+                    ad.table(content.get("pnpm", {}), "pnpm settings").get(
+                        "overrides", {}
+                    ),
+                    "pnpm overrides",
+                ).items():
                     add(
                         js_pin(
                             rel,
@@ -315,10 +369,14 @@ def discover(
                     )
             if workspace:
                 rel = workspace_file.relative_to(root).as_posix()
-                for dependency, requirement in workspace.get("catalog", {}).items():
+                for dependency, requirement in ad.table(
+                    workspace.get("catalog", {}), "Default catalog"
+                ).items():
                     add(js_pin(rel, ["catalog", dependency], dependency, requirement))
-                for catalog, entries in workspace.get("catalogs", {}).items():
-                    for dependency, requirement in entries.items():
+                for catalog, entries in ad.table(
+                    workspace.get("catalogs", {}), "Named catalogs"
+                ).items():
+                    for dependency, requirement in ad.table(entries, "Catalog").items():
                         add(
                             js_pin(
                                 rel,
@@ -327,31 +385,42 @@ def discover(
                                 requirement,
                             )
                         )
-                for dependency, requirement in workspace.get("overrides", {}).items():
+                for dependency, requirement in ad.table(
+                    workspace.get("overrides", {}), "Workspace overrides"
+                ).items():
                     add(js_pin(rel, ["overrides", dependency], dependency, requirement))
         elif kind == "crates":
             # Only explicitly declared manifest globs; never walk downloaded/vendor source.
-            paths = set()
-            for pattern in spec["inputs"]:
+            paths: set[Path] = set()
+            for pattern in ad.strings(spec["inputs"], "Module inputs"):
                 paths.update(p for p in root.glob(pattern) if p.name == "Cargo.toml")
             for path in sorted(paths):
                 rel = path.relative_to(root).as_posix()
-                content = document(contained(root, rel))[0]
+                content = ad.table(document(contained(root, rel))[0], "Cargo manifest")
 
-                def visit(table, pointer):
+                def visit(
+                    table: Mapping[str, object], pointer: list[str | int]
+                ) -> None:
                     for key, value in table.items():
                         if key in (
                             "dependencies",
                             "dev-dependencies",
                             "build-dependencies",
                         ):
-                            for dependency, requirement in value.items():
+                            for dependency, requirement in ad.table(
+                                value, "Cargo dependencies"
+                            ).items():
                                 location = pointer + [key, dependency]
                                 actual = dependency
                                 if isinstance(requirement, Mapping):
                                     if requirement.get("path"):
                                         local_source(
-                                            root, path.parent, requirement["path"]
+                                            root,
+                                            path.parent,
+                                            ad.text(
+                                                requirement["path"],
+                                                "Cargo local source",
+                                            ),
                                         )
                                         continue
                                     if requirement.get("workspace"):
@@ -360,7 +429,10 @@ def discover(
                                         raise ValueError(
                                             "Git Cargo dependencies need an explicit release pin"
                                         )
-                                    actual = requirement.get("package", dependency)
+                                    actual = ad.text(
+                                        requirement.get("package", dependency),
+                                        "Cargo package",
+                                    )
                                     location.append("version")
                                     requirement = requirement.get("version")
                                 if not isinstance(requirement, str):
@@ -375,59 +447,75 @@ def discover(
                                     }
                                 )
                         elif isinstance(value, Mapping):
-                            visit(value, pointer + [key])
+                            visit(ad.table(dict(value), "Cargo table"), pointer + [key])
 
                 visit(content, [])
         elif kind == "pypi":
             paths = set()
-            for pattern in spec["inputs"]:
+            for pattern in ad.strings(spec["inputs"], "Module inputs"):
                 paths.update(
                     p for p in root.glob(pattern) if p.name == "pyproject.toml"
                 )
             for path in sorted(paths):
                 rel = path.relative_to(root).as_posix()
-                content = document(contained(root, rel))[0]
-                groups = [
+                content = ad.table(document(contained(root, rel))[0], "Python manifest")
+                project = ad.table(content.get("project", {}), "Python project")
+                build_system = ad.table(
+                    content.get("build-system", {}), "Python build system"
+                )
+                groups: list[tuple[object, list[str | int]]] = [
                     (
-                        content.get("project", {}).get("dependencies", []),
+                        project.get("dependencies", []),
                         ["project", "dependencies"],
                     )
                 ]
                 groups.append(
                     (
-                        content.get("build-system", {}).get("requires", []),
+                        build_system.get("requires", []),
                         ["build-system", "requires"],
                     )
                 )
-                for key, values in (
-                    content.get("project", {}).get("optional-dependencies", {}).items()
-                ):
+                for key, values in ad.table(
+                    project.get("optional-dependencies", {}), "Optional dependencies"
+                ).items():
                     groups.append((values, ["project", "optional-dependencies", key]))
-                for key, values in content.get("dependency-groups", {}).items():
+                for key, values in ad.table(
+                    content.get("dependency-groups", {}), "Dependency groups"
+                ).items():
                     if key == spec.get("build_dependency_group"):
                         continue  # Derived from build-system.requires, never another authoritative pin.
                     groups.append((values, ["dependency-groups", key]))
                 for values, prefix in groups:
-                    for index, requirement in enumerate(values):
+                    for index, requirement in enumerate(
+                        ad.array(values, "Python requirements")
+                    ):
                         if isinstance(requirement, Mapping) and set(requirement) == {
                             "include-group"
                         }:
                             continue
-                        parsed = Requirement(requirement)
+                        parsed = Requirement(ad.text(requirement, "Python requirement"))
                         if parsed.url:
                             raise ValueError(
                                 "Python direct URLs need an explicit artifact pin"
                             )
-                        sources = (
-                            content.get("tool", {}).get("uv", {}).get("sources", {})
+                        sources = ad.table(
+                            ad.table(
+                                ad.table(content.get("tool", {}), "Python tools").get(
+                                    "uv", {}
+                                ),
+                                "uv settings",
+                            ).get("sources", {}),
+                            "uv sources",
                         )
-                        if parsed.name in sources and (
-                            sources[parsed.name].get("workspace")
-                            or sources[parsed.name].get("path")
-                        ):
-                            if sources[parsed.name].get("path"):
+                        source = ad.table(
+                            sources.get(parsed.name, {}), "uv dependency source"
+                        )
+                        if source.get("workspace") or source.get("path"):
+                            if source.get("path"):
                                 local_source(
-                                    root, path.parent, sources[parsed.name]["path"]
+                                    root,
+                                    path.parent,
+                                    ad.text(source["path"], "uv local source"),
                                 )
                             continue
                         pins.append(
@@ -441,8 +529,8 @@ def discover(
                         )
         elif kind == "pub":
             group = pub_workspace(root, directory)
-            declared = set()
-            for pattern in spec.get("inputs", []):
+            declared: set[str] = set()
+            for pattern in ad.strings(spec.get("inputs", []), "Module inputs"):
                 contained(root, pattern)
                 declared.update(
                     str(p.relative_to(root))
@@ -463,7 +551,7 @@ def configure_build_dependencies(
     *,
     check: bool = False,
     validate_only: bool = False,
-    specs: dict | None = None,
+    specs: Mapping[str, Mapping[str, object]] | None = None,
 ) -> None:
     """Put declared Python build requirements into the ordinary audited workspace lock."""
     for name in selected:
@@ -471,16 +559,23 @@ def configure_build_dependencies(
         group = spec.get("build_dependency_group")
         if not group:
             continue
-        if spec.get("ecosystem") != "pypi" or not re.fullmatch(
-            r"[a-z][a-z0-9-]+", group
+        if (
+            spec.get("ecosystem") != "pypi"
+            or not isinstance(group, str)
+            or not re.fullmatch(r"[a-z][a-z0-9-]+", group)
         ):
             raise ValueError("Unsupported derived build dependency group")
-        requirements, paths = {}, set()
-        for pattern in spec["inputs"]:
+        requirements: dict[str, str] = {}
+        paths: set[Path] = set()
+        for pattern in ad.strings(spec["inputs"], "Module inputs"):
             paths.update(p for p in root.glob(pattern) if p.name == "pyproject.toml")
         for path in sorted(paths):
-            content = document(contained(root, str(path.relative_to(root))))[0]
-            for raw in content.get("build-system", {}).get("requires", []):
+            content = ad.table(
+                document(contained(root, str(path.relative_to(root))))[0],
+                "Python manifest",
+            )
+            build = ad.table(content.get("build-system", {}), "Python build system")
+            for raw in ad.strings(build.get("requires", []), "Build requirements"):
                 parsed = Requirement(raw)
                 if parsed.url or parsed.marker:
                     raise ValueError(
@@ -494,28 +589,52 @@ def configure_build_dependencies(
                         "Conflicting per-package Python build requirements"
                     )
                 requirements[key] = requirement
-        path = contained(root, spec["directory"] + "/pyproject.toml")
-        if str(path.relative_to(root)) not in spec.get("update_outputs", []):
+        path = contained(
+            root, ad.text(spec["directory"], "Module directory") + "/pyproject.toml"
+        )
+        if str(path.relative_to(root)) not in ad.strings(
+            spec.get("update_outputs", []), "Module update outputs"
+        ):
             raise ValueError("Derived build group must be a declared update output")
         if validate_only:
             continue
-        content, render = document(path)
-        old = content.get("dependency-groups", {}).get(group)
+        mutable, render = document(path)
+        if not isinstance(mutable, MutableMapping):
+            raise ValueError("Python manifest requires a mutable mapping")
+        old = ad.table(mutable.get("dependency-groups", {}), "Dependency groups").get(
+            group
+        )
         expected = [requirements[key] for key in sorted(requirements)]
         if old != expected:
             if check:
                 raise ValueError(
                     "Derived Python build dependency group disagrees with build-system.requires"
                 )
-            content.setdefault("dependency-groups", {})[group] = expected
+            groups = mutable.setdefault("dependency-groups", {})
+            if not isinstance(groups, MutableMapping):
+                raise ValueError("Dependency groups require a mutable mapping")
+            groups[group] = expected
             path.write_text(render())
 
 
-def replace(pin: dict, release, root: Path) -> bool:
-    path = contained(root, pin["file"])
+def pin_pointer(value: object) -> list[str | int]:
+    result: list[str | int] = []
+    for component in ad.array(value, "Dependency pointer"):
+        if not isinstance(component, (str, int)) or isinstance(component, bool):
+            raise ValueError(
+                "Dependency pointers require string keys or integer indexes"
+            )
+        result.append(component)
+    return result
+
+
+def replace(pin: Mapping[str, object], release: Release, root: Path) -> bool:
+    path = contained(root, ad.text(pin["file"], "Pin file"))
     if pin.get("format") == "regex":
         body = path.read_text()
-        matches = list(re.finditer(pin["pattern"], body, re.MULTILINE))
+        matches = list(
+            re.finditer(ad.text(pin["pattern"], "Pin pattern"), body, re.MULTILINE)
+        )
         if len(matches) != 1 or "value" not in matches[0].groupdict():
             raise ValueError("Explicit pin must match exactly one named value group")
         match = matches[0]
@@ -536,17 +655,20 @@ def replace(pin: dict, release, root: Path) -> bool:
             path.write_text(body)
         return old != replacement
     value, render = document(path)
-    old = lookup(value, pin["pointer"])
+    pointer = pin_pointer(pin["pointer"])
+    old = lookup(value, pointer)
     if pin.get("representation") == "requirement":
-        parsed = Requirement(old)
+        parsed = Requirement(ad.text(old, "Python requirement"))
         extras = "[" + ",".join(sorted(parsed.extras)) + "]" if parsed.extras else ""
         replacement = f"{parsed.name}{extras}=={release.version}"
         if parsed.marker:
             replacement += f"; {parsed.marker}"
     else:
-        replacement = pin.get("prefix", "") + release.version.removeprefix("v")
+        replacement = ad.text(
+            pin.get("prefix", ""), "Pin prefix"
+        ) + release.version.removeprefix("v")
     if replacement == old:
         return False
-    assign(value, pin["pointer"], replacement)
+    assign(value, pointer, replacement)
     path.write_text(render())
     return True
