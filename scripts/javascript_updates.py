@@ -64,7 +64,9 @@ def bounded(options, name, default, maximum):
     return value
 
 
-def parse_requirement(alias, value):
+def parse_requirement(
+    alias: str, value: object
+) -> tuple[str, str, str, str | None] | None:
     if not isinstance(value, str):
         raise ValueError("JavaScript dependency requirements must be strings")
     actual, prefix = alias, ""

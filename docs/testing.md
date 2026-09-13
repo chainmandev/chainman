@@ -27,8 +27,8 @@ profiles, pin arrays and policy maps. The npm adapter requires complete function
 annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 44 source
-files, including 40 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 45 source
+files, including 41 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -88,6 +88,11 @@ The shared update engine enforces strict flags for Git tree entries, source
 snapshots, submodule records, transaction/preview results and verification
 callbacks. Lock inventories and Python resolver settings are projected into
 their consumed types while manifest edits retain the original serializer.
+Retained JavaScript source declarations and lock handling also enforce strict
+flags. They expose named source records, project registry/package metadata before
+use, and edit the original serializer through manifest pointers. The retained
+source resolver test checks that comments and unknown nested metadata survive
+the edit before the frozen native check is invoked.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by

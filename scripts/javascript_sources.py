@@ -17,21 +17,42 @@ from pathlib import Path, PurePosixPath
 import re
 import tarfile
 from urllib.parse import quote
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 from semantic_version import NpmSpec, Version
 
 import registry
+import manifests
 from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
-from adapter_data import Table
+from adapter_data import Table, array, table, text, string_map
+
+if TYPE_CHECKING:
+    from javascript_updates import Workspace
 
 
-def declarations(spec):
-    values = spec.get("retained_sources", [])
+class RetainedSource(TypedDict):
+    manifest: str
+    package: str
+    repository: str
+    commit: str
+    sha256: str
+    reason: str
+    parent: NotRequired[str]
+    parent_specifier: NotRequired[str]
+    specifier: str
+    url: str
+    integrity: str
+
+
+def declarations(spec: Mapping[str, object]) -> list[RetainedSource]:
+    values = array(spec.get("retained_sources", []), "Retained sources")
     if values and spec.get("manager", "pnpm") != "pnpm":
         raise ValueError("Retained GitHub sources currently require pnpm")
-    result, seen = [], set()
-    for item in values:
+    result: list[RetainedSource] = []
+    seen: set[tuple[str, str | None, str]] = set()
+    for raw in values:
+        item = string_map(raw, "Retained source")
         required = {
             "manifest",
             "package",
@@ -83,30 +104,39 @@ def declarations(spec):
         if key in seen:
             raise ValueError("Duplicate retained source manifest alias")
         seen.add(key)
-        result.append(
-            {
-                **item,
-                "specifier": f"github:{item['repository']}#{item['commit']}",
-                "url": f"https://codeload.github.com/{item['repository']}/tar.gz/{item['commit']}",
-                "integrity": "sha256-"
-                + base64.b64encode(bytes.fromhex(item["sha256"])).decode(),
-            }
-        )
+        entry: RetainedSource = {
+            "manifest": item["manifest"],
+            "package": item["package"],
+            "repository": item["repository"],
+            "commit": item["commit"],
+            "sha256": item["sha256"],
+            "reason": item["reason"],
+            "specifier": f"github:{item['repository']}#{item['commit']}",
+            "url": f"https://codeload.github.com/{item['repository']}/tar.gz/{item['commit']}",
+            "integrity": "sha256-"
+            + base64.b64encode(bytes.fromhex(item["sha256"])).decode(),
+        }
+        if "parent" in item:
+            entry["parent"] = item["parent"]
+            entry["parent_specifier"] = item["parent_specifier"]
+        result.append(entry)
     return result
 
 
-def manifest_entries(directory, item):
-    value = json.loads(tc.regular_input(directory, item["manifest"]))
+def manifest_entries(directory: Path, item: RetainedSource) -> None:
+    value = table(
+        json.loads(tc.regular_input(directory, item["manifest"])), "Package manifest"
+    )
     alias = item["parent"].rpartition("@")[0] if "parent" in item else item["package"]
     matches = [
-        table[alias]
+        section_values[alias]
         for section in (
             "dependencies",
             "devDependencies",
             "optionalDependencies",
             "peerDependencies",
         )
-        if alias in (table := value.get(section, {}))
+        if alias in (section_values := string_map(value.get(section, {}), section))
     ]
     if "parent" in item:
         valid = matches and all(
@@ -121,7 +151,9 @@ def manifest_entries(directory, item):
         )
 
 
-def matched(spec, manifest, alias, value):
+def matched(
+    spec: Mapping[str, object], manifest: str, alias: str, value: object
+) -> bool:
     candidates = [
         item
         for item in declarations(spec)
@@ -133,7 +165,7 @@ def matched(spec, manifest, alias, value):
     return bool(candidates)
 
 
-def override(spec, selector, value):
+def override(spec: Mapping[str, object], selector: str, value: object) -> bool:
     candidates = [
         i
         for i in declarations(spec)
@@ -146,10 +178,13 @@ def override(spec, selector, value):
     return bool(candidates)
 
 
-def configured(workspace):
+def configured(workspace: "Workspace") -> None:
+    pnpm = table(
+        workspace.documents["package.json"][0].get("pnpm", {}), "pnpm manifest settings"
+    )
     overrides = {
-        **workspace.documents["package.json"][0].get("pnpm", {}).get("overrides", {}),
-        **workspace.settings.get("overrides", {}),
+        **table(pnpm.get("overrides", {}), "pnpm overrides"),
+        **table(workspace.settings.get("overrides", {}), "Workspace overrides"),
     }
     for item in declarations(workspace.spec):
         if "parent" in item:
@@ -160,12 +195,17 @@ def configured(workspace):
                 )
 
 
-def bound_edges(item, lock):
+def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> None:
+    importer = str(Path(item["manifest"]).parent)
+    importers = table(lock.get("importers", {}), "pnpm importers")
+    imports = table(importers.get(importer, {}), "pnpm importer")
     if "parent" in item:
         parent_name, _, parent_version = item["parent"].rpartition("@")
-        importer = str(Path(item["manifest"]).parent)
         incoming = [
-            v[parent_name].get("version")
+            text(
+                table(v[parent_name], "pnpm importer dependency").get("version"),
+                "pnpm importer version",
+            )
             for section in (
                 "dependencies",
                 "devDependencies",
@@ -173,21 +213,26 @@ def bound_edges(item, lock):
                 "peerDependencies",
             )
             if parent_name
-            in (v := lock.get("importers", {}).get(importer, {}).get(section, {}))
+            in (v := table(imports.get(section, {}), "pnpm importer dependencies"))
         ]
         if not incoming or any(
             value.partition("(")[0] != parent_version for value in incoming
         ):
             raise ValueError("Retained source registry parent changed")
         parents = [
-            node
-            for context, node in lock.get("snapshots", {}).items()
+            table(node, "pnpm snapshot")
+            for context, node in table(
+                lock.get("snapshots", {}), "pnpm snapshots"
+            ).items()
             if context.partition("(")[0] == item["parent"]
         ]
         edges = [
-            node.get("dependencies", {}).get(
+            table(node.get("dependencies", {}), "pnpm snapshot dependencies").get(
                 item["package"],
-                node.get("optionalDependencies", {}).get(item["package"]),
+                table(
+                    node.get("optionalDependencies", {}),
+                    "pnpm snapshot optional dependencies",
+                ).get(item["package"]),
             )
             for node in parents
         ]
@@ -196,9 +241,8 @@ def bound_edges(item, lock):
                 "Retained source parent edge differs from its immutable declaration"
             )
     else:
-        importer = str(Path(item["manifest"]).parent)
-        edges = [
-            table[item["package"]]
+        importer_edges = [
+            section_values[item["package"]]
             for section in (
                 "dependencies",
                 "devDependencies",
@@ -206,18 +250,26 @@ def bound_edges(item, lock):
                 "peerDependencies",
             )
             if item["package"]
-            in (table := lock.get("importers", {}).get(importer, {}).get(section, {}))
+            in (
+                section_values := table(
+                    imports.get(section, {}), "pnpm importer dependencies"
+                )
+            )
         ]
-        if not edges or any(
+        if not importer_edges or any(
             edge != {"specifier": item["specifier"], "version": item["url"]}
-            for edge in edges
+            for edge in importer_edges
         ):
             raise ValueError("Retained source importer differs from its declaration")
 
 
 def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Table:
-    entries = dict(lock.get("packages", {}))
-    directory = tc.contained(root, spec.get("directory", "."))
+    document = table(lock, "pnpm lock")
+    entries = table(document.get("packages", {}), "pnpm packages")
+    snapshots = table(document.get("snapshots", {}), "pnpm snapshots")
+    directory = tc.contained(
+        root, text(spec.get("directory", "."), "JavaScript directory")
+    )
     for item in declarations(spec):
         manifest_entries(directory, item)
         key = item["package"] + "@" + item["url"]
@@ -225,7 +277,8 @@ def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Ta
         # completed audit requires its importer and source identity to exist.
         if key not in entries:
             continue
-        resolution = entries[key].get("resolution", {})
+        package = table(entries[key], "pnpm package")
+        resolution = table(package.get("resolution", {}), "pnpm resolution")
         if (
             set(resolution) - {"tarball", "gitHosted", "integrity"}
             or resolution.get("tarball") != item["url"]
@@ -233,15 +286,20 @@ def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Ta
         ):
             raise ValueError("Retained GitHub source lock identity differs from policy")
         if resolution.get("integrity"):
-            registry.digest(resolution["integrity"], npm=True)
-        if registry.version("npm", entries[key].get("version")) is None:
+            registry.digest(text(resolution["integrity"], "pnpm integrity"), npm=True)
+        if (
+            registry.version(
+                "npm", text(package.get("version"), "pnpm package version")
+            )
+            is None
+        ):
             raise ValueError(
                 "Retained source lock must declare a stable package version"
             )
-        bound_edges(item, lock)
-        if key not in lock.get("snapshots", {}):
+        bound_edges(item, document)
+        if key not in snapshots:
             raise ValueError("Retained source lacks its locked dependency graph")
-        if "parent" not in item and lock["snapshots"][key] != {}:
+        if "parent" not in item and snapshots[key] != {}:
             raise ValueError(
                 "Retained source must have an empty declared dependency graph"
             )
@@ -249,20 +307,28 @@ def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Ta
     return entries
 
 
-def lock_identities(root, spec, lock) -> set[Identity]:
+def lock_identities(
+    root: Path, spec: Mapping[str, object], lock: object
+) -> set[Identity]:
     registry_entries(root, spec, lock)
-    result = set()
+    result: set[Identity] = set()
+    packages = table(table(lock, "pnpm lock").get("packages", {}), "pnpm packages")
     for item in declarations(spec):
-        package = lock.get("packages", {}).get(item["package"] + "@" + item["url"])
-        if package is not None:
+        raw = packages.get(item["package"] + "@" + item["url"])
+        if raw is not None:
+            package = table(raw, "pnpm package")
             result.add(
                 Identity(
                     provider="github-source",
                     package=item["package"],
-                    version=package["version"] + "@" + item["commit"],
+                    version=text(package["version"], "pnpm package version")
+                    + "@"
+                    + item["commit"],
                     url=item["url"],
                     digest="sha256:" + item["sha256"]
-                    if package.get("resolution", {}).get("integrity")
+                    if table(package.get("resolution", {}), "pnpm resolution").get(
+                        "integrity"
+                    )
                     == item["integrity"]
                     else "",
                 )
@@ -270,7 +336,9 @@ def lock_identities(root, spec, lock) -> set[Identity]:
     return result
 
 
-def is_target(spec, manifest, alias, raw):
+def is_target(
+    spec: Mapping[str, object], manifest: str, alias: str, raw: object
+) -> bool:
     items = [
         item
         for item in declarations(spec)
@@ -282,7 +350,7 @@ def is_target(spec, manifest, alias, raw):
     return bool(items)
 
 
-def bind(workspace, directory):
+def bind(workspace: "Workspace", directory: Path) -> None:
     if not workspace.spec.get("retained_sources"):
         return
     import javascript_updates as js
@@ -292,14 +360,16 @@ def bind(workspace, directory):
         path, tc.regular_input(directory, workspace.lock).decode()
     )
     registry_entries(workspace.root, workspace.spec, lock)
+    packages = table(table(lock, "pnpm lock").get("packages", {}), "pnpm packages")
     for item in declarations(workspace.spec):
         key = item["package"] + "@" + item["url"]
-        if key not in lock.get("packages", {}):
+        if key not in packages:
             raise ValueError("pnpm omitted a declared retained source")
-        observed = lock["packages"][key]["resolution"].get("integrity")
+        package = table(packages[key], "pnpm package")
+        observed = table(package["resolution"], "pnpm resolution").get("integrity")
         if observed and observed != item["integrity"]:
             body = registry.fetch(item["url"], "application/octet-stream")[0]
-            digest = registry.digest(observed, npm=True)
+            digest = registry.digest(text(observed, "pnpm integrity"), npm=True)
             algorithm, _, encoded = digest.partition(":")
             if (
                 len(body) > 8 * 1024 * 1024
@@ -309,36 +379,58 @@ def bind(workspace, directory):
                 raise ValueError(
                     "Resolver source archive integrity differs from pinned bytes"
                 )
-        lock["packages"][key]["resolution"]["integrity"] = item["integrity"]
+        manifests.assign(
+            lock, ["packages", key, "resolution", "integrity"], item["integrity"]
+        )
     tc.atomic_bytes(path, render().encode(), 0o644)
 
 
-def audit(workspace, before, policy, now):
+def audit(
+    workspace: "Workspace",
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> dict[str, Table]:
     if not workspace.spec.get("retained_sources"):
         return {}
     import javascript_updates as js
 
-    lock = js.document(
-        Path(workspace.lock),
-        tc.regular_input(workspace.directory, workspace.lock).decode(),
-    )[0]
+    lock = table(
+        js.document(
+            Path(workspace.lock),
+            tc.regular_input(workspace.directory, workspace.lock).decode(),
+        )[0],
+        "pnpm lock",
+    )
     registry_entries(workspace.root, workspace.spec, lock)
-    contents = {}
+    packages = table(lock.get("packages", {}), "pnpm packages")
+    contents: dict[str, Table] = {}
     configured(workspace)
     for item in declarations(workspace.spec):
         key = item["package"] + "@" + item["url"]
-        package = lock.get("packages", {}).get(key, {})
-        if package.get("resolution", {}).get("integrity") != item["integrity"]:
+        package = table(packages.get(key, {}), "pnpm package")
+        if (
+            table(package.get("resolution", {}), "pnpm resolution").get("integrity")
+            != item["integrity"]
+        ):
             raise ValueError("Retained source lock must bind its declared archive hash")
         bound_edges(item, lock)
         if "parent" in item:
             parent, _, version = item["parent"].rpartition("@")
-            parent_info = registry.data(
-                f"https://registry.npmjs.org/{quote(parent, safe='')}/{version}"
+            parent_info = table(
+                registry.data(
+                    f"https://registry.npmjs.org/{quote(parent, safe='')}/{version}"
+                ),
+                "Registry parent package",
             )
             declared = {
-                **parent_info.get("dependencies", {}),
-                **parent_info.get("optionalDependencies", {}),
+                **string_map(
+                    parent_info.get("dependencies", {}), "Parent dependencies"
+                ),
+                **string_map(
+                    parent_info.get("optionalDependencies", {}),
+                    "Parent optional dependencies",
+                ),
             }
             if (
                 parent_info.get("name") != parent
@@ -346,10 +438,10 @@ def audit(workspace, before, policy, now):
                 or declared.get(item["package"]) != item["parent_specifier"]
             ):
                 raise ValueError("Retained source parent registry declaration changed")
-        identity = (
+        identity = Identity(
             "github-source",
             item["package"],
-            package["version"] + "@" + item["commit"],
+            text(package["version"], "pnpm package version") + "@" + item["commit"],
             item["url"],
             "sha256:" + item["sha256"],
         )
@@ -388,12 +480,15 @@ def audit_identity(
         or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest)
     ):
         raise ValueError("Retained source lacks a complete immutable archive identity")
-    commit = registry.data(
-        f"https://api.github.com/repos/{match[1]}/commits/{revision}"
+    commit = table(
+        registry.data(f"https://api.github.com/repos/{match[1]}/commits/{revision}"),
+        "GitHub commit",
     )
     if commit.get("sha") != revision:
         raise ValueError("GitHub returned a different retained source commit")
-    published = registry.timestamp(commit["commit"]["committer"]["date"])
+    details = table(commit["commit"], "GitHub commit details")
+    committer = table(details["committer"], "GitHub committer")
+    published = registry.timestamp(committer["date"])
     if published > now or (
         identity not in before
         and published > now - timedelta(days=registry.minimum_age(policy))
@@ -404,7 +499,7 @@ def audit_identity(
         body
     ).hexdigest() != digest.removeprefix("sha256:"):
         raise ValueError("Retained source archive fails its size or SHA-256 contract")
-    manifests = []
+    manifests: list[Table] = []
     with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as archive:
         for index, member in enumerate(archive):
             path = PurePosixPath(member.name)
@@ -417,7 +512,9 @@ def audit_identity(
                     raise ValueError(
                         "Retained source manifest must be a bounded regular file"
                     )
-                manifests.append(json.load(archive.extractfile(member)))
+                stream = archive.extractfile(member)
+                assert stream is not None  # isfile() above guarantees a data stream.
+                manifests.append(table(json.load(stream), "Retained source manifest"))
     if len(manifests) != 1:
         raise ValueError("Retained source requires one root package manifest")
     content = manifests[0]
@@ -438,15 +535,18 @@ def audit_identity(
                 "Retained source registry dependency graph exceeds its bound"
             )
         for alias, requirement in values.items():
-            if js.parse_requirement(alias, requirement) is None:
+            if (
+                js.parse_requirement(text(alias, "Dependency alias"), requirement)
+                is None
+            ):
                 raise ValueError(
                     "Retained source graphs cannot introduce nested local or remote sources"
                 )
     if not registry.compatible(
-        "npm", content["version"], registry.constraint("npm", policy, package)
+        "npm", version, registry.constraint("npm", policy, package)
     ):
         raise ValueError("Retained source violates package compatibility")
     safe = registry.minimum_safe("npm", policy, package)
-    if safe is not None and Version(content["version"]) < safe:
+    if safe is not None and Version(version) < safe:
         raise ValueError("Retained source is below its declared security safe floor")
     return content

@@ -2595,17 +2595,21 @@ class JavaScriptTests(unittest.TestCase):
 
     def test_retained_source_resolver_binds_archive_integrity_before_freeze(self):
         item, body, lock, commit = self.retained_fixture(integrity=False)
+        lock["futureMetadata"] = {"records": ["keep", {"value": 3}]}
         next(iter(lock["packages"].values()))["resolution"]["integrity"] = (
             "sha512-" + base64.b64encode(hashlib.sha512(body).digest()).decode()
         )
 
         def execute(root, profile, argv, *, cwd, **kwargs):
             if "--frozen-lockfile" not in argv:
-                (cwd / "pnpm-lock.yaml").write_text(json.dumps(lock))
+                (cwd / "pnpm-lock.yaml").write_text(
+                    "# native source metadata\n" + json.dumps(lock)
+                )
             else:
-                current = js.document(
-                    Path("pnpm-lock.yaml"), (cwd / "pnpm-lock.yaml").read_text()
-                )[0]
+                rendered = (cwd / "pnpm-lock.yaml").read_text()
+                current = js.document(Path("pnpm-lock.yaml"), rendered)[0]
+                self.assertIn("# native source metadata", rendered)
+                self.assertEqual(current["futureMetadata"], lock["futureMetadata"])
                 self.assertEqual(
                     next(iter(current["packages"].values()))["resolution"]["integrity"],
                     item["integrity"],
