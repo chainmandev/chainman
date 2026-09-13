@@ -36,7 +36,8 @@ class ServiceControlTests(unittest.TestCase):
         worker = self.root / "worker.py"
         worker.write_text("""import os,signal,time
 from pathlib import Path
-Path('pid').write_text(str(os.getpid()))
+Path('pid.next').write_text(str(os.getpid()))
+os.replace('pid.next', 'pid')
 signal.signal(signal.SIGTERM,lambda *_:exit(0))
 Path('ready').touch()
 while True:time.sleep(.1)
