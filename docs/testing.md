@@ -28,8 +28,8 @@ and peer metadata. Shared JavaScript range, override and compatibility helpers
 expose their input/output types and project their configuration values; the
 workspace planner still has dynamic operations. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 47 source
-files, including 45 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 48 source
+files, including 46 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -103,6 +103,9 @@ Nix selection and reconciliation. Action occurrences/selections, OCI inventory
 entries and Nix snapshots have named records. Source JSON and Nix follows paths
 are projected before use; OCI selections preserve extra caller metadata, and
 Nix resolution retains declared flake order.
+Artifact transport callbacks and origin observations also enforce strict flags.
+The urllib constructor/callback options and consumed private standard-library
+attributes are declared explicitly; returned observations have a named wire record.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by

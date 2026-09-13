@@ -10,9 +10,12 @@ import hashlib
 import ipaddress
 import re
 import socket
+import ssl
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from http.client import HTTPSConnection
+from http.client import HTTPSConnection, HTTPMessage, HTTPResponse
+from typing import IO, Literal, TypedDict, Unpack
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlparse, urlunparse
 from urllib.request import (
@@ -27,6 +30,24 @@ import registry
 
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_DECLARED_BYTES = 16 * MAX_BYTES
+# Typeshed omits this private sentinel used by http.client.create_connection.
+DEFAULT_TIMEOUT: object = vars(socket)["_GLOBAL_DEFAULT_TIMEOUT"]
+
+
+class HTTPSOptions(TypedDict, total=False):
+    timeout: float | None
+    source_address: tuple[str, int] | None
+    context: ssl.SSLContext | None
+    blocksize: int
+
+
+class Observation(TypedDict):
+    url: str
+    resolved_url: str
+    digest: str
+    size: int
+    published: str
+    age_basis: Literal["origin-artifact-last-modified"]
 
 
 def public_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
@@ -53,8 +74,10 @@ def public_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
 
 
 def public_connection(
-    address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None
-):
+    address: tuple[str, int],
+    timeout: object = DEFAULT_TIMEOUT,
+    source_address: object = None,
+) -> socket.socket:
     """Resolve once, validate the entire answer, then dial only those numeric IPs."""
     host, port = address
     if port != 443 or source_address is not None:
@@ -64,6 +87,7 @@ def public_connection(
     )
     endpoints = []
     for family, kind, protocol, _, target in resolved:
+        assert isinstance(target[0], str)  # TCP getaddrinfo returns an IP string.
         ip = public_address(target[0])
         if (
             family not in (socket.AF_INET, socket.AF_INET6)
@@ -71,7 +95,7 @@ def public_connection(
             or protocol != socket.IPPROTO_TCP
             or target[1] != 443
             or (family == socket.AF_INET) != (ip.version == 4)
-            or (family == socket.AF_INET6 and target[3] != 0)
+            or (family == socket.AF_INET6 and (len(target) != 4 or target[3] != 0))
         ):
             raise ValueError("Artifact DNS lacks a public HTTPS endpoint")
         # Reconstruct a canonical numeric sockaddr; connect performs no new lookup.
@@ -82,7 +106,8 @@ def public_connection(
     for family, kind, protocol, target in endpoints:
         connected = socket.socket(family, kind, protocol)
         try:
-            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+            if timeout is not DEFAULT_TIMEOUT:
+                assert timeout is None or isinstance(timeout, (int, float))
                 connected.settimeout(timeout)
             connected.connect(target)
             return connected
@@ -92,11 +117,16 @@ def public_connection(
 
 
 class PublicHTTPSConnection(HTTPSConnection):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    _tunnel_host: str | None
+    _create_connection: Callable[[tuple[str, int], object, object], socket.socket]
+
+    def __init__(
+        self, host: str, port: int | None = None, **kwargs: Unpack[HTTPSOptions]
+    ) -> None:
+        super().__init__(host, port, **kwargs)
         self._create_connection = public_connection
 
-    def connect(self):
+    def connect(self) -> None:
         if self._tunnel_host:
             raise ValueError("Artifact evidence does not permit proxy tunnels")
         # Keep the standard verified TLS handshake and original hostname/SNI.
@@ -104,13 +134,16 @@ class PublicHTTPSConnection(HTTPSConnection):
 
 
 class PublicHTTPSHandler(HTTPSHandler):
-    def https_open(self, request):
+    _context: ssl.SSLContext | None
+
+    def https_open(self, request: Request) -> HTTPResponse:
         return self.do_open(PublicHTTPSConnection, request, context=self._context)
 
 
 def artifact_url(value: str, *, signed_github_cdn: bool = False) -> str:
     registry.artifact_url(value)
     parsed = urlparse(value)
+    assert parsed.hostname is not None  # registry.artifact_url requires a host.
     host = parsed.hostname.lower()
     if (
         (
@@ -145,7 +178,7 @@ class PublicRedirects(HTTPRedirectHandler):
     max_redirections = 5
     max_repeats = 1
 
-    def __init__(self, source: str = ""):
+    def __init__(self, source: str = "") -> None:
         super().__init__()
         parsed = urlparse(source)
         self.github_release = parsed.hostname == "github.com" and bool(
@@ -155,14 +188,22 @@ class PublicRedirects(HTTPRedirectHandler):
             )
         )
 
-    def redirect_request(self, request, fp, code, message, headers, newurl):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: HTTPMessage,
+        newurl: str,
+    ) -> Request | None:
         artifact_url(newurl, signed_github_cdn=self.github_release)
-        return super().redirect_request(request, fp, code, message, headers, newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def inspect(
     url: str, digest: str, now: datetime, *, max_bytes: int | None = None
-) -> dict:
+) -> Observation:
     """Read exact public bytes; missing or future origin metadata is an error."""
     artifact_url(url)
     registry.digest(digest)
@@ -231,8 +272,13 @@ def inspect(
 
 
 def audit(
-    url: str, digest: str, policy: dict, now: datetime, *, max_bytes: int | None = None
-) -> dict:
+    url: str,
+    digest: str,
+    policy: Mapping[str, object],
+    now: datetime,
+    *,
+    max_bytes: int | None = None,
+) -> Observation:
     result = inspect(url, digest, now, max_bytes=max_bytes)
     if registry.timestamp(result["published"]) > now - timedelta(
         days=registry.minimum_age(policy)
