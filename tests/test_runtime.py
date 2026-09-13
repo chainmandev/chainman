@@ -208,6 +208,77 @@ class NixReferenceTests(unittest.TestCase):
             self.assertEqual(result.stdout, "correct runtime")
 
 
+class SetupCacheTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="chainman setup stamp ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        (self.root / "scripts").mkdir()
+        entry = self.root / "scripts/enter.sh"
+        entry.write_text('#!/bin/sh\nshift\nexec "$@"\n')
+        entry.chmod(0o755)
+        (self.root / "toolchain.toml").write_text('schema=1\nmodules=["demo"]\n')
+        self.spec = {
+            "name": "demo",
+            "directory": ".",
+            "profile": "core",
+            "inputs": ["input.txt"],
+            "artifacts": ["ready.txt"],
+            "commands": {
+                "setup": [
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os, pathlib, sys; "
+                        "p=pathlib.Path('runs.txt'); p.write_text(p.read_text()+'run\\n' if p.exists() else 'run\\n'); "
+                        "sys.exit(23) if os.environ.get('SETUP_FIXTURE_FAIL') else None; "
+                        "pathlib.Path('ready.txt').write_text('ready')",
+                    ]
+                ]
+            },
+        }
+        self.stamp = self.root / ".cache/toolchain/setup/demo.json"
+
+    def setup(self, *, fail=False):
+        toolchain.setup(
+            self.spec,
+            dict(os.environ, SETUP_FIXTURE_FAIL="1" if fail else ""),
+            self.root,
+        )
+
+    def test_invalid_cache_shapes_rebuild_once_and_then_reuse_ready_outputs(self):
+        invalid = [b"null", b"[]", b'"old stamp"', b"42", b"true", b"{", b"\xff"]
+        self.stamp.parent.mkdir(parents=True)
+        for body in invalid:
+            with self.subTest(body=body):
+                (self.root / "runs.txt").unlink(missing_ok=True)
+                self.stamp.write_bytes(body)
+                self.setup()
+                self.setup()
+                self.assertEqual((self.root / "runs.txt").read_text(), "run\n")
+                self.assertEqual(
+                    json.loads(self.stamp.read_text()),
+                    {"fingerprint": toolchain.fingerprint(self.spec, self.root)},
+                )
+
+    def test_missing_outputs_changed_inputs_and_failed_setup_do_not_reuse_a_stamp(self):
+        self.setup()
+        self.setup()
+        self.assertEqual((self.root / "runs.txt").read_text(), "run\n")
+        (self.root / "ready.txt").unlink()
+        previous = self.stamp.read_bytes()
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.setup(fail=True)
+        self.assertEqual(error.exception.returncode, 23)
+        self.assertEqual(self.stamp.read_bytes(), previous)
+        self.assertFalse((self.root / "ready.txt").exists())
+        self.setup()
+        (self.root / "input.txt").write_text("changed declared input")
+        self.setup()
+        self.setup()
+        self.assertEqual((self.root / "runs.txt").read_text(), "run\n" * 4)
+
+
 class RuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

@@ -1085,11 +1085,13 @@ def setup(spec: dict, env: dict[str, str], root: Path = ROOT) -> None:
     expected = fingerprint(spec, root)
     artifacts = spec.get("artifacts", [])
     try:
-        recorded = json.loads(stamp.read_text())
+        recorded: object = json.loads(stamp.read_text())
     except (FileNotFoundError, ValueError):
         recorded = {}
-    if recorded.get("fingerprint") == expected and all(
-        artifact_ready(root, p, env) for p in artifacts
+    if (
+        isinstance(recorded, dict)
+        and recorded.get("fingerprint") == expected
+        and all(artifact_ready(root, p, env) for p in artifacts)
     ):
         return
     run_commands(spec, "setup", env, root)

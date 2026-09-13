@@ -121,6 +121,12 @@ candidate while ignoring conflicts, and rejecting every graph indiscriminately.
 
 ## What the existing tests establish
 
+Source-module setup treats unparseable JSON content and non-object readiness
+stamps as cache misses. A child-process fixture verifies that each invalid stamp
+causes one setup run, followed by reuse of the repaired stamp. Missing outputs
+and changed declared inputs invalidate readiness; failed setup preserves the
+previous stamp and cannot make absent outputs ready.
+
 The reviewed transaction tests operate on disposable Git repositories and assert
 actual file bytes, index contents, commit identities and preservation of
 concurrent edits. Workflow tests execute fixture programs and inspect their
