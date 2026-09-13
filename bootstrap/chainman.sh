@@ -518,7 +518,13 @@ pid=$expected_pid"
     [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation. Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
 }
 if "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
-volume_clients=$("$engine" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}')
+if [ "$engine" = podman ]; then
+    # Podman 4.x has no Docker-compatible .Label template accessor. Its negative
+    # label filter selects the same incompatible clients in one engine snapshot.
+    volume_clients=$("$engine" ps --filter "volume=$volume" --filter 'label!=dev.chainman.store.schema=1' --format '{{.ID}}')
+else
+    volume_clients=$("$engine" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}')
+fi
 while IFS= read -r client; do
     case "$client" in '' | *' 1') ;; *) fail 'Stop existing containers using this Nix volume before migrating from independent local-store writers to the shared daemon.' ;; esac
 done << EOF
