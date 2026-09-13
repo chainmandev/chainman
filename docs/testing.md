@@ -27,8 +27,8 @@ profiles, pin arrays and policy maps. The npm adapter requires complete function
 annotations and passes decoded records through its decisions; some imported
 operations remain dynamic. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 39 source
-files, including 30 with the strict flags. Recipe bindings and verification task
+but still permit untyped calls and dynamic payloads. The gate checks 40 source
+files, including 31 with the strict flags. Recipe bindings and verification task
 lists are validated into typed collections before facade generation. Environment
 expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
@@ -49,6 +49,9 @@ Module adapter assembly, nonstandard GitHub tag selection and declared artifact
 snapshots also enforce strict flags. Selected tags and artifact identities have
 named records; manifest pointers are copied into snapshot records so callers
 cannot mutate their source configuration through a returned snapshot.
+SDK source pin editing also has strict types for its declaration, selected record
+and serializer callback. A write requires an actual source declaration and retains
+the existing concurrent-edit checks and original file mode.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The

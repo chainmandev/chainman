@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 import hashlib
 import json
 import re
 import stat
 from pathlib import Path
+from typing import TypedDict
 
+import adapter_data as ad
 import manifests
 import registry
 import toolchain as tc
 
 
-def declaration(tool: dict) -> dict | None:
+class SourcePin(TypedDict):
+    file: str
+    pointer: list[str | int]
+
+
+class SourceRecord(TypedDict):
+    version: str
+    url: str
+    hash: str
+
+
+def declaration(tool: Mapping[str, object]) -> SourcePin | None:
     pin = tool.get("source_pin")
     if pin is None:
         return None
@@ -29,14 +44,17 @@ def declaration(tool: dict) -> dict | None:
         or any(type(p) not in (str, int) for p in pin["pointer"])
     ):
         raise ValueError("SDK source pins require npm and a parsed file/pointer")
-    return pin
+    return {
+        "file": ad.text(pin["file"], "SDK source file"),
+        "pointer": manifests.pin_pointer(pin["pointer"]),
+    }
 
 
-def record(tool: dict, release: registry.Release) -> dict:
+def record(tool: Mapping[str, object], release: registry.Release) -> SourceRecord:
     if len(release.artifacts) != 1:
         raise ValueError("SDK source pin requires one canonical npm artifact")
     artifact = release.artifacts[0]
-    package = tool["name"]
+    package = ad.text(tool["name"], "SDK package name")
     expected = (
         f"https://registry.npmjs.org/{package}/-/"
         f"{package.rsplit('/', 1)[-1]}-{release.version}.tgz"
@@ -56,8 +74,8 @@ def record(tool: dict, release: registry.Release) -> dict:
     }
 
 
-def unique(pairs):
-    result = {}
+def unique(pairs: list[tuple[str, object]]) -> ad.Table:
+    result: ad.Table = {}
     for key, value in pairs:
         if key in result:
             raise ValueError("Duplicate SDK source JSON key")
@@ -65,7 +83,7 @@ def unique(pairs):
     return result
 
 
-def document(root: Path, pin: dict):
+def document(root: Path, pin: SourcePin) -> tuple[bytes, object, Callable[[], str]]:
     body = tc.regular_input(root, pin["file"])
     path = tc.contained(root, pin["file"])
     if path.suffix == ".json":
@@ -74,7 +92,7 @@ def document(root: Path, pin: dict):
     return body, value, render
 
 
-def read(root: Path, tool: dict) -> dict | None:
+def read(root: Path, tool: Mapping[str, object]) -> SourceRecord | None:
     pin = declaration(tool)
     if pin is None:
         return None
@@ -89,21 +107,30 @@ def read(root: Path, tool: dict) -> dict | None:
         raise ValueError("SDK source record requires version, URL and hash strings")
     registry.artifact_url(source["url"])
     registry.digest(source["hash"], npm=True)
-    return dict(source)
-
-
-def files(root: Path, tools: list[dict]) -> dict:
     return {
-        tool["source_pin"]["file"]: hashlib.sha256(
-            tc.regular_input(root, tool["source_pin"]["file"])
-        ).hexdigest()
-        for tool in tools
-        if declaration(tool) is not None
+        "version": ad.text(source["version"], "SDK version"),
+        "url": ad.text(source["url"], "SDK URL"),
+        "hash": ad.text(source["hash"], "SDK hash"),
     }
 
 
-def write(root: Path, tool: dict, expected: dict, selected: dict) -> bool:
+def files(root: Path, tools: Sequence[Mapping[str, object]]) -> dict[str, str]:
+    return {
+        pin["file"]: hashlib.sha256(tc.regular_input(root, pin["file"])).hexdigest()
+        for tool in tools
+        if (pin := declaration(tool)) is not None
+    }
+
+
+def write(
+    root: Path,
+    tool: Mapping[str, object],
+    expected: SourceRecord,
+    selected: SourceRecord,
+) -> bool:
     pin = declaration(tool)
+    if pin is None:
+        raise ValueError("SDK source update requires a declared source pin")
     body, value, render = document(root, pin)
     if manifests.lookup(value, pin["pointer"]) != expected:
         raise ValueError("SDK source changed concurrently before its update")
@@ -119,7 +146,9 @@ def write(root: Path, tool: dict, expected: dict, selected: dict) -> bool:
     return True
 
 
-def inventory(releases: list[registry.Release], current: str, mode: str) -> list:
+def inventory(
+    releases: list[registry.Release], current: str, mode: str
+) -> list[registry.Release]:
     if mode not in {"aggressive", "compatible"}:
         raise ValueError("SDK source selection mode must be aggressive or compatible")
     # All npm candidates carry artifact dates. Bind their maximum date before
@@ -138,21 +167,22 @@ def inventory(releases: list[registry.Release], current: str, mode: str) -> list
 
 
 def select(
-    tool: dict,
-    before: dict,
-    source: dict,
+    tool: ad.Table,
+    before: Mapping[str, object] | None,
+    source: SourceRecord,
     pins: list[str],
-    policy,
-    now,
+    policy: ad.Table,
+    now: datetime,
     *,
-    mode="aggressive",
-):
+    mode: str = "aggressive",
+) -> SourceRecord:
     import source_toolchain as sdk
 
     observed, releases = sdk.observe(tool, source["version"])
     releases = inventory(releases, source["version"], mode)
-    candidates = registry.maturity("npm", releases, policy, tool["name"], now)
-    candidates += registry.active_exceptions("npm", releases, policy, tool["name"], now)
+    package = ad.text(tool["name"], "SDK package name")
+    candidates = registry.maturity("npm", releases, policy, package, now)
+    candidates += registry.active_exceptions("npm", releases, policy, package, now)
     latest = max(
         candidates, key=lambda r: registry.version("npm", r.version), default=None
     )
@@ -163,7 +193,11 @@ def select(
     retained = (
         sdk.evidence(tool, latest, latest.version) == before
         and record(tool, latest) == source
-        and [sdk.render(pin, latest.version) for pin in tool["pins"]] == pins
+        and [
+            sdk.render(ad.table(pin, "SDK output pin"), latest.version)
+            for pin in ad.array(tool["pins"], "SDK output pins")
+        ]
+        == pins
     )
     sdk.eligible_tool(tool, latest, releases, policy, now, retained=retained)
     return record(tool, latest)

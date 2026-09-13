@@ -83,6 +83,20 @@ class SourcePinTests(unittest.TestCase):
         self.releases.append(self.release("0.9.0"))
         self.assertEqual(self.resolve()["changed"], [])
 
+    def test_source_projection_owns_its_pointer_and_write_requires_a_declaration(self):
+        pin = source.declaration(self.tool)
+        self.assertEqual(pin, {"file": "sources.json", "pointer": ["sdk"]})
+        pin["pointer"].append("changed")
+        self.assertEqual(self.tool["source_pin"]["pointer"], ["sdk"])
+        undeclared = {
+            key: value for key, value in self.tool.items() if key != "source_pin"
+        }
+        before = (self.root / "sources.json").read_bytes()
+        record = source.record(self.tool, self.releases[0])
+        with self.assertRaisesRegex(ValueError, "requires a declared source pin"):
+            source.write(self.root, undeclared, record, record)
+        self.assertEqual((self.root / "sources.json").read_bytes(), before)
+
     def test_mature_major_updates_source_then_refreshes_and_renders(self):
         self.releases.extend([self.release("2.0.0"), self.release("3.0.0", YOUNG)])
         before = sdk.snapshot(self.root, self.spec)
