@@ -76,3 +76,6 @@ jobs:
       - name: Qualify native service ownership and backend
         if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
+      - name: Qualify native Python update validation
+        if: matrix.mode == 'host-nix' && matrix.module == 'python'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- python-test

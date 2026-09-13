@@ -84,6 +84,37 @@ commands=[["true"]]
             subject.finalize(self.root, self.stage)
         return json.loads(stream.getvalue())
 
+    def test_finalize_requires_inspection_and_resume_discards_old_inspection(self):
+        self.prepare("--no-commit")
+        with self.assertRaisesRegex(ValueError, "not been inspected"):
+            self.finish()
+        (self.candidate / "dependency.lock").write_text("new\n")
+        subject.inspect(self.root, self.stage)
+        subject.resume(self.root, self.stage)
+        with self.assertRaisesRegex(ValueError, "not been inspected"):
+            self.finish()
+        self.assertEqual(updates.snapshot(self.root), self.before)
+        subject.inspect(self.root, self.stage)
+        self.assertEqual(self.finish()["changed"], ["dependency.lock"])
+        self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
+
+    def test_corrupt_checkpoint_fails_before_git_or_publication(self):
+        self.update("--no-commit")
+        path = self.stage / "control/state.json"
+        original = json.loads(path.read_text())
+        for field, invalid in (
+            ("before", []),
+            ("paths", "dependency.lock"),
+            ("options", {}),
+            ("candidate_index", {"source.txt": ["100644", False]}),
+        ):
+            path.write_text(json.dumps({**original, field: invalid}))
+            with self.subTest(field=field), patch.object(updates, "repository") as git:
+                with self.assertRaisesRegex(ValueError, "Invalid update state"):
+                    self.finish()
+                git.assert_not_called()
+            self.assertEqual(updates.snapshot(self.root), self.before)
+
     def test_secondary_policy_cannot_choose_reconciliation_before_inspection(self):
         config = self.root / "chainman.toml"
         config.write_text(

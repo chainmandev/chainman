@@ -23,6 +23,7 @@ import chainman
 import lock_adapters
 import manifests
 import registry
+from dependency_identity import inventory as identity_inventory
 import toolchain as tc
 import updates
 
@@ -740,7 +741,7 @@ def pub_resolve(
                     print(result.stdout or "", end="")
         return True
 
-    baseline = {tuple(item) for item in before["identities"]}
+    baseline = identity_inventory(before["identities"])
     selected_overrides = {
         name: {
             pin["name"]: chosen.version
@@ -1218,7 +1219,7 @@ def cargo_resolve(
     initial = {path: cargo_file_state(root, path) for path in lock_names.values()}
     expected = dict(initial)
     public_inputs = cargo_input_state(root, specs, set(initial))
-    baseline = {tuple(item) for item in before["identities"]}
+    baseline = identity_inventory(before["identities"])
     inventories = {}
     attempts = 0
     visited = set()
@@ -1686,10 +1687,9 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
                     raise ValueError(
                         "SwiftPM did not retain the selected direct release"
                     )
-            expected = {
-                tuple(item)
-                for item in resolution.get("swift_identities", {}).get(name, [])
-            }
+            expected = identity_inventory(
+                resolution.get("swift_identities", {}).get(name, [])
+            )
             if {item for item in current if item[1] in selected} != expected:
                 raise ValueError(
                     "A project hook changed a selected Swift artifact identity"
@@ -1720,9 +1720,9 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     for name, expected in (
         before.get("resolution", {}).get("cargo_identities", {}).items()
     ):
-        if name not in specs or updates.lock_identities(root, [name], specs=specs) != {
-            tuple(item) for item in expected
-        }:
+        if name not in specs or updates.lock_identities(
+            root, [name], specs=specs
+        ) != identity_inventory(expected):
             raise ValueError("A project hook changed the selected Cargo artifact graph")
     if spec.get("mode", "aggressive") == "compatible":
         for provider, package, value, _, _ in updates.lock_identities(
@@ -1740,7 +1740,7 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime):
     updates.audit_locks(
         root,
         list(specs),
-        {tuple(item) for item in before["identities"]},
+        identity_inventory(before["identities"]),
         policy,
         now,
         specs=specs,

@@ -30,6 +30,7 @@ from urllib.parse import quote
 
 import chainman
 import registry
+from dependency_identity import inventory as identity_inventory
 import toolchain as tc
 import updates
 from ruamel.yaml import YAML
@@ -1524,7 +1525,7 @@ def audit_peers(workspace, evidence, options):
 
 def audit_artifacts(workspace, before, policy, now, scopes):
     identities = locked_identities(workspace)
-    old = {tuple(i) for i in before["identities"]}
+    old = identity_inventory(before["identities"])
     exclusions = set()
     groups = {}
     for identity in identities:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import javascript_updates as js
 import registry
+from dependency_identity import Identity
 import toolchain as tc
 from semantic_version import NpmSpec, Version
 
@@ -39,8 +40,8 @@ def name_at(location, item):
     return js.package_name(item.get("name", suffix))
 
 
-def identities(workspace):
-    result = set()
+def identities(workspace) -> set[Identity]:
+    result: set[Identity] = set()
     lock = read(workspace)
     locals = local_locations(workspace)
     for location, item in lock["packages"].items():
@@ -80,12 +81,12 @@ def identities(workspace):
         if registry.lock_version("npm", version) is None:
             raise ValueError("npm lock lacks a stable registry version")
         result.add(
-            (
-                "npm",
-                name,
-                version,
-                registry.artifact_url(item.get("resolved")),
-                registry.digest(item.get("integrity"), npm=True),
+            Identity(
+                provider="npm",
+                package=name,
+                version=version,
+                url=registry.artifact_url(item.get("resolved")),
+                digest=registry.digest(item.get("integrity"), npm=True),
             )
         )
     return result

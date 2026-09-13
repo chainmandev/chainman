@@ -7,13 +7,20 @@ portion. To run the generated contracts alone:
 
 ```sh
 just exec python3 -B -m unittest discover -s tests -p test_properties.py -v
+just exec python3 -B -m unittest discover -s tests -p test_transaction_state.py -v
+just exec python3 -B -m unittest discover -s tests -p test_dependency_identity.py -v
 ```
 
-The configuration compiler and resource policy module enforce the pinned mypy
-strict flags, plus rejection of explicit `Any` and unreachable code. Decoded
-values enter as `object` and are narrowed by validation. Resource execution uses
-an immutable policy with typed fields. The other modules listed in `mypy.ini`
-check unannotated bodies but still permit untyped calls and dynamic payloads.
+The configuration compiler, resource policy, transaction checkpoint codec and
+dependency identity modules enforce the pinned mypy strict flags, plus rejection
+of explicit `Any` and unreachable code. Decoded values enter as `object` and are
+narrowed by validation. Resource execution uses an immutable policy with typed
+fields. The transaction coordinator and source workflow require complete function
+annotations and pass decoded records through their decisions. Their configuration
+inputs and imported operations still have dynamic types. The other modules listed
+in `mypy.ini` check unannotated bodies but still permit untyped calls and dynamic
+payloads. Identity producers have named fields and typed return signatures, but
+the adapter implementations are not yet in the mypy gate.
 This is incremental coverage, not a claim that all Python is strictly typed.
 
 Hypothesis is pinned through the development Python shell. It is absent from
@@ -35,6 +42,11 @@ The generated oracles cover:
   observation orderings must reject it until the latest observation matures.
 - Resource budgets against an exact rational capacity calculation, including the
   CPU/configuration caps, minimum one job and monotonicity with more resources.
+- Existing flat schema-1 checkpoints against an independent wire fixture, with
+  distinct original/candidate Git identities and snapshots, inspected/uninspected
+  states, exact JSON compatibility and independence from later input mutation.
+- Dependency records against the existing five-string tuple/JSON contract,
+  including named-field order, hash/equality compatibility and duplicate removal.
 
 These have deliberately bounded vocabularies. They do not establish complete
 SemVer/PEP 440 correctness, lock graph correctness or platform behavior.
@@ -68,6 +80,21 @@ The pnpm setup migration fixture also now closes stdin explicitly: capturing
 stdout/stderr did not remove an inherited terminal, so its intended noninteractive
 refusal case could hang waiting for confirmation when launched from a shell.
 
+`just python-test` qualifies pinned uv against a disposable loopback Simple API
+index with upload timestamps and real wheels. It checks direct and transitive
+selection, global/per-package cutoffs, exact no-op retention, retirement of
+per-package cutoffs, and rejection of a stale lock without rewriting it. Restored
+manifest/lock pairs must pass real offline `uv lock --check`. This is a native
+configuration/lock boundary test, not a full Python adapter or PyPI provenance
+audit; production artifact checks still use their separate registry evidence.
+
+The native fixture found a conservative boundary difference: uv 0.12.5 excludes
+artifacts exactly at its cutoff using millisecond precision; Chainman's shared
+eligibility check includes the cutoff. The test covers an upload immediately
+before, exactly at and immediately after it, then advances the cutoff one
+millisecond. Chainman retains uv's conservative behavior. See the
+[pinned uv comparison](https://github.com/astral-sh/uv/blob/0.12.5/crates/uv-resolver/src/version_map.rs#L524-L528).
+
 The public bootstrap suite includes real host-Nix update/recovery lifecycles.
 Container-engine and native controller tests have separate prerequisites/gates;
 skipped tests provide no evidence about those paths. Linux success does not
@@ -97,12 +124,29 @@ oldest-observation mutation. Explicit generation of correlated observations was
 necessary. Generate important interactions deliberately instead of relying on
 independent random inputs to happen to contain them.
 
-## Next improvements
+The follow-up boundary work also injected four independent faults: preserving
+inspection on resume, confusing original and candidate indexes, bypassing
+malformed-baseline validation for an empty result, and swapping identity URL/hash
+fields. Each new targeted test failed on its corresponding fault. These mutations
+ran in separate Python processes without changing repository files. The codec
+checks have explicit field assertions in addition to round trips, so a paired
+encoder/decoder mistake cannot silently validate itself.
 
-Prioritize typed transaction state and dependency evidence/lock identities over
-splitting large modules for size alone. Put decoding and validation at their
-boundaries, then pass typed values through decision logic. A `dict[str, Any]`
-annotation would preserve most of the current blind spots.
+## Boundary guarantees and next improvements
+
+Typed checkpoints now reject malformed records before operational decisions;
+resume invalidates prior inspection. The in-memory inspection record is not a
+verifier attestation: the launcher remains responsible for running verification
+before finalization. The persisted flat schema and dependency identity wire form
+remain compatible. Records have frozen fields, with copied mutable collections
+inside the transaction state; they are not deeply immutable.
+
+Continue from these boundaries into adapter configuration/evidence types and
+their implementation checks. A diagnostic mypy probe of `lock_adapters` and
+`javascript_npm` reported 19 errors, mostly heterogeneous variable reuse, missing
+collection annotations, optional values and an unstubbed third-party import.
+Those modules are not silently counted as checked. Splitting large modules for
+size alone is a lower priority than replacing dynamic decision inputs.
 
 Add differential tests against native resolvers when changing their adapters.
 Expand transaction fault injection around interrupted application, rollback and

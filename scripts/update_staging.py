@@ -8,6 +8,8 @@ bootstrap. They cannot rewrite the snapshot authorizing changes to the original.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
+from collections.abc import Iterable, Iterator
 import json
 import hashlib
 import os
@@ -22,16 +24,17 @@ import dependency_api
 import toolchain as tc
 import updates
 import workflows
+from transaction_state import Inspection, State
 
 
-def directory(value):
+def directory(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute() or path.resolve() != path or not path.is_dir():
         raise ValueError("Update staging requires a real absolute directory")
     return path
 
 
-def export_bootstrap(runtime, target):
+def export_bootstrap(runtime: Path, target: Path) -> None:
     target.mkdir(exist_ok=True)
     for source, name, mode in (
         ("chainman.sh", "chainman.sh", 0o700),
@@ -43,8 +46,13 @@ def export_bootstrap(runtime, target):
 
 
 def export_authority(
-    root, candidate, target, *, pin_root=None, git_directories=(".git",)
-):
+    root: Path,
+    candidate: Path,
+    target: Path,
+    *,
+    pin_root: Path | None = None,
+    git_directories: Iterable[str] = (".git",),
+) -> None:
     """Keep entry policy and runtime selection outside the writable candidate.
 
     The launcher mounts this directory read-only. It contains no transaction
@@ -76,7 +84,7 @@ def export_authority(
     tc.atomic_json(target / "chainman.lock", pin)
 
 
-def patterns(root, policy):
+def patterns(root: Path, policy: dict) -> list[str]:
     result = [
         *policy.get("outputs", []),
         *runtime_files(root),
@@ -91,7 +99,7 @@ def patterns(root, policy):
     return result
 
 
-def runtime_files(root):
+def runtime_files(root: Path) -> list[str]:
     import recipes
 
     if not (root / "chainman.toml").is_file():
@@ -101,7 +109,7 @@ def runtime_files(root):
     ]
 
 
-def verification(root, policy):
+def verification(root: Path, policy: dict) -> list[str]:
     task = policy.get("verify_task")
     tasks = policy.get("verify_tasks")
     if (
@@ -129,23 +137,24 @@ def verification(root, policy):
     return ["_update-verify", "legacy"]
 
 
-def index(root):
-    # JSON retains lists, so normalize Git's mode/OID tuples before comparison.
-    return {name: list(value) for name, value in updates.staged_entries(root).items()}
+def index(root: Path) -> dict[str, tuple[str, str]]:
+    return updates.staged_entries(root)
 
 
-def unchanged(root, state):
+def unchanged(root: Path, state: State) -> None:
     if (
-        list(updates.repository(root, clean=False)) != state["identity"]
-        or index(root) != state["index"]
-        or updates.snapshot(root) != state["before"]
+        updates.repository(root, clean=False) != state.identity
+        or index(root) != state.index
+        or updates.snapshot(root) != state.before
     ):
         raise ValueError(
             "Original checkout changed during the update; candidate and user changes are preserved"
         )
 
 
-def prepare(root, destination, args, *, source=False):
+def prepare(
+    root: Path, destination: Path, args: list[str], *, source: bool = False
+) -> None:
     candidate = directory(destination / "candidate")
     control = directory(destination / "control")
     try:
@@ -178,22 +187,13 @@ def prepare(root, destination, args, *, source=False):
         if source and opts.format:
             policy = dict(policy, outputs=["*"])
         verify = verification(root, policy)
-        state = dict(
-            schema=1,
-            root=str(root),
-            candidate=str(candidate),
-            identity=list(identity),
-            before=before,
-            index=index(root),
-            patterns=(runtime_files(root) + policy.get("reconcile_outputs", []))
+        original_index = index(root)
+        output_patterns = (
+            (runtime_files(root) + policy.get("reconcile_outputs", []))
             if opts.only_chainman
-            else patterns(root, policy),
-            options=vars(opts),
-            runtime_files=runtime_files(root),
-            verify=verify,
-            at=datetime.now(timezone.utc).isoformat(),
-            source=source,
+            else patterns(root, policy)
         )
+        selected = None
         if opts.staged:
             staged = set(
                 updates.git(
@@ -201,7 +201,7 @@ def prepare(root, destination, args, *, source=False):
                 ).split("\0")
             ) - {""}
             unstaged = set(updates.git(root, "diff", "--name-only", "-z").split("\0"))
-            state["selected"] = sorted(staged - unstaged)
+            selected = sorted(staged - unstaged)
         with updates.preview_git_environment():
             if opts.preview or opts.staged:
                 updates.prepare_preview(root, candidate, before)
@@ -214,18 +214,35 @@ def prepare(root, destination, args, *, source=False):
                 updates.git(candidate, "symbolic-ref", "HEAD", identity[0])
                 if previous != identity[0]:
                     updates.git(candidate, "update-ref", "-d", previous)
-            state["candidate_identity"] = list(updates.repository(candidate))
-            state["candidate_before"] = updates.snapshot(candidate)
-            state["candidate_index"] = index(candidate)
-            state["candidate_modes"] = {
+            candidate_before = updates.snapshot(candidate)
+            candidate_modes = {
                 name: (candidate / name).stat().st_mode & 0o777
-                for name in state["candidate_before"]
+                for name in candidate_before
                 if (candidate / name).is_file() and not (candidate / name).is_symlink()
             }
-            state["candidate_git"] = {
+            candidate_git = {
                 name: administration(candidate, name)
                 for name in git_directories(candidate)
             }
+            state = State(
+                root=str(root),
+                candidate=str(candidate),
+                identity=identity,
+                before=before,
+                index=original_index,
+                patterns=output_patterns,
+                options=opts,
+                runtime_files=runtime_files(root),
+                verify=verify,
+                at=datetime.now(timezone.utc),
+                source=source,
+                selected=selected,
+                candidate_identity=updates.repository(candidate),
+                candidate_before=candidate_before,
+                candidate_index=index(candidate),
+                candidate_modes=candidate_modes,
+                candidate_git=candidate_git,
+            )
         unchanged(root, state)
         if not source:
             export_bootstrap(chainman.RUNTIME, destination / "original-bootstrap")
@@ -233,13 +250,13 @@ def prepare(root, destination, args, *, source=False):
                 root,
                 candidate,
                 destination / "original-bootstrap",
-                git_directories=state["candidate_git"],
+                git_directories=state.candidate_git,
             )
-        tc.atomic_json(control / "state.json", state)
-        tc.atomic_bytes(control / "at", (state["at"] + "\n").encode())
+        tc.atomic_json(control / "state.json", state.encode())
+        tc.atomic_bytes(control / "at", (state.at.isoformat() + "\n").encode())
 
 
-def resolve(root, at, args):
+def resolve(root: Path, at: str, args: list[str]) -> None:
     opts = runtime_updates.options(args)
     with updates.preview_git_environment(), tc.operation(root):
         updates.repository(root)
@@ -257,49 +274,45 @@ def resolve(root, at, args):
         )
 
 
-def read_state(root, destination):
-    state = json.loads(
-        tc.regular_input(directory(destination / "control"), "state.json")
+def read_state(root: Path, destination: Path) -> tuple[State, Path]:
+    state = State.decode(
+        json.loads(tc.regular_input(directory(destination / "control"), "state.json"))
     )
-    if (
-        state.get("schema") != 1
-        or state["root"] != str(root)
-        or state["candidate"] != str(destination / "candidate")
-    ):
+    if state.root != str(root) or state.candidate != str(destination / "candidate"):
         raise ValueError("Update transaction identity changed")
-    return state, directory(state["candidate"])
+    return state, directory(state.candidate)
 
 
-def resume(root, destination):
+def resume(root: Path, destination: Path) -> None:
     """Admit edited candidate sources without trusting previous verification."""
     state, candidate = read_state(root, destination)
     with tc.operation(root):
         unchanged(root, state)
     with updates.preview_git_environment(), tc.operation(candidate):
         candidate_unchanged(candidate, state)
-    state["at"] = datetime.now(timezone.utc).isoformat()
-    opts = state["options"]
-    args = ["--message", opts["message"]]
-    for key, flag in (
-        ("format", "--format"),
-        ("staged", "--staged"),
-        ("only_chainman", "--only-chainman"),
-        ("preview", "--preview"),
-        ("no_commit", "--no-commit"),
+    state = replace(state, at=datetime.now(timezone.utc), inspection=None)
+    opts = state.options
+    args = ["--message", opts.message]
+    for enabled, flag in (
+        (opts.format, "--format"),
+        (opts.staged, "--staged"),
+        (opts.only_chainman, "--only-chainman"),
+        (opts.preview, "--preview"),
+        (opts.no_commit, "--no-commit"),
     ):
-        if opts.get(key):
+        if enabled:
             args.append(flag)
-    if opts.get("extra"):
-        args += ["--", *opts["extra"]]
+    if opts.extra:
+        args += ["--", *opts.extra]
     if any("\n" in value or "\r" in value for value in args):
         raise ValueError("Resumed transaction arguments must be single-line values")
     control = destination / "control"
     tc.atomic_bytes(control / "resume-arguments", ("\n".join(args) + "\n").encode())
-    tc.atomic_json(control / "state.json", state)
-    tc.atomic_bytes(control / "at", (state["at"] + "\n").encode())
+    tc.atomic_json(control / "state.json", state.encode())
+    tc.atomic_bytes(control / "at", (state.at.isoformat() + "\n").encode())
 
 
-def reaudit(root, at, args):
+def reaudit(root: Path, at: str, args: list[str]) -> None:
     """Reconstruct original dependency identities from the unchanged Git commit."""
     opts = runtime_updates.options(args)
     if opts.format:
@@ -378,7 +391,7 @@ def reaudit(root, at, args):
                         )
 
 
-def git_directories(root, prefix=""):
+def git_directories(root: Path, prefix: str = "") -> Iterator[str]:
     """Discover administration only while the newly copied input is trusted."""
     yield prefix + ".git"
     for name in updates.gitlinks(root):
@@ -387,7 +400,7 @@ def git_directories(root, prefix=""):
             yield from git_directories(nested, prefix + name + "/")
 
 
-def administration(root, name):
+def administration(root: Path, name: str) -> str:
     """Read frozen candidate metadata as bytes, before invoking Git against it."""
     relative = Path(name)
     if relative.name != ".git":
@@ -409,20 +422,20 @@ def administration(root, name):
     return digest.hexdigest()
 
 
-def candidate_unchanged(candidate, state):
+def candidate_unchanged(candidate: Path, state: State) -> None:
     if any(
         administration(candidate, name) != expected
-        for name, expected in state["candidate_git"].items()
+        for name, expected in state.candidate_git.items()
     ):
         raise ValueError("Updater or verifier changed candidate Git administration")
     if (
-        list(updates.repository(candidate, clean=False)) != state["candidate_identity"]
-        or index(candidate) != state["candidate_index"]
+        updates.repository(candidate, clean=False) != state.candidate_identity
+        or index(candidate) != state.candidate_index
     ):
         raise ValueError("Updater or verifier changed candidate Git HEAD or index")
 
 
-def verified_runtime(candidate, *, gc_root):
+def verified_runtime(candidate: Path, *, gc_root: Path) -> Path:
     # Evaluate the old trusted fetch helper; never import candidate source merely
     # because the resolver left it in the checkout.
     runtime = runtime_updates.fetch_source(candidate, gc_root=gc_root)
@@ -475,43 +488,43 @@ def verified_runtime(candidate, *, gc_root):
     return runtime
 
 
-def inspect(root, destination):
+def inspect(root: Path, destination: Path) -> None:
     state, candidate = read_state(root, destination)
     with tc.operation(root):
         unchanged(root, state)
     with updates.preview_git_environment(), tc.operation(candidate):
         candidate_unchanged(candidate, state)
         updated = updates.snapshot(candidate)
-        paths = updates.changed(state["candidate_before"], updated)
-        if state["options"].get("staged"):
+        paths = updates.changed(state.candidate_before, updated)
+        if state.options.staged:
+            if state.selected is None:
+                raise ValueError("Staged update state lacks its selected paths")
             # Verification must see the exact effective working tree to be
             # applied, including the original bytes of every excluded path.
             updates.restore_paths(
                 candidate,
-                state["candidate_identity"][1],
-                [path for path in paths if path not in state["selected"]],
-                state["candidate_modes"],
+                state.candidate_identity[1],
+                [path for path in paths if path not in state.selected],
+                state.candidate_modes,
             )
             updated = updates.snapshot(candidate)
-            paths = updates.changed(state["candidate_before"], updated)
+            paths = updates.changed(state.candidate_before, updated)
         if set(paths) & (set(updates.gitlinks(candidate)) | {".gitmodules"}):
             raise ValueError(
                 "Submodule inputs and metadata require a separate transaction"
             )
-        updates.allowed(paths, state["patterns"])
-        if not state["options"]["only_chainman"] and set(paths) & set(
-            state["runtime_files"]
-        ):
+        updates.allowed(paths, state.patterns)
+        if not state.options.only_chainman and set(paths) & set(state.runtime_files):
             raise ValueError(
                 "Dependency resolvers must not change the runtime; use chainman-update"
             )
         # Check all output kinds before starting potentially expensive verification.
-        updates.expected_entries(candidate, state["candidate_identity"][1], paths)
+        updates.expected_entries(candidate, state.candidate_identity[1], paths)
         if tc.config(candidate) != tc.config(root) or dependency_api.policy(
             candidate
         ) != dependency_api.policy(root):
             raise ValueError("Update must not change its workflow or dependency policy")
-        if paths and not state.get("source"):
+        if paths and not state.source:
             with tc.nix_temporary_directory("chainman-inspect-") as directory:
                 runtime = verified_runtime(
                     candidate, gc_root=Path(directory) / "runtime"
@@ -522,28 +535,27 @@ def inspect(root, destination):
                     candidate,
                     destination / "candidate-bootstrap",
                     pin_root=candidate,
-                    git_directories=state["candidate_git"],
+                    git_directories=state.candidate_git,
                 )
-        state.update(updated=updated, paths=paths)
+        state = replace(state, inspection=Inspection(updated=updated, paths=paths))
         control = destination / "control"
-        tc.atomic_json(control / "state.json", state)
+        tc.atomic_json(control / "state.json", state.encode())
         tc.atomic_bytes(control / "changed", ("yes\n" if paths else "no\n").encode())
-        tc.atomic_bytes(
-            control / "verify", ("\n".join(state["verify"]) + "\n").encode()
-        )
+        tc.atomic_bytes(control / "verify", ("\n".join(state.verify) + "\n").encode())
 
 
-def finalize(root, destination):
+def finalize(root: Path, destination: Path) -> None:
     state, candidate = read_state(root, destination)
+    inspected = state.require_inspection()
     with updates.preview_git_environment(), tc.operation(candidate):
         candidate_unchanged(candidate, state)
-        if updates.snapshot(candidate) != state["updated"]:
+        if updates.snapshot(candidate) != inspected.updated:
             raise ValueError(
                 "Verification changed candidate sources; original checkout is untouched"
             )
         # Freeze bytes before writing anything in the original checkout.
         outputs = {}
-        for name in state["paths"]:
+        for name in inspected.paths:
             path = tc.contained(candidate, name)
             outputs[name] = (
                 (tc.regular_input(candidate, name), path.stat().st_mode & 0o777)
@@ -552,59 +564,59 @@ def finalize(root, destination):
             )
     with tc.operation(root):
         unchanged(root, state)
-        opts = state["options"]
+        opts = state.options
         commit = None
-        if not opts["preview"] and state["paths"]:
+        if not opts.preview and inspected.paths:
             for name, output in outputs.items():
                 target = tc.contained(root, name)
                 if output is None:
                     target.unlink(missing_ok=True)
                 else:
                     tc.atomic_bytes(target, *output)
-            expected = dict(state["before"])
-            for name in state["paths"]:
-                if name in state["updated"]:
-                    expected[name] = state["updated"][name]
+            expected = dict(state.before)
+            for name in inspected.paths:
+                if name in inspected.updated:
+                    expected[name] = inspected.updated[name]
                 else:
                     expected.pop(name, None)
             if updates.snapshot(root) != expected:
                 raise ValueError(
                     "Original source changed while applying verified files; inspect preserved changes"
                 )
-            if not opts["no_commit"]:
+            if not opts.no_commit:
                 commit = updates.commit_verified(
                     root,
-                    state["identity"][0],
-                    state["identity"][1],
+                    state.identity[0],
+                    state.identity[1],
                     expected,
-                    state["paths"],
-                    opts["message"],
+                    inspected.paths,
+                    opts.message,
                 )
-            elif opts.get("staged"):
+            elif opts.staged:
                 # Preserve partial/unrelated staging, but require selected entries
                 # to contain exactly the verified raw bytes and executable modes.
                 # Git clean filters and core.filemode can otherwise silently
                 # turn a successful format check into an unverified staged tree.
                 expected_index = {
                     name: value
-                    for name, value in state["index"].items()
-                    if name not in state["paths"]
+                    for name, value in state.index.items()
+                    if name not in inspected.paths
                 }
                 expected_index.update(
                     {
-                        name: list(value)
+                        name: value
                         for name, value in updates.raw_entries(
-                            root, state["paths"]
+                            root, inspected.paths
                         ).items()
                     }
                 )
-                updates.git(root, "add", "--", *state["paths"])
+                updates.git(root, "add", "--", *inspected.paths)
                 if index(root) != expected_index:
                     raise ValueError(
                         "The staged tree differs from verified bytes/modes or contains unrelated index changes; inspect Git filters and the preserved index"
                     )
                 if (
-                    list(updates.repository(root, clean=False)) != state["identity"]
+                    updates.repository(root, clean=False) != state.identity
                     or updates.snapshot(root) != expected
                 ):
                     raise ValueError(
@@ -612,16 +624,16 @@ def finalize(root, destination):
                     )
         result = dict(
             schema=1,
-            changed=state["paths"],
+            changed=inspected.paths,
             commit=commit,
-            verification="passed" if state["paths"] else "no changes",
+            verification="passed" if inspected.paths else "no changes",
         )
-        if opts["preview"]:
+        if opts.preview:
             result["preview"] = True
         print(json.dumps(result, indent=2))
 
 
-def run(root, action, args):
+def run(root: Path, action: str, args: list[str]) -> int:
     if action == "_update-reaudit" and args:
         reaudit(root, args[0], args[1:])
         return 0

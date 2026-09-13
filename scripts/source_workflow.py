@@ -4,7 +4,6 @@ The source repository builds the runtime itself, so its host-Nix entry replaces
 the installed consumer's lock/bootstrap entry; candidate ownership is shared.
 """
 
-from datetime import datetime
 import os
 from pathlib import Path
 import sys
@@ -16,7 +15,7 @@ import update_staging as staging
 import updates
 
 
-def format_source(root, *, check=False, staged=False):
+def format_source(root: Path, *, check: bool = False, staged: bool = False) -> None:
     commands = []
     if check or not staged:
         commands.append(
@@ -32,7 +31,7 @@ def format_source(root, *, check=False, staged=False):
         )
 
 
-def run(root, action, arguments):
+def run(root: Path, action: str, arguments: list[str]) -> None:
     if action not in {"format", "deps-update"}:
         raise ValueError("Expected format or deps-update")
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
@@ -70,7 +69,7 @@ def run(root, action, arguments):
     try:
         if resumed:
             state, _ = staging.read_state(root, destination)
-            if not state.get("source"):
+            if not state.source:
                 raise ValueError("This transaction belongs to an installed consumer")
             staging.resume(root, destination)
             arguments = (
@@ -84,16 +83,16 @@ def run(root, action, arguments):
             if opts.format:
                 format_source(candidate, staged=opts.staged)
             elif resumed:
-                staging.reaudit(candidate, state["at"], arguments)
+                staging.reaudit(candidate, state.at.isoformat(), arguments)
             else:
                 updates.perform(
                     candidate,
-                    datetime.fromisoformat(state["at"]),
+                    state.at,
                     tc.config(candidate)["modules"],
                 )
         staging.inspect(root, destination)
         state, candidate = staging.read_state(root, destination)
-        if state["paths"]:
+        if state.require_inspection().paths:
             with updates.preview_git_environment(), updates.operation(candidate):
                 if opts.format:
                     format_source(candidate, check=True, staged=opts.staged)

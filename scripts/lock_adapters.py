@@ -13,6 +13,7 @@ from urllib.parse import quote, urlparse
 import xml.etree.ElementTree as ET
 
 import registry
+from dependency_identity import Identity
 from toolchain import (
     contained,
     environment,
@@ -400,7 +401,7 @@ def validate_gradle_projects(root: Path, spec: dict, reports: list) -> dict:
     return {"projects": projects, "edges": edges}
 
 
-def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
+def identities(root: Path, spec: dict) -> set[Identity]:
     directory = contained(root, spec["directory"])
     kind, result = spec["ecosystem"], set()
     if kind == "go":
@@ -417,7 +418,15 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
                     raise ValueError("Noncanonical Go lock version")
                 suffix = ".mod" if raw.endswith("/go.mod") else ".zip"
                 url = f"https://proxy.golang.org/{registry.go_path(package)}/@v/{quote(value, safe='')}{suffix}"
-                result.add((kind, package, value, url, registry.go_digest(checksum)))
+                result.add(
+                    Identity(
+                        provider=kind,
+                        package=package,
+                        version=value,
+                        url=url,
+                        digest=registry.go_digest(checksum),
+                    )
+                )
     elif kind == "swift":
         for path in [swift_lock_path(root, spec)]:
             if not path.exists():
@@ -451,7 +460,15 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
                 if package in seen:
                     raise ValueError("Duplicate SwiftPM source identity")
                 seen.add(package)
-                result.add((kind, package, value, url, "git:" + revision))
+                result.add(
+                    Identity(
+                        provider=kind,
+                        package=package,
+                        version=value,
+                        url=url,
+                        digest="git:" + revision,
+                    )
+                )
     elif kind == "maven":
         local = local_gradle_projects(root, spec)
         required = [
@@ -532,12 +549,12 @@ def identities(root: Path, spec: dict) -> set[tuple[str, str, str, str, str]]:
                     raise ValueError("Duplicate Maven verification artifact")
                 seen.add(url)
                 result.add(
-                    (
-                        kind,
-                        package,
-                        value,
-                        url,
-                        registry.digest("sha256:" + sha[0].get("value", "")),
+                    Identity(
+                        provider=kind,
+                        package=package,
+                        version=value,
+                        url=url,
+                        digest=registry.digest("sha256:" + sha[0].get("value", "")),
                     )
                 )
             covered.add((package, value))

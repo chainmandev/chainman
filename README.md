@@ -63,6 +63,7 @@ just verify
 just module rust verify
 just module javascript verify
 just javascript-test
+just python-test
 just bootstrap-test docker
 just bootstrap-test podman
 just release
@@ -79,6 +80,9 @@ host engine client to the Nix test process; it does not use a host language inte
 local registry to qualify dependency resolution, overrides and frozen lock checks.
 It includes the JavaScript unit suite and local pnpm installation/receipt checks,
 and requires no public registry downloads.
+`just python-test` uses pinned uv with a disposable loopback package index and
+real fixture wheels to check maturity cutoffs, transitive resolution, no-op
+retention and manifest/lock consistency. It requires no public registry downloads.
 Optional modules cover JavaScript/TypeScript, Rust, Python, Go, Flutter/Dart,
 SwiftPM/SwiftUI and Gradle/Compose. They are loaded only when requested. The manually
 dispatched workflow contains portable and native Apple lanes; running one lane is
@@ -107,7 +111,8 @@ project code with declared access; it is not a sandbox for hostile source.
 `just verify` includes Ruff correctness checks across Python source and tests, plus
 `just type-check` for the runtime/control modules listed in `mypy.ini`. Mypy checks
 unannotated function bodies in that scope, with strict flags for configuration
-composition and resource policies. Hypothesis contracts run in the ordinary unit
+composition, resource policies, transaction checkpoint decoding and dependency
+identity records. Hypothesis contracts run in the ordinary unit
 gate. This is not a repository-wide strict typing claim. Adapter signatures are
 visible to the gate, while expanding coverage of their implementations remains
 separate work. All checkers come from pinned Nix. See the

@@ -20,6 +20,7 @@ from urllib.parse import quote
 from semantic_version import NpmSpec, Version
 
 import registry
+from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
 
 
@@ -246,19 +247,19 @@ def registry_entries(root, spec, lock):
     return entries
 
 
-def lock_identities(root, spec, lock):
+def lock_identities(root, spec, lock) -> set[Identity]:
     registry_entries(root, spec, lock)
     result = set()
     for item in declarations(spec):
         package = lock.get("packages", {}).get(item["package"] + "@" + item["url"])
         if package is not None:
             result.add(
-                (
-                    "github-source",
-                    item["package"],
-                    package["version"] + "@" + item["commit"],
-                    item["url"],
-                    "sha256:" + item["sha256"]
+                Identity(
+                    provider="github-source",
+                    package=item["package"],
+                    version=package["version"] + "@" + item["commit"],
+                    url=item["url"],
+                    digest="sha256:" + item["sha256"]
                     if package.get("resolution", {}).get("integrity")
                     == item["integrity"]
                     else "",
@@ -351,7 +352,7 @@ def audit(workspace, before, policy, now):
             "sha256:" + item["sha256"],
         )
         content = audit_identity(
-            identity, {tuple(i) for i in before["identities"]}, policy, now
+            identity, identity_inventory(before["identities"]), policy, now
         )
         if content.get("version") != package.get("version"):
             raise ValueError("Retained source archive version differs from lock")

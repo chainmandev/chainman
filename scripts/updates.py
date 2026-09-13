@@ -20,6 +20,7 @@ import manifests
 import lock_adapters
 import sdk_versions
 import registry
+from dependency_identity import Identity, inventory as identity_inventory
 from toolchain import (
     atomic_bytes,
     ROOT,
@@ -150,7 +151,7 @@ def allowed(paths: list[str], patterns: list[str]) -> None:
             )
 
 
-def tree_entries(root: Path, revision: str) -> dict:
+def tree_entries(root: Path, revision: str) -> dict[str, tuple[str, str]]:
     entries = {}
     for record in git(root, "ls-tree", "-r", "-z", "--full-tree", revision).split("\0"):
         if record:
@@ -430,7 +431,7 @@ def expected_entries(root: Path, head: str, paths: list[str]) -> dict:
     return raw_entries(root, tree_entries(root, head).keys() | set(paths))
 
 
-def staged_entries(root: Path) -> dict:
+def staged_entries(root: Path) -> dict[str, tuple[str, str]]:
     entries = {}
     for record in git(root, "ls-files", "--stage", "-z").split("\0"):
         if record:
@@ -573,20 +574,20 @@ def settings(root: Path) -> dict:
 
 def lock_identities(
     root: Path, selected: list[str], *, specs: dict | None = None
-) -> set[tuple[str, str, str, str, str]]:
+) -> set[Identity]:
     """One identity per actual distribution, with explicit URLs where the lock has them."""
-    identities = set()
+    identities: set[Identity] = set()
 
     def add(provider, package, value, url, digest):
         if not package or registry.lock_version(provider, value) is None:
             raise ValueError("Unrecognized stable lock identity")
         identities.add(
-            (
-                provider,
-                registry.package_name(provider, package),
-                value,
-                registry.artifact_url(url) if url else "",
-                digest,
+            Identity(
+                provider=provider,
+                package=registry.package_name(provider, package),
+                version=value,
+                url=registry.artifact_url(url) if url else "",
+                digest=digest,
             )
         )
 
@@ -739,9 +740,11 @@ def audit_locks(
 
 
 def audit_identities(
-    root: Path, current: set, before: set, policy: dict, now: datetime
+    root: Path, current: object, before: object, policy: dict, now: datetime
 ) -> None:
     """Check actual immutable artifacts; only the observed baseline is age-exempt."""
+    current = identity_inventory(current)
+    before = identity_inventory(before)
     cutoff = now - timedelta(days=registry.minimum_age(policy))
     evidence = {}
     for identity in sorted(current):

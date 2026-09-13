@@ -19,6 +19,7 @@ import registry
 import source_updates
 import toolchain as tc
 import updates
+from transaction_state import Options
 
 
 def managed_state(root: Path, name: str) -> tuple[bytes, int] | None:
@@ -558,7 +559,7 @@ def verify_current(root: Path):
         updates.verify(root, tc.config(root)["modules"])
 
 
-def options(args: list[str]):
+def options(args: list[str]) -> Options:
     import recipes
 
     args = recipes.options(args)
@@ -596,7 +597,7 @@ def options(args: list[str]):
         raise ValueError("Runtime updates do not accept dependency resolver arguments")
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start another update")
-    return opts
+    return Options.decode(vars(opts))
 
 
 if __name__ == "__main__":
