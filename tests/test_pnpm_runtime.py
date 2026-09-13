@@ -54,6 +54,7 @@ class PnpmRuntimeTests(unittest.TestCase):
                     ["pnpm", *args],
                     cwd=root,
                     env=selected,
+                    stdin=subprocess.DEVNULL,
                     text=True,
                     capture_output=True,
                     timeout=60,

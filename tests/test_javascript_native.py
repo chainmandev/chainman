@@ -35,7 +35,13 @@ class NativeJavaScriptTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         environment = patch.dict(
-            os.environ, TOOLCHAIN_DOWNLOAD_CACHE=str(self.root / "downloads")
+            os.environ,
+            TOOLCHAIN_DOWNLOAD_CACHE=str(self.root / "downloads"),
+            # pnpm 11 ignores cache-dir and request options in .npmrc. Native
+            # fixtures must not share mutable metadata for their neutral names.
+            PNPM_CONFIG_CACHE_DIR=str(self.root / "pnpm-cache"),
+            PNPM_CONFIG_FETCH_RETRIES="0",
+            PNPM_CONFIG_FETCH_TIMEOUT="5000",
         )
         environment.start()
         self.addCleanup(environment.stop)
@@ -66,8 +72,6 @@ class NativeJavaScriptTests(unittest.TestCase):
             ".npmrc",
             f"registry=http://127.0.0.1:{server.server_port}/\n"
             f"cache={self.root / 'npm-cache'}\n"
-            f"store-dir={self.root / 'pnpm-store'}\n"
-            f"cache-dir={self.root / 'pnpm-cache'}\n"
             "fetch-retries=0\nfetch-timeout=5000\naudit=false\nfund=false\n",
         )
         self.write("chainman.toml", 'schema=1\n[project]\ndefault_profile="host"\n')
@@ -159,6 +163,18 @@ class NativeJavaScriptTests(unittest.TestCase):
             "--strict-peer-dependencies=false",
             "--frozen-lockfile",
         )
+
+    def test_native_cache_configuration_is_scoped_to_the_fixture(self):
+        self.configure("pnpm")
+        for manager, key, expected in (
+            ("pnpm", "cacheDir", self.root / "pnpm-cache"),
+            ("pnpm", "storeDir", self.root / "downloads/pnpm"),
+            ("npm", "cache", self.root / "npm-cache"),
+        ):
+            with self.subTest(manager=manager, key=key):
+                result = self.native(manager, "config", "get", key)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(expected))
 
     def test_real_resolvers_accept_a_registry_transitive_graph(self):
         for manager in ("npm", "pnpm"):

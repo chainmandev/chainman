@@ -57,6 +57,17 @@ fixtures. They cannot prove how the real package managers interpret a lockfile.
 and a disposable local registry. The same distinction applies to other adapters:
 mocked native success is not evidence of native acceptance or compatibility.
 
+A repeat native JavaScript run exposed an intermittent upstream-override failure.
+The case and complete native suite then passed without production changes.
+Investigation confirmed that pnpm 11 ignored the fixture's `.npmrc` cache-directory
+setting, leaving metadata shared across neutral package fixtures. The fixture now
+sets `PNPM_CONFIG_CACHE_DIR` and checks the effective pnpm/npm cache paths through
+the real binaries. Cache interference is a plausible explanation for the original
+failure, not an established causal reproduction.
+The pnpm setup migration fixture also now closes stdin explicitly: capturing
+stdout/stderr did not remove an inherited terminal, so its intended noninteractive
+refusal case could hang waiting for confirmation when launched from a shell.
+
 The public bootstrap suite includes real host-Nix update/recovery lifecycles.
 Container-engine and native controller tests have separate prerequisites/gates;
 skipped tests provide no evidence about those paths. Linux success does not
