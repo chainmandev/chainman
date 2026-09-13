@@ -281,12 +281,14 @@ class ProjectEnvironmentTests(unittest.TestCase):
                         "--impure",
                         "--raw",
                         "--expr",
-                        f'import {helper} {{ root = {json.dumps(str(root))}; action = "options"; }}',
+                        'import (builtins.toPath (builtins.getEnv "CHAINMAN_TEST_FETCH_HELPER")) { root = builtins.getEnv "CHAINMAN_TEST_CONSUMER_ROOT"; action = "options"; }',
                     ],
                     env=dict(
                         os.environ,
                         CHAINMAN_REQUEST_ACTION=action,
                         CHAINMAN_REQUEST_TASK=name,
+                        CHAINMAN_TEST_FETCH_HELPER=str(helper),
+                        CHAINMAN_TEST_CONSUMER_ROOT=str(root),
                     ),
                     text=True,
                 )

@@ -47,7 +47,10 @@ class PnpmRuntimeTests(unittest.TestCase):
                 os.environ, {"TOOLCHAIN_DOWNLOAD_CACHE": str(root / "downloads")}
             ):
                 env = toolchain.environment(root)
-            env.pop("CI", None)
+            # pnpm also recognizes vendor markers such as GITHUB_ACTIONS.
+            # Explicit false models local execution even when this fixture runs
+            # on a CI host; the later true value exercises the actual transition.
+            env["CI"] = "false"
 
             def run(*args, selected=env):
                 return subprocess.run(
