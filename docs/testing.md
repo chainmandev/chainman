@@ -10,6 +10,7 @@ just exec python3 -B -m unittest discover -s tests -p test_properties.py -v
 just exec python3 -B -m unittest discover -s tests -p test_transaction_state.py -v
 just exec python3 -B -m unittest discover -s tests -p test_dependency_identity.py -v
 just exec python3 -B -m unittest discover -s tests -p test_adapter_data.py -v
+just exec python3 -B -m unittest discover -s tests -p test_application_recovery.py -v
 ```
 
 The configuration compiler, resource policy, transaction checkpoint codec,
@@ -56,6 +57,11 @@ The generated oracles cover:
   requirement order and duplicate entries and remaining independent of later
   input mutation. This checks the data boundary, not Go replacement precedence;
   disposable native Go fixtures check that separately.
+- Application/recovery sequences against independent expected file bytes, full
+  modes, index entries and HEAD. The bounded state machine runs 20 examples of up
+  to 12 steps: interrupted application, refused resume over partial outputs,
+  explicit operator restoration, resumed inspection and successful application.
+  It uses real disposable Git repositories and no Nix or native resolver calls.
 
 These have deliberately bounded vocabularies. They do not establish complete
 SemVer/PEP 440 correctness, lock graph correctness or platform behavior.
@@ -105,6 +111,13 @@ millisecond. Chainman retains uv's conservative behavior. See the
 [pinned uv comparison](https://github.com/astral-sh/uv/blob/0.12.5/crates/uv-resolver/src/version_map.rs#L524-L528).
 
 The public bootstrap suite includes real host-Nix update/recovery lifecycles.
+Separate application tests inject failed writes, deletions and Git index/commit
+operations. They also kill a disposable Python child after its first completed
+write, immediately before branch publication and immediately after it. Assertions
+check preserved original/candidate bytes and modes, actual staged blobs, branch
+history and release of process leases. These are process-interruption checks,
+not a simulation of power loss or filesystem durability.
+
 `just gradle-test` enables the existing offline native Gradle fixture suite and
 runs in the compose job of the deliberate CI workflow. It checks child-project
 transitive locks, native composite-build source bindings, read-only inspection,
@@ -156,6 +169,15 @@ and assert published lock contents or preserved original inputs, in addition to
 native call ordering. Their native processes remain fault-injection fixtures;
 the pinned npm/pnpm gate supplies separate real-binary evidence.
 
+The application follow-up reproduced an overwrite before adding destination
+rechecks: an edit made to a later output during application was replaced, and
+finalization reported success. The regression tests now cover changed bytes,
+deletion targets and modes. Three isolated mutation probes were detected:
+removing the destination recheck, retaining stale inspection on resume, and
+erasing a previously completed output after an application failure. The latter
+two were detected by the recovery state machine's assertions. These probes leave
+repository files unchanged and do not constitute a repository-wide mutation score.
+
 ## Boundary guarantees and next improvements
 
 Typed checkpoints now reject malformed records before operational decisions;
@@ -179,7 +201,6 @@ the other adapter implementations outside the gate. Splitting large modules for
 size alone is a lower priority than replacing dynamic decision inputs.
 
 Add differential tests against native resolvers when changing their adapters.
-Expand transaction fault injection around interrupted application, rollback and
-resume using real disposable Git state. A generated state machine is useful only
-if its oracle independently describes committed bytes, index state and allowed
-transitions; a second copy of the production algorithm adds little confidence.
+Continue native update qualification with Cargo and SwiftPM fixtures. Application
+failures deliberately preserve partial results for inspection; the recovery model
+does not introduce automatic rollback or authorize resuming over changed inputs.

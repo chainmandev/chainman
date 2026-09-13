@@ -173,6 +173,7 @@
     "template/scripts/chainman.just",
     "template/scripts/demo.py",
     "tests/test_adapter_data.py",
+    "tests/test_application_recovery.py",
     "tests/test_bootstrap.py",
     "tests/test_cargo_resolution.py",
     "tests/test_chainman.py",

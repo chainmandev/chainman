@@ -50,6 +50,9 @@ out-of-scope change or concurrent original edit leaves the original unchanged an
 preserves the candidate under the host's Chainman update cache for inspection.
 Candidate source changes during verification are failures. Failures while applying
 or committing already verified files preserve the resulting files/index for review.
+Each destination's raw contents and full mode are checked again immediately before
+writing or deleting it. A detected edit to a later output stops application and
+preserves that edit together with any earlier completed writes.
 No reset, stash, push, background updater or automatic retry is involved.
 Staged formatting also compares the complete resulting index against the verified
 selected bytes/modes plus the original unrelated staging. A clean filter or ignored
@@ -560,6 +563,12 @@ assumes cooperating process locks, not filesystem compare-and-swap against a hos
 same-user writer. Termination during final application can leave verified but
 partially applied files; inspect the original diff and preserved candidate before
 retrying.
+Resume requires the original HEAD, index and source snapshot to match preparation.
+After partial application, reconcile the original checkout explicitly before
+resuming; previous candidate inspection is discarded and verification runs again.
+If interruption happened after branch publication, the verified commit may already
+exist even though no success response was printed. Inspect HEAD and its diff before
+starting another update.
 
 Runtime releases are qualified in the Chainman source project. Consumer runtime
 upgrades validate the candidate configuration and run the declared project verifier

@@ -102,6 +102,19 @@ def repository(root: Path, clean: bool = True) -> tuple[str, str]:
     return branch, head
 
 
+def file_identity(path: Path) -> str | None:
+    """Fingerprint one source entry using its raw bytes and full file mode."""
+    if path.is_symlink():
+        body = b"symlink\0" + os.readlink(path).encode()
+    elif path.is_file():
+        body = str(path.stat().st_mode & 0o777).encode() + b"\0" + path.read_bytes()
+    elif not path.exists():
+        return None
+    else:
+        raise ValueError("Unexpected directory in project source inventory")
+    return hashlib.sha256(body).hexdigest()
+
+
 def snapshot(root: Path) -> dict[str, str]:
     paths = git(
         root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
@@ -116,17 +129,13 @@ def snapshot(root: Path) -> dict[str, str]:
             body = json.dumps(
                 submodule_state(root, name, links[name]), sort_keys=True
             ).encode()
-        elif path.is_symlink():
-            body = b"symlink\0" + os.readlink(path).encode()
-        elif path.is_file():
-            body = str(path.stat().st_mode & 0o777).encode() + b"\0" + path.read_bytes()
-        elif not path.exists():
-            # A deleted tracked file must have the same source identity before
-            # and after staging removes it from the index.
-            continue
+            identity = hashlib.sha256(body).hexdigest()
         else:
-            raise ValueError("Unexpected directory in project source inventory")
-        result[name] = hashlib.sha256(body).hexdigest()
+            identity = file_identity(path)
+        # Deleted tracked files have the same source identity before and after
+        # staging removes them from the index.
+        if identity is not None:
+            result[name] = identity
     return result
 
 

@@ -569,6 +569,13 @@ def finalize(root: Path, destination: Path) -> None:
         if not opts.preview and inspected.paths:
             for name, output in outputs.items():
                 target = tc.contained(root, name)
+                # An editor can change a later destination after the initial
+                # checkout check while earlier files are being applied.
+                if updates.file_identity(target) != state.before.get(name):
+                    raise ValueError(
+                        f"Original output changed during application: {name}; "
+                        "candidate and partial application are preserved"
+                    )
                 if output is None:
                     target.unlink(missing_ok=True)
                 else:
