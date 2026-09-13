@@ -1008,7 +1008,9 @@ def preview(root: Path, now: datetime, selected: list[str]) -> dict:
         tempfile.TemporaryDirectory(prefix="toolchain-preview-") as tmp,
         preview_git_environment(),
     ):
-        copy = Path(tmp)
+        # tempfile may return an alias such as macOS /tmp -> /private/tmp.
+        # The owned preview and its copied submodules use physical root identity.
+        copy = Path(tmp).resolve()
         prepare_preview(root, copy, before)
         result = transaction(
             copy,

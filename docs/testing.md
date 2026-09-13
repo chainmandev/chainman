@@ -202,6 +202,10 @@ Temporary fixture roots are canonicalized immediately after allocation: macOS
 can return `/tmp` through its `/private/tmp` alias, whereas Git and subprocesses
 report physical paths. Explicit alias and symlink cases construct their own links
 after that common fixture setup.
+Source previews also canonicalize their internally allocated temporary root.
+A regression uses an aliased temporary directory and a real copied Git submodule:
+valid relative links remain readable, candidate edits verify in the copy, and the
+original bytes, index and HEAD remain unchanged.
 The bundled macOS Swift profile uses the Xcode selected by `xcode-select` for both
 its compiler and SDK. It restores `DEVELOPER_DIR` before refreshing `SDKROOT`,
 `CC` and `CXX` through `xcrun`; Nix's Apple SDK hook otherwise changes both the

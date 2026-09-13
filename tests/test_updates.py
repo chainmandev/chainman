@@ -514,6 +514,46 @@ class TransactionTests(unittest.TestCase):
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.assertEqual((self.root / "deps.txt").read_text(), "before\n")
 
+    def test_preview_preserves_relative_links_with_an_aliased_temporary_directory(self):
+        source, _, _ = self.submodule()
+        (source / "alias").symlink_to("input.txt")
+        updates.git(source, "add", "alias")
+        updates.git(
+            source, "-c", "core.hooksPath=/dev/null", "commit", "-m", "Link local input"
+        )
+        (self.root / "dependency-link").symlink_to("deps.txt")
+        self.git("add", "dependency-link", "vendor source")
+        self.git("commit", "-m", "Add dependency link")
+        before = updates.snapshot(self.root)
+        head = self.git("rev-parse", "HEAD")
+        index = (self.root / ".git/index").read_bytes()
+        with tempfile.TemporaryDirectory(prefix="preview temp alias ") as temporary:
+            base = Path(temporary).resolve()
+            (base / "physical").mkdir()
+            (base / "alias").symlink_to("physical", target_is_directory=True)
+
+            def update(candidate, *_):
+                self.assertEqual(
+                    (candidate / "dependency-link").read_text(), "before\n"
+                )
+                (candidate / "deps.txt").write_text("candidate\n")
+
+            def verify(candidate, *_):
+                self.assertEqual(
+                    (candidate / "dependency-link").read_text(), "candidate\n"
+                )
+                self.assertEqual(
+                    (candidate / "vendor source/alias").read_text(), "current input"
+                )
+
+            with patch.object(tempfile, "tempdir", str(base / "alias")):
+                result = self.preview(update, verify)
+            self.assertEqual(result["changed"], ["deps.txt"])
+            self.assertEqual(list((base / "physical").iterdir()), [])
+        self.assertEqual(updates.snapshot(self.root), before)
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual((self.root / ".git/index").read_bytes(), index)
+
     def test_preview_rejects_links_to_original_or_external_files_before_hooks(self):
         with tempfile.TemporaryDirectory(prefix="preview external ") as external:
             canary = Path(external) / "canary.txt"
