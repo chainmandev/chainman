@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
@@ -459,14 +460,22 @@ def inherited_operation() -> OperationState:
         if compat_value is not None
         else (None if identity else descriptor)
     )
-    descriptor_identities(
-        [
-            descriptor,
-            *ancestors,
-            *([gate] if gate is not None else []),
-            *([compat] if compat is not None else []),
-        ]
-    )
+    try:
+        descriptor_identities(
+            [
+                descriptor,
+                *ancestors,
+                *([gate] if gate is not None else []),
+                *([compat] if compat is not None else []),
+            ]
+        )
+    except OSError as error:
+        if error.errno != errno.EBADF:
+            raise
+        # Subprocess wrappers can retain the environment while closing FDs.
+        # Re-enter ordinary admission without borrowing any parent ownership.
+        # A live parent still excludes mutation through its own kernel lease.
+        return None, None, "", None, ()
     return descriptor, gate, identity, compat, tuple(ancestors)
 
 

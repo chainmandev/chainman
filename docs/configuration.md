@@ -100,6 +100,12 @@ remains an error even when bounded termination succeeds.
 The stop request calls the executable resolved during preflight directly, so
 shutdown does not require another Nix evaluation or wait behind garbage collection.
 
+If a subprocess wrapper closes inherited operation descriptors while retaining
+their environment variables, the next command obtains a new operation lease.
+Ordinary commands can coexist with their parent; an exclusive update or cleanup
+still refuses to run while independent operations are active. Such a wrapper cannot
+borrow its parent's exclusive admission through environment variables alone.
+
 An explicit `TMPDIR` remains the temporary base across bootstrap and profile
 refreshes, including project/profile overrides. Without one, Chainman retains
 Nix's first scoped temporary directory. This prevents repeated shell entries from

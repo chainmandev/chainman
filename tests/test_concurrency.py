@@ -212,6 +212,46 @@ class ConcurrencyTests(unittest.TestCase):
             with tc.operation(self.root):
                 pass
 
+    def test_descriptor_closing_wrapper_readmits_shared_commands_independently(self):
+        with tc.operation(self.root, exclusive=False):
+            work = self.root / ".cache/toolchain/work/held"
+            work.mkdir(parents=True)
+            artifact = work / "object"
+            artifact.write_text("parent output")
+            (work / "last-used").touch()
+            os.utime(work / "last-used", (1, 1))
+            inherited = tc.managed_options({"env": self.env})["env"]
+            # Ordinary Python/Node subprocess defaults retain environment strings
+            # but close the parent's operation descriptors.
+            body = "import os; print(os.environ['TOOLCHAIN_OPERATION_ID'])\n"
+            result = subprocess.run(
+                [*self.entry, "exec", "--", sys.executable, "-c", body],
+                env=inherited,
+                close_fds=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotEqual(
+                result.stdout.strip(), inherited["TOOLCHAIN_OPERATION_ID"]
+            )
+            # A descriptor-closing wrapper cannot share the parent's mutation
+            # admission: the still-running parent must keep its outputs alive.
+            blocked = subprocess.run(
+                [*self.entry, "cache-prune", "--all"],
+                env=inherited,
+                close_fds=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("active", blocked.stderr)
+            self.assertEqual(artifact.read_text(), "parent output")
+        self.assertEqual(self.command("cache-prune", "--all").returncode, 0)
+        self.assertFalse(artifact.exists())
+
     def test_managed_child_accepts_inherited_environment_and_preserves_io_mode(self):
         body = (
             "import os,sys\n"
