@@ -9,10 +9,21 @@ import (
 	"testing"
 )
 
+// Fixture paths represent the allocated directory, including on hosts where the
+// system temporary directory is an alias (macOS /tmp -> /private/tmp).
+func physicalTempDir(t *testing.T) string {
+	t.Helper()
+	path, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestHTTPReadinessRejectsInvalidPlans(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	command := Command{Argv: []string{"/bin/true"}, Directory: root}
-	p := Plan{Schema: 1, Root: root, State: t.TempDir(), Backend: "/bin/true", Fingerprint: "fixture", Services: map[string]Service{}, Requested: []string{"web"}, Task: command}
+	p := Plan{Schema: 1, Root: root, State: physicalTempDir(t), Backend: "/bin/true", Fingerprint: "fixture", Services: map[string]Service{}, Requested: []string{"web"}, Task: command}
 	for _, h := range []HTTPProbe{
 		{8080, "/health?ready=1", 204},
 		{0, "/", 200}, {65536, "/", 200},
@@ -35,7 +46,7 @@ func TestHTTPReadinessRejectsInvalidPlans(t *testing.T) {
 }
 
 func TestContainerOutlivesClientDescriptorLease(t *testing.T) {
-	state := t.TempDir()
+	state := physicalTempDir(t)
 	engine := filepath.Join(state, "engine")
 	owner := &Container{Engine: engine, Name: "chainman-fixture", Token: "0123456789abcdef0123456789abcdef"}
 	receipt := filepath.Join(state, "client.lease")
@@ -112,7 +123,7 @@ func TestKernelIdentityAndGroupInventory(t *testing.T) {
 }
 
 func TestChangedEngineContextCannotInspectOrStopContainers(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	engine := filepath.Join(root, "docker")
 	marker := filepath.Join(root, "container-action")
 	body := "#!/bin/sh\nif [ \"$1\" = info ]; then printf '%s\\n' changed-daemon; else touch " + quote(marker) + "; fi\n"
@@ -131,7 +142,7 @@ func TestChangedEngineContextCannotInspectOrStopContainers(t *testing.T) {
 	}
 }
 func TestScopeCannotFollowSymlink(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	real := filepath.Join(base, "real")
 	if err := os.Mkdir(real, 0700); err != nil {
 		t.Fatal(err)
@@ -165,7 +176,7 @@ func TestNewChildDoesNotAdvertiseClosedOperationDescriptors(t *testing.T) {
 	}
 }
 func TestCachedExecutableTamperingIsRejected(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	backend := filepath.Join(base, "backend")
 	if err := os.WriteFile(backend, []byte("fixture backend"), 0700); err != nil {
 		t.Fatal(err)

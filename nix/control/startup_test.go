@@ -10,7 +10,7 @@ import (
 )
 
 func TestStartupStopTickets(t *testing.T) {
-	state := t.TempDir()
+	state := physicalTempDir(t)
 	path := filepath.Join(state, "startup-stop.json")
 	notice := stopNotice{Token: token()}
 	if err := atomic(path, notice); err != nil {
@@ -37,7 +37,7 @@ func TestStartupStopTickets(t *testing.T) {
 }
 
 func TestStartupGateWaitCanBeInterruptedWithoutReleasingItsOwner(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "gate")
+	path := filepath.Join(physicalTempDir(t), "gate")
 	owner, err := locked(path, false)
 	if err != nil {
 		t.Fatal(err)

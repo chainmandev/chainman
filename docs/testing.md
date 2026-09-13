@@ -200,8 +200,9 @@ SDK recipe tests exercise the actual Just entrypoint with a fixture launcher;
 the macOS job separately runs the real Apple SDK preflight.
 Temporary fixture roots are canonicalized immediately after allocation: macOS
 can return `/tmp` through its `/private/tmp` alias, whereas Git and subprocesses
-report physical paths. Explicit alias and symlink cases construct their own links
-after that common fixture setup.
+report physical paths. Both Python and Go fixture roots use this convention.
+Explicit alias and symlink cases construct their own links after that common
+fixture setup. The Go race suite also runs successfully with an aliased `TMPDIR`.
 Source previews also canonicalize their internally allocated temporary root.
 A regression uses an aliased temporary directory and a real copied Git submodule:
 valid relative links remain readable, candidate edits verify in the copy, and the

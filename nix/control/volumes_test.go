@@ -10,7 +10,7 @@ import (
 
 func volumeFixture(t *testing.T) (Volume, string, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	state := filepath.Join(root, "volume.json")
 	mutations := filepath.Join(root, "mutations")
 	v := Volume{Engine: filepath.Join(root, "engine"), Name: "chainman-fixture-data", Scope: strings.Repeat("a", 24), Compatibility: strings.Repeat("b", 64), Policy: "preserve"}
@@ -94,7 +94,7 @@ func resetFixture(t *testing.T) (Plan, Volume, string, string) {
 	t.Helper()
 	v, volumeState, mutations := volumeFixture(t)
 	v.Services = []string{"database"}
-	parent := t.TempDir()
+	parent := physicalTempDir(t)
 	p := Plan{Schema: 1, Root: filepath.Join(parent, "project"), State: filepath.Join(parent, "state"), Backend: "/bin/false", Fingerprint: "fixture", Services: map[string]Service{"database": {Command: Command{Argv: []string{"true"}}, Restart: "no", Shutdown: 1}}, Requested: []string{"database"}, Volumes: []Volume{v}}
 	if e := private(p.State); e != nil {
 		t.Fatal(e)

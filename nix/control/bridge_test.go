@@ -10,7 +10,7 @@ import (
 
 func bridgeFixture(t *testing.T) (*Bridge, string, string) {
 	t.Helper()
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	state, mutations := filepath.Join(root, "network.json"), filepath.Join(root, "mutations")
 	b := &Bridge{Engine: filepath.Join(root, "engine"), Scope: strings.Repeat("a", 24)}
 	b.Name = "chainman-" + b.Scope
@@ -102,7 +102,7 @@ func TestBridgeRemovalNeverDisconnectsExternalEndpoints(t *testing.T) {
 }
 
 func TestRepositoryOnlyStartAndTaskHaveSameEngineFingerprint(t *testing.T) {
-	engine := filepath.Join(t.TempDir(), "docker")
+	engine := filepath.Join(physicalTempDir(t), "docker")
 	if e := os.WriteFile(engine, []byte("#!/bin/sh\n[ \"$1\" = info ] || exit 1\necho fixture-engine\n"), 0700); e != nil {
 		t.Fatal(e)
 	}

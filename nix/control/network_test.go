@@ -9,7 +9,7 @@ import (
 )
 
 func TestNetworkBorrowingUsesOwnedImmutableIdentity(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	engine := filepath.Join(root, "engine")
 	owner := &Container{Engine: engine, Name: "chainman-primary", Token: strings.Repeat("a", 32)}
 	borrower := &Container{Engine: engine, Name: "chainman-borrower", Token: strings.Repeat("b", 32)}
@@ -45,7 +45,7 @@ func TestNetworkBorrowingUsesOwnedImmutableIdentity(t *testing.T) {
 }
 
 func TestNetworkBorrowingUsesSavedRepositoryOwner(t *testing.T) {
-	state := t.TempDir()
+	state := physicalTempDir(t)
 	owner := &Container{Engine: "/fixture/docker", Name: "chainman-db", Token: strings.Repeat("a", 32)}
 	saved := Plan{State: state, Services: map[string]Service{"database": {Container: owner, Restart: "no"}}}
 	if e := atomic(filepath.Join(state, "plan.json"), saved); e != nil {

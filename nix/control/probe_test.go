@@ -10,7 +10,7 @@ import (
 )
 
 func TestContainerProbeBindsOwnedRunningIdentity(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	engine := filepath.Join(root, "engine")
 	owner := &Container{Engine: engine, Name: "chainman-fixture", Token: strings.Repeat("a", 32)}
 	id := strings.Repeat("b", 64)
