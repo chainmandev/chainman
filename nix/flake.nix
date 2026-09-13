@@ -164,6 +164,8 @@
                   # Use one selected Xcode for the native compiler and its SDK.
                   # Nix's Apple SDK hook also sets DEVELOPER_DIR. xcrun honors
                   # that inherited value even when --sdk macosx is explicit.
+                  # xcode-select itself honors the same environment override.
+                  unset DEVELOPER_DIR SDKROOT
                   DEVELOPER_DIR=$(/usr/bin/xcode-select --print-path)
                   export DEVELOPER_DIR
                   SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
