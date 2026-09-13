@@ -754,25 +754,30 @@ class GoReplacementTests(unittest.TestCase):
             "bootstrap/go.mod",
             f"module example.invalid/bootstrap\n\ngo 1.24\nrequire {GO} v1.6.0\n",
         )
-        lock_adapters.native(
-            self.source_root,
-            "go",
-            [
-                "env",
-                "GOMODCACHE=" + str(self.root / "module-cache"),
-                "GOPROXY=" + (self.root / "proxy").as_uri(),
-                "GOSUMDB=off",
-                "GOWORK=off",
+        try:
+            lock_adapters.native(
+                self.source_root,
                 "go",
-                "-C",
-                str(self.root / "bootstrap"),
-                "list",
-                "-mod=mod",
-                "-m",
-                "-json",
-                GO,
-            ],
-        )
+                [
+                    "env",
+                    "GOMODCACHE=" + str(self.root / "module-cache"),
+                    "GOPROXY=" + (self.root / "proxy").as_uri(),
+                    "GOSUMDB=off",
+                    "GOWORK=off",
+                    "go",
+                    "-C",
+                    str(self.root / "bootstrap"),
+                    "list",
+                    "-mod=mod",
+                    "-m",
+                    "-json",
+                    GO,
+                ],
+            )
+        except subprocess.CalledProcessError as error:
+            error.add_note("Go fixture setup stdout:\n" + (error.stdout or ""))
+            error.add_note("Go fixture setup stderr:\n" + (error.stderr or ""))
+            raise
         self.env = patch.dict(os.environ, {"GOWORK": ""})
         self.env.start()
         self.addCleanup(self.env.stop)

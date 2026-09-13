@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 import fnmatch
@@ -15,9 +16,11 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from typing import Literal, NotRequired, TypedDict
 
 import manifests
 import adapter_data
+from adapter_data import Table, array, table, text, strings
 import lock_adapters
 import sdk_versions
 import registry
@@ -39,8 +42,24 @@ from toolchain import (
 )
 
 
+class SubmoduleState(TypedDict):
+    commit: str
+    initialized: bool
+    sources: NotRequired[dict[str, str]]
+
+
+class TransactionResult(TypedDict):
+    changed: list[str]
+    commit: str | None
+    verification: Literal["no changes", "passed"]
+
+
+class PreviewResult(TransactionResult):
+    preview: Literal[True]
+
+
 @contextmanager
-def preview_git_environment():
+def preview_git_environment() -> Iterator[None]:
     # Preview owns a disposable repository. Ambient Git routing, configuration,
     # identity, credentials and hooks must not target the original repository.
     saved = {key: value for key, value in os.environ.items() if key.startswith("GIT_")}
@@ -126,6 +145,7 @@ def snapshot(root: Path) -> dict[str, str]:
         if not name:
             continue
         path = root / name
+        identity: str | None
         if name in links:
             body = json.dumps(
                 submodule_state(root, name, links[name]), sort_keys=True
@@ -140,7 +160,7 @@ def snapshot(root: Path) -> dict[str, str]:
     return result
 
 
-def changed(before: dict, after: dict) -> list[str]:
+def changed(before: Mapping[str, object], after: Mapping[str, object]) -> list[str]:
     return sorted(
         p for p in before.keys() | after.keys() if before.get(p) != after.get(p)
     )
@@ -179,7 +199,7 @@ def gitlinks(root: Path) -> dict[str, str]:
     }
 
 
-def submodule_state(root: Path, name: str, identity: str) -> dict:
+def submodule_state(root: Path, name: str, identity: str) -> SubmoduleState:
     """Submodules are frozen inputs, never targets or implicitly fetched sources."""
     path = contained(root, name)
     if not path.exists() or (path.is_dir() and not any(path.iterdir())):
@@ -207,7 +227,7 @@ def submodule_state(root: Path, name: str, identity: str) -> dict:
     return {"commit": identity, "initialized": True, "sources": snapshot(path)}
 
 
-def raw_entries(root: Path, names) -> dict:
+def raw_entries(root: Path, names: Iterable[str]) -> dict[str, tuple[str, str]]:
     """Read actual tracked contents without Git stat-cache or clean-filter decisions."""
     entries = {}
     links = gitlinks(root)
@@ -271,7 +291,7 @@ def preview_link(root: Path, path: Path) -> str:
 
 
 def copy_submodule(
-    source: Path, target: Path, identity: str, *, preserve_modes=True
+    source: Path, target: Path, identity: str, *, preserve_modes: bool = True
 ) -> None:
     """Copy committed blobs, with no working edits, history, remotes or hooks."""
     target.mkdir(parents=True, exist_ok=True)
@@ -364,7 +384,9 @@ def restore_blob(root: Path, name: str, mode: str, oid: str) -> None:
         raise ValueError("Cannot restore a non-file Git entry")
 
 
-def restore_paths(root: Path, identity: str, names: list[str], modes=None) -> None:
+def restore_paths(
+    root: Path, identity: str, names: list[str], modes: Mapping[str, int] | None = None
+) -> None:
     entries = tree_entries(root, identity)
     for name in names:
         if name in entries:
@@ -376,7 +398,7 @@ def restore_paths(root: Path, identity: str, names: list[str], modes=None) -> No
             path.unlink(missing_ok=True)
 
 
-def prepare_preview(root: Path, copy: Path, before: dict) -> None:
+def prepare_preview(root: Path, copy: Path, before: Mapping[str, str]) -> None:
     """Create a source-only baseline, preserving frozen submodule identities."""
     links = gitlinks(root)
     git(
@@ -430,7 +452,9 @@ def prepare_preview(root: Path, copy: Path, before: dict) -> None:
     )
 
 
-def expected_entries(root: Path, head: str, paths: list[str]) -> dict:
+def expected_entries(
+    root: Path, head: str, paths: list[str]
+) -> dict[str, tuple[str, str]]:
     for name in paths:
         path = contained(root, name)
         if not path.exists():
@@ -478,7 +502,7 @@ def commit_verified(
     root: Path,
     branch: str,
     head: str,
-    candidate: dict,
+    candidate: Mapping[str, str],
     paths: list[str],
     message: str = "chore: update dependencies",
 ) -> str:
@@ -532,12 +556,12 @@ def commit_verified(
 def transaction(
     root: Path,
     patterns: list[str],
-    update,
-    verify,
+    update: Callable[[], object],
+    verify: Callable[[], object],
     commit: bool = True,
     *,
     message: str = "chore: update dependencies",
-) -> dict:
+) -> TransactionResult:
     if not isinstance(message, str) or not message.strip() or "\0" in message:
         raise ValueError("Commit message must be nonempty text without NUL")
     branch, head = repository(root)
@@ -574,21 +598,21 @@ def transaction(
     return {"changed": paths, "commit": identifier, "verification": "passed"}
 
 
-def settings(root: Path) -> dict:
+def settings(root: Path) -> Table:
     cfg = config(root)
-    policy = dict(cfg["updates"])
+    policy = table(cfg["updates"], "Update settings")
     extra = tomllib.loads(contained(root, "dependencies.toml").read_text())
     policy.update(extra)
     return policy
 
 
 def lock_identities(
-    root: Path, selected: list[str], *, specs: dict | None = None
+    root: Path, selected: list[str], *, specs: Mapping[str, Table] | None = None
 ) -> set[Identity]:
     """One identity per actual distribution, with explicit URLs where the lock has them."""
     identities: set[Identity] = set()
 
-    def add(provider, package, value, url, digest):
+    def add(provider: str, package: str, value: str, url: str, digest: str) -> None:
         if not package or registry.lock_version(provider, value) is None:
             raise ValueError("Unrecognized stable lock identity")
         identities.add(
@@ -603,8 +627,8 @@ def lock_identities(
 
     for name in selected:
         spec = module(name, root) if specs is None else specs[name]
-        directory = contained(root, spec["directory"])
-        kind = spec.get("ecosystem")
+        directory = contained(root, text(spec["directory"], "Module directory"))
+        kind = text(spec.get("ecosystem", ""), "Module ecosystem")
         if kind in ("go", "swift", "maven"):
             identities.update(lock_adapters.identities(root, spec))
             continue
@@ -643,13 +667,16 @@ def lock_identities(
                 if set(resolution) - {"integrity", "tarball"}:
                     raise ValueError("Unrecognized npm lock resolution source")
                 if "tarball" in resolution:
-                    registry.artifact_url(resolution["tarball"])
+                    registry.artifact_url(text(resolution["tarball"], "Artifact URL"))
                 add(
                     kind,
                     package,
                     version,
-                    resolution.get("tarball", ""),
-                    registry.digest(resolution.get("integrity"), npm=True),
+                    text(resolution.get("tarball", ""), "Artifact URL"),
+                    registry.digest(
+                        text(resolution.get("integrity"), "Artifact integrity"),
+                        npm=True,
+                    ),
                 )
         elif kind == "crates":
             lock = tomllib.loads(path.read_text())
@@ -694,26 +721,34 @@ def lock_identities(
                         registry.digest(artifact.get("hash")),
                     )
         elif kind == "pub":
-            lock = manifests.document(path)[0]
-            for package, item in lock.get("packages", {}).items():
-                if item["source"] == "path":
-                    local_source(root, directory, item["description"]["path"])
+            lock = table(manifests.document(path)[0], "Pub lock")
+            for package, raw in table(lock.get("packages", {}), "Pub packages").items():
+                pub_package = table(raw, "Pub package")
+                if pub_package["source"] == "sdk":
                     continue
-                if item["source"] == "sdk":
+                description = table(
+                    pub_package.get("description", {}), "Pub package description"
+                )
+                if pub_package["source"] == "path":
+                    local_source(
+                        root, directory, text(description["path"], "Local Pub source")
+                    )
                     continue
                 if (
-                    item["source"] != "hosted"
-                    or item["description"].get("url") != "https://pub.dev"
+                    pub_package["source"] != "hosted"
+                    or description.get("url") != "https://pub.dev"
                 ):
                     raise ValueError("Unrecognized Dart lock registry")
-                if item["description"].get("name") != package:
+                if description.get("name") != package:
                     raise ValueError("Dart lock package identity mismatch")
                 add(
                     kind,
                     package,
-                    item["version"],
+                    text(pub_package["version"], "Pub version"),
                     "",
-                    registry.digest("sha256:" + item["description"].get("sha256", "")),
+                    registry.digest(
+                        "sha256:" + text(description.get("sha256", ""), "Pub checksum")
+                    ),
                 )
     return identities
 
@@ -721,11 +756,11 @@ def lock_identities(
 def audit_locks(
     root: Path,
     selected: list[str],
-    before: set,
-    policy: dict,
+    before: set[Identity],
+    policy: Mapping[str, object],
     now: datetime,
     *,
-    specs: dict | None = None,
+    specs: Mapping[str, Table] | None = None,
 ) -> None:
     for name in selected:
         spec = module(name, root) if specs is None else specs[name]
@@ -733,9 +768,9 @@ def audit_locks(
             "crates": "Cargo.lock",
             "pypi": "uv.lock",
             "pub": "pubspec.lock",
-        }.get(spec.get("ecosystem"))
+        }.get(text(spec.get("ecosystem", ""), "Module ecosystem"))
         if filename:
-            directory = contained(root, spec["directory"])
+            directory = contained(root, text(spec["directory"], "Module directory"))
             path = contained(root, str((directory / filename).relative_to(root)))
             if not path.is_file():
                 raise ValueError(f"Missing resolved dependency lock: {filename}")
@@ -754,13 +789,17 @@ def audit_locks(
 
 
 def audit_identities(
-    root: Path, current: object, before: object, policy: dict, now: datetime
+    root: Path,
+    current: object,
+    before: object,
+    policy: Mapping[str, object],
+    now: datetime,
 ) -> None:
     """Check actual immutable artifacts; only the observed baseline is age-exempt."""
     current = identity_inventory(current)
     before = identity_inventory(before)
     cutoff = now - timedelta(days=registry.minimum_age(policy))
-    evidence = {}
+    evidence: dict[tuple[str, str], tuple[list[registry.Release], set[str]]] = {}
     for identity in sorted(current):
         provider, package, value, url, digest = identity
         if provider == "github-source":
@@ -787,8 +826,9 @@ def audit_identities(
                 items = {item for item in current if item[:2] == key}
                 candidates = lock_adapters.evidence(root, provider, package, items)
                 if any(
-                    e.get("package") == provider + ":" + package
-                    for e in policy.get("exceptions", [])
+                    table(e, "Policy exception").get("package")
+                    == provider + ":" + package
+                    for e in array(policy.get("exceptions", []), "Policy exceptions")
                 ):
                     if provider == "go":
                         candidates += lock_adapters.go_candidates(
@@ -810,10 +850,10 @@ def audit_identities(
                     if provider == "npm"
                     else registry.releases(provider, package)
                 )
-            exceptions = registry.active_exceptions(
+            admitted = registry.active_exceptions(
                 provider, candidates, policy, package, now
             )
-            evidence[key] = (candidates, {r.version for r in exceptions})
+            evidence[key] = (candidates, {r.version for r in admitted})
         candidates, exceptions = evidence[key]
         if identity not in before and any(
             r.version == value and r.deprecated for r in candidates
@@ -848,24 +888,28 @@ def audit_identities(
             )
 
 
-def uv_resolution_options(policy: dict, now: datetime) -> list[str]:
+def uv_resolution_options(policy: Mapping[str, object], now: datetime) -> list[str]:
     """Retain the global cutoff and admit only exact, currently active Python fixes."""
     options = [
         "--exclude-newer",
         (now - timedelta(days=registry.minimum_age(policy))).isoformat(),
     ]
+    exceptions = [
+        table(value, "Policy exception")
+        for value in array(policy.get("exceptions", []), "Policy exceptions")
+    ]
     packages = {
-        registry.package_name("pypi", e["package"].partition(":")[2])
-        for e in policy.get("exceptions", [])
-        if e.get("package", "").startswith("pypi:")
+        registry.package_name(
+            "pypi", text(e["package"], "Exception package").partition(":")[2]
+        )
+        for e in exceptions
+        if text(e.get("package", ""), "Exception package").startswith("pypi:")
     }
     for package in sorted(packages):
         candidates = registry.releases("pypi", package)
-        exceptions = registry.active_exceptions(
-            "pypi", candidates, policy, package, now
-        )
-        if exceptions:
-            chosen = max(exceptions, key=lambda r: registry.version("pypi", r.version))
+        admitted = registry.active_exceptions("pypi", candidates, policy, package, now)
+        if admitted:
+            chosen = max(admitted, key=lambda r: registry.version("pypi", r.version))
             options.extend(
                 [
                     "--exclude-newer-package",
@@ -877,25 +921,37 @@ def uv_resolution_options(policy: dict, now: datetime) -> list[str]:
     return options
 
 
-def configure_uv(root: Path, spec: dict, options: list[str]) -> str:
+def configure_uv(root: Path, spec: Mapping[str, object], options: list[str]) -> str:
     # uv records these settings in its lock. Persist the same policy in the
     # declared manifest so ordinary `uv lock --check` remains reproducible.
     path = contained(
         root,
-        str((contained(root, spec["directory"]) / "pyproject.toml").relative_to(root)),
+        str(
+            (
+                contained(root, text(spec["directory"], "Module directory"))
+                / "pyproject.toml"
+            ).relative_to(root)
+        ),
     )
     document, render = manifests.document(path)
-    table = document.setdefault("tool", {}).setdefault("uv", {})
-    table["exclude-newer"] = options[1]
+    if not isinstance(document, MutableMapping):
+        raise ValueError("Python manifest must be a table")
+    tools = document.setdefault("tool", {})
+    if not isinstance(tools, MutableMapping):
+        raise ValueError("Python tool settings must be a table")
+    uv_settings = tools.setdefault("uv", {})
+    if not isinstance(uv_settings, MutableMapping):
+        raise ValueError("Python uv settings must be a table")
+    uv_settings["exclude-newer"] = options[1]
     overrides = {}
     for index, arg in enumerate(options):
         if arg == "--exclude-newer-package":
             package, _, cutoff = options[index + 1].partition("=")
             overrides[package] = cutoff
     if overrides:
-        table["exclude-newer-package"] = overrides
+        uv_settings["exclude-newer-package"] = overrides
     else:
-        table.pop("exclude-newer-package", None)
+        uv_settings.pop("exclude-newer-package", None)
     rendered = render()
     if rendered != path.read_text():
         path.write_text(rendered)
@@ -903,12 +959,16 @@ def configure_uv(root: Path, spec: dict, options: list[str]) -> str:
 
 
 def retain_uv_noop(
-    root: Path, spec: dict, old_manifest: str, old_lock: str | None, configured: str
+    root: Path,
+    spec: Mapping[str, object],
+    old_manifest: str,
+    old_lock: str | None,
+    configured: str,
 ) -> None:
     """Keep a previously reproducible stricter cutoff when only dates advanced."""
     if old_lock is None:
         return
-    directory = contained(root, spec["directory"])
+    directory = contained(root, text(spec["directory"], "Module directory"))
     manifest = contained(root, str((directory / "pyproject.toml").relative_to(root)))
     lock = contained(root, str((directory / "uv.lock").relative_to(root)))
     if manifest.read_text() != configured:
@@ -917,12 +977,15 @@ def retain_uv_noop(
     new = tomllib.loads(configured).get("tool", {}).get("uv", {})
     previous, current = tomllib.loads(old_lock), tomllib.loads(lock.read_text())
 
-    def dates(table):
+    def dates(value: object) -> dict[str, datetime]:
+        values = table(value, "uv options")
         return {
-            "": registry.timestamp(table.get("exclude-newer")),
+            "": registry.timestamp(values.get("exclude-newer")),
             **{
                 package: registry.timestamp(at)
-                for package, at in table.get("exclude-newer-package", {}).items()
+                for package, at in table(
+                    values.get("exclude-newer-package", {}), "uv package cutoffs"
+                ).items()
             },
         }
 
@@ -983,6 +1046,7 @@ def perform(root: Path, now: datetime, selected: list[str]) -> None:
     )
 
     if spec is not None:
+        assert before is not None
         source_updates.audit(root, spec, before, policy, now)
 
 
@@ -998,11 +1062,15 @@ def verify(root: Path, selected: list[str]) -> None:
         run_commands(spec, "verify", env, root)
 
 
-def preview(root: Path, now: datetime, selected: list[str]) -> dict:
+def preview(root: Path, now: datetime, selected: list[str]) -> PreviewResult:
     repository(root, clean=False)
     before = snapshot(root)
-    patterns = settings(root)["outputs"] + [
-        p for n in selected for p in module(n, root).get("update_outputs", [])
+    patterns = strings(settings(root)["outputs"], "Update outputs") + [
+        p
+        for n in selected
+        for p in strings(
+            module(n, root).get("update_outputs", []), "Module update outputs"
+        )
     ]
     with (
         tempfile.TemporaryDirectory(prefix="toolchain-preview-") as tmp,

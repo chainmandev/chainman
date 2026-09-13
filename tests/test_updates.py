@@ -656,7 +656,8 @@ class TransactionTests(unittest.TestCase):
         (self.root / "scripts/enter.sh").chmod(0o755)
         self.write(
             "scripts/updates.py",
-            "import runpy\nfrom pathlib import Path\n"
+            "import runpy, sys\nfrom pathlib import Path\n"
+            + f"sys.path.insert(0, {str(updates.RUNTIME / 'scripts')!r})\n"
             + f"root = runpy.run_path({str(updates.RUNTIME / 'scripts/toolchain.py')!r})['ROOT']\n"
             + "assert (root / 'preview-fixture-marker').read_text() == 'neutral'\n"
             + "(root / 'deps.txt').write_text('candidate\\n')\n",

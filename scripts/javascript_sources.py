@@ -7,7 +7,8 @@ original source declaration, with a mandatory immutable parent-scoped override.
 Source graphs may contain registry children; bundled or nested sources fail.
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
+from collections.abc import Mapping
 import base64
 import hashlib
 import io
@@ -22,6 +23,7 @@ from semantic_version import NpmSpec, Version
 import registry
 from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
+from adapter_data import Table
 
 
 def declarations(spec):
@@ -213,7 +215,7 @@ def bound_edges(item, lock):
             raise ValueError("Retained source importer differs from its declaration")
 
 
-def registry_entries(root, spec, lock):
+def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Table:
     entries = dict(lock.get("packages", {}))
     directory = tc.contained(root, spec.get("directory", "."))
     for item in declarations(spec):
@@ -367,7 +369,12 @@ def audit(workspace, before, policy, now):
     return contents
 
 
-def audit_identity(identity, before, policy, now):
+def audit_identity(
+    identity: Identity,
+    before: set[Identity],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> Table:
     provider, package, version_commit, url, digest = identity
     version, _, revision = version_commit.rpartition("@")
     match = re.fullmatch(
