@@ -193,6 +193,7 @@
     "tests/test_runtime.py",
     "tests/test_sdk_versions.py",
     "tests/test_self_update.py",
+    "tests/test_service_export.py",
     "tests/test_service_network.py",
     "tests/test_service_scopes.py",
     "tests/test_service_volumes.py",

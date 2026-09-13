@@ -281,6 +281,73 @@ command=["python3","probe.py"]
         ):
             services.execute_internal(self.root, "_workflow-task", ["build", expected])
 
+    def test_internal_services_reconstruct_requesting_task_context_in_target_lane(self):
+        import services
+
+        self.body += """
+[environment]
+files=[{path="local.env",when={AUTH_MODE="local"}},{path="provider.env",required=true,when={AUTH_MODE="provider"}}]
+[tasks.main]
+depends_on=["build"]
+services=["demo"]
+commands=[["true"]]
+context_environment={AUTH_MODE="local",FIXTURE_SEED="{env:HOST_SEED}"}
+[services.demo]
+command=["true"]
+environment={FIXTURE_SERVICE="{env:FIXTURE_SEED}"}
+readiness={command=["python3","probe.py"]}
+"""
+        (self.root / "local.env").write_text("HOST_SEED=from file\n")
+        (self.root / "probe.py").write_text(
+            "import os; from pathlib import Path; "
+            "Path('probed').write_text(os.environ['FIXTURE_SERVICE'])"
+        )
+        with (self.root / "install.py").open("a") as script:
+            script.write(
+                "import os\nPath('effective').write_text(os.environ['FIXTURE_SEED'])\n"
+            )
+        self.write_config()
+        os.environ.update(
+            AUTH_MODE="provider",
+            CHAINMAN_CONTEXT_TASK="main",
+            CHAINMAN_COMPILER_OWNER="inherited-owner",
+        )
+        cfg = workflows.configuration(self.root)
+        selected = workflows.context_environment(
+            self.root, cfg, "main", tc.environment(self.root)
+        )
+        expected = services.config_fingerprint(self.root, cfg, env=selected)
+        endpoints = []
+        real_setup_use = workflows.setup_use
+
+        def setup_use(root, cfg, requested, env):
+            self.assertTrue(tc._operation_id)
+            self.assertTrue(env["SCCACHE_SERVER_UDS"].endswith(tc._operation_id))
+            self.assertNotIn("CHAINMAN_COMPILER_OWNER", env)
+            self.assertEqual(env["FIXTURE_SEED"], "from file")
+            endpoints.append(env["SCCACHE_SERVER_UDS"])
+            return real_setup_use(root, cfg, requested, env)
+
+        with patch.object(workflows, "setup_use", side_effect=setup_use):
+            for _ in range(2):
+                self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+                for action, name in (
+                    ("_workflow-prepare", "main"),
+                    ("_workflow-task", "build"),
+                    ("_workflow-service", "demo"),
+                    ("_workflow-probe", "demo"),
+                ):
+                    self.assertEqual(
+                        services.execute_internal(self.root, action, [name, expected]),
+                        0,
+                    )
+        self.assertEqual(len(endpoints), 10)
+        self.assertEqual(len(set(endpoints)), len(endpoints))
+        self.assertEqual((self.root / "effective").read_text(), "from file")
+        self.assertEqual((self.root / "probed").read_text(), "from file")
+        self.assertEqual(os.environ["AUTH_MODE"], "provider")
+        self.assertNotIn("FIXTURE_SEED", os.environ)
+
     def test_context_conflicts_fail_before_setup_and_project_policy_wins(self):
         self.body += 'context_environment={FIXTURE_SEED="dependency"}\n[tasks.test]\ndepends_on=["build"]\ncontext_environment={FIXTURE_SEED="different"}\n'
         self.write_config()

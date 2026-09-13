@@ -467,11 +467,21 @@ def export(root, arguments):
         if name in os.environ:
             planning_env[name] = os.environ[name]
     planning_env = workflows.context_environment(root, cfg, task, planning_env)
-    forwarded = {
+    compatibility_env = {
         name: value
         for name, value in planning_env.items()
         if not name.startswith(("CHAINMAN_", "TOOLCHAIN_")) and name != "XDG_CACHE_HOME"
     }
+    forwarded = {
+        name: value
+        for name, value in input_env.items()
+        if not name.startswith(("CHAINMAN_", "TOOLCHAIN_")) and name != "XDG_CACHE_HOME"
+    }
+    # Only caller-owned host inputs enter host launcher/engine environments.
+    # Project files and expanded declarations remain data until execution inside
+    # the selected project lane. Carry the requesting task, not its environment,
+    # so services and watched builds can reconstruct the same context there.
+    forwarded["CHAINMAN_CONTEXT_TASK"] = task
     declared = declarations(root, cfg)
     fingerprint = config_fingerprint(root, cfg, env=dict(os.environ, **planning_env))
     task_args = (
@@ -518,14 +528,7 @@ def export(root, arguments):
             service_root, service_key = root, key
         owner = secrets.token_hex(16)
         container_name = "chainman-" + service_key + "-" + name
-        env = (
-            dict(
-                forwarded,
-                **literal_environment(spec.get("environment", {}), root, planning_env),
-            )
-            if name not in shared_names
-            else {}
-        )
+        env = dict(forwarded) if name not in shared_names else {}
         if "container" in spec:
             if not engine:
                 raise ValueError(
@@ -710,7 +713,7 @@ def export(root, arguments):
         "watcher": str(destination / "watchexec"),
         "licenses": licenses,
         "fingerprint": hashlib.sha256(
-            json.dumps([fingerprint, forwarded], sort_keys=True).encode()
+            json.dumps([fingerprint, compatibility_env], sort_keys=True).encode()
         ).hexdigest(),
         "services": {
             name: spec for name, spec in prepared.items() if name not in shared_names
@@ -830,15 +833,17 @@ def prepare_requested(root, arguments):
         raise ValueError("Service preparation requires one task")
     cfg = workflows.configuration(root)
     entries = declarations(root, cfg)
-    env = workflows.context_environment(root, cfg, arguments[0], tc.environment(root))
+    env = workflows.context_environment(
+        root, cfg, arguments[0], tc.environment(root, create=False)
+    )
     expected = config_fingerprint(root, cfg, include_volume_inputs=False, env=env)
-    result = prepare_setup(root, cfg, entries, arguments[0], env=env)
+    result = prepare_setup(root, cfg, entries, arguments[0])
     if config_fingerprint(root, cfg, include_volume_inputs=False, env=env) != expected:
         raise ValueError("Service configuration changed during preparation")
     return result
 
 
-def prepare_setup(root, cfg, entries, name, *, env=None):
+def prepare_setup(root, cfg, entries, name, *, context_task=None):
     tasks = workflows.order(cfg.get("tasks", {}), [name])
     requested = [
         service for task in tasks for service in cfg["tasks"][task].get("services", [])
@@ -860,7 +865,12 @@ def prepare_setup(root, cfg, entries, name, *, env=None):
         group for service in selected for group in entries[service].get("setup", [])
     ]
     return (
-        workflows.run(root, "setup", list(dict.fromkeys(groups)), env=env)
+        workflows.run(
+            root,
+            "setup",
+            list(dict.fromkeys(groups)),
+            context_task=context_task or name,
+        )
         if groups
         else 0
     )
@@ -872,15 +882,21 @@ def execute_internal(root, action, extra):
     name, expected, *arguments = extra
     cfg = workflows.configuration(root)
     entries = declarations(root, cfg)
-    if config_fingerprint(root, cfg) != expected:
+    env = tc.environment(root, create=False)
+    context_task = os.environ.get("CHAINMAN_CONTEXT_TASK")
+    if context_task:
+        env = workflows.context_environment(root, cfg, context_task, env)
+    if config_fingerprint(root, cfg, env=env) != expected:
         raise ValueError(
             "Service inputs changed after planning; stop existing services before starting the updated workflow"
         )
     if action == "_workflow-task":
-        return workflows.run(root, name, arguments, service_context=True)
+        return workflows.run(
+            root, name, arguments, service_context=True, context_task=context_task
+        )
     if action == "_workflow-prepare":
-        result = prepare_setup(root, cfg, entries, name)
-        if config_fingerprint(root, cfg) != expected:
+        result = prepare_setup(root, cfg, entries, name, context_task=context_task)
+        if config_fingerprint(root, cfg, env=env) != expected:
             raise ValueError(
                 "Service inputs changed during preparation; rerun the workflow"
             )
@@ -890,7 +906,9 @@ def execute_internal(root, action, extra):
     spec = entries[name]
     with tc.operation(root, exclusive=False, new_execution=True, automatic_prune=False):
         env = tc.environment(root)
-        env.update(literal_environment(spec.get("environment", {}), root))
+        if context_task:
+            env = workflows.context_environment(root, cfg, context_task, env)
+        env.update(literal_environment(spec.get("environment", {}), root, env))
         with workflows.setup_use(root, cfg, spec.get("setup", []), env) as descriptors:
             profile = spec.get(
                 "profile", cfg.get("project", {}).get("default_profile", "default")

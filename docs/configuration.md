@@ -66,6 +66,12 @@ without putting its value in arguments. This option covers Chainman's Python
 registry metadata requests. Native Git, Swift and Nix downloads keep their own
 credential behavior; this does not qualify general private-repository support.
 
+Service planning keeps project environment files, defaults, values and task context
+as data. They are applied inside the selected execution lane, including for setup,
+services, probes and watched builds. They do not override the host launcher's or
+container engine's environment. Only explicitly forwarded original host inputs
+cross that boundary; `source_env` mount declarations select host values.
+
 The optional-module example uses `modules = ["core", "rust"]` and individual files
 under `modules/`. Each declares directory, input globs, readiness artifacts, commands
 and update outputs. A project may keep its own modules and flake; runtime updates

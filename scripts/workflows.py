@@ -465,7 +465,14 @@ def context_environment(root, cfg, task, inherited):
     return project_environment.apply(root, spec, dict(inherited, **expanded))
 
 
-def run(root: Path, action: str, extra: list[str], *, service_context=False, env=None):
+def run(
+    root: Path,
+    action: str,
+    extra: list[str],
+    *,
+    service_context=False,
+    context_task=None,
+):
     cfg = configuration(root)
     task_names = order(cfg.get("tasks", {}), [action]) if action != "setup" else []
     exclusive = any(cfg["tasks"][key].get("exclusive", False) for key in task_names)
@@ -481,7 +488,11 @@ def run(root: Path, action: str, extra: list[str], *, service_context=False, env
         new_execution=True,
         automatic_prune=cfg.get("cache", {}).get("automatic_prune", True),
     ):
-        env = dict(tc.environment(root) if env is None else env)
+        # Managed paths and compiler ownership belong to this execution. Apply
+        # the requesting graph's project values only after creating its lease.
+        env = tc.environment(root)
+        if context_task:
+            env = context_environment(root, cfg, context_task, env)
         if action != "setup":
             env = context_environment(root, cfg, action, env)
         if action == "setup":
