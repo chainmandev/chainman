@@ -7,24 +7,53 @@ import json
 import re
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TypedDict
 from urllib.parse import quote
+from semantic_version import Version
 
 import chainman
 import registry
 import toolchain as tc
+import adapter_data as ad
+
+
+class Snapshot(TypedDict):
+    adapter: str
+    members: dict[str, ad.Table]
+    workspaces: dict[str, ad.Table]
+    identities: list[list[str]]
+    files: dict[str, str]
+
+
+def documents(value: object) -> dict[str, ad.Table]:
+    return {
+        name: ad.table(body, "Go document")
+        for name, body in ad.table(value, "Go documents").items()
+    }
+
+
+def identities(value: object) -> set[tuple[str, str, str, str]]:
+    result: set[tuple[str, str, str, str]] = set()
+    for raw in ad.array(value, "Go identities"):
+        item = ad.strings(raw, "Go identity")
+        if len(item) != 4:
+            raise ValueError("Go identity requires package, version, URL and digest")
+        result.add((item[0], item[1], item[2], item[3]))
+    return result
 
 
 def execute(
     root: Path,
-    spec: dict,
+    spec: Mapping[str, object],
     argv: list[str],
     *,
-    directory=None,
-    output=False,
-    workspace=None,
-):
+    directory: Path | None = None,
+    output: bool = False,
+    workspace: str | None = None,
+) -> subprocess.CompletedProcess[str]:
     env = tc.environment(root)
     env.update(
         GOENV="off",
@@ -43,22 +72,24 @@ def execute(
         env["GOWORK"] = str(tc.contained(root, workspace))
     return chainman.execute(
         root,
-        spec.get("profile", "go"),
+        ad.text(spec.get("profile", "go"), "Go profile"),
         argv,
         env=env,
         cwd=root if directory is None else directory,
         text=True,
-        **({"stdout": subprocess.PIPE} if output else {}),
+        stdout=subprocess.PIPE if output else None,
     )
 
 
-def native_json(root: Path, spec: dict, argv: list[str]) -> dict:
+def native_json(root: Path, spec: Mapping[str, object], argv: list[str]) -> ad.Table:
     with tempfile.TemporaryDirectory(prefix="chainman Go evidence ") as temporary:
         result = execute(root, spec, argv, directory=Path(temporary), output=True)
-    return json.loads(result.stdout)
+    return ad.table(json.loads(result.stdout), "Go command result")
 
 
-def query(root: Path, spec: dict, package: str, version: str) -> dict:
+def query(
+    root: Path, spec: Mapping[str, object], package: str, version: str
+) -> ad.Table:
     registry.go_path(package)
     if version != "latest" and not registry.go_version(version):
         raise ValueError("Invalid Go query version")
@@ -76,12 +107,26 @@ def query(root: Path, spec: dict, package: str, version: str) -> dict:
 
 
 def go_candidates(
-    root: Path, spec: dict, package: str, **selection
+    root: Path,
+    spec: Mapping[str, object],
+    package: str,
+    *,
+    policy: Mapping[str, object] | None = None,
+    now: datetime | None = None,
+    bounds: tuple[str, ...] = (),
+    exact: str | None = None,
 ) -> list[registry.Release]:
     available = query(root, spec, package, "latest").get("Versions")
     if not isinstance(available, list):
         raise ValueError("Go did not return its unretracted release inventory")  # noqa: TRY004 - decoded external data
-    return registry.go_releases(package, available, **selection)
+    return registry.go_releases(
+        package,
+        ad.strings(available, "Go versions"),
+        policy=policy,
+        now=now,
+        bounds=bounds,
+        exact=exact,
+    )
 
 
 def local_directory(root: Path, base: Path, value: str) -> Path:
@@ -124,13 +169,16 @@ def local_module_path(module: str) -> None:
             raise ValueError("Invalid local Go module identity")
 
 
-def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
+def metadata(
+    root: Path, spec: Mapping[str, object]
+) -> tuple[dict[str, ad.Table], dict[str, ad.Table]]:
     directories = spec.get("directories")
     if not isinstance(directories, list) or not directories:
         raise ValueError("Go requires explicit module or workspace directories")
-    members, workspaces = {}, {}
-    pending = set()
-    for relative in directories:
+    members: dict[str, ad.Table] = {}
+    workspaces: dict[str, ad.Table] = {}
+    pending: set[Path] = set()
+    for relative in ad.strings(directories, "Go directories"):
         directory = tc.contained(root, relative)
         if (directory / "go.work").exists():
             name = str((directory / "go.work").relative_to(root))
@@ -139,8 +187,8 @@ def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
                 root, spec, ["go", "work", "edit", "-json", str(directory / "go.work")]
             )
             workspaces[name] = work
-            for item in work.get("Use") or []:
-                pending.add(local_directory(root, directory, item["DiskPath"]))
+            for path in ad.GoFile.decode(work, workspace=True).uses:
+                pending.add(local_directory(root, directory, path))
         elif (directory / "go.mod").exists():
             pending.add(directory)
         else:
@@ -153,9 +201,10 @@ def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
         body = native_json(
             root, spec, ["go", "mod", "edit", "-json", str(directory / "go.mod")]
         )
-        module = body.get("Module", {}).get("Path")
+        module = ad.GoFile.decode(body).module
+        assert module is not None
         local_module_path(module)
-        if any(m.get("Module", {}).get("Path") == module for m in members.values()):
+        if any(ad.GoFile.decode(m).module == module for m in members.values()):
             raise ValueError("Go workspace has duplicate module identities")
         members[str(directory.relative_to(root))] = body
     # Local replacements are deliberate source bindings, never public releases.
@@ -164,13 +213,15 @@ def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
         base = tc.contained(
             root, str(Path(name).parent) if name.endswith("go.work") else name
         )
-        for entry in body.get("Replace") or []:
-            target = entry["New"]
-            if target.get("Version"):
+        for entry in ad.GoFile.decode(
+            body, workspace=name.endswith("go.work")
+        ).replacements:
+            target = entry.new
+            if target.version:
                 raise ValueError(
                     "Remote Go replacements require an explicit source contract"
                 )
-            location = local_directory(root, base, target["Path"])
+            location = local_directory(root, base, target.path)
             if str(location.relative_to(root)) not in members:
                 raise ValueError(
                     "Go local replacement is not a declared workspace module"
@@ -178,7 +229,9 @@ def metadata(root: Path, spec: dict) -> tuple[dict, dict]:
     return members, workspaces
 
 
-def checksum_identities(root: Path, members: dict, workspaces: dict) -> list[list[str]]:
+def checksum_identities(
+    root: Path, members: Mapping[str, object], workspaces: Mapping[str, object]
+) -> list[list[str]]:
     names = {str(Path(name) / "go.sum") for name in members}
     names.update(name + ".sum" for name in workspaces)
     identities = set()
@@ -199,7 +252,7 @@ def checksum_identities(root: Path, members: dict, workspaces: dict) -> list[lis
     return [list(item) for item in sorted(identities)]
 
 
-def snapshot(root: Path, spec: dict) -> dict:
+def snapshot(root: Path, spec: Mapping[str, object]) -> Snapshot:
     members, workspaces = metadata(root, spec)
     paths = {
         str(Path(name) / filename)
@@ -222,16 +275,16 @@ def snapshot(root: Path, spec: dict) -> dict:
     }
 
 
-def workspace_for(root: Path, directory: Path, state: dict):
+def workspace_for(
+    root: Path, directory: Path, state: Mapping[str, object]
+) -> str | None:
     selected = [
         name
-        for name, body in state["workspaces"].items()
+        for name, body in documents(state["workspaces"]).items()
         if any(
-            local_directory(
-                root, tc.contained(root, str(Path(name).parent)), entry["DiskPath"]
-            )
+            local_directory(root, tc.contained(root, str(Path(name).parent)), path)
             == directory
-            for entry in body.get("Use") or []
+            for path in ad.GoFile.decode(body, workspace=True).uses
         )
     ]
     if len(selected) > 1:
@@ -247,7 +300,12 @@ def compatible_bound(current: str) -> str:
 
 
 def select(
-    root: Path, spec: dict, package: str, current: str, policy: dict, now: datetime
+    root: Path,
+    spec: Mapping[str, object],
+    package: str,
+    current: str,
+    policy: Mapping[str, object],
+    now: datetime,
 ) -> registry.Release:
     mode = spec.get("mode", "aggressive")
     if mode not in ("aggressive", "compatible"):
@@ -266,14 +324,16 @@ def select(
     return registry.select("go", candidates, policy, package, now)
 
 
-def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
+def resolve(
+    root: Path, spec: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> ad.Table:
     before = snapshot(root, spec)
-    local = {body["Module"]["Path"] for body in before["members"].values()}
-    selections = []
+    local = {ad.GoFile.decode(body).module for body in before["members"].values()}
+    selections: list[dict[str, str]] = []
     for name, body in before["members"].items():
         arguments = []
-        for item in body.get("Require") or []:
-            package, current = item["Path"], item["Version"]
+        for item in ad.GoFile.decode(body).requires:
+            package, current = item.path, item.version
             if package in local:
                 continue
             registry.go_path(package)
@@ -323,19 +383,26 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
     return {"changed": changed, "selected": selections}
 
 
-def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> None:
+def audit(
+    root: Path,
+    spec: Mapping[str, object],
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> None:
     if spec.get("mode", "aggressive") not in ("aggressive", "compatible"):
         raise ValueError("Go mode must be aggressive or compatible")
     after = snapshot(root, spec)
+    before_members = documents(before["members"])
     if (
-        before["members"].keys() != after["members"].keys()
+        before_members.keys() != after["members"].keys()
         or before["workspaces"] != after["workspaces"]
     ):
         raise ValueError(
             "Go workspace membership or source bindings changed during resolution"
         )
-    old_versions = {}
-    for name, body in before["members"].items():
+    old_versions: dict[str, set[str]] = {}
+    for name, body in before_members.items():
         current = after["members"][name]
         if body.get("Module") != current.get("Module") or body.get(
             "Replace"
@@ -343,37 +410,37 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
             raise ValueError(
                 "Go module or replacement identity changed during resolution"
             )
-        for item in body.get("Require") or []:
-            old_versions.setdefault(item["Path"], set()).add(item["Version"])
-    identities = set(map(tuple, after["identities"]))
-    added = identities - set(map(tuple, before["identities"]))
-    local = {body["Module"]["Path"] for body in after["members"].values()}
+        for item in ad.GoFile.decode(body).requires:
+            old_versions.setdefault(item.path, set()).add(item.version)
+    observed = identities(after["identities"])
+    added = observed - identities(before["identities"])
+    local = {ad.GoFile.decode(body).module for body in after["members"].values()}
 
-    def check_policy(package, value):
+    def check_policy(package: str, value: str) -> None:
         floor = registry.minimum_safe("go", policy, package)
-        if floor is not None and registry.Semver(value.removeprefix("v")) < floor:
+        if floor is not None and Version(value.removeprefix("v")) < floor:
             raise ValueError("Go identity is below its declared security safe floor")
         if not registry.compatible(
             "go", value, registry.constraint("go", policy, package)
         ):
             raise ValueError("Go identity violates a declared constraint")
 
-    for package, value, _, _ in identities:
+    for package, value, _, _ in observed:
         check_policy(package, value)
     public_requirements = [
         item
         for body in after["members"].values()
-        for item in body.get("Require") or []
-        if item["Path"] not in local
+        for item in ad.GoFile.decode(body).requires
+        if item.path not in local
     ]
     for item in public_requirements:
-        registry.go_path(item["Path"])
-        check_policy(item["Path"], item["Version"])
-    public_packages = {item[0] for item in identities} | {
-        item["Path"] for item in public_requirements
+        registry.go_path(item.path)
+        check_policy(item.path, item.version)
+    public_packages = {identity[0] for identity in observed} | {
+        item.path for item in public_requirements
     }
 
-    def selection_bounds(package):
+    def selection_bounds(package: str) -> tuple[str, ...]:
         return (
             tuple(
                 compatible_bound(previous)
@@ -387,8 +454,8 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
     for package in sorted(public_packages):
         registry.minimum_safe("go", policy, package)
         if not any(
-            item.get("package") == "go:" + package
-            for item in policy.get("exceptions", [])
+            ad.table(item, "Go exception").get("package") == "go:" + package
+            for item in ad.array(policy.get("exceptions", []), "Go exceptions")
         ):
             continue
         candidates = go_candidates(
@@ -411,32 +478,30 @@ def audit(root: Path, spec: dict, before: dict, policy: dict, now: datetime) -> 
                     ]
         registry.active_exceptions("go", candidates, policy, package, now)
     for name, body in after["members"].items():
-        previous = {
-            item["Path"]: item["Version"]
-            for item in before["members"][name].get("Require") or []
+        previous_requirements = {
+            item.path: item.version
+            for item in ad.GoFile.decode(before_members[name]).requires
         }
-        for item in body.get("Require") or []:
-            package, value = item["Path"], item["Version"]
+        for item in ad.GoFile.decode(body).requires:
+            package, value = item.path, item.version
             if package in local:
                 continue
             check_policy(package, value)
-            if previous.get(package) == value:
+            if previous_requirements.get(package) == value:
                 continue
             # Existing indirect lock entries cannot bypass eligibility when promoted
             # to a newly selected requirement by resolution or reconciliation.
-            evidence = {i for i in identities if i[:2] == (package, value)}
+            evidence = {i for i in observed if i[:2] == (package, value)}
             if not evidence:
                 raise ValueError("Changed Go requirement lacks checksum evidence")
             added.update(evidence)
             old, new = (
-                registry.version("go", previous.get(package, "")),
+                registry.version("go", previous_requirements.get(package, "")),
                 registry.version("go", value),
             )
             if old is not None and new is not None and new < old:
                 raise ValueError("Go resolution downgraded a declared requirement")
-    required_versions = {
-        (item["Path"], item["Version"]) for item in public_requirements
-    }
+    required_versions = {(item.path, item.version) for item in public_requirements}
     for package, value in sorted(required_versions):
         if query(root, spec, package, value).get("Retracted"):
             raise ValueError("Required Go module version is retracted")
