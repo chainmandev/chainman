@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 import contextlib
 import fcntl
 import hashlib
@@ -22,7 +22,7 @@ import time
 import tomllib
 import uuid
 from urllib.parse import quote
-from typing import TextIO
+from typing import IO, Literal, TextIO, TypedDict, Unpack, overload
 
 RUNTIME = Path(__file__).resolve().parents[1]
 ROOT = Path(os.environ.get("CHAINMAN_ROOT", str(RUNTIME))).resolve()
@@ -34,6 +34,25 @@ _ancestor_fds: tuple[int, ...] = ()
 _COMPILER_STARTUP_SECONDS = 120
 
 type OperationState = tuple[int | None, int | None, str, int | None, tuple[int, ...]]
+
+
+class ProcessOptions(TypedDict, total=False):
+    """The process controls used by managed runtime children."""
+
+    cwd: str | Path | None
+    env: Mapping[str, str] | None
+    stdin: int | IO[str] | IO[bytes] | None
+    stdout: int | IO[str] | IO[bytes] | None
+    stderr: int | IO[str] | IO[bytes] | None
+    pass_fds: Sequence[int]
+    start_new_session: bool
+    close_fds: bool
+
+
+class RunOptions(ProcessOptions, total=False):
+    check: bool
+    capture_output: bool
+    timeout: float | None
 
 
 def nix_path_reference(directory: Path, attribute: str) -> str:
@@ -535,14 +554,16 @@ def operation(
             yield not nested_project
 
 
-def managed_options(kwargs):
+def managed_options[Options: ProcessOptions](kwargs: Options) -> Options:
     """Retain every outstanding project lease through nested managed children."""
+    options: ProcessOptions = kwargs
     descriptor, gate, identity, compat, ancestors = inherited_operation()
     if descriptor is not None:
-        env = dict(kwargs.get("env", os.environ))
+        inherited = options.get("env")
+        env = dict(os.environ if inherited is None else inherited)
         env["TOOLCHAIN_LOCK_FD"] = str(descriptor)
         env["TOOLCHAIN_OPERATION_ID"] = identity
-        ancestors = tuple(dict.fromkeys((*ancestors, *kwargs.get("pass_fds", ()))))
+        ancestors = tuple(dict.fromkeys((*ancestors, *options.get("pass_fds", ()))))
         env["TOOLCHAIN_ANCESTOR_FDS"] = json.dumps(ancestors)
         descriptors = [descriptor, *ancestors]
         for name, value in (
@@ -555,12 +576,49 @@ def managed_options(kwargs):
                 env[name] = str(value)
                 descriptors.append(value)
         descriptor_identities(descriptors)
-        kwargs.update(env=env, pass_fds=tuple(dict.fromkeys(descriptors)))
+        options["env"] = env
+        options["pass_fds"] = tuple(dict.fromkeys(descriptors))
     return kwargs
 
 
-def managed_run(argv, **kwargs):
-    return subprocess.run(argv, **managed_options(kwargs))
+@overload
+def managed_run(
+    argv: Sequence[str | Path],
+    *,
+    text: Literal[True],
+    input: str | None = None,
+    **kwargs: Unpack[RunOptions],
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def managed_run(
+    argv: Sequence[str | Path],
+    *,
+    text: Literal[False] = False,
+    input: bytes | None = None,
+    **kwargs: Unpack[RunOptions],
+) -> subprocess.CompletedProcess[bytes]: ...
+
+
+@overload
+def managed_run(
+    argv: Sequence[str | Path],
+    *,
+    text: bool,
+    input: str | bytes | None = None,
+    **kwargs: Unpack[RunOptions],
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]: ...
+
+
+def managed_run(
+    argv: Sequence[str | Path],
+    *,
+    text: bool = False,
+    input: str | bytes | None = None,
+    **kwargs: Unpack[RunOptions],
+) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+    return subprocess.run(argv, text=text, input=input, **managed_options(kwargs))
 
 
 PNPM_STORE_VARIABLES = (
@@ -809,17 +867,13 @@ def owned_compiler_cache(
     # has exited. The parent closes its copy immediately after spawn.
     with operation_file(root, lifecycle_name, unique=True) as lifecycle:
         acquire_operation(lifecycle.fileno())
-        server = subprocess.Popen(
-            command,
-            **managed_options(
-                {
-                    "cwd": root,
-                    "env": server_env,
-                    "stdout": sys.stderr,
-                    "pass_fds": (lifecycle.fileno(),),
-                }
-            ),
-        )
+        options: ProcessOptions = {
+            "cwd": root,
+            "env": server_env,
+            "stdout": sys.stderr,
+            "pass_fds": (lifecycle.fileno(),),
+        }
+        server = subprocess.Popen(command, **managed_options(options))
     deadline = time.monotonic() + _COMPILER_STARTUP_SECONDS
     owned_socket = None
     try:
@@ -978,7 +1032,7 @@ def run_commands(
         )
     cwd = contained(root, spec["directory"])
 
-    def launch(argv, selected_env):
+    def launch(argv: list[str], selected_env: dict[str, str]) -> None:
         # The working directory travels as an argument, never shell syntax.
         launch = [
             *entry_command(root, spec["profile"]),
@@ -997,7 +1051,7 @@ def run_commands(
             launch(argv, selected_env)
 
 
-def artifact_ready(root: Path, artifact, env: dict[str, str]) -> bool:
+def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
     if isinstance(artifact, str):
         return contained(root, artifact).exists()
     if (

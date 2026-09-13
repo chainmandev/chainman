@@ -1,6 +1,7 @@
 """Literal project configuration; no shell evaluation or implicit secret discovery."""
 
 import fnmatch
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ from pathlib import Path
 import re
 
 import toolchain as tc
+from adapter_data import Table, array, string_map, strings, table, text
 
 VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 REFERENCE = re.compile(
@@ -15,7 +17,7 @@ REFERENCE = re.compile(
 )
 
 
-def variable(name):
+def variable(name: object) -> str:
     if not isinstance(name, str) or not VARIABLE.fullmatch(name):
         raise ValueError("Environment entries require variable names")
     if name == "CHAINMAN_TEMP_BASE":
@@ -38,7 +40,7 @@ def variable(name):
     return name
 
 
-def transport(spec):
+def transport(spec: object) -> None:
     if not isinstance(spec, dict) or set(spec) - {"ports", "mounts", "host_access"}:
         raise ValueError("Transport supports only ports, mounts and host_access")
     if type(spec.get("host_access", False)) is not bool:
@@ -81,7 +83,7 @@ def transport(spec):
             raise ValueError("Mount read_only must be boolean")
 
 
-def values(spec):
+def values(spec: object) -> None:
     if not isinstance(spec, dict):
         raise ValueError("Environment values must be a table")
     for key, value in spec.items():
@@ -90,7 +92,7 @@ def values(spec):
             raise ValueError("Environment values must be strings without NUL")
 
 
-def validate(root, spec):
+def validate(root: Path, spec: object) -> None:
     """Validate structure without reading files, secrets or live endpoints."""
     if not isinstance(spec, dict) or set(spec) - {
         "files",
@@ -132,7 +134,7 @@ def validate(root, spec):
             or set(entry) - {"path", "required", "override", "when"}
         ):
             raise ValueError("Invalid environment file declaration")
-        tc.contained(root, entry["path"])
+        tc.contained(root, text(entry["path"], "Environment file path"))
         if any(
             type(entry.get(key, False)) is not bool for key in ("required", "override")
         ):
@@ -142,12 +144,17 @@ def validate(root, spec):
             raise ValueError("Environment file when must be nonempty")
 
 
-def files(root, spec, inherited=None):
-    result: list[tuple[dict, bytes | None, dict[str, str]]] = []
+def files(
+    root: Path,
+    spec: Mapping[str, object],
+    inherited: Mapping[str, str] | None = None,
+) -> list[tuple[Table, bytes | None, dict[str, str]]]:
+    result: list[tuple[Table, bytes | None, dict[str, str]]] = []
     env = dict(inherited or {})
-    selectors = {}
-    for entry in spec.get("files", []):
-        if not isinstance(entry, dict) or set(entry) - {
+    selectors: dict[str, str | None] = {}
+    for raw in array(spec.get("files", []), "Environment files"):
+        entry = table(raw, "Environment file")
+        if set(entry) - {
             "path",
             "required",
             "override",
@@ -160,10 +167,11 @@ def files(root, spec, inherited=None):
             type(entry.get(key, False)) is not bool for key in ("required", "override")
         ):
             raise ValueError("Environment file flags must be boolean")
-        path = tc.contained(root, entry["path"])
+        path = tc.contained(root, text(entry["path"], "Environment file path"))
         condition = entry.get("when", {})
         if not isinstance(condition, dict) or ("when" in entry and not condition):
             raise ValueError("Environment file when must be a nonempty literal table")
+        condition = string_map(condition, "Environment file condition")
         for key, value in condition.items():
             variable(key)
             if not isinstance(value, str) or "\0" in value:
@@ -204,7 +212,9 @@ def files(root, spec, inherited=None):
     return result
 
 
-def file_fingerprint(root, spec, env=None):
+def file_fingerprint(
+    root: Path, spec: Mapping[str, object], env: Mapping[str, str] | None = None
+) -> str:
     return hashlib.sha256(
         json.dumps(
             [
@@ -216,9 +226,10 @@ def file_fingerprint(root, spec, env=None):
     ).hexdigest()
 
 
-def expand(values, root, env):
+def expand(values: object, root: Path, env: Mapping[str, str]) -> dict[str, str]:
     if not isinstance(values, dict):
         raise ValueError("Environment values must be a table")
+    literals = string_map(values, "Environment values")
     for key, value in values.items():
         variable(key)
         if not isinstance(value, str) or "\0" in value:
@@ -244,13 +255,13 @@ def expand(values, root, env):
     }
     resolved: dict[str, str] = {}
 
-    def resolve(key, visiting):
+    def resolve(key: str, visiting: set[str]) -> str:
         if key in resolved:
             return resolved[key]
         if key in visiting or len(visiting) >= 32:
             raise ValueError("Cyclic environment references")
 
-        def replace(match):
+        def replace(match: re.Match[str]) -> str:
             name = match[1]
             if name.startswith("service:"):
                 import service_endpoints
@@ -263,21 +274,23 @@ def expand(values, root, env):
             if not name.startswith("env:"):
                 return paths[name]
             name = name[4:]
-            if name in values:
+            if name in literals:
                 return resolve(name, visiting | {key})
             if name not in env:
                 raise ValueError(f"Environment reference is unset: {name}")
             return env[name]
 
-        resolved[key] = REFERENCE.sub(replace, values[key])
+        resolved[key] = REFERENCE.sub(replace, literals[key])
         return resolved[key]
 
-    for key in values:
+    for key in literals:
         resolve(key, set())
     return resolved
 
 
-def apply(root, spec, inherited):
+def apply(
+    root: Path, spec: Mapping[str, object], inherited: Mapping[str, str]
+) -> dict[str, str]:
     validate(root, spec)
     env = dict(inherited)
     for entry, _, values in files(root, spec, env):
@@ -289,15 +302,18 @@ def apply(root, spec, inherited):
                 applied[key] = value
         tc.pnpm_environment(env, applied)
     mode = env.get("CHAINMAN_MODE", "host-nix")
-    modes = spec.get("modes", {})
+    modes = table(spec.get("modes", {}), "Environment modes")
     if set(modes) - {"host-nix", "container-nix"}:
         raise ValueError("Environment modes must be host-nix or container-nix")
-    selected = modes.get(mode, {})
+    selected = table(modes.get(mode, {}), "Selected environment mode")
     for index, values in enumerate(
         (
-            dict(spec.get("defaults", {}), **selected.get("defaults", {})),
-            spec.get("values", {}),
-            selected.get("values", {}),
+            {
+                **string_map(spec.get("defaults", {}), "Environment defaults"),
+                **string_map(selected.get("defaults", {}), "Mode defaults"),
+            },
+            string_map(spec.get("values", {}), "Environment values"),
+            string_map(selected.get("values", {}), "Mode values"),
         )
     ):
         if index == 0:
@@ -308,11 +324,11 @@ def apply(root, spec, inherited):
     return env
 
 
-def host_inputs(destination, spec):
+def host_inputs(destination: Path, spec: Mapping[str, object]) -> dict[str, str]:
     path = destination / "host-environment"
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError("Controller planning requires bounded host environment data")
-    patterns = spec.get("pass", [])
+    patterns = strings(spec.get("pass", []), "Environment forwarding patterns")
     inherited = {}
     for record in path.read_bytes().split(b"\0"):
         if not record:

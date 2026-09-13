@@ -212,6 +212,32 @@ class ConcurrencyTests(unittest.TestCase):
             with tc.operation(self.root):
                 pass
 
+    def test_managed_child_accepts_inherited_environment_and_preserves_io_mode(self):
+        body = (
+            "import os,sys\n"
+            "os.fstat(int(os.environ['TOOLCHAIN_LOCK_FD']))\n"
+            "sys.stdout.buffer.write(os.environ['APP_VALUE'].encode() + b':' + "
+            "sys.stdin.buffer.read())\n"
+        )
+        with (
+            patch.dict(os.environ, APP_VALUE="inherited"),
+            tc.operation(self.root, exclusive=False),
+        ):
+            for text_mode, payload in ((True, "literal λ\n"), (False, b"\x00\xff\n")):
+                with self.subTest(text=text_mode):
+                    result = tc.managed_run(
+                        [sys.executable, "-c", body],
+                        env=None,
+                        text=text_mode,
+                        input=payload,
+                        capture_output=True,
+                        check=True,
+                        timeout=10,
+                    )
+                    prefix = "inherited:" if text_mode else b"inherited:"
+                    self.assertEqual(result.stdout, prefix + payload)
+                    self.assertEqual(result.stderr, "" if text_mode else b"")
+
     def test_public_child_does_not_borrow_its_parent_compiler_lifetime(self):
         with tc.operation(self.root, exclusive=False):
             inherited = tc.managed_options({})["env"]

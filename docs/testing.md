@@ -24,14 +24,16 @@ native lock adapter and npm adapter require complete function annotations and
 pass decoded records through their decisions. Their configuration inputs and some
 imported operations still have dynamic types. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 32 source
-files, including 16 with the strict flags. Recipe bindings and verification task
-lists are validated into typed collections before facade generation. Distribution inventories and consumed
+but still permit untyped calls and dynamic payloads. The gate checks 33 source
+files, including 18 with the strict flags. Recipe bindings and verification task
+lists are validated into typed collections before facade generation. Environment
+expansion and service addresses consume typed string collections. Distribution inventories and consumed
 release metadata are validated before use; produced release metadata has a typed
 wire schema. Timing context managers have explicit lifetime and environment types.
 Operation leases and compiler lifetime context managers also expose concrete
-descriptor, stream and yielded-environment types. The subprocess option boundary
-and general configuration maps still need further typing.
+descriptor, stream and yielded-environment types. Managed subprocess options have
+explicit allowed keys and value types, with separate text and binary results.
+General configuration maps still need further typing.
 JavaScript workspace collections and evidence-cache boundaries now have explicit
 types; peer optionality is projected into boolean records when a candidate is
 visited. Unused older peer metadata cannot invalidate a valid selection. The
