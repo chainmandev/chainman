@@ -7,6 +7,7 @@ portion. To run the generated contracts alone:
 
 ```sh
 just exec python3 -B -m unittest discover -s tests -p test_properties.py -v
+just exec python3 -B -m unittest discover -s tests -p test_solver_properties.py -v
 just exec python3 -B -m unittest discover -s tests -p test_transaction_state.py -v
 just exec python3 -B -m unittest discover -s tests -p test_dependency_identity.py -v
 just exec python3 -B -m unittest discover -s tests -p test_adapter_data.py -v
@@ -63,6 +64,12 @@ The generated oracles cover:
   comparisons, including deprecated/prerelease entries and input reordering.
 - Multiple observations of the same version straddling an age boundary. Both
   observation orderings must reject it until the latest observation matures.
+- JavaScript peer solving against exhaustive integer-domain assignments, including
+  cycles, per-release constraints, impossible graphs and a duplicate package pin
+  across two scopes. There are at most 243 assignments, below the configured 256
+  visited-state bound. A selected tuple must satisfy the independent oracle, and
+  failure is allowed exactly when the oracle has no solution. Repeated solves
+  must agree. This does not impose a global version-preference optimum.
 - Resource budgets against an exact rational capacity calculation, including the
   CPU/configuration caps, minimum one job and monotonicity with more resources.
 - Existing flat schema-1 checkpoints and schema-2 explicit runtime selections
@@ -87,6 +94,10 @@ The generated oracles cover:
 
 These have deliberately bounded vocabularies. They do not establish complete
 SemVer/PEP 440 correctness, lock graph correctness or platform behavior.
+The peer property tests the solver with declared candidate domains and fixture
+metadata; registry decoding and native resolution retain their separate gates.
+It detected both deliberately substituted regressions: selecting every newest
+candidate while ignoring conflicts, and rejecting every graph indiscriminately.
 
 ## What the existing tests establish
 

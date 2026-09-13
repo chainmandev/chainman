@@ -209,6 +209,7 @@
     "tests/test_service_scopes.py",
     "tests/test_service_volumes.py",
     "tests/test_services_control.py",
+    "tests/test_solver_properties.py",
     "tests/test_source_artifact.py",
     "tests/test_source_github.py",
     "tests/test_source_toolchain_pin.py",
