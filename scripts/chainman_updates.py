@@ -468,7 +468,7 @@ def resolve_current(root: Path, policy: dict, now: datetime, extra: list[str]):
     policy = dependency_api.policy(root)
     env = tc.environment(root)
     if policy.get("adapters") or policy.get("steps"):
-        dependency_api.plan_steps(root, policy, [])
+        dependency_api.plan_steps(root, policy, extra)
     env.update(
         TOOLCHAIN_FRESH="1",
         CHAINMAN_ROOT=str(root),

@@ -20,6 +20,56 @@ NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 
 
 class PlanTests(unittest.TestCase):
+    def test_runtime_resolver_honors_selection_when_every_adapter_is_explicit(self):
+        import chainman_updates
+        import source_updates
+
+        with tempfile.TemporaryDirectory(prefix="explicit update ") as directory:
+            root = Path(directory).resolve()
+            (root / "chainman.toml").write_text("""schema=3
+[updates.adapters.sdk]
+adapter="go"
+explicit_only=true
+[[updates.steps]]
+resolve="sdk"
+""")
+            observed = []
+
+            def snapshot(root, spec):
+                observed.append("snapshot")
+                return {"identities": [], "fixture": "before"}
+
+            def resolve(root, spec, policy, now):
+                self.assertEqual(spec["mode"], "compatible")
+                observed.append("resolve")
+                return {"fixture": "resolved"}
+
+            def audit(root, spec, before, policy, now):
+                self.assertEqual(
+                    before,
+                    {
+                        "identities": [],
+                        "fixture": "before",
+                        "resolution": {"fixture": "resolved"},
+                    },
+                )
+                self.assertEqual(spec["mode"], "compatible")
+                observed.append("verify")
+
+            with (
+                patch.object(chainman_updates.tc, "environment", return_value={}),
+                patch.object(source_updates, "snapshot", side_effect=snapshot),
+                patch.object(source_updates, "resolve", side_effect=resolve),
+                patch.object(source_updates, "audit", side_effect=audit),
+            ):
+                chainman_updates.resolve_current(
+                    root,
+                    api.policy(root),
+                    NOW,
+                    ["--targets", "sdk", "--target-policy", "sdk=compatible"],
+                )
+            self.assertEqual(observed, ["snapshot", "resolve", "verify"])
+
     def test_public_plan_checks_unselected_adapters_without_running_hooks(self):
         with tempfile.TemporaryDirectory(prefix="consumer plan ") as directory:
             root = Path(directory).resolve()

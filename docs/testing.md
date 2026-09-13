@@ -62,6 +62,9 @@ Coverage includes both SDK source declarations and synchronized output pins; its
 regression uses a disposable Git repository and verifies reporting changes no
 files and runs no SDK probe. Workspace discovery checks inferred and explicit
 manifest lists, including exclusions.
+The runtime resolver regression also covers a project whose adapters all require
+explicit selection. Its targeted policy reaches snapshot, resolution and final
+validation; the preliminary plan check must use that same selection.
 Task execution and setup readiness enforce the same strict flags. Their setup
 status rows, environment projections, command arrays and yielded lease descriptors
 have concrete types. Service planning shares the task duration validation used by
