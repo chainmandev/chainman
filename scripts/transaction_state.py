@@ -1,12 +1,14 @@
-"""Typed decoding of the private schema-1 update checkpoint.
+"""Typed decoding of private update checkpoints.
 
-The wire format remains flat for retained candidates from earlier runtimes.
+Schema 2 records explicit runtime selection. Retained schema-1 candidates keep
+their original mutually exclusive boolean selection and round-trip unchanged.
 Inspection is explicit in memory; preparation and resume carry no approval of
 candidate contents. Filesystem and Git authority checks remain in the coordinator.
 """
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from enum import Enum
 
 
 def table(value: object, field: str) -> dict[str, object]:
@@ -63,6 +65,12 @@ def modes(value: object) -> dict[str, int]:
     return result
 
 
+class RuntimeMode(Enum):
+    EXCLUDE = "exclude"
+    INCLUDE = "include"
+    ONLY = "only"
+
+
 @dataclass(frozen=True)
 class Options:
     format: bool
@@ -71,13 +79,52 @@ class Options:
     no_commit: bool
     json: bool
     message: str
-    only_chainman: bool
-    skip_chainman: bool
+    runtime: RuntimeMode
     extra: list[str]
 
+    @property
+    def only_chainman(self) -> bool:
+        return self.runtime is RuntimeMode.ONLY
+
+    @property
+    def skip_chainman(self) -> bool:
+        return self.runtime is RuntimeMode.EXCLUDE
+
+    def encode(self, *, legacy: bool = False) -> dict[str, object]:
+        data = asdict(self)
+        if legacy:
+            if self.runtime is RuntimeMode.INCLUDE:
+                raise ValueError(
+                    "Schema-1 checkpoints cannot include a combined update"
+                )
+            data.pop("runtime")
+            data.update(
+                only_chainman=self.only_chainman, skip_chainman=self.skip_chainman
+            )
+        else:
+            data["runtime"] = self.runtime.value
+        return data
+
     @classmethod
-    def decode(cls, value: object) -> "Options":
+    def decode(cls, value: object, *, legacy: bool = False) -> "Options":
         data = table(value, "options")
+        if legacy:
+            only = flag(data.get("only_chainman"), "options.only_chainman")
+            skip = flag(data.get("skip_chainman"), "options.skip_chainman")
+            if only == skip or "runtime" in data:
+                raise ValueError(
+                    "Invalid update state: inconsistent options (schema 1)"
+                )
+            runtime = RuntimeMode.ONLY if only else RuntimeMode.EXCLUDE
+        else:
+            if "only_chainman" in data or "skip_chainman" in data:
+                raise ValueError(
+                    "Invalid update state: mixed runtime selection formats"
+                )
+            try:
+                runtime = RuntimeMode(text(data.get("runtime"), "options.runtime"))
+            except ValueError as error:
+                raise ValueError("Invalid update state: runtime selection") from error
         result = cls(
             format=flag(data.get("format"), "options.format"),
             staged=flag(data.get("staged"), "options.staged"),
@@ -85,19 +132,17 @@ class Options:
             no_commit=flag(data.get("no_commit"), "options.no_commit"),
             json=flag(data.get("json"), "options.json"),
             message=text(data.get("message"), "options.message"),
-            only_chainman=flag(data.get("only_chainman"), "options.only_chainman"),
-            skip_chainman=flag(data.get("skip_chainman"), "options.skip_chainman"),
+            runtime=runtime,
             extra=strings(data.get("extra"), "options.extra"),
         )
         if (
             not result.message.strip()
             or "\0" in result.message
-            or result.skip_chainman == result.only_chainman
             or (
                 result.staged
                 and (not result.format or result.preview or not result.no_commit)
             )
-            or (result.format and (result.only_chainman or result.extra))
+            or (result.format and (not result.skip_chainman or result.extra))
             or (result.only_chainman and result.extra)
         ):
             raise ValueError("Invalid update state: inconsistent options")
@@ -130,6 +175,7 @@ class State:
     candidate_git: dict[str, str]
     selected: list[str] | None = None
     inspection: Inspection | None = None
+    schema: int = 2
 
     def require_inspection(self) -> Inspection:
         if self.inspection is None:
@@ -138,7 +184,7 @@ class State:
 
     def encode(self) -> dict[str, object]:
         data = asdict(self)
-        data["schema"] = 1
+        data["options"] = self.options.encode(legacy=self.schema == 1)
         data["at"] = self.at.isoformat()
         data.pop("inspection")
         if self.selected is None:
@@ -150,12 +196,13 @@ class State:
     @classmethod
     def decode(cls, value: object) -> "State":
         data = table(value, "transaction")
-        if type(data.get("schema")) is not int or data["schema"] != 1:
+        schema = data.get("schema")
+        if type(schema) is not int or schema not in (1, 2):
             raise ValueError("Invalid update state: unsupported schema")
         at = datetime.fromisoformat(text(data.get("at"), "at"))
         if at.utcoffset() is None:
             raise ValueError("Invalid update state: at requires a timezone")
-        options = Options.decode(data.get("options"))
+        options = Options.decode(data.get("options"), legacy=schema == 1)
         selected = strings(data.get("selected"), "selected") if options.staged else None
         inspection = None
         if "updated" in data or "paths" in data:
@@ -164,6 +211,7 @@ class State:
                 paths=strings(data.get("paths"), "paths"),
             )
         return cls(
+            schema=schema,
             root=text(data.get("root"), "root"),
             candidate=text(data.get("candidate"), "candidate"),
             identity=pair(data.get("identity"), "identity"),

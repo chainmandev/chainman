@@ -588,7 +588,7 @@ def options(args: list[str]) -> Options:
             opts.message = "chore: format"
     # Runtime changes are an explicit operation, never an incidental part of
     # updating application dependencies.
-    opts.skip_chainman = not opts.only_chainman
+    opts.runtime = "only" if opts.only_chainman else "exclude"
     if opts.extra[:1] == ["--"]:
         opts.extra = opts.extra[1:]
     if not opts.message.strip() or "\0" in opts.message:
@@ -597,6 +597,7 @@ def options(args: list[str]) -> Options:
         raise ValueError("Runtime updates do not accept dependency resolver arguments")
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start another update")
+    del opts.only_chainman
     return Options.decode(vars(opts))
 
 

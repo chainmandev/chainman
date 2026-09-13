@@ -10,7 +10,7 @@ import unittest
 from hypothesis import given, settings, strategies as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from transaction_state import State
+from transaction_state import RuntimeMode, State
 
 
 def checkpoint():
@@ -48,6 +48,65 @@ def checkpoint():
 
 
 class TransactionStateTests(unittest.TestCase):
+    @settings(max_examples=80, derandomize=True, deadline=None)
+    @given(
+        st.sampled_from(["exclude", "include", "only"]),
+        st.booleans(),
+        st.lists(st.text(alphabet="abc 012_-", max_size=12), max_size=4),
+    )
+    def test_explicit_runtime_selection_round_trips_without_reinterpreting_it(
+        self, runtime, preview, extra
+    ):
+        wire = checkpoint()
+        wire["schema"] = 2
+        wire["options"].pop("only_chainman")
+        wire["options"].pop("skip_chainman")
+        wire["options"].update(
+            runtime=runtime, preview=preview, extra=[] if runtime == "only" else extra
+        )
+        expected = deepcopy(wire)
+        state = State.decode(wire)
+        self.assertEqual(state.options.runtime.value, runtime)
+        self.assertEqual(state.options.only_chainman, runtime == "only")
+        self.assertEqual(state.options.skip_chainman, runtime == "exclude")
+        self.assertEqual(json.loads(json.dumps(state.encode())), expected)
+        wire["options"]["runtime"] = "changed"
+        wire["options"]["extra"].append("changed")
+        self.assertEqual(json.loads(json.dumps(state.encode())), expected)
+
+    def test_checkpoint_versions_do_not_accept_ambiguous_runtime_selection(self):
+        original = checkpoint()
+        modern = deepcopy(original)
+        modern["schema"] = 2
+        modern["options"].pop("only_chainman")
+        modern["options"].pop("skip_chainman")
+        modern["options"]["runtime"] = "include"
+        cases = []
+        for value in (None, False, [], "all", 1):
+            wire = deepcopy(modern)
+            wire["options"]["runtime"] = value
+            cases.append(wire)
+        for field in ("only_chainman", "skip_chainman"):
+            wire = deepcopy(modern)
+            wire["options"][field] = False
+            cases.append(wire)
+        wire = deepcopy(original)
+        wire["options"]["runtime"] = "exclude"
+        cases.append(wire)
+        wire = deepcopy(modern)
+        wire["options"]["format"] = True
+        wire["options"]["extra"] = []
+        cases.append(wire)
+        wire = deepcopy(modern)
+        wire["options"]["runtime"] = "only"
+        cases.append(wire)  # Runtime-only updates cannot have application targets.
+        for wire in cases:
+            with self.subTest(options=wire["options"]), self.assertRaises(ValueError):
+                State.decode(wire)
+        legacy = State.decode(original)
+        self.assertIs(legacy.options.runtime, RuntimeMode.EXCLUDE)
+        self.assertEqual(json.loads(json.dumps(legacy.encode())), original)
+
     @settings(max_examples=80, derandomize=True, deadline=None)
     @given(
         st.booleans(),

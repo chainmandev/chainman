@@ -59,7 +59,8 @@ The generated oracles cover:
   observation orderings must reject it until the latest observation matures.
 - Resource budgets against an exact rational capacity calculation, including the
   CPU/configuration caps, minimum one job and monotonicity with more resources.
-- Existing flat schema-1 checkpoints against an independent wire fixture, with
+- Existing flat schema-1 checkpoints and schema-2 explicit runtime selections
+  against independent wire fixtures, with
   distinct original/candidate Git identities and snapshots, inspected/uninspected
   states, exact JSON compatibility and independence from later input mutation.
 - Dependency records against the existing five-string tuple/JSON contract,
