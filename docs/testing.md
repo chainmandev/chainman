@@ -22,8 +22,16 @@ native lock adapter and npm adapter require complete function annotations and
 pass decoded records through their decisions. Their configuration inputs and some
 imported operations still have dynamic types. The other modules listed in
 `mypy.ini` check unannotated bodies
-but still permit untyped calls and dynamic payloads. The gate checks 20 source
+but still permit untyped calls and dynamic payloads. The gate checks 22 source
 files, including five with the strict flags.
+JavaScript workspace collections and evidence-cache boundaries now have explicit
+types; peer optionality is projected into boolean records when a candidate is
+visited. Unused older peer metadata cannot invalidate a valid selection. The
+shared registry implementation is also checked: constraint containers are
+validated before use, and matching age exceptions become named immutable records
+before version ranking. Its callable cache exposes typed cache operations.
+Raw workspace documents, adapter configuration and parts of the pnpm graph solver
+remain dynamic; inclusion in the gate does not imply complete strict typing.
 Adapter implementations outside that explicit list are not counted as checked.
 The unstubbed third-party `semantic_version` import has a scoped missing-import
 exception; its API remains a dynamic boundary, not an adapter-wide suppression.
@@ -204,6 +212,14 @@ erasing a previously completed output after an application failure. The latter
 two were detected by the recovery state machine's assertions. These probes leave
 repository files unchanged and do not constitute a repository-wide mutation score.
 
+The JavaScript evidence follow-up detected two further isolated mutations:
+bypassing peer-metadata validation and making every declared peer optional.
+Assertions check successful fallback to a valid release, rejection when a required
+peer has no compatible release, and unchanged project manifests. Malformed
+metadata is tested separately from valid optional peers and unused older releases.
+The shared policy tests also check malformed tables and exception fields through
+actual release selection, alongside the existing age/floor/expiry oracles.
+
 ## Boundary guarantees and next improvements
 
 Typed checkpoints now reject malformed records before operational decisions;
@@ -222,8 +238,9 @@ serialization, so validating a projection does not drop unknown native metadata.
 Go records have immutable fields and tuple collections; Swift graph children are
 decoded one level at a time during iterative traversal, not deeply frozen.
 
-Remaining typing work is concentrated in adapter configuration, registry APIs and
-the other adapter implementations outside the gate. Splitting large modules for
+Remaining typing work is concentrated in adapter configuration, the deeper pnpm
+graph payloads, registry HTTP payloads and adapter implementations outside the
+gate. Splitting large modules for
 size alone is a lower priority than replacing dynamic decision inputs.
 
 Add differential tests against native resolvers when changing their adapters.

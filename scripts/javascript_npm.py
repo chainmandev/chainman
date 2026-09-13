@@ -199,7 +199,7 @@ def audit(
                         raise ValueError(
                             "npm local dependency declarations disagree with their manifest"
                         )
-                dependencies = info
+                dependencies: inputs.NpmPackage | dict = info
             else:
                 dependencies = item
                 actual = name_at(location, item)

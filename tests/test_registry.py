@@ -34,6 +34,40 @@ def release(version, days):
 
 
 class ConjunctionTests(unittest.TestCase):
+    def test_malformed_policy_tables_fail_as_validation_errors(self):
+        for invalid in (None, False, [], "", 1):
+            for policy in (
+                {"constraints": invalid},
+                {"exceptions": [None] if invalid == [] else invalid},
+                {"constraints": {"npm:demo": invalid}},
+                {"exceptions": [invalid]},
+            ):
+                with self.subTest(policy=policy), self.assertRaises(ValueError):
+                    registry.select("npm", [release("1.0.0", 60)], policy, "demo", NOW)
+
+    def test_exception_text_is_validated_before_version_ranking(self):
+        valid = {
+            "package": "npm:demo",
+            "version": "1.0.0",
+            "minimum_safe": "1.0.0",
+            "reason": "fixture exception",
+            "advisory": "https://example.invalid/advisory",
+            "expires": (NOW + timedelta(days=5)).isoformat(),
+        }
+        for field in ("version", "minimum_safe", "reason", "advisory", "expires"):
+            for invalid in (None, False, [], {}, 1):
+                with (
+                    self.subTest(field=field, value=invalid),
+                    self.assertRaises(ValueError),
+                ):
+                    registry.select(
+                        "npm",
+                        [release("1.0.0", 1)],
+                        {"exceptions": [{**valid, field: invalid}]},
+                        "demo",
+                        NOW,
+                    )
+
     def test_each_range_retains_its_own_prerelease_boundary(self):
         bounds = [">=5.0.0 <6.0.0", "^5.0.0-beta.0"]
         # Independently checked with strict node-semver membership per range.

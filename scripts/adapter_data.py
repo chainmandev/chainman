@@ -49,6 +49,44 @@ def string_map(value: object, field: str) -> dict[str, str]:
     return {key: text(item, field) for key, item in table(value, field).items()}
 
 
+class PeerMetadata(TypedDict, total=False):
+    optional: bool
+
+
+def peer_metadata(value: object) -> dict[str, PeerMetadata]:
+    result: dict[str, PeerMetadata] = {}
+    for name, raw in table(value, "Peer dependency metadata").items():
+        entry = table(raw, "Peer dependency metadata entry")
+        projected: PeerMetadata = {}
+        if "optional" in entry:
+            optional = entry["optional"]
+            if not isinstance(optional, bool):
+                raise ValueError("Peer dependency optional flag must be boolean")
+            projected["optional"] = optional
+        result[name] = projected
+    return result
+
+
+@dataclass(frozen=True)
+class AgeException:
+    version: str
+    minimum_safe: str
+    reason: str
+    advisory: str
+    expires: str
+
+    @classmethod
+    def decode(cls, value: object) -> "AgeException":
+        entry = table(value, "Release age exception")
+        return cls(
+            version=nonempty(entry.get("version"), "Exception version"),
+            minimum_safe=nonempty(entry.get("minimum_safe"), "Exception minimum_safe"),
+            reason=nonempty(entry.get("reason"), "Exception reason"),
+            advisory=nonempty(entry.get("advisory"), "Exception advisory"),
+            expires=nonempty(entry.get("expires"), "Exception expires"),
+        )
+
+
 class NpmPackage(TypedDict, total=False):
     name: str
     version: str

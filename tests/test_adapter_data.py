@@ -15,6 +15,24 @@ import lock_adapters
 
 
 class AdapterDataTests(unittest.TestCase):
+    def test_peer_metadata_projection_preserves_boolean_meaning_and_owns_input(self):
+        original = {
+            "required": {"optional": False},
+            "optional": {"optional": True},
+            "default": {"unknown": "future field"},
+        }
+        parsed = data.peer_metadata(original)
+        self.assertEqual(
+            parsed,
+            {
+                "required": {"optional": False},
+                "optional": {"optional": True},
+                "default": {},
+            },
+        )
+        original["required"]["optional"] = True
+        self.assertIs(parsed["required"]["optional"], False)
+
     @settings(max_examples=100, derandomize=True, deadline=None)
     @given(
         st.lists(

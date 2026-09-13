@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from contextlib import contextmanager
 import base64
@@ -25,6 +26,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version as PythonVersion
 from packaging.utils import canonicalize_name
 from semantic_version import NpmSpec, Version as Semver
+import adapter_data
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_RETRY_WAIT_SECONDS = 60
@@ -184,7 +186,7 @@ def package_name(provider: str, name: str) -> str:
     return canonicalize_name(name) if provider == "pypi" else name
 
 
-def validate_constraint(provider: str, value) -> str | tuple[str, ...]:
+def validate_constraint(provider: str, value: object) -> str | tuple[str, ...]:
     if isinstance(value, str):
         return value
     if (
@@ -204,17 +206,21 @@ def validate_constraint(provider: str, value) -> str | tuple[str, ...]:
     return tuple(value)
 
 
-def constraint(provider: str, policy: dict, name: str) -> str | tuple[str, ...]:
+def constraint(
+    provider: str, policy: Mapping[str, object], name: str
+) -> str | tuple[str, ...]:
     rules = [
         rule
-        for key, rule in policy.get("constraints", {}).items()
+        for key, rule in adapter_data.table(
+            policy.get("constraints", {}), "Compatibility constraints"
+        ).items()
         if key.partition(":")[0] == provider
         and package_name(provider, key.partition(":")[2])
         == package_name(provider, name)
     ]
     if len(rules) > 1:
         raise ValueError("Duplicate normalized compatibility constraints")
-    rule = rules[0] if rules else {}
+    rule = adapter_data.table(rules[0], "Compatibility constraint") if rules else {}
     if rule and not str(rule.get("reason", "")).strip():
         raise ValueError("Compatibility constraints require a reason")
     return validate_constraint(provider, rule.get("range", ""))
@@ -287,10 +293,11 @@ def _fetch(
                 },
                 method=method,
             )
-            open_request = urlopen
             if authenticated:
                 request.add_unredirected_header("Authorization", "Bearer " + token)
-                open_request = build_opener(GitHubNoRedirect()).open
+            open_request = (
+                build_opener(GitHubNoRedirect()).open if authenticated else urlopen
+            )
             with (
                 request_window(parsed.hostname),
                 open_request(request, timeout=30) as response,
@@ -338,16 +345,19 @@ def _cached_fetch(
     return _fetch(url, accept, method)
 
 
-def fetch(
-    url: str, accept: str = "application/json", method: str = "GET"
-) -> tuple[bytes, dict]:
-    github_token()  # Check before a cache hit can return the command's evidence.
-    return _cached_fetch(url, accept, method)
+class RegistryFetch:
+    def __call__(
+        self, url: str, accept: str = "application/json", method: str = "GET"
+    ) -> tuple[bytes, dict]:
+        github_token()  # Check before a cache hit can return the command's evidence.
+        return _cached_fetch(url, accept, method)
+
+    # Clearing metadata never resets the command's credential context.
+    cache_clear = staticmethod(_cached_fetch.cache_clear)
+    cache_info = staticmethod(_cached_fetch.cache_info)
 
 
-# Clearing metadata never resets the command's credential context.
-fetch.cache_clear = _cached_fetch.cache_clear
-fetch.cache_info = _cached_fetch.cache_info
+fetch = RegistryFetch()
 
 
 def data(url: str):
@@ -403,31 +413,36 @@ def lock_version(provider: str, value: str):
         return None
 
 
-def minimum_age(policy: dict) -> int:
+def minimum_age(policy: Mapping[str, object]) -> int:
     days = policy.get("minimum_age_days", 30)
     if type(days) is not int or days < 0:
         raise ValueError("minimum_age_days must be a nonnegative integer")
     return days
 
 
-def minimum_safe(provider: str, policy: dict, name: str):
-    floors = []
-    for exception in policy.get("exceptions", []):
-        scope, _, package = exception.get("package", "").partition(":")
+def policy_exceptions(
+    provider: str, policy: Mapping[str, object], name: str
+) -> Iterator[adapter_data.AgeException]:
+    for raw in adapter_data.array(
+        policy.get("exceptions", []), "Release age exceptions"
+    ):
+        exception = adapter_data.table(raw, "Release age exception")
+        scope, _, package = adapter_data.text(
+            exception.get("package", ""), "Exception package"
+        ).partition(":")
         if scope != provider or package_name(provider, package) != package_name(
             provider, name
         ):
             continue
-        if not all(
-            exception.get(key)
-            for key in ("version", "minimum_safe", "reason", "advisory", "expires")
-        ):
-            raise ValueError(
-                "Security exceptions require exact version, safe floor, reason, advisory, and expiry"
-            )
-        floor = version(provider, exception["minimum_safe"])
-        admitted = version(provider, exception["version"])
-        timestamp(exception["expires"])
+        yield adapter_data.AgeException.decode(exception)
+
+
+def minimum_safe(provider: str, policy: Mapping[str, object], name: str):
+    floors = []
+    for exception in policy_exceptions(provider, policy, name):
+        floor = version(provider, exception.minimum_safe)
+        admitted = version(provider, exception.version)
+        timestamp(exception.expires)
         if floor is None or admitted is None or admitted < floor:
             raise ValueError("Invalid exception safe floor")
         floors.append(floor)
@@ -435,7 +450,7 @@ def minimum_safe(provider: str, policy: dict, name: str):
 
 
 def latest_publications(releases: list[Release]) -> dict[str, datetime]:
-    dates = {}
+    dates: dict[str, datetime] = {}
     for release in releases:
         dates[release.version] = max(
             dates.get(release.version, release.published), release.published
@@ -475,22 +490,10 @@ def active_exceptions(
     candidates = []
     dates = latest_publications(releases)
     # An exception admits one exact version only while a mature safe version is absent.
-    for exception in policy.get("exceptions", []):
-        scope, _, package = exception.get("package", "").partition(":")
-        if scope != provider or package_name(provider, package) != package_name(
-            provider, name
-        ):
-            continue
-        if not all(
-            exception.get(k)
-            for k in ("version", "minimum_safe", "reason", "advisory", "expires")
-        ):
-            raise ValueError(
-                "Security exceptions require exact version, safe floor, reason, advisory, and expiry"
-            )
-        expiry = timestamp(exception["expires"])
-        safe = version(provider, exception["minimum_safe"])
-        admitted = version(provider, exception["version"])
+    for exception in policy_exceptions(provider, policy, name):
+        expiry = timestamp(exception.expires)
+        safe = version(provider, exception.minimum_safe)
+        admitted = version(provider, exception.version)
         if safe is None or admitted is None or admitted < safe:
             raise ValueError("Invalid exception safe floor")
         if any(version(provider, release.version) >= safe for release in mature):
@@ -499,7 +502,7 @@ def active_exceptions(
             raise ValueError(f"Expired security exception for {name}")
         for release in releases:
             if (
-                release.version == exception["version"]
+                release.version == exception.version
                 and dates[release.version] <= now
                 and version(provider, release.version) >= required_safe
                 and release.python != "unsupported"
@@ -694,7 +697,11 @@ def go_releases(
         # selection or the retirement of a security age exception.
         release = go_info(package, value)
         result.append(release)
-        if policy is not None and maturity("go", [release], policy, package, now):
+        if (
+            policy is not None
+            and now is not None
+            and maturity("go", [release], policy, package, now)
+        ):
             winner = rank
     return result
 
@@ -868,11 +875,12 @@ def docker_releases(repository: str, accepts_tag) -> list[Release]:
                     "" if identity is None else digest(identity),
                 )
             )
-        url = body.get("next")
-        if url is None:
+        next_url = body.get("next")
+        if next_url is None:
             return result
-        if not isinstance(url, str) or not url:
+        if not isinstance(next_url, str) or not next_url:
             raise ValueError("Unexpected Docker Hub pagination target")
+        url = next_url
     raise ValueError("Docker Hub pagination exceeded its bound")
 
 

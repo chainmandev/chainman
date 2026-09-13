@@ -21,7 +21,7 @@ import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,8 +29,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 import chainman
+import adapter_data as data
 import registry
-from dependency_identity import inventory as identity_inventory
+from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
 import updates
 from ruamel.yaml import YAML
@@ -45,7 +46,7 @@ SECTIONS = (
 NAME = r"(?:@[a-z0-9_.~-]+/)?[a-z0-9_.~-]+"
 
 
-def package_name(value):
+def package_name(value: object) -> str:
     if not isinstance(value, str) or not re.fullmatch(NAME, value):
         raise ValueError("Expected a registry package name")
     return value
@@ -94,7 +95,7 @@ def parse_requirement(alias, value):
     return actual, prefix, requirement, simple.group(1) if simple else None
 
 
-def document(path, body):
+def document(path: Path, body: str) -> tuple[dict, Callable[[], str]]:
     if path.suffix == ".json":
         value = json.loads(body)
         whitespace = re.search(r"\n([ \t]+)\"", body)
@@ -118,7 +119,7 @@ def document(path, body):
 @dataclass
 class Pin:
     file: str
-    pointer: tuple
+    pointer: tuple[str, ...]
     alias: str
     name: str
     original: str
@@ -131,7 +132,7 @@ class Pin:
     candidates: list[str] = field(default_factory=list)
     held: bool = False
 
-    def replacement(self, selected):
+    def replacement(self, selected: str) -> str:
         if self.operator is None:
             # Preserve unions, bounded ranges and wildcards. The lock and the
             # post-resolution audit still enforce their selected compatibility.
@@ -148,7 +149,7 @@ def manifest_paths(directory, spec, root_manifest, settings):
         patterns = ["package.json", *[p + "/package.json" for p in workspaces]]
     if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
         raise ValueError("JavaScript manifests must be a list of relative patterns")
-    included, excluded = {"package.json"}, set()
+    included, excluded = {"package.json"}, set[str]()
     for pattern in patterns:
         negative = pattern.startswith("!")
         pattern = pattern.removeprefix("!")
@@ -159,7 +160,7 @@ def manifest_paths(directory, spec, root_manifest, settings):
 
 
 class Workspace:
-    def __init__(self, root, spec):
+    def __init__(self, root: Path, spec: dict) -> None:
         self.root, self.spec = root, spec
         self.directory = tc.contained(root, spec.get("directory", "."))
         self.manager = spec.get("manager", "pnpm")
@@ -167,10 +168,15 @@ class Workspace:
             raise ValueError("JavaScript manager must be npm or pnpm")
         self.workspace = spec.get("workspace", "pnpm-workspace.yaml")
         self.lock = "package-lock.json" if self.manager == "npm" else "pnpm-lock.yaml"
-        self.documents, self.original, self.modes = {}, {}, {}
-        self.pins, self.refs, self.locals = [], {}, {}
-        self.duplicates = []
-        self.patches = {}
+        self.documents: dict[str, tuple[dict, Callable[[], str]]] = {}
+        self.original: dict[str, bytes] = {}
+        self.modes: dict[str, int] = {}
+        self.pins: list[Pin] = []
+        self.refs: dict[str, dict[str, int]] = {}
+        self.locals: dict[str, str] = {}
+        self.duplicates: list[tuple[int, int]] = []
+        self.patches: dict[str, str] = {}
+        self.source_contents: dict[str, dict] = {}
         root_manifest = self.load("package.json")
         workspace_path = tc.contained(self.directory, self.workspace)
         self.settings = (
@@ -201,8 +207,8 @@ class Workspace:
                 if content["name"] in self.locals:
                     raise ValueError("Duplicate local workspace package name")
                 self.locals[content["name"]] = path
-        for name, content in list(self.documents.items()):
-            value = content[0]
+        for name, loaded in list(self.documents.items()):
+            value = loaded[0]
             patched = (
                 value.get("patchedDependencies", {})
                 if name == self.workspace
@@ -233,7 +239,7 @@ class Workspace:
 
             javascript_sources.configured(self)
 
-    def apply_held(self):
+    def apply_held(self) -> None:
         for rule in self.spec.get("held_dependencies", []):
             if (
                 set(rule) != {"manifest", "package", "reason"}
@@ -252,7 +258,7 @@ class Workspace:
             for pin in matches:
                 pin.held = True
 
-    def keep(self, relative):
+    def keep(self, relative: str) -> bytes:
         path = tc.contained(self.directory, relative)
         data = tc.regular_input(self.directory, relative)
         if len(data) > 16 * 1024 * 1024:
@@ -261,7 +267,7 @@ class Workspace:
         self.modes[relative] = path.stat().st_mode & 0o777
         return data
 
-    def load(self, relative):
+    def load(self, relative: str) -> dict:
         if relative not in self.documents:
             self.documents[relative] = document(
                 Path(relative), self.keep(relative).decode()
@@ -273,7 +279,16 @@ class Workspace:
             )
         return result
 
-    def add(self, file, pointer, alias, value, *, catalog=None, user=None):
+    def add(
+        self,
+        file: str,
+        pointer: Sequence[str],
+        alias: str,
+        value: str,
+        *,
+        catalog: str | None = None,
+        user: str | None = None,
+    ) -> int | None:
         if isinstance(value, str) and value.startswith(
             ("file:", "link:", "workspace:")
         ):
@@ -306,7 +321,7 @@ class Workspace:
         self.pins.append(pin)
         return len(self.pins) - 1
 
-    def local_manifest(self, alias, value, base="."):
+    def local_manifest(self, alias: str, value: str, base: str = ".") -> str:
         """Bind local declarations to the explicitly included workspace inputs."""
         protocol, _, relative = value.partition(":")
         if protocol == "workspace" and not relative.startswith((".", "/")):
@@ -317,9 +332,11 @@ class Workspace:
                 )
             version = self.documents[manifest][0].get("version")
             requirement = "*" if relative in ("*", "^", "~") else relative
-            if registry.lock_version("npm", version) is None or Version(
-                version
-            ) not in NpmSpec(requirement):
+            if (
+                not isinstance(version, str)
+                or registry.lock_version("npm", version) is None
+                or Version(version) not in NpmSpec(requirement)
+            ):
                 raise ValueError(
                     "Workspace dependency violates the declared local version"
                 )
@@ -337,7 +354,7 @@ class Workspace:
             )
         return manifest
 
-    def discover(self):
+    def discover(self) -> None:
         catalogs = {}
         for name, entries in [
             ("default", self.settings.get("catalog", {})),
@@ -390,7 +407,9 @@ class Workspace:
                 self.workspace, ("overrides", selector), selector, requirement
             )
 
-    def override(self, file, pointer, selector, requirement):
+    def override(
+        self, file: str, pointer: Sequence[str], selector: str, requirement: str
+    ) -> None:
         if self.spec.get("retained_sources"):
             import javascript_sources
 
@@ -405,7 +424,13 @@ class Workspace:
             NpmSpec(match[2])
         self.add(file, pointer, match[1], requirement)
 
-    def npm_overrides(self, file, pointer, table, parent=None):
+    def npm_overrides(
+        self,
+        file: str,
+        pointer: Sequence[str],
+        table: Mapping,
+        parent: str | None = None,
+    ) -> None:
         for selector, requirement in table.items():
             target = parent if selector == "." else selector
             match = re.fullmatch(rf"({NAME})(?:@(.+))?", target or "")
@@ -416,7 +441,9 @@ class Workspace:
             else:
                 self.add(file, (*pointer, selector), match[1], requirement)
 
-    def render(self, selected, *, resolver_pins=False):
+    def render(
+        self, selected: Sequence[str], *, resolver_pins: bool = False
+    ) -> dict[str, bytes]:
         # An empty selection serializes existing declarations without repinning.
         for pin, version in zip(self.pins, selected, strict=False):
             table = self.documents[pin.file][0]
@@ -434,28 +461,35 @@ class Workspace:
 
 
 class Evidence:
-    def __init__(self, policy, now):
+    def __init__(self, policy: dict, now: datetime) -> None:
         if now.tzinfo is None:
             raise ValueError("JavaScript update time requires a timezone")
         registry.minimum_age(policy)
-        self.policy, self.now, self.cache = policy, now, {}
+        self.policy, self.now = policy, now
+        self.cache: dict[str, tuple[list[registry.Release], dict[str, object]]] = {}
+        self.baseline: set[Identity] = set()
 
-    def get(self, name):
+    def get(self, name: str) -> tuple[list[registry.Release], dict[str, object]]:
         package_name(name)
         if name not in self.cache:
-            body = registry.data(f"https://registry.npmjs.org/{quote(name, safe='')}")
+            body = data.table(
+                registry.data(f"https://registry.npmjs.org/{quote(name, safe='')}"),
+                "Registry package metadata",
+            )
             if body.get("name") != name:
                 raise ValueError("Registry package identity disagrees with its request")
             releases = registry.releases(
                 "npm", name, include_prerelease=True, include_deprecated=True
             )
-            versions = body.get("versions", {})
+            versions = data.table(body.get("versions", {}), "Registry versions")
             for release in releases:
                 if release.version not in versions:
                     raise ValueError(
                         "Registry release metadata disagrees with its manifest"
                     )
-                info = versions[release.version]
+                info = data.table(
+                    versions[release.version], "Registry version manifest"
+                )
                 if info.get("name") != name or info.get("version") != release.version:
                     raise ValueError("Registry version manifest identity mismatch")
             # Baseline maturity checks visit every transitive package. Keep the
@@ -482,7 +516,9 @@ class Evidence:
             self.cache[name] = releases, dependency_versions
         return self.cache[name]
 
-    def peers(self, name, version, *, manifest=None):
+    def peers(
+        self, name: str, version: str, *, manifest: str | None = None
+    ) -> tuple[dict[str, str], dict[str, data.PeerMetadata]]:
         info = self.get(name)[1].get(version)
         if not isinstance(info, Mapping):
             raise ValueError("Selected package lacks registry dependency metadata")
@@ -498,10 +534,10 @@ class Evidence:
                 self.policy.get("javascript", {}), manifest, name, peer
             ):
                 NpmSpec(value)
-        return peers, info.get("peerDependenciesMeta", {})
+        return peers, data.peer_metadata(info.get("peerDependenciesMeta", {}))
 
 
-def peer_range(value):
+def peer_range(value: object) -> str:
     # npm permits whitespace after comparators; semantic_version does not.
     # Preserve token boundaries and leave all other syntax to its strict parser.
     if not isinstance(value, str):
@@ -509,7 +545,7 @@ def peer_range(value):
     return re.sub(r"(?<=[<>=~^])\s+(?=[v0-9xX*])", "", value)
 
 
-def peer_ignored(options, manifest, source, peer):
+def peer_ignored(options: dict, manifest: str, source: str, peer: str) -> bool:
     ignored = False
     for rule in options.get("peer_exceptions", []):
         if (
@@ -848,7 +884,7 @@ def plan(workspace, policy, now, *, before=None):
 def solve(workspace, evidence, options, initial=None):
     ceiling = bounded(options, "solver_states", 256, 4096)
     initial = initial or tuple(pin.candidates[0] for pin in workspace.pins)
-    visited = set()
+    visited: set[tuple[str, ...]] = set()
     metadata_error = None
     # A baseline is fixed for this solve. Index availability once; the final
     # artifact audit separately binds every selected URL and digest.
@@ -895,9 +931,9 @@ def solve(workspace, evidence, options, initial=None):
                 for candidate in workspace.pins[index].candidates:
                     if candidate == selected[index]:
                         continue
-                    revised = list(selected)
-                    revised[index] = candidate
-                    revised = tuple(revised)
+                    revised_values = list(selected)
+                    revised_values[index] = candidate
+                    revised = tuple(revised_values)
                     if revised in visited:
                         continue
                     if direct:
@@ -1350,7 +1386,7 @@ def audit_peers(workspace, evidence, options):
     packages, snapshots = lock.get("packages", {}), lock.get("snapshots", {})
     if not str(lock.get("lockfileVersion", "")).startswith("9"):
         raise ValueError("JavaScript peer audit requires pnpm lockfile version 9")
-    scopes = {}
+    scopes: dict[tuple[str, str], list[str]] = {}
     for importer, info in lock.get("importers", {}).items():
         manifest = "package.json" if importer == "." else importer + "/package.json"
         if manifest not in workspace.manifests:
@@ -1527,7 +1563,7 @@ def audit_artifacts(workspace, before, policy, now, scopes):
     identities = locked_identities(workspace)
     old = identity_inventory(before["identities"])
     exclusions = set()
-    groups = {}
+    groups: dict[tuple[str, tuple[str, ...]], set[Identity]] = {}
     for identity in identities:
         provider, name, version, *_ = identity
         bounds = list(scopes.get((name, version), [])) if provider == "npm" else []
@@ -1539,8 +1575,8 @@ def audit_artifacts(workspace, before, policy, now, scopes):
                     bounds.append(rule_range(rule))
         key = (name if bounds else "", tuple(sorted(set(bounds))))
         groups.setdefault(key, set()).add(identity)
-    for (name, bounds), group in groups.items():
-        scoped = scoped_policy(policy, name, bounds) if bounds else policy
+    for (name, group_bounds), group in groups.items():
+        scoped = scoped_policy(policy, name, group_bounds) if group_bounds else policy
         updates.audit_identities(workspace.root, group, old, scoped, now)
         for identity in group:
             if identity[0] != "npm":
@@ -1696,11 +1732,11 @@ def normalization_graph(lock):
     for importer in graph.get("importers", {}).values():
         for section in SECTIONS:
             for entry in importer.get(section, {}).values():
-                if isinstance(entry, Mapping):
+                if isinstance(entry, MutableMapping):
                     entry.pop("specifier", None)
     for catalog in graph.get("catalogs", {}).values():
         for entry in catalog.values():
-            if isinstance(entry, Mapping):
+            if isinstance(entry, MutableMapping):
                 entry.pop("specifier", None)
     return graph
 
@@ -1726,7 +1762,7 @@ def resolve(root: Path, spec: dict, policy: dict, now: datetime) -> dict:
         workspace.settings = workspace.documents[workspace.workspace][0]
     workspace.settings["minimumReleaseAge"] = registry.minimum_age(policy) * 1440
     workspace.settings["minimumReleaseAgeIgnoreMissingTime"] = False
-    excludes = []
+    excludes: list[str] = []
     for exception in policy.get("exceptions", []):
         provider, _, name = exception.get("package", "").partition(":")
         if provider == "npm":

@@ -99,6 +99,55 @@ class JavaScriptTests(unittest.TestCase):
             for pin, version in zip(workspace.pins, selected, strict=True)
         }
 
+    def test_malformed_peer_metadata_rejects_candidate_and_tries_valid_release(self):
+        self.manifest("package.json", {"renderer": "^1.0.0"})
+        self.release("renderer", "1.0.0")
+        self.release("renderer", "1.5.0", peers={"runtime": "^1"})
+        for invalid in (
+            None,
+            [],
+            False,
+            {"runtime": None},
+            {"runtime": []},
+            {"runtime": {"optional": "true"}},
+            {"runtime": {"optional": 1}},
+        ):
+            with self.subTest(metadata=invalid):
+                self.metadata["renderer"]["versions"]["1.5.0"][
+                    "peerDependenciesMeta"
+                ] = invalid
+                original = (self.root / "package.json").read_bytes()
+                _, selected = self.selected()
+                self.assertEqual(selected, {"renderer": "1.0.0"})
+                self.assertEqual((self.root / "package.json").read_bytes(), original)
+
+    def test_unused_older_peer_metadata_does_not_poison_valid_selection(self):
+        self.manifest("package.json", {"renderer": "^1.0.0"})
+        self.release("renderer", "1.0.0", peers={"runtime": "^1"})
+        self.metadata["renderer"]["versions"]["1.0.0"]["peerDependenciesMeta"] = None
+        self.release(
+            "renderer",
+            "1.5.0",
+            peers={"runtime": "^1"},
+            optional={
+                "runtime": {"optional": True, "futureMetadata": "retained upstream"}
+            },
+        )
+        _, selected = self.selected()
+        self.assertEqual(selected, {"renderer": "1.5.0"})
+
+    def test_required_peer_is_not_made_optional_by_metadata_projection(self):
+        self.manifest("package.json", {"renderer": "1.0.0"})
+        self.release(
+            "renderer",
+            "1.0.0",
+            peers={"runtime": "^1"},
+            optional={"runtime": {"optional": False}},
+        )
+        self.release("runtime", "2.0.0")
+        with self.assertRaisesRegex(ValueError, "peer"):
+            self.selected()
+
     def test_many_peer_alternatives_preserve_the_conjunction_without_expansion(self):
         bounds = [
             ">=5.0.0 <6.0.0",
