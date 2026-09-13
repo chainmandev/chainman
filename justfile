@@ -83,6 +83,9 @@ javascript-test:
 python-test:
     @./scripts/enter.sh python env CHAINMAN_TEST_UV=1 python3 -B -m unittest discover -s tests -p test_python_native.py -v
 
+gradle-test:
+    @./scripts/enter.sh compose env CHAINMAN_TEST_GRADLE=1 python3 -B -m unittest discover -s tests -p test_gradle_resolution.py -v
+
 # Static consumer validation; never executes project workflows.
 consumer-check +args:
     @./scripts/enter.sh core python3 scripts/consumer_contract.py "$@"

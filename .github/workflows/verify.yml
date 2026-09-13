@@ -79,3 +79,6 @@ jobs:
       - name: Qualify native Python update validation
         if: matrix.mode == 'host-nix' && matrix.module == 'python'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- python-test
+      - name: Qualify native Gradle update validation
+        if: matrix.mode == 'host-nix' && matrix.module == 'compose'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- gradle-test

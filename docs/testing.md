@@ -105,6 +105,12 @@ millisecond. Chainman retains uv's conservative behavior. See the
 [pinned uv comparison](https://github.com/astral-sh/uv/blob/0.12.5/crates/uv-resolver/src/version_map.rs#L524-L528).
 
 The public bootstrap suite includes real host-Nix update/recovery lifecycles.
+`just gradle-test` enables the existing offline native Gradle fixture suite and
+runs in the compose job of the deliberate CI workflow. It checks child-project
+transitive locks, native composite-build source bindings, read-only inspection,
+resolution failure and termination of the build JVM. Building the Compose example
+and qualifying Chainman's Gradle adapter are separate checks.
+
 Container-engine and native controller tests have separate prerequisites/gates;
 skipped tests provide no evidence about those paths. Linux success does not
 establish macOS success.

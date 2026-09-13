@@ -64,6 +64,7 @@ just module rust verify
 just module javascript verify
 just javascript-test
 just python-test
+just gradle-test
 just bootstrap-test docker
 just bootstrap-test podman
 just release
@@ -83,6 +84,9 @@ and requires no public registry downloads.
 `just python-test` uses pinned uv with a disposable loopback package index and
 real fixture wheels to check maturity cutoffs, transitive resolution, no-op
 retention and manifest/lock consistency. It requires no public registry downloads.
+`just gradle-test` uses pinned Gradle with disposable offline Maven and composite
+build fixtures to check transitive locks, local source bindings, read-only graph
+inspection and build JVM lifetime.
 Optional modules cover JavaScript/TypeScript, Rust, Python, Go, Flutter/Dart,
 SwiftPM/SwiftUI and Gradle/Compose. They are loaded only when requested. The manually
 dispatched workflow contains portable and native Apple lanes; running one lane is
