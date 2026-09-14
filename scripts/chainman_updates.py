@@ -251,9 +251,12 @@ def validate_runtime(runtime: Path, version: str) -> None:
         raise ValueError("Candidate VERSION does not match release metadata")
 
 
-def release_assets(
-    selected: registry.Release, policy: Mapping[str, object], now: datetime
-) -> tuple[object, bytes, str]:
+def published_assets(
+    selected: registry.Release,
+    policy: Mapping[str, object],
+    now: datetime,
+    names: tuple[str, ...],
+) -> tuple[dict[str, bytes], str]:
     """Bind release maturity to the exact server-dated assets before execution."""
     repository = "chainmandev/chainman"
     api = f"https://api.github.com/repos/{repository}"
@@ -263,15 +266,17 @@ def release_assets(
         or release.get("tag_name") != selected.version
         or release.get("draft") is not False
         or release.get("prerelease") is not False
+        or release.get("immutable") is not True
         or registry.timestamp(release.get("published_at")) != selected.published
         or not isinstance(release.get("assets"), list)
     ):
-        raise ValueError("Runtime release changed or lacks publication evidence")
+        raise ValueError(
+            "Runtime release must be immutable and retain its publication evidence"
+        )
     revision = registry.github_commit(repository, selected.version)
     published = max(
         selected.published, source_updates.commit_time(repository, revision)
     )
-    names = ("chainman-release.json", f"chainman-{selected.version.lstrip('v')}.tar.gz")
     assets: dict[str, ReleaseAsset] = {}
     for name in names:
         matches = [
@@ -306,21 +311,33 @@ def release_assets(
         repository,
         now,
     )
-    bodies = []
+    bodies = {}
     for name in names:
         asset = assets[name]
+        # Public assets may redirect to GitHub's download host. Request them
+        # anonymously from the outset; authenticated metadata stays no-redirect.
         body = registry.fetch(
-            f"{api}/releases/assets/{asset['id']}", accept="application/octet-stream"
+            f"{api}/releases/assets/{asset['id']}",
+            accept="application/octet-stream",
+            anonymous=True,
         )[0]
         if (
             len(body) != asset["size"]
             or "sha256:" + hashlib.sha256(body).hexdigest() != asset["digest"]
         ):
             raise ValueError("Runtime asset bytes differ from dated release identity")
-        bodies.append(body)
+        bodies[name] = body
     if registry.github_commit(repository, selected.version, fresh=True) != revision:
         raise ValueError("Runtime release tag changed during download")
-    return json.loads(bodies[0]), bodies[1], revision
+    return bodies, revision
+
+
+def release_assets(
+    selected: registry.Release, policy: Mapping[str, object], now: datetime
+) -> tuple[object, bytes, str]:
+    names = ("chainman-release.json", f"chainman-{selected.version.lstrip('v')}.tar.gz")
+    bodies, revision = published_assets(selected, policy, now, names)
+    return json.loads(bodies[names[0]]), bodies[names[1]], revision
 
 
 def runtime_candidate(

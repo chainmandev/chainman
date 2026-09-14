@@ -39,9 +39,8 @@ def check(
         if pin.get(field) != release[field]:
             raise ValueError(f"Consumer runtime {field} differs from the candidate")
     bundle = pin.get("bundled_archive")
-    if (
-        not bundle
-        or hashlib.sha256(
+    if bundle and (
+        hashlib.sha256(
             tc.regular_input(root, text(bundle, "Runtime bundle"))
         ).hexdigest()
         != release["archive_sha256"]

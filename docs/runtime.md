@@ -1,5 +1,20 @@
 # Runtime and distribution contract
 
+[Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
+
+## Installation and trust at a glance
+
+`just init DEST VERSION` from a source checkout performs explicit adoption of an
+immutable public release. New consumers carry URL-only locks. Automatic runtime
+selection also requires immutability and applies the project's minimum age policy;
+ordinary launches verify the committed NAR hash without querying release metadata.
+The checked-in launcher and lock are therefore reviewable trust inputs. Hashes
+detect changes relative to that pin; they do not independently establish who wrote
+the source. Build and release attestations add optional provenance evidence.
+See [publication and attestation verification](releasing.md).
+
+## Runtime source and bootstrap
+
 For an adopted repository, project shells use the local Git flake source: tracked
 working-tree edits are visible, while untracked package downloads and build caches
 stay out of the Nix store. Add new flake inputs to Git before importing them. Copies
@@ -256,22 +271,21 @@ build products. The consumer generator verifies both flat archive checksum and N
 hash before copying templates and examples. The release emits a runtime archive and a separately hashed source archive.
 Development tests, examples, templates and authoring utilities belong to the source
 archive. The consumer generator verifies both products and their shared file
-identities; every generated consumer bundles only the runtime archive at `vendor/chainman/chainman.tar.gz`. Remove that optional file
-and its lock field only after its pinned public URL is available.
+identities. Generated consumers retain the release URL and NAR hash, without
+checking an archive into the project. Older bundled consumers remain supported;
+remove their archive and lock field only after migrating to a published pin.
 
 Disposable update and staged-format repositories disable Git's automatic
 maintenance. Their administrative directories are hashed as transaction inputs,
 so a detached repack must not race that identity read or outlive cleanup.
 
-`just release` builds a local candidate; it does not authorize publication.
-`just control-release-check` enforces at least 30 days of maturity for the native
-backend inputs recorded in `nix/control-sources.json`. Process Compose 1.122.0 is
-the candidate because it fixes stopping processes waiting on dependencies; its
-publication gate opens on 2026-09-16 at 23:01:55 UTC. Qualification may run before
-that date, but publication must not bypass the gate. `just control-test` exercises
-the actual pinned backend and cross-compiles the ownership adapter for all four
-targets. Cross-compilation does not substitute for execution on each supported OS
-and engine.
+`just release` builds a local candidate. Publication requires qualification of
+the exact source and complete immutable release assets, without a separate
+backend waiting period. Backend versions, provenance and hashes remain recorded
+in `nix/control-sources.json`. `just control-test` exercises the pinned backend
+and cross-compiles the ownership adapter for all four targets. Cross-compilation
+does not substitute for execution on each supported OS and engine. Automatic
+dependency updates retain their configurable release-age policy.
 
 For Just shebang recipes, use
 `#!/usr/bin/env -S ./scripts/chainman.sh script` (optionally adding

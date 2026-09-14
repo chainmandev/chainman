@@ -1,5 +1,7 @@
 # Python reliability and test evidence
 
+[Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
+
 ## Development gates
 
 Use `just verify` for the complete core gate. `just type-check` runs its mypy

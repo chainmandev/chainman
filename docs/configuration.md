@@ -1,8 +1,49 @@
 # Project configuration
 
+[Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
+
 A consumer checks in `chainman.toml`, `chainman.lock`, the two bootstrap companions,
-and a small `justfile` adapter. Configuration schema is 1. A minimal existing-project
-configuration is:
+and a small `justfile` adapter. **New projects use schema 3.** Profiles select the
+environment, setup groups declare frozen installation and readiness, tasks run
+commands and acquire services, and recipe bindings expose the public commands.
+
+```toml
+schema = 3
+
+[project]
+default_profile = "default"
+
+[profiles.default]
+runtime_profile = "core" # Or a project-owned shell: flake = "nix#default"
+
+[tasks.check]
+commands = [["python3", "-m", "unittest", "discover", "-s", "tests"]]
+
+[recipes]
+verify = ["check"]
+verify-lite = ["check"]
+
+[updates]
+minimum_age_days = 30
+verify_task = "check"
+```
+
+Use [getting started](getting-started.md#existing-projects) to generate and import
+the recipe facade. Run `just config validate`, `just config show --json`, or
+`just explain check --json` to inspect declarations before executing them.
+Schema 3 also supports reusable [templates and composition](composition.md).
+
+## Reference map
+
+- [Legacy schema-1 commands](#legacy-schema-1-commands)
+- [Named setup groups and tasks](#named-setup-groups-and-tasks)
+- [Services](#services), including readiness and lifecycle ownership
+- [Recipe bindings](recipes.md) and [dependency updates](updates.md)
+
+## Legacy schema-1 commands
+
+Schema 1 remains accepted for older consumers. Its command hooks below are a
+compatibility interface; use named tasks in schema 3 for new integrations:
 
 ```toml
 schema = 1
@@ -59,6 +100,12 @@ it can dispatch a successor request. Other origins retain anonymous transport;
 authentication errors never fall back to anonymous requests. Existing request,
 retry, maturity and immutable-source audit bounds remain in force. Authentication
 does not guarantee quota availability.
+
+Public Chainman asset bytes are requested anonymously from the outset, including
+when metadata uses a token. GitHub can redirect those downloads to its asset host;
+no credential accompanies either request. Asset IDs, sizes and digests still bind
+the downloaded bytes to the validated release. Authenticated metadata requests
+retain their no-redirect rule; an authentication failure is never retried anonymously.
 
 Host mode inherits the explicitly supplied variable. Container callers can select
 `environment.pass = ["GITHUB_TOKEN"]`; the existing forwarding passes its name,
@@ -158,12 +205,13 @@ directory are supported. Newlines and ambiguous container comma-paths are reject
 `CHAINMAN_ARCHIVE` selects a local archive override, but its contents must still
 match the committed lock hash. Mode changes inside an active shell are rejected.
 
-Schema 2 introduces named setup groups and tasks. Schema 1 remains accepted while
-initial consumers are converted. Inputs and artifacts are relative to the project;
+## Named setup groups and tasks
+
+Schemas 2 and 3 support named setup groups and tasks. Inputs and artifacts are relative to the project;
 `directory` changes only the command working directory. For example:
 
 ```toml
-schema = 2
+schema = 3
 [project]
 default_profile = "default"
 [profiles.default]
@@ -271,7 +319,9 @@ affinity and cgroup-v2 ancestor limits, with v1 memory-limit support. macOS uses
 available CPU count and physical memory. These are concurrency hints rather than
 memory isolation. Workflows without a resource declaration perform no resource probe.
 
-Schema 2 service workflows use the checked-in host launcher. A task's `services`
+## Services
+
+Service workflows in schemas 2 and 3 use the checked-in host launcher. A task's `services`
 array selects services and their declared dependencies. Each service declares one
 argument-array `command` with a `profile`, or a digest-pinned `container`. Optional
 `setup` groups hold shared artifact leases for the entire service lifetime.

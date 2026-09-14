@@ -132,7 +132,6 @@ def create(destination: Path, metadata_path: Path) -> dict[str, str | int]:
             )
     selected["scripts/chainman.sh"] = files["bootstrap/chainman.sh"]
     selected["scripts/chainman-fetch.nix"] = files["bootstrap/fetch.nix"]
-    selected["vendor/chainman/chainman.tar.gz"] = body, 0o644
     # Container image updates belong to the managed bootstrap/runtime release.
     dependency_body, mode = selected["dependencies.toml"]
     dependencies = tomlkit.parse(dependency_body.decode())
@@ -148,13 +147,13 @@ def create(destination: Path, metadata_path: Path) -> dict[str, str | int]:
         pin
         for pin in dependencies.get("pins", [])
         if not pin["file"].startswith("template/")
+        and pin["file"] != ".github/workflows/release.yml"
     ]
     selected["dependencies.toml"] = tomlkit.dumps(dependencies).encode(), mode
     lock = {
         key: metadata[key]
         for key in ("schema", "version", "revision", "url", "narHash")
     }
-    lock["bundled_archive"] = "vendor/chainman/chainman.tar.gz"
     selected["chainman.lock"] = (json.dumps(lock, indent=2) + "\n").encode(), 0o644
     for name, (data, mode) in sorted(selected.items()):
         path = destination / name

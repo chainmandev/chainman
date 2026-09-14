@@ -120,16 +120,45 @@ class SelfUpdateTests(unittest.TestCase):
             "tag_name": "v2.0.0",
             "draft": False,
             "prerelease": False,
+            "immutable": True,
             "published_at": self.release_date,
             "assets": assets,
         }
 
     def fetch_asset(self, url, **kwargs):
-        self.assertEqual(kwargs, {"accept": "application/octet-stream"})
+        self.assertEqual(
+            kwargs, {"accept": "application/octet-stream", "anonymous": True}
+        )
         if url.endswith("/releases/assets/1"):
             return json.dumps(self.metadata).encode(), {}
         self.assertTrue(url.endswith("/releases/assets/2"))
         return self.body, {}
+
+    def test_mutable_release_is_rejected_before_candidate_evaluation(self):
+        response = self.release_response(
+            "https://api.github.com/repos/chainmandev/chainman/releases/tags/v2.0.0"
+        )
+        for value in (False, None, "true", 1):
+            with (
+                self.subTest(immutable=value),
+                patch("registry.data", return_value={**response, "immutable": value}),
+                patch.object(subject, "fetch_runtime") as evaluate,
+            ):
+                with self.assertRaisesRegex(ValueError, "immutable"):
+                    self.run_apply(lambda *_: self.fail("candidate executed"))
+                evaluate.assert_not_called()
+                self.assertEqual(self.managed(), self.before)
+
+    def test_url_only_update_does_not_create_a_bundle(self):
+        pin = dict(self.old_lock)
+        del pin["bundled_archive"]
+        (self.root / "chainman.lock").write_text(json.dumps(pin))
+        (self.root / "bundle.tar.gz").unlink()
+        self.run_apply(lambda *_: None)
+        result = json.loads((self.root / "chainman.lock").read_text())
+        self.assertEqual(result["version"], "2.0.0")
+        self.assertNotIn("bundled_archive", result)
+        self.assertFalse((self.root / "bundle.tar.gz").exists())
 
     def test_old_release_cannot_admit_young_or_undated_replacement_assets(self):
         for number in (1, 2):
@@ -572,6 +601,7 @@ class FreshReleaseTagTests(unittest.TestCase):
             "tag_name": "v2.0.0",
             "draft": False,
             "prerelease": False,
+            "immutable": True,
             "published_at": self.date,
             "assets": [
                 {

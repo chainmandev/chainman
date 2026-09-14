@@ -272,6 +272,7 @@ def _fetch(
     method: str = "GET",
     *,
     fresh: bool = False,
+    anonymous: bool = False,
 ) -> tuple[bytes, dict[str, str]]:
     token = github_token()
     parsed = urlparse(url)
@@ -283,11 +284,15 @@ def _fetch(
     ):
         raise ValueError("Registry requests require credential-free HTTPS URLs")
     try:
-        authenticated = bool(token) and (
-            parsed.hostname == "api.github.com"
-            and parsed.username is None
-            and parsed.password is None
-            and parsed.port in (None, 443)
+        authenticated = (
+            not anonymous
+            and bool(token)
+            and (
+                parsed.hostname == "api.github.com"
+                and parsed.username is None
+                and parsed.password is None
+                and parsed.port in (None, 443)
+            )
         )
     except ValueError:
         raise ValueError("Registry URL has an invalid port") from None
@@ -350,17 +355,27 @@ def _fetch(
 
 @lru_cache(maxsize=2048)
 def _cached_fetch(
-    url: str, accept: str = "application/json", method: str = "GET"
+    url: str,
+    accept: str = "application/json",
+    method: str = "GET",
+    anonymous: bool = False,
 ) -> tuple[bytes, dict[str, str]]:
+    if anonymous:
+        return _fetch(url, accept, method, anonymous=True)
     return _fetch(url, accept, method)
 
 
 class RegistryFetch:
     def __call__(
-        self, url: str, accept: str = "application/json", method: str = "GET"
+        self,
+        url: str,
+        accept: str = "application/json",
+        method: str = "GET",
+        *,
+        anonymous: bool = False,
     ) -> tuple[bytes, dict[str, str]]:
         github_token()  # Check before a cache hit can return the command's evidence.
-        return _cached_fetch(url, accept, method)
+        return _cached_fetch(url, accept, method, anonymous)
 
     # Clearing metadata never resets the command's credential context.
     cache_clear = staticmethod(_cached_fetch.cache_clear)

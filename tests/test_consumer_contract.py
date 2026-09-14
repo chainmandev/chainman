@@ -66,6 +66,16 @@ class ConsumerContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "archive"):
             consumer_contract.check(self.root, self.release)
 
+    def test_url_only_pin_and_copies_require_no_archive(self):
+        for root in (self.root, self.root / "copy"):
+            pin = json.loads((root / "chainman.lock").read_text())
+            del pin["bundled_archive"]
+            (root / "chainman.lock").write_text(json.dumps(pin))
+            (root / "bundle.tar.gz").unlink()
+        result = consumer_contract.check(self.root, self.release)
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["runtime_files"], 6)
+
     def test_copy_mode_drift_rejected(self):
         (self.root / "copy/scripts/chainman.sh").chmod(0o644)
         with self.assertRaisesRegex(ValueError, "copy differs"):

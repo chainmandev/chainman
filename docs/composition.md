@@ -1,5 +1,7 @@
 # Explicit configuration composition
 
+[Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
+
 Schema 3 adds reusable declarations while retaining explicit task and service
 names. Schema 1 and 2 consumers keep their existing behavior. They must opt into
 schema 3 before using `templates` or `extends`.
@@ -87,7 +89,7 @@ just consumer-check --release dist/release/chainman-release.json /path/to/consum
 ```
 
 The check validates effective declarations, the selected release identity,
-bundled archive digest, bootstrap bytes/modes, and every declared runtime copy.
+optional legacy bundled archive digest, bootstrap bytes/modes, and every declared runtime copy.
 It never executes consumer workflows. `--baselines file.json` additionally
 compares effective declarations with an explicit mapping from absolute
 `chainman.toml` paths to parsed pre-migration configurations. Only the input

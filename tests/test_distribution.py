@@ -116,9 +116,10 @@ class DistributionTests(unittest.TestCase):
             self.assertEqual(
                 (destination / "flake.nix").read_bytes(), b"import verified runtime"
             )
-            self.assertEqual(
-                (destination / "vendor/chainman/chainman.tar.gz").read_bytes(), body
-            )
+            self.assertFalse((destination / "vendor").exists())
+            pin = json.loads((destination / "chainman.lock").read_text())
+            self.assertNotIn("bundled_archive", pin)
+            self.assertEqual(pin["narHash"], metadata["narHash"])
             self.assertEqual(
                 example.tomlkit.parse((destination / "dependencies.toml").read_text())[
                     "nix"

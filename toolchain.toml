@@ -10,7 +10,7 @@ automatic_prune = true
 [updates]
 minimum_age_days = 30
 # Only these files may change during the update transaction.
-outputs = ["nix/flake.lock", "nix/container-image.txt", "bootstrap/chainman.sh", ".github/workflows/verify.yml", "template/.github/workflows/verify.yml"]
+outputs = ["nix/flake.lock", "nix/container-image.txt", "bootstrap/chainman.sh", ".github/workflows/verify.yml", ".github/workflows/release.yml", "template/.github/workflows/verify.yml"]
 # Additional pins and ecosystem lock audits live in dependencies.toml.
 
 [ci]

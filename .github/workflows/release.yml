@@ -1,0 +1,91 @@
+name: Publish immutable Chainman release
+"on":
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Numeric release version matching VERSION (for example 0.1.0)
+        required: true
+        type: string
+      candidate_sha:
+        description: Full commit at the selected workflow ref
+        required: true
+        type: string
+      immutability_enabled:
+        description: Repository Settings / Releases / Enable release immutability is enabled
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: chainman-release-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  qualify:
+    if: github.repository == 'chainmandev/chainman' && inputs.immutability_enabled
+    uses: ./.github/workflows/verify.yml
+    with:
+      candidate_sha: ${{ inputs.candidate_sha }}
+      release_version: ${{ inputs.version }}
+  publish:
+    needs: qualify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ inputs.version }}
+      EXPECTED: ${{ inputs.candidate_sha }}
+      GH_REPO: chainmandev/chainman
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Confirm exact source and version
+        env:
+          EVENT: ${{ github.sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$EVENT" = "$EXPECTED"
+          test "$(cat VERSION)" = "$VERSION"
+          test -z "$(git status --porcelain)"
+      - name: Build reproducible artifacts twice
+        run: |
+          set -eu
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- release
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- release dist/release-repeat
+          diff -r dist/release dist/release-repeat
+      - name: Attest the complete release
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/release/*
+      - name: Upload complete draft and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # shellcheck disable=SC2016
+          nix --extra-experimental-features 'nix-command flakes' develop path:./nix#release --no-write-lock-file --command sh -eu -c '
+            gh release create "v$VERSION" --repo "$GH_REPO" --target "$EXPECTED" --draft \
+              --title "Chainman v$VERSION" --notes-file docs/release-notes.md
+            gh release upload "v$VERSION" --repo "$GH_REPO" dist/release/*
+            gh release edit "v$VERSION" --repo "$GH_REPO" --draft=false --latest
+            test "$(gh api "repos/$GH_REPO/releases/tags/v$VERSION" --jq .immutable)" = true
+            gh release verify "v$VERSION" --repo "$GH_REPO"
+            for asset in dist/release/*; do
+              gh release verify-asset "v$VERSION" "$asset" --repo "$GH_REPO"
+            done
+          '
+      - name: Qualify public installation and starter
+        env:
+          CHAINMAN_MODE: host-nix
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- init "$RUNNER_TEMP/released-consumer" "$VERSION"
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/released-consumer/justfile" setup
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/released-consumer/justfile" verify

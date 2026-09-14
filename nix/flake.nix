@@ -135,6 +135,7 @@
           # a C compiler. Language toolchains still come from the chosen profile.
           bootstrap = shellWith pkgs.mkShellNoCC runtimeBase "bootstrap" [ ] "";
           updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ ] "";
+          release = shellWith pkgs.mkShellNoCC (updateBase ++ [ pkgs.gh ]) "release" [ ] "";
           core = shell "core" [ ] "";
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";

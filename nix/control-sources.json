@@ -1,5 +1,4 @@
 {
-  "minimum_age_days": 30,
   "process-compose": {
     "version": "1.122.0",
     "published": "2026-08-17T23:01:55Z",

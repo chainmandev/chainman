@@ -597,6 +597,7 @@ format-check=["format-check"]
             tag_name="v0.2.0",
             draft=False,
             prerelease=False,
+            immutable=True,
             published_at=published,
             assets=[],
         )

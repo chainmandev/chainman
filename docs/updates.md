@@ -1,5 +1,7 @@
 # Verified dependency updates
 
+[Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
+
 `./scripts/chainman.sh deps-check` validates the configured adapter names and
 ordered update steps without resolving dependencies, running hooks, or requiring
 a clean Git checkout. It accepts the same selection arguments as the resolver,
@@ -15,7 +17,7 @@ inspection, verification and finalization; it needs neither host Python nor a
 container-engine socket inside project containers. `mode=dry-run` stops before applying
 the verified changes. `commit=off` applies them without committing, for a coordinated
 checkpoint. Untargeted updates and `targets=all` include the Chainman runtime pin,
-bundled archive, managed bootstrap and recipe facades. Explicit application targets
+optional legacy bundled archive, managed bootstrap and recipe facades. Explicit application targets
 retain the runtime pin; `--skip-chainman` also selects project-only updates.
 `just chainman-update` updates only the runtime and its managed companions.
 Runtime selection happens before project resolution. Resolution, reconciliation
@@ -571,14 +573,14 @@ Git configuration in the copy, and does not test the operator's signing backend 
 filters. It uses the existing development host and shared caches, so it is not a
 sandbox for hostile update scripts. Linked submodules require their own transactions.
 
-Self-updates validate release metadata, source revision, SHA-256 identities, source
+Self-updates require an immutable GitHub release and validate its metadata, source revision, SHA-256 identities, source
 tree types and version before running a candidate. The maturity window applies to
 the commit and both required release assets' creation/modification dates, as well
 as release publication. Downloads use asset IDs and must match GitHub's recorded
 SHA-256 and size; missing evidence and a tag moving during download fail before
 candidate evaluation. Locally edited bootstrap files
 must be reconciled explicitly. Consumer verification runs from refreshed environments.
-Until verification passes, the previous pin, bootstrap and bundled archive remain
+Until verification passes, the previous pin, bootstrap and optional legacy bundled archive remain
 untouched in the original checkout. Failed candidate files remain available for
 diagnosis. Prior installed runtime generations remain available throughout the
 transaction. Partial runtime publication inside the candidate restores only

@@ -1,8 +1,9 @@
-# Nix/just toolchain
+# Chainman project starter
 
-Copy this entire directory, including dotfiles, into a new project root. It contains
+This independently generated project contains
 a small executable example, optional language modules, pinned Nix inputs and a
-pinned Chainman runtime. It works independently of the directory it came from.
+URL-only Chainman runtime pin. It does not depend on the checkout used to create it.
+Chainman v0.1.0 is an experimental alpha; qualify changes against your application.
 Keep the modules you need and adapt application paths and commands.
 
 ## Start
@@ -11,26 +12,29 @@ Install Git, `just`, and Docker or Podman. On macOS the engine uses its Linux VM
 on Windows use WSL2 and keep the checkout in its Linux filesystem.
 
 ```sh
+git init
+git add .
+git commit -m "Adopt Chainman"
 just setup
 just exec python3 examples/core/greeting.py
 just verify
 ```
 
 Containerized Nix is the default. Select Podman with
-`CHAINMAN_CONTAINER_ENGINE=podman just verify`. For host Nix, install Nix and use
+`CHAINMAN_CONTAINER_ENGINE=podman just verify`. For host Nix, install Nix 2.24 or later and use
 `CHAINMAN_MODE=host-nix just verify`. No host language toolchain or global Chainman
 command is needed. `just --justfile '/path with spaces/project/justfile' verify`
 also works from another directory.
 
 The checked-in launcher verifies `chainman.lock` before executing the immutable
-runtime in the Nix store. The bundled `vendor/chainman/chainman.tar.gz` matches that pin
-and allows installation before its public URL is available. Keep the bootstrap
+runtime in the Nix store. The runtime is fetched from the immutable public release URL and verified by Nix. Keep the bootstrap
 companions unchanged. The root `flake.nix` imports SDK profiles from that same
 verified runtime using this project’s own `flake.lock`; the project does not copy
 Chainman’s Nix implementation or service controller. Project extensions belong in
 `chainman.toml`, modules or
-project-owned scripts. The intended upstream is github.com/chainmandev/chainman,
-with future public home chainman.dev. Publication is separate from local adoption.
+project-owned scripts. See [the guide index](../docs/README.md),
+[upstream source](https://github.com/chainmandev/chainman), and
+[chainman.dev](https://chainman.dev).
 
 ## Commands
 
@@ -45,12 +49,16 @@ with future public home chainman.dev. Publication is separate from local adoptio
 | `just deps-update mode=dry-run` | Resolve and verify a disposable copy |
 | `just deps-update` | Update project dependencies, verify, commit locally |
 | `just deps-update commit=off` | Leave a verified update for coordinated review |
-| `just chainman-update` | Update the runtime, managed bootstrap and bundled archive |
+| `just chainman-update` | Update the runtime, managed bootstrap and recipe facades |
 | `just cache-status` / `just cache-prune` | Report disk use or prune stale managed build contexts |
 | `just clean` | Explicitly remove managed build contexts |
 | `just doctor` | Report selected project, runtime, mode and modules |
 | `just sdk-doctor apple` / `just sdk-doctor android` | Check explicit native SDK prerequisites |
 | `just ci-prune --module flutter` | Preview guarded disposable hosted-runner SDK cleanup |
+
+Explicit initial adoption can select a new release immediately. Automatic updates
+retain the configurable 30-day maturity policy; use `just deps-update --skip-chainman`
+for project-only updates while the first public release matures.
 
 Full project updates include the Chainman runtime pin. Explicit application targets
 retain it, as does `just deps-update --skip-chainman`. `just chainman-update` explicitly

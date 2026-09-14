@@ -1,129 +1,113 @@
 # Chainman
 
-Chainman keeps shared development machinery behind a project's `just` commands.
-Developers install `just`, Git, and either Docker/Podman or Nix. A checked-in launcher
-fetches a pinned source archive, verifies its SHA-256 NAR hash through Nix, and executes
-the runtime directly from its verified Nix-store source. Python and development languages
-come from Nix. Update libraries are loaded only for dependency operations. There is no global Chainman installation.
+**Development environments and project-wide maintenance behind your `just` commands.**
 
-The intended public home is **chainman.dev**, with source at
-**github.com/chainmandev/chainman**. These are publication destinations; local release
-artifacts and bundled consumers work before anything is published there. Licensed
-under [MIT](LICENSE).
+Chainman brings Nix environments, dependency setup, development services, scoped
+caches, and verified dependency updates into a project's existing workflow. You
+check in a small launcher and a release pin. Nix fetches the pinned runtime and
+checks its hash before running it; languages and build tools come from pinned Nix
+shells. There is no global Chainman installation or runtime archive to vendor.
 
-## Use in a project
+Projects keep their own commands, toolchains, dependency policies, and acceptance
+tests. Chainman coordinates them, including projects with several languages or
+services. [chainman.dev](https://chainman.dev) explains the motivation and scope.
 
-Start with the independent example produced by this repository:
+**v0.1.0 is an experimental alpha, not recommended for general adoption.** Expect
+breaking changes, investigate failures, and qualify updates against your own
+application. See [release trust](docs/runtime.md) and
+[testing coverage](docs/testing.md) for the guarantees and their limits.
+
+## Prerequisites
+
+- Git and [just](https://just.systems).
+- **Docker or Podman**, running locally, for the default container Nix mode; or
+  **Nix 2.24 or later** for host Nix mode.
+
+You do not need host Python, Node, `gh`, or a global package manager. Linux and
+macOS are supported; Windows uses WSL2 with the project in its Linux filesystem.
+Native Apple SDK work requires host Nix on macOS and the relevant Apple tools.
+Containers execute trusted project code with declared access; they are not a
+sandbox for hostile repositories.
+
+## Start a project
+
+Run this with Docker or Podman available:
 
 ```sh
-just release
-just example '/path/to/new-project'
-cd '/path/to/new-project'
+git clone https://github.com/chainmandev/chainman.git chainman
+cd chainman
+just init ../my-project 0.1.0
+cd ../my-project
+git init
+git add .
+git commit -m "Adopt Chainman"
 just setup
 just exec python3 examples/core/greeting.py
 just verify
 ```
 
-`just release` requires a clean committed Chainman source tree. `just example` takes
-an empty destination and copies a small working core, optional modules and the exact
-runtime archive. It does not initialize Git or run the new project's commands.
-Its README explains adoption, caches, updates and native SDK requirements.
+For host Nix, set this before the same commands:
 
-New consumers default to containerized Nix. Set `CHAINMAN_MODE=host-nix` for host Nix
-or `CHAINMAN_CONTAINER_ENGINE=podman` to select Podman. Linux and macOS are supported;
-Windows uses WSL2 with the checkout in the Linux filesystem. Native Apple SDK work
-uses host Nix on macOS. Native SDK discovery does not replace app packaging/device
-verification.
+```sh
+export CHAINMAN_MODE=host-nix
+```
 
-An existing project keeps its `justfile`, flake, workspace organization and application
-commands. Copy `bootstrap/chainman.sh` to `scripts/chainman.sh` and `bootstrap/fetch.nix`
-to `scripts/chainman-fetch.nix`, adopt a release lock, and call
-`./scripts/chainman.sh exec --profile default -- COMMAND...` from its existing adapter.
-Import the generated `scripts/chainman.just` facade and declare the standard recipe
-bindings. See [project recipes](docs/recipes.md), [configuration](docs/configuration.md)
-and [dependency updates](docs/updates.md).
-The bootstrap and helper are managed release files; custom behavior belongs in the
-project adapter/configuration, so self-updates can check and replace them safely.
+`init` accepts a new or empty destination whose parent exists, including paths with
+spaces. It verifies the explicitly selected published release and creates an
+independent schema-3 starter with a URL-only lock. It does not initialize Git or
+run setup. After initialization, the new project does not depend on the Chainman
+checkout. The first command can take time while Nix downloads the pinned tools.
 
-## Develop Chainman
+The starter includes a working Python demo and optional JavaScript/TypeScript,
+Rust, Python, Go, Flutter/Dart, Swift, and Compose examples. Enable only the modules
+you need. For an existing repository, follow the
+[adoption guide](docs/getting-started.md#existing-projects).
 
-Chainman's own source development requires `just`, Git and host Nix. Its small source
-launcher enters the pinned core shell directly, avoiding a bootstrap dependency on
-an older release of itself. Consumer installation is exercised separately against
-real disposable archives and projects.
+## Everyday commands
 
-Source `format` and `deps-update` use the same isolated candidate, verification and
-exact-commit machinery as consumers. `format commit=off` generates and formats in
-place; `format-write` only formats. Failed acceptance retains the candidate for
-inspection and `resume=...`, with the original checkout unchanged.
+```sh
+just --list
+just setup
+just exec python3 --version
+just config validate
+just setup-status
+just verify
+just deps-update mode=dry-run
+just deps-update commit=off
+just stop
+```
+
+Dependency updates allow major versions by default, apply a configurable **30-day
+minimum age**, and run project verification in an isolated candidate before
+applying changes. **Successful updates commit by default**; use `commit=off` to
+review the verified changes yourself. Failed verification retains the candidate
+for inspection and resume. Formatting also commits by default where the project
+uses Chainman's transaction-backed formatting recipe.
+
+Explicit initial adoption can select a new release. Automatic runtime updates
+still apply the age policy. While v0.1.0 matures, update project dependencies with:
+
+```sh
+just deps-update --skip-chainman mode=dry-run
+just deps-update --skip-chainman commit=off
+```
+
+See [updates and recovery](docs/updates.md) before your first update.
+
+## Documentation
+
+- [Guide index](docs/README.md) and [getting started](docs/getting-started.md)
+- [Configuration](docs/configuration.md), [recipes](docs/recipes.md), and [services](docs/services.md)
+- [Dependency updates](docs/updates.md) and [troubleshooting](docs/troubleshooting.md)
+- [Installation and release trust](docs/runtime.md)
+- [Contributing](docs/contributing.md) and [publishing releases](docs/releasing.md)
+
+Chainman's source development uses host Nix:
 
 ```sh
 just setup
 just verify
-just module rust verify
-just module javascript verify
-just javascript-test
-just python-test
-just rust-test
-just swift-test
-just gradle-test
-just bootstrap-test docker
-just bootstrap-test podman
-just release
-just example
+just control-test
 ```
 
-`just verify` runs syntax/format checks, unit tests, real neutral Git transactions,
-real host-Nix bootstrap tests, and the tiny deterministic demo build.
-The bootstrap suite includes public dependency/runtime updates, failed and
-interrupted verification with resume, and preservation of partial staging.
-Container tests opt into an installed engine. `just bootstrap-test` exposes the
-host engine client to the Nix test process; it does not use a host language interpreter.
-`just javascript-test` uses the pinned npm and pnpm binaries against a disposable
-local registry to qualify dependency resolution, overrides and frozen lock checks.
-It includes the JavaScript unit suite and local pnpm installation/receipt checks,
-and requires no public registry downloads.
-`just python-test` uses pinned uv with a disposable loopback package index and
-real fixture wheels to check maturity cutoffs, transitive resolution, no-op
-retention and manifest/lock consistency. It requires no public registry downloads.
-`just rust-test` qualifies Cargo selection, transitive repair, failed resolution
-and restored manifests against real local crate archives and a loopback index.
-`just swift-test` qualifies SwiftPM selection, failed resolution and frozen graph
-audits against disposable Git repositories, including a stale repository cache.
-Both run the production adapter with fixture registry evidence and require no
-public package downloads.
-`just gradle-test` uses pinned Gradle with disposable offline Maven and composite
-build fixtures to check transitive locks, local source bindings, read-only graph
-inspection and build JVM lifetime.
-Optional modules cover JavaScript/TypeScript, Rust, Python, Go, Flutter/Dart,
-SwiftPM/SwiftUI and Gradle/Compose. They are loaded only when requested. The manually
-dispatched workflow contains portable and native Apple lanes; running one lane is
-not evidence that another platform works.
-
-The release uses [an explicit inventory](release-files.json) read from the clean Git
-commit, stable archive ordering, timestamps and permissions. It emits a source
-archive, `chainman-release.json` and `SHA256SUMS` under `dist/release/`. The metadata
-records the full source revision, flat archive SHA-256 and unpacked SHA-256 NAR hash.
-Build metadata is outside the archive to avoid self-referential hashes. Identical
-source produces identical artifacts. Nothing in these commands pushes or publishes.
-
-## Scope
-
-Chainman owns environment entry, scoped caches, setup fingerprints, dependency update
-transactions and repeatable distribution. Projects own their requirements, dependency
-selection extensions, native SDK configuration and application commands. A custom
-resolver must explicitly accept eligibility responsibility; the transaction cannot
-infer release dates from arbitrary shell scripts. Keep specialized cleanup close to
-the outputs it understands.
-
-Read [the runtime and bootstrap contract](docs/runtime.md) before extending mounts,
-cache lifetimes or managed release files. The development environment runs trusted
-project code with declared access; it is not a sandbox for hostile source.
-
-`just verify` includes Ruff correctness checks across Python source and tests, plus
-`just type-check` with strict mypy checks for every production Python module on
-both Linux and Darwin. New modules under `scripts` enter that gate automatically.
-The gate rejects explicit `Any` and unreachable code and has no per-module exemptions.
-External data enters as `object` and is validated where it is consumed.
-Hypothesis contracts run in the ordinary unit gate. All checkers come from pinned
-Nix. See the [test evidence and remaining gaps](docs/testing.md).
+Licensed under [MIT](LICENSE).

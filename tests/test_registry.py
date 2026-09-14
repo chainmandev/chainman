@@ -807,6 +807,38 @@ class GitHubAuthTests(unittest.TestCase):
         self.assertTrue(all(stream.closed for stream in closed))
         self.assertEqual(waits, [])
 
+    def test_public_assets_redirect_without_credentials_and_keep_separate_cache(self):
+        os.environ["GITHUB_TOKEN"] = self.token
+        url = "https://api.github.com/repos/chainmandev/chainman/releases/assets/1"
+        destination = "https://release-assets.githubusercontent.com/fixture"
+        sent, closed, _ = self.transport(
+            [
+                (200, {}, b"authenticated metadata"),
+                (302, {"Location": destination}, b"redirect"),
+                (200, {}, b"public bytes"),
+            ]
+        )
+        self.assertEqual(
+            self.registry.fetch(url, "application/octet-stream")[0],
+            b"authenticated metadata",
+        )
+        self.assertEqual(
+            self.registry.fetch(url, "application/octet-stream", anonymous=True)[0],
+            b"public bytes",
+        )
+        self.assertEqual(
+            self.registry.fetch(url, "application/octet-stream", anonymous=True)[0],
+            b"public bytes",
+        )
+        self.assertEqual(len(sent), 3)
+        self.assertEqual(sent[0].get_header("Authorization"), "Bearer " + self.token)
+        self.assertTrue(all(r.get_header("Authorization") is None for r in sent[1:]))
+        self.assertEqual(sent[-1].full_url, destination)
+        self.assertTrue(all(stream.closed for stream in closed))
+        os.environ["GITHUB_TOKEN"] = "changed"
+        with self.assertRaisesRegex(ValueError, "GITHUB_TOKEN changed"):
+            self.registry.fetch(url, "application/octet-stream", anonymous=True)
+
     def test_authenticated_fresh_head_preserves_headers_and_interrupt_propagation(self):
         os.environ["GITHUB_TOKEN"] = self.token
         sent, closed, waits = self.transport([(200, {}, b""), KeyboardInterrupt()])
