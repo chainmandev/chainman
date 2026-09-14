@@ -307,6 +307,108 @@ class RuntimeTests(unittest.TestCase):
             'schema=1\nmodules=["core"]\n[cache]\nbuild_limit_gib=0\nstale_hours=0\n'
         )
 
+    def test_nix_root_lease_cleans_success_and_failure_without_following_links(self):
+        sentinel = self.root / "sentinel"
+        sentinel.write_text("keep")
+        with patch.object(toolchain.tempfile, "tempdir", str(self.root)):
+            with toolchain.nix_temporary_directory("chainman-test-") as directory:
+                Path(directory, "link").symlink_to(sentinel)
+                self.assertTrue(Path(directory).exists())
+            self.assertFalse(Path(directory).exists())
+            with self.assertRaisesRegex(RuntimeError, "fixture"):
+                with toolchain.nix_temporary_directory("chainman-test-") as failed:
+                    raise RuntimeError("fixture")
+            self.assertFalse(Path(failed).exists())
+        self.assertEqual(sentinel.read_text(), "keep")
+
+    def test_nix_root_survives_its_owner_while_managed_child_is_alive(self):
+        child = None
+        with patch.object(toolchain.tempfile, "tempdir", str(self.root)):
+            try:
+                with toolchain.nix_temporary_directory("chainman-test-") as directory:
+                    child = subprocess.Popen(
+                        [sys.executable, "-c", "import time; time.sleep(60)"],
+                        **toolchain.managed_options({}),
+                    )
+                self.assertTrue(Path(directory).exists())
+                with toolchain.nix_temporary_directory("chainman-test-"):
+                    self.assertTrue(Path(directory).exists())
+                child.terminate()
+                child.wait(timeout=10)
+                with toolchain.nix_temporary_directory("chainman-test-"):
+                    self.assertFalse(Path(directory).exists())
+            finally:
+                if child is not None and child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=10)
+
+    def test_nix_root_from_killed_owner_is_reclaimed_on_next_admission(self):
+        ready = self.root / "root-ready"
+        script = (
+            "import pathlib, sys, time\n"
+            f"sys.path.insert(0, {str(toolchain.RUNTIME / 'scripts')!r})\n"
+            "import toolchain\n"
+            "with toolchain.nix_temporary_directory('chainman-test-') as directory:\n"
+            f"    pathlib.Path({str(ready)!r}).write_text(directory)\n"
+            "    time.sleep(60)\n"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", script],
+            env=dict(os.environ, TMPDIR=str(self.root), TOOLCHAIN_CONTAINER="0"),
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while (
+                not ready.exists()
+                and child.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.02)
+            self.assertTrue(ready.exists())
+            directory = Path(ready.read_text())
+            child.kill()
+            child.wait(timeout=10)
+            self.assertTrue(directory.exists())
+            with patch.object(toolchain.tempfile, "tempdir", str(self.root)):
+                with toolchain.nix_temporary_directory("chainman-test-"):
+                    self.assertFalse(directory.exists())
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=10)
+
+    def test_nix_root_pool_refuses_a_directory_link(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        pool = self.root / f"chainman-gc-roots-{os.getuid()}"
+        pool.symlink_to(outside, target_is_directory=True)
+        with patch.object(toolchain.tempfile, "tempdir", str(self.root)):
+            with self.assertRaisesRegex(ValueError, "private, owned directory"):
+                with toolchain.nix_temporary_directory("chainman-test-"):
+                    self.fail("linked pool was accepted")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_nix_root_sweep_ignores_legacy_unleased_and_linked_entries(self):
+        outside = self.root / "chainman-compiler-legacy"
+        outside.mkdir()
+        sentinel = outside / "precious"
+        sentinel.write_text("keep")
+        pool = self.root / f"chainman-gc-roots-{os.getuid()}"
+        pool.mkdir(mode=0o700)
+        (pool / "chainman-linked").symlink_to(outside, target_is_directory=True)
+        unleased = pool / "chainman-unleased"
+        unleased.mkdir()
+        linked = pool / "chainman-linked-lease"
+        linked.mkdir()
+        (linked / ".lease").symlink_to(sentinel)
+        with patch.object(toolchain.tempfile, "tempdir", str(self.root)):
+            with toolchain.nix_temporary_directory("chainman-test-"):
+                pass
+        self.assertTrue(unleased.exists())
+        self.assertTrue(linked.exists())
+        self.assertTrue((pool / "chainman-linked").is_symlink())
+        self.assertEqual(sentinel.read_text(), "keep")
+
     def test_gradle_defaults_bound_build_jvms_and_preserve_explicit_options(self):
         with patch.dict(os.environ):
             os.environ.pop("GRADLE_OPTS", None)
@@ -801,6 +903,54 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 toolchain.prune(self.root, all_outputs=True)
         self.assertTrue(entry.exists())
+
+    def test_cache_budget_evicts_recent_contexts_oldest_first(self):
+        (self.root / "toolchain.toml").write_text(
+            'schema=1\nmodules=["core"]\n[cache]\n'
+            f"build_limit_gib={12 / 1024**3}\nstale_hours=48\n"
+        )
+        base = self.root / ".cache/toolchain/work"
+        for name, stamp in (("oldest", 100), ("newest", 300), ("middle", 200)):
+            entry = base / name
+            entry.mkdir(parents=True)
+            (entry / "output").write_bytes(b"x" * 6)
+            (entry / "last-used").touch()
+            os.utime(entry / "last-used", (stamp, stamp))
+        with toolchain.operation(self.root):
+            self.assertEqual(
+                toolchain.prune(self.root, now=301),
+                [".cache/toolchain/work/oldest"],
+            )
+        self.assertEqual(toolchain.size(base), 12)
+        self.assertTrue((base / "newest/output").exists())
+        self.assertTrue((base / "middle/output").exists())
+
+    def test_frequently_used_single_context_cannot_escape_budget(self):
+        (self.root / "toolchain.toml").write_text(
+            'schema=1\nmodules=["core"]\n[cache]\n'
+            f"build_limit_gib={4 / 1024**3}\nstale_hours=48\n"
+        )
+        entry = self.root / ".cache/toolchain/work/current"
+        entry.mkdir(parents=True)
+        (entry / "output").write_bytes(b"12345")
+        (entry / "last-used").touch()
+        with toolchain.operation(self.root, automatic_prune=True):
+            self.assertFalse(entry.exists())
+
+    def test_stale_context_expires_even_below_budget(self):
+        (self.root / "toolchain.toml").write_text(
+            'schema=1\nmodules=["core"]\n[cache]\nbuild_limit_gib=1\nstale_hours=1\n'
+        )
+        entry = self.root / ".cache/toolchain/work/expired"
+        entry.mkdir(parents=True)
+        (entry / "output").write_bytes(b"old")
+        (entry / "last-used").touch()
+        os.utime(entry / "last-used", (100, 100))
+        with toolchain.operation(self.root):
+            self.assertEqual(
+                toolchain.prune(self.root, now=3700),
+                [".cache/toolchain/work/expired"],
+            )
 
     def test_internal_build_alias_is_counted_once_and_disposable(self):
         entry = self.root / ".cache/toolchain/work/swift"

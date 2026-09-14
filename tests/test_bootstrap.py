@@ -45,8 +45,18 @@ class BootstrapTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.shared = tempfile.TemporaryDirectory(prefix="chainman bootstrap assets ")
+        cls.addClassCleanup(cls.shared.cleanup)
+        cls.test_volume = (
+            "chainman-bootstrap-test-"
+            + hashlib.sha256(cls.shared.name.encode()).hexdigest()[:16]
+        )
+        cls.test_engine = os.environ.get("CHAINMAN_TEST_CONTAINER")
+        if cls.test_engine in ("docker", "podman"):
+            cls.addClassCleanup(cls.cleanup_store)
         cls.tree = Path(cls.shared.name).resolve() / "runtime"
         (cls.tree / "scripts").mkdir(parents=True)
+        for name in ("toolchain.py", "adapter_data.py"):
+            shutil.copy2(SOURCE / "scripts" / name, cls.tree / "scripts" / name)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
             "import json, os, pathlib, shutil, socket, subprocess, sys, tempfile, time\n"
@@ -106,6 +116,17 @@ class BootstrapTests(unittest.TestCase):
             " assert deletion.returncode != 0, deletion.stdout + deletion.stderr\n"
             " assert pathlib.Path(held_record['output']).read_text() == 'held\\n'\n"
             " record['held_profile_protected'] = True\n"
+            "if '--hold-managed-root' in sys.argv:\n"
+            " import toolchain\n"
+            " with toolchain.nix_temporary_directory('chainman-test-') as managed:\n"
+            "  (root / 'managed-root').write_text(managed)\n"
+            "  deadline = time.monotonic() + 120\n"
+            "  while not (root / 'release-managed-root').exists() and time.monotonic() < deadline: time.sleep(0.1)\n"
+            "if '--check-managed-root' in sys.argv:\n"
+            " import toolchain\n"
+            " with toolchain.nix_temporary_directory('chainman-test-'):\n"
+            "  assert pathlib.Path((root / 'managed-root').read_text()).is_dir()\n"
+            " record['managed_root_protected'] = True\n"
             "(root / ('record-' + str(os.getpid()) + '.json')).write_text(json.dumps(record))\n"
             "if '--hold-profile' in sys.argv:\n"
             " deadline = time.monotonic() + 120\n"
@@ -130,8 +151,28 @@ class BootstrapTests(unittest.TestCase):
             archive.add(cls.tree, arcname="runtime")
 
     @classmethod
-    def tearDownClass(cls):
-        cls.shared.cleanup()
+    def cleanup_store(cls):
+        """The suite owns these exact volumes, never the developer's warm store."""
+
+        def engine(*arguments):
+            return subprocess.check_output(
+                [cls.test_engine, *arguments], text=True, timeout=60
+            ).strip()
+
+        clients = engine(
+            "ps",
+            "--all",
+            "--filter",
+            f"volume={cls.test_volume}",
+            "--format",
+            "{{.ID}}",
+        ).split()
+        if clients:
+            engine("rm", "--force", "--volumes", *clients)
+        volumes = set(engine("volume", "ls", "--format", "{{.Name}}").splitlines())
+        for volume in (cls.test_volume, cls.test_volume + "-downloads"):
+            if volume in volumes:
+                engine("volume", "rm", volume)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
@@ -160,7 +201,12 @@ class BootstrapTests(unittest.TestCase):
             for key, value in os.environ.items()
             if not key.startswith(("CHAINMAN_", "TOOLCHAIN_", "GIT_CONFIG_"))
         }
-        self.env.update(CHAINMAN_MODE="host-nix", CHAINMAN_NIX_BIN=NIX)
+        self.env.update(
+            CHAINMAN_MODE="host-nix",
+            CHAINMAN_NIX_BIN=NIX,
+            XDG_CACHE_HOME=str(Path(self.shared.name).resolve() / "cache"),
+            CHAINMAN_NIX_VOLUME=self.test_volume,
+        )
 
     def write_lock(self):
         (self.root / "chainman.lock").write_text(json.dumps(self.lock))
@@ -1408,6 +1454,72 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertEqual(process.returncode, 0, stdout + stderr)
 
     @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
+    def test_container_root_sweep_preserves_another_clients_lease(self):
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=self.test_engine,
+        )
+        process = subprocess.Popen(
+            [str(self.launcher), "--hold-managed-root"],
+            cwd="/",
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 120
+            while (
+                not (self.root / "managed-root").exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.1)
+            self.assertTrue((self.root / "managed-root").exists())
+            self.run_bootstrap("--check-managed-root", env=env)
+            self.assertTrue(
+                any(record.get("managed_root_protected") for record in self.records())
+            )
+        finally:
+            (self.root / "release-managed-root").touch()
+            stdout, stderr = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
+    def test_container_store_is_owned_and_has_pressure_gc(self):
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=self.test_engine,
+        )
+        self.run_bootstrap("gc-policy", env=env)
+        daemon = self.test_volume + "-daemon"
+        result = subprocess.check_output(
+            [
+                self.test_engine,
+                "exec",
+                daemon,
+                "sh",
+                "-eu",
+                "-c",
+                'test -z "$(find /nix/store -mindepth 1 -maxdepth 1 ! -user "$(id -u)" -print -quit)"; '
+                "nix --extra-experimental-features nix-command config show --json",
+            ],
+            text=True,
+            timeout=30,
+        )
+        settings = json.loads(result)
+        self.assertEqual(settings["min-free"]["value"], 8 * 1024**3)
+        self.assertEqual(settings["max-free"]["value"], 16 * 1024**3)
+
+    @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") == "docker",
         "requires Docker for the isolated daemon migration fixture",
     )
@@ -1455,10 +1567,50 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             self.run_bootstrap("first", env=env)
             identity = engine("inspect", "--format", "{{.Id}}", daemon)
             engine("stop", daemon)
+            # Reproduce older volumes containing immutable, root-owned outputs.
+            # A link must not transfer ownership of a target outside the store.
+            owned = "/nix/store/00000000000000000000000000000000-owned-fixture"
+            engine(
+                "run",
+                "--rm",
+                "--user",
+                "0:0",
+                "--mount",
+                f"type=volume,src={volume},dst=/nix",
+                image,
+                "sh",
+                "-eu",
+                "-c",
+                'mkdir -p "$1"; echo fixture > "$1/output"; '
+                'touch /nix/ownership-sentinel; ln -s /nix/ownership-sentinel "$1/link"; '
+                'chmod -R a-w "$1"',
+                "sh",
+                owned,
+            )
             self.run_bootstrap("restart", env=env)
             self.assertEqual(engine("inspect", "--format", "{{.Id}}", daemon), identity)
             self.assertEqual(
                 engine("inspect", "--format", "{{.State.Running}}", daemon), "true"
+            )
+            owner = engine("inspect", "--format", "{{.Config.User}}", daemon)
+            self.assertEqual(
+                engine("exec", daemon, "stat", "-c", "%u:%g", owned + "/output"), owner
+            )
+            self.assertEqual(
+                engine(
+                    "exec", daemon, "stat", "-c", "%u:%g", "/nix/ownership-sentinel"
+                ),
+                "0:0",
+            )
+            engine(
+                "exec",
+                daemon,
+                "sh",
+                "-eu",
+                "-c",
+                'chmod u+w "$1"; rm -r "$1"',
+                "sh",
+                owned,
             )
             engine("rm", "--force", daemon)
             engine("create", "--name", daemon, image, "sleep", "300")

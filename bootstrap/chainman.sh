@@ -527,6 +527,7 @@ validate_daemon() {
         expected_capabilities='[] []'
     fi
     daemon_identity=$("$engine" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
+{{index .Config.Labels "dev.chainman.store.gc"}}
 {{index .Config.Labels "dev.chainman.store.volume"}}
 {{.Config.Image}}
 {{.Config.User}}
@@ -539,6 +540,7 @@ validate_daemon() {
 {{.HostConfig.NetworkMode}}
 pid={{.HostConfig.PidMode}}' "$daemon_name")
     expected_identity="1
+1
 $volume
 $expected_image
 $container_uid:$container_gid
@@ -550,7 +552,7 @@ volume:$volume:/nix:true;
 0
 bridge
 pid=$expected_pid"
-    [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation. Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
+    [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation (including its GC policy). Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
 }
 if "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
 if [ "$engine" = podman ]; then
@@ -569,7 +571,14 @@ EOF
 run --rm --user 0:0 --label dev.chainman.store.schema=1 --mount "type=volume,src=$volume,dst=/nix" --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" "$image" sh -eu -c '
     mkdir -p /nix/store /nix/var
     chown "$1:$2" /nix /nix/store
-    [ ! -d /nix/store/.links ] || chown "$1:$2" /nix/store/.links
+    # An empty engine volume inherits root-owned paths from the upstream image.
+    # Old image paths become garbage after upgrades; a mapped-user daemon cannot
+    # chmod/delete them unless ownership was normalized too. Inspect top-level
+    # entries on warm starts, traversing the store only for initialization/repair.
+    # Never dereference store symlinks into other locations.
+    if [ -n "$(find /nix/store -mindepth 1 -maxdepth 1 ! -user "$1" -print -quit)" ]; then
+        chown -hR "$1:$2" /nix/store
+    fi
     if [ "$(stat -c %u:%g /nix/var)" != "$1:$2" ]; then chown -R "$1:$2" /nix/var; fi
     chown "$1:$2" /chainman-downloads
 ' sh "$container_uid" "$container_gid"
@@ -580,10 +589,13 @@ if ! "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then
     run --detach --name "$daemon_name" --init --read-only --network bridge \
         --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
         --label dev.chainman.store.schema=1 --label "dev.chainman.store.volume=$volume" \
+        --label dev.chainman.store.gc=1 \
         --mount "type=volume,src=$volume,dst=/nix" \
         --env HOME=/nix/var/nix/chainman-daemon-home --env TMPDIR=/nix/tmp \
         --env 'NIX_CONFIG=build-users-group =
-trusted-users = *' \
+trusted-users = *
+min-free = 8589934592
+max-free = 17179869184' \
         "$image" sh -eu -c 'mkdir -p "$HOME" "$TMPDIR"; exec nix-daemon --daemon' \
         > /dev/null 2> "$temporary/daemon-create" || {
         # Container creation is atomic; a concurrent bootstrap can win the name.

@@ -34,6 +34,7 @@ _operation_gate_fd: int | None = None
 _operation_id = ""
 _operation_compat_fd: int | None = None
 _ancestor_fds: tuple[int, ...] = ()
+_nix_root_fds: tuple[int, ...] = ()
 _COMPILER_STARTUP_SECONDS = 120
 
 type OperationState = tuple[int | None, int | None, str, int | None, tuple[int, ...]]
@@ -101,12 +102,108 @@ def runtime_nix_environment(env: dict[str, str]) -> None:
         )
 
 
-def nix_temporary_directory(prefix: str) -> tempfile.TemporaryDirectory[str]:
-    """Keep managed roots visible to the shared container store daemon."""
-    return tempfile.TemporaryDirectory(
-        prefix=prefix,
-        dir="/nix/tmp" if os.environ.get("TOOLCHAIN_CONTAINER") == "1" else None,
+@contextlib.contextmanager
+def nix_root_gate(pool: Path) -> Iterator[None]:
+    """Serialize publication and collection, not the commands using the roots."""
+    pool.mkdir(mode=0o700, exist_ok=True)
+    info = pool.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_mode & 0o077
+    ):
+        raise ValueError("Nix root pool must be a private, owned directory")
+    descriptor = os.open(pool / ".gate", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+        ):
+            raise ValueError("Nix root gate must be an owned regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def collect_nix_root(directory: Path) -> None:
+    """Called under the pool gate; never collect a live or unrecognized entry."""
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        # Another admission may collect it after the last owner closes its FD.
+        return
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return
+    try:
+        descriptor = os.open(
+            directory / ".lease", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        )
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            return
+        raise
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+        ):
+            return
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        shutil.rmtree(directory)
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def nix_temporary_directory(prefix: str) -> Iterator[str]:
+    """Root packages through execution, then recover even from a killed owner.
+
+    Kernel leases work across container PID namespaces. Managed children inherit
+    them; a surviving child keeps its roots even after the original owner exits.
+    Older unleased directories are outside this private pool and are untouched.
+    """
+    global _nix_root_fds
+    if not prefix.startswith("chainman-") or any(
+        c not in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in prefix
+    ):
+        raise ValueError("Invalid managed Nix root prefix")
+    base = Path(
+        "/nix/tmp"
+        if os.environ.get("TOOLCHAIN_CONTAINER") == "1"
+        else tempfile.gettempdir()
     )
+    pool = base / f"chainman-gc-roots-{os.getuid()}"
+    with nix_root_gate(pool):
+        for entry in pool.iterdir():
+            if entry.name.startswith("chainman-"):
+                collect_nix_root(entry)
+        directory = Path(tempfile.mkdtemp(prefix=prefix, dir=pool))
+        descriptor = os.open(
+            directory / ".lease",
+            os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
+            0o600,
+        )
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+    previous = _nix_root_fds
+    _nix_root_fds = (*previous, descriptor)
+    try:
+        yield str(directory)
+    finally:
+        _nix_root_fds = previous
+        # Do not LOCK_UN: forked children share this open-file description.
+        os.close(descriptor)
+        with nix_root_gate(pool):
+            collect_nix_root(directory)
 
 
 def entry_command(root: Path, profile: str) -> list[str]:
@@ -607,6 +704,9 @@ def operation(
 def managed_options[Options: ProcessOptions](kwargs: Options) -> Options:
     """Retain every outstanding project lease through nested managed children."""
     options: ProcessOptions = kwargs
+    options["pass_fds"] = tuple(
+        dict.fromkeys((*options.get("pass_fds", ()), *_nix_root_fds))
+    )
     descriptor, gate, identity, compat, ancestors = inherited_operation()
     if descriptor is not None:
         inherited = options.get("env")
@@ -1179,6 +1279,12 @@ def size(path: Path, *, allow_external_links: bool = False) -> int:
 def prune(
     root: Path = ROOT, *, all_outputs: bool = False, now: float | None = None
 ) -> list[str]:
+    """Expire idle contexts and enforce the size budget under maintenance access.
+
+    Age is not an exemption from the budget: a frequently used context must not
+    grow forever merely because each command refreshes its last-used stamp.
+    Callers acquire the existing project gate and exclude active operations.
+    """
     settings = CachePolicy.decode(config(root))
     base = contained(root, ".cache/toolchain/work")
     if not base.exists():
@@ -1198,7 +1304,7 @@ def prune(
     total = sum(item[2] for item in entries)
     limit = settings.build_limit_gib * 1024**3
     for age, item, count in sorted(entries, reverse=True):
-        if not all_outputs and (age < settings.stale_hours * 3600 or total <= limit):
+        if not all_outputs and age < settings.stale_hours * 3600 and total <= limit:
             continue
         shutil.rmtree(
             item

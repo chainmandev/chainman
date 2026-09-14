@@ -534,7 +534,8 @@ readiness={command=["python3","probe.py"]}
         obsolete = self.root / ".cache/toolchain/work/old-context"
         obsolete.mkdir(parents=True)
         (obsolete / "output").write_text("disposable")
-        self.body += "\n[cache]\nbuild_limit_gib=0\nstale_hours=0\n"
+        # A recent context over budget must still survive an active operation.
+        self.body += "\n[cache]\nbuild_limit_gib=0\nstale_hours=48\n"
         self.write_config()
         with tc.operation(self.root, exclusive=False):
             result = self.run_cli("run", "build")

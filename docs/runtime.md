@@ -49,6 +49,15 @@ explicit stop completes recovery. Later starts accept completed tickets. Process
 Compose remains responsible for the actual readiness probes and thresholds.
 
 Native task helpers have temporary GC roots for the duration of command execution.
+New roots live in a private `chainman-gc-roots-UID` pool under the selected temporary
+base (`/nix/tmp` in containers). Each directory has an inherited kernel lease;
+later root allocation removes only directories whose owners and managed children
+have exited. This recovers roots left by killed compiler/task owners without
+trusting PIDs across container namespaces or deleting a live child's environment.
+Publication and collection share a short gate; commands do not hold that gate.
+Legacy unleased temporary roots are deliberately not scavenged. After confirming
+there are no clients of a store, an operator can remove its old temporary roots
+and run Nix GC once. Shared source-archive roots remain separate and retained.
 Controller export similarly retains its Nix package until the standalone binaries
 have been copied. The temporary directories, including their roots, are removed
 when these operations finish or fail; Nix handles later collection normally.
@@ -100,6 +109,19 @@ configuration; changing those settings requires stopping its clients first.
 The initial migration also refuses to run while containers from the earlier
 local-store arrangement still use that volume; it does not stop those clients.
 Host Nix continues using its own existing store arrangement.
+
+The owned container daemon enables upstream Nix pressure GC: below 8 GiB free on
+the store filesystem during Nix builds, collection targets 16 GiB free or stops
+when no garbage remains. These are free-space thresholds, not a store quota or a
+guarantee against unrelated writes. Nix's normal roots protect live environments;
+download caches and project outputs are outside this collector. See the upstream
+[`min-free` and `max-free` settings](https://nix.dev/manual/nix/2.33/command-ref/conf-file#conf-min-free).
+Volume preparation also normalizes image/legacy store ownership without following
+symlinks; otherwise the mapped-user daemon cannot delete old root-owned outputs.
+Daemons created before this policy must be removed after stopping their clients;
+the next bootstrap repairs ownership and recreates the daemon while retaining
+both cache volumes. Older daemon configuration is rejected rather than silently
+claiming that pressure GC is enabled. Host Nix configuration is not changed.
 
 Project outputs live separately under `.cache/toolchain/work`.
 Named workflows apply the shared age and size pruning policy before acquiring
@@ -204,15 +226,29 @@ and SDK versions remain pinned by their own flakes. There is no Chainman Nix pat
 The upstream container image is pinned by digest and updated deliberately.
 
 Cache reporting distinguishes project builds, shared downloads and free disk bytes.
-Limits and stale age live in `cache`; automatic pruning removes only old declared
-build contexts after acquiring exclusive maintenance access. `clean` clears those same contexts.
+Limits and stale age live in `cache`. At idle command admission, automatic pruning
+expires declared build contexts older than `stale_hours` (default 48), then evicts
+the oldest remaining contexts until their apparent size is at most
+`build_limit_gib` (default 12 GiB). Recent use does not exempt a context from the
+budget. This is an admission-time budget, not a quota during a running build;
+active commands and their ancestors still prevent pruning. A removed context is
+recreated by setup when needed. `clean` clears those same contexts.
 Application outputs elsewhere require application-owned cleanup. Build contexts
 and their parent directories cannot be symlinks. Links inside a context, including
 compiler-generated references to source files and download caches, count only
 their own bytes and are removed without following or modifying their targets.
-Actual deletion failures fail visibly. Host-wide Nix GC and container volume
-removal are explicit operator actions and can affect other projects. SDK removal is
+Actual deletion failures fail visibly. Host-wide Nix GC, explicit full container
+GC and container volume removal remain operator actions and can affect other projects.
+Container pressure GC above only collects unrooted Nix paths. SDK removal is
 separately opt-in and restricted to declared disposable hosted CI locations.
+
+Bootstrap qualification uses a suite-local host cache and uniquely named
+`chainman-bootstrap-test-*` engine volumes, shared only within that suite. Test
+cleanup removes its containers and volumes even after a test failure; it never
+uses the operator's ordinary Nix/download volumes. A killed test runner can still
+leave those explicitly named fixtures for operator cleanup. External experiment
+harnesses own their clone, HOME and cache lifetimes; retain small logs/evidence
+separately and dispose of their generated state when qualification finishes.
 
 `release-files.json` is the archive allowlist. The release builder reads committed
 regular-file blobs and executable modes, never Git history, ignored caches or local
