@@ -22,6 +22,15 @@ release if the existing release is immutable. `CHAINMAN_ARCHIVE` is a local arch
 override for disposable qualification; it must still satisfy the pinned hash.
 Older consumers can retain `bundled_archive`, but new consumers use URL-only locks.
 
+Initialization and new runtime selection read GitHub release metadata. If GitHub
+reports an API rate limit, wait for the reset or supply an optional `GITHUB_TOKEN`
+environment variable with access to the public repository. The initializer passes
+it to its temporary container when container mode is selected. Keep credentials
+out of project files and do not change the token during a command. Release assets
+are downloaded anonymously; ordinary launches need neither this token nor the
+release-metadata API. A missing release tag or incomplete asset set must be fixed
+by the publisher, rather than by changing the consumer's hashes.
+
 ## Setup and services
 
 ```sh
