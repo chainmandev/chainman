@@ -147,6 +147,9 @@ network override. Host mode (`CHAINMAN_MODE=host-nix`) already uses host loopbac
 Git administrative mounts belong only to a repository whose root is the selected
 project, including linked worktrees. Nested unadopted examples receive global/system
 Git identity and signing policy without mounting or inheriting their enclosing repository.
+Disposable update candidates also disable automatic Git maintenance. Update tasks
+receive only their isolated candidate checkout and a dedicated workspace-transaction
+root; they do not receive the updater's private control directory or original checkout.
 Independent ordinary commands and shells may run concurrently in one project.
 Each public managed command owns an inherited advisory lease. Updates and cleanup take
 an exclusive writer gate and refuse to proceed while an independent family is

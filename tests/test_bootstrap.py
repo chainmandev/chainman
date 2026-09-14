@@ -320,12 +320,18 @@ format-check=["format-check"]
         for name in ("selected.txt", "excluded.txt", "partial.txt"):
             (self.root / name).write_text("original\n")
         (self.root / "workflow.py").write_text(
-            "import os, pathlib, sys, time\n"
+            "import os, pathlib, subprocess, sys, time\n"
             "root = pathlib.Path.cwd()\n"
             # Every project command must execute in the isolated candidate.
             f"assert str(root) != {str(self.root)!r}\n"
             "action = sys.argv[1]\n"
+            "transaction_root = pathlib.Path(os.environ['CHAINMAN_WORKSPACE_TRANSACTION_ROOT'])\n"
+            "assert transaction_root.is_dir() and transaction_root.parent == root.parent\n"
+            "assert transaction_root != root and root not in transaction_root.parents\n"
+            "assert subprocess.check_output(['git', 'config', '--get', 'gc.auto'], text=True).strip() == '0'\n"
+            "assert subprocess.check_output(['git', 'config', '--get', 'maintenance.auto'], text=True).strip() == 'false'\n"
             "if action == 'resolve':\n"
+            "    (transaction_root / 'workspace-stage-probe').write_text('candidate-owned scratch\\n')\n"
             f"    (root / 'dependency.lock').write_text({'rejected\n' if reject else 'accepted\n'!r})\n"
             "elif action == 'verify':\n"
             "    assert sys.stdin.read() == ''\n"

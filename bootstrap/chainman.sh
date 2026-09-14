@@ -169,8 +169,15 @@ update_dispatch() {
     esac
     update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
     trap 'printf "Chainman: candidate preserved at %s/candidate; resume with: just deps-update resume=%s\n" "$update_output" "$update_output" >&2' EXIT
-    if [ "$update_resume" = 0 ]; then mkdir "$update_output/candidate" "$update_output/control"; fi
+    if [ "$update_resume" = 0 ]; then
+        mkdir "$update_output/candidate" "$update_output/control" "$update_output/workspace-transactions"
+    else
+        [ ! -L "$update_output/workspace-transactions" ] || fail 'Workspace transaction root must be a real directory.'
+        mkdir -p "$update_output/workspace-transactions"
+        [ -d "$update_output/workspace-transactions" ] || fail 'Workspace transaction root must be a real directory.'
+    fi
     printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
+    printf '%s\n%s\n' --mount "type=bind,src=$update_output/workspace-transactions,dst=$update_output/workspace-transactions" > "$update_output/control/candidate-mounts"
     if [ "$update_resume" = 1 ]; then
         CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
             "$self" _update-resume "$update_output" >&2
@@ -230,9 +237,11 @@ update_candidate() (
     for update_git in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
         unset "$update_git"
     done
-    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=2 \
-        GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 \
-        CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
+    exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=4 \
+        GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
+        GIT_CONFIG_KEY_2=gc.auto GIT_CONFIG_VALUE_2=0 GIT_CONFIG_KEY_3=maintenance.auto GIT_CONFIG_VALUE_3=false \
+        GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 CHAINMAN_CONTAINER_OPTIONS_FILE="$update_output/control/candidate-mounts" \
+        CHAINMAN_WORKSPACE_TRANSACTION_ROOT="$update_output/workspace-transactions" CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
 )
 expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) {
     root = builtins.getEnv "CHAINMAN_PROJECT_ROOT";
@@ -793,8 +802,9 @@ if [ "$authority" != "$root" ]; then
         set -- --mount "type=bind,src=$git_directory,dst=$git_directory,readonly" "$@"
     done < "$authority/git-directories"
     set -- --env GIT_CONFIG_GLOBAL=/dev/null --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 --env GIT_OPTIONAL_LOCKS=0 "$@"
-    count=2
-    set -- --env GIT_CONFIG_KEY_0=core.fsmonitor --env GIT_CONFIG_VALUE_0=false --env GIT_CONFIG_KEY_1=core.hooksPath --env GIT_CONFIG_VALUE_1=/dev/null "$@"
+    count=4
+    set -- --env GIT_CONFIG_KEY_0=core.fsmonitor --env GIT_CONFIG_VALUE_0=false --env GIT_CONFIG_KEY_1=core.hooksPath --env GIT_CONFIG_VALUE_1=/dev/null \
+        --env GIT_CONFIG_KEY_2=gc.auto --env GIT_CONFIG_VALUE_2=0 --env GIT_CONFIG_KEY_3=maintenance.auto --env GIT_CONFIG_VALUE_3=false "$@"
 elif command -v git > /dev/null 2>&1; then
     git_owner=$(git -C "$root" rev-parse --show-toplevel 2> /dev/null) || git_owner=
     if [ -n "$git_owner" ]; then
@@ -867,6 +877,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
+    --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
