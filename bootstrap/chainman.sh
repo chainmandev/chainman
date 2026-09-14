@@ -262,6 +262,21 @@ fi
 cd "$root"
 [ -f chainman.lock ] && [ ! -L chainman.lock ] || fail 'Missing regular chainman.lock.'
 [ ! -L "$root/.chainman" ] || fail '.chainman must be a real directory.'
+if [ -z "${CHAINMAN_WORKSPACE_TRANSACTION_ROOT:-}" ]; then
+    CHAINMAN_WORKSPACE_TRANSACTION_ROOT=$root/.chainman/workspace-transactions
+fi
+case "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" in
+    "$root/.chainman/workspace-transactions" | "$root/.chainman-workspace-transactions") ;;
+    *) fail 'Workspace transaction root must be owned by the selected project.' ;;
+esac
+[ ! -L "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" ] || fail 'Workspace transaction root must not be a symlink.'
+if [ -e "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" ]; then
+    [ -d "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" ] || fail 'Workspace transaction root must be a directory.'
+    [ "$(CDPATH='' cd -P -- "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" && pwd)" = "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" ] || fail 'Workspace transaction root must not contain symlinks.'
+elif [ "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" != "$root/.chainman/workspace-transactions" ]; then
+    fail 'Candidate workspace transaction root must already exist.'
+fi
+export CHAINMAN_WORKSPACE_TRANSACTION_ROOT
 
 case "$CHAINMAN_REQUEST_ACTION" in
     deps-update | chainman-update | format)

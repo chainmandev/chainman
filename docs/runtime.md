@@ -151,6 +151,9 @@ Disposable update candidates also disable automatic Git maintenance. Update task
 receive only their isolated candidate checkout and a dedicated, ignored
 workspace-transaction root on the checkout's own rename domain; they do not receive
 the updater's private control directory or original checkout.
+Ordinary managed commands receive `.chainman/workspace-transactions` as their
+consumer-created location through the same environment contract, keeping atomic
+staging inside the mounted project without treating it as project source.
 Independent ordinary commands and shells may run concurrently in one project.
 Each public managed command owns an inherited advisory lease. Updates and cleanup take
 an exclusive writer gate and refuse to proceed while an independent family is
