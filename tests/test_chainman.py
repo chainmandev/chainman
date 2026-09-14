@@ -841,6 +841,7 @@ class RuntimeReleaseTests(ConsumerFixture):
             "tag_name": "v2.0.0",
             "draft": False,
             "prerelease": False,
+            "immutable": True,
             "published_at": published,
             "assets": [
                 {
@@ -859,8 +860,9 @@ class RuntimeReleaseTests(ConsumerFixture):
             ],
         }
 
-    def release_download(self, url, *, accept):
+    def release_download(self, url, *, accept, anonymous):
         self.assertEqual(accept, "application/octet-stream")
+        self.assertIs(anonymous, True)
         if url == self.api + "/releases/assets/1":
             return json.dumps(self.metadata).encode(), {}
         self.assertEqual(url, self.api + "/releases/assets/2")
