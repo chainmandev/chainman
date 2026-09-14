@@ -685,10 +685,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 json.dumps(
                     {
-                        "build_bytes": tc.size(work, reporting=True),
+                        "build_bytes": tc.size(work, allow_external_links=True),
                         "free_bytes": shutil.disk_usage(root).free,
                         "download_cache": str(downloads),
-                        "download_bytes": tc.size(downloads, reporting=True),
+                        "download_bytes": tc.size(downloads, allow_external_links=True),
                         "project": str(root),
                         "cache": cfg.get("cache", {}),
                     }

@@ -817,15 +817,47 @@ class RuntimeTests(unittest.TestCase):
             )
         self.assertFalse(entry.exists())
 
-    def test_nested_escape_rejects_whole_prune_before_any_deletion(self):
+    def test_linked_context_rejects_whole_prune_before_any_deletion(self):
         base = self.root / ".cache/toolchain/work"
         for name in ("old", "new"):
             (base / name).mkdir(parents=True)
             (base / name / "build").write_text("keep")
-        (base / "new/escape").symlink_to(self.root)
+        (base / "linked-context").symlink_to(self.root)
         with self.assertRaisesRegex(ValueError, "symlink"):
             toolchain.prune(self.root, all_outputs=True)
         self.assertEqual((base / "old/build").read_text(), "keep")
+
+    def test_compiler_links_are_disposable_without_modifying_their_targets(self):
+        entry = self.root / ".cache/toolchain/work/cxx"
+        output = entry / "cargo/debug/build/provider/out/cxxbridge"
+        output.mkdir(parents=True)
+        source = self.root / "packages/provider"
+        source.mkdir(parents=True)
+        (source / "native.rs").write_bytes(b"source stays")
+        header = self.root / "downloads/cxx/include/cxx.h"
+        header.parent.mkdir(parents=True)
+        header.write_bytes(b"download stays")
+        (output / "provider").symlink_to(source, target_is_directory=True)
+        (output / "cxx.h").symlink_to(header)
+        # Missing SDKs and cyclic aliases do not require target traversal either.
+        (output / "missing").symlink_to(self.root / "removed-sdk")
+        (output / "loop").symlink_to("loop")
+        (output / "object").write_bytes(b"generated object")
+        expected = sum(path.lstat().st_size for path in output.iterdir())
+        self.assertEqual(toolchain.size(entry, allow_external_links=True), expected)
+        (self.root / "toolchain.toml").write_text(
+            'schema=1\nmodules=["core"]\n[cache]\nbuild_limit_gib=1\nstale_hours=48\n'
+        )
+        with toolchain.operation(self.root):
+            self.assertEqual(toolchain.prune(self.root), [])
+            self.assertTrue((output / "provider").is_symlink())
+            self.assertEqual(
+                toolchain.prune(self.root, all_outputs=True),
+                [".cache/toolchain/work/cxx"],
+            )
+        self.assertFalse(entry.exists())
+        self.assertEqual((source / "native.rs").read_bytes(), b"source stays")
+        self.assertEqual(header.read_bytes(), b"download stays")
 
     def test_cache_report_does_not_follow_outside_links(self):
         entry = self.root / "report"
@@ -833,7 +865,9 @@ class RuntimeTests(unittest.TestCase):
         target = self.root / "outside"
         target.write_bytes(b"x" * 1000)
         (entry / "link").symlink_to(target)
-        self.assertEqual(toolchain.size(entry, reporting=True), len(str(target)))
+        self.assertEqual(
+            toolchain.size(entry, allow_external_links=True), len(str(target))
+        )
 
     def test_virtual_environment_interpreter_readiness_is_narrow(self):
         interpreter = self.root / "example/.venv/bin/python"

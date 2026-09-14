@@ -495,6 +495,12 @@ capture=[["python3","capture.py"]]
         obsolete = self.write(".cache/toolchain/work/old-context/object", "old build")
         stamp = self.write(".cache/toolchain/work/old-context/last-used", "")
         os.utime(stamp, (1, 1))
+        source = self.write("packages/provider/native.rs", "source stays")
+        (obsolete.parent / "source").symlink_to(source.parent)
+        download = self.base / "downloads/cxx.h"
+        download.parent.mkdir(parents=True)
+        download.write_text("download stays")
+        (obsolete.parent / "cxx.h").symlink_to(download)
         result = subprocess.run(
             [
                 sys.executable,
@@ -513,6 +519,8 @@ capture=[["python3","capture.py"]]
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(obsolete.parent.exists())
+        self.assertEqual(source.read_text(), "source stays")
+        self.assertEqual(download.read_text(), "download stays")
 
     def test_nested_exec_preserves_active_outputs_and_rejects_cleanup(self):
         self.write(

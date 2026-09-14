@@ -199,8 +199,11 @@ The upstream container image is pinned by digest and updated deliberately.
 Cache reporting distinguishes project builds, shared downloads and free disk bytes.
 Limits and stale age live in `cache`; automatic pruning removes only old declared
 build contexts after acquiring exclusive maintenance access. `clean` clears those same contexts.
-Application outputs elsewhere require application-owned cleanup. Symlink escapes
-and actual deletion failures fail visibly. Host-wide Nix GC and container volume
+Application outputs elsewhere require application-owned cleanup. Build contexts
+and their parent directories cannot be symlinks. Links inside a context, including
+compiler-generated references to source files and download caches, count only
+their own bytes and are removed without following or modifying their targets.
+Actual deletion failures fail visibly. Host-wide Nix GC and container volume
 removal are explicit operator actions and can affect other projects. SDK removal is
 separately opt-in and restricted to declared disposable hosted CI locations.
 

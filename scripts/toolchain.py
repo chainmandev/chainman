@@ -1152,7 +1152,7 @@ def setup(spec: Mapping[str, object], env: dict[str, str], root: Path = ROOT) ->
     atomic_json(stamp, {"fingerprint": fingerprint(spec, root)})
 
 
-def size(path: Path, *, reporting: bool = False) -> int:
+def size(path: Path, *, allow_external_links: bool = False) -> int:
     if path.is_symlink():
         raise ValueError("cache inventory refuses symlinks")
     if not path.exists():
@@ -1164,7 +1164,7 @@ def size(path: Path, *, reporting: bool = False) -> int:
     for parent, dirs, files in os.walk(path, followlinks=False):
         for name in dirs + files:
             item = Path(parent) / name
-            if item.is_symlink() and not reporting:
+            if item.is_symlink() and not allow_external_links:
                 try:
                     target = item.resolve()
                 except RuntimeError:
@@ -1187,7 +1187,10 @@ def prune(
     entries = []
     for item in base.iterdir():
         contained(root, str(item.relative_to(root)))
-        count = size(item)  # Validate the entire candidate before any deletion.
+        # CXX and other compilers link generated outputs to source/download files.
+        # Inventory the links themselves; rmtree also unlinks without following
+        # them. The context root and its parents must still be real directories.
+        count = size(item, allow_external_links=True)
         stamp = item / "last-used"
         age = now - (stamp.stat().st_mtime if stamp.exists() else item.stat().st_mtime)
         entries.append((age, item, count))
@@ -1246,10 +1249,11 @@ def main() -> int:
                     {
                         "free_bytes": shutil.disk_usage(ROOT).free,
                         "build_bytes": size(
-                            contained(ROOT, ".cache/toolchain/work"), reporting=True
+                            contained(ROOT, ".cache/toolchain/work"),
+                            allow_external_links=True,
                         ),
                         "download_cache": str(downloads),
-                        "download_bytes": size(downloads, reporting=True),
+                        "download_bytes": size(downloads, allow_external_links=True),
                         "compiler_limit_gib": CachePolicy.decode(
                             cfg
                         ).compiler_limit_gib,
