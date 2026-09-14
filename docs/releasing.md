@@ -15,7 +15,9 @@ skips an equal version. Historical pins are not retroactively made installable.
    `chainmandev/chainman`. The selected workflow ref must point to that commit.
 3. In repository **Settings → Releases**, enable **release immutability before
    publication**. Ensure Actions can write contents and attestations and request
-   an OIDC token. Do not publish a provisional release under the final tag.
+   an OIDC token. Leave the release tag absent: the workflow creates it at the exact
+   source SHA and rejects an existing tag. Do not publish a provisional release
+   under the final tag.
 4. Record the full source SHA with `git rev-parse HEAD`.
 
 The repository immutability-settings API requires administration access, which
@@ -53,8 +55,10 @@ outside the archives to avoid self-referential hashes. There is no separate
 publication waiting period. Backend source hashes, provenance, and qualification
 remain required; consumers' automatic dependency age policy remains independent.
 
-If upload fails while still a draft, inspect the draft and uploaded asset inventory
-before retrying. The workflow does not clobber existing assets. Once published,
+If upload fails while still a draft, inspect the draft, tag and uploaded asset
+inventory before retrying. A new workflow run rejects an existing tag; an operator
+must deliberately reconcile or remove an unpublished draft and its tag first.
+The workflow does not clobber existing tags or assets. Once published,
 corrections receive a **new version**. GitHub immutability applies to releases
 published after the setting is enabled and locks their tag and assets.
 [GitHub's guarantees](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).

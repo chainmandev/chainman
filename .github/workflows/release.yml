@@ -70,9 +70,12 @@ jobs:
           set -eu
           # shellcheck disable=SC2016
           nix --extra-experimental-features 'nix-command flakes' develop path:./nix#release --no-write-lock-file --command sh -eu -c '
-            gh release create "v$VERSION" --repo "$GH_REPO" --target "$EXPECTED" --draft \
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f "ref=refs/tags/v$VERSION" -f "sha=$EXPECTED" > /dev/null
+            gh release create "v$VERSION" --repo "$GH_REPO" --verify-tag --draft \
               --title "Chainman v$VERSION" --notes-file docs/release-notes.md
             gh release upload "v$VERSION" --repo "$GH_REPO" dist/release/*
+            test "$(gh api "repos/$GH_REPO/git/ref/tags/v$VERSION" --jq .object.sha)" = "$EXPECTED"
             gh release edit "v$VERSION" --repo "$GH_REPO" --draft=false --latest
             test "$(gh api "repos/$GH_REPO/releases/tags/v$VERSION" --jq .immutable)" = true
             gh release verify "v$VERSION" --repo "$GH_REPO"
