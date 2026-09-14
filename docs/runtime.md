@@ -216,6 +216,10 @@ archive. The consumer generator verifies both products and their shared file
 identities; every generated consumer bundles only the runtime archive at `vendor/chainman/chainman.tar.gz`. Remove that optional file
 and its lock field only after its pinned public URL is available.
 
+Disposable update and staged-format repositories disable Git's automatic
+maintenance. Their administrative directories are hashed as transaction inputs,
+so a detached repack must not race that identity read or outlive cleanup.
+
 `just release` builds a local candidate; it does not authorize publication.
 `just control-release-check` enforces at least 30 days of maturity for the native
 backend inputs recorded in `nix/control-sources.json`. Process Compose 1.122.0 is

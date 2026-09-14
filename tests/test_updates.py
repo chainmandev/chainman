@@ -501,6 +501,19 @@ class TransactionTests(unittest.TestCase):
             }
         )
 
+    def test_preview_disables_background_git_maintenance(self):
+        before = dict(os.environ)
+        with updates.preview_git_environment():
+            for name, expected in (
+                ("gc.auto", "0"),
+                ("maintenance.auto", "false"),
+            ):
+                actual = subprocess.check_output(
+                    ["git", "config", "--get", name], text=True
+                ).strip()
+                self.assertEqual(actual, expected)
+        self.assertEqual(dict(os.environ), before)
+
     def test_preview_failure_restores_git_environment(self):
         before = dict(os.environ)
         with self.assertRaisesRegex(ValueError, "controlled verification failure"):
