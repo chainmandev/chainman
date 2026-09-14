@@ -170,14 +170,10 @@ update_dispatch() {
     update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
     trap 'printf "Chainman: candidate preserved at %s/candidate; resume with: just deps-update resume=%s\n" "$update_output" "$update_output" >&2' EXIT
     if [ "$update_resume" = 0 ]; then
-        mkdir "$update_output/candidate" "$update_output/control" "$update_output/workspace-transactions"
-    else
-        [ ! -L "$update_output/workspace-transactions" ] || fail 'Workspace transaction root must be a real directory.'
-        mkdir -p "$update_output/workspace-transactions"
-        [ -d "$update_output/workspace-transactions" ] || fail 'Workspace transaction root must be a real directory.'
+        mkdir "$update_output/candidate" "$update_output/control"
     fi
     printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
-    printf '%s\n%s\n' --mount "type=bind,src=$update_output/workspace-transactions,dst=$update_output/workspace-transactions" > "$update_output/control/candidate-mounts"
+    : > "$update_output/control/candidate-mounts"
     if [ "$update_resume" = 1 ]; then
         CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
             "$self" _update-resume "$update_output" >&2
@@ -196,6 +192,9 @@ update_dispatch() {
         trap - EXIT
         exit 0
     fi
+    workspace_transactions=$update_output/candidate/.chainman-workspace-transactions
+    [ -d "$workspace_transactions" ] && [ ! -L "$workspace_transactions" ] || fail 'Workspace transaction root must be a real candidate directory.'
+    [ "$(CDPATH='' cd -P -- "$workspace_transactions" && pwd)" = "$workspace_transactions" ] || fail 'Workspace transaction root must not contain symlinks.'
     IFS= read -r update_at < "$update_output/control/at"
     update_launcher=$update_output/original-bootstrap/chainman.sh
     if [ "$update_resume" = 0 ]; then
@@ -241,7 +240,7 @@ update_candidate() (
         GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
         GIT_CONFIG_KEY_2=gc.auto GIT_CONFIG_VALUE_2=0 GIT_CONFIG_KEY_3=maintenance.auto GIT_CONFIG_VALUE_3=false \
         GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 CHAINMAN_CONTAINER_OPTIONS_FILE="$update_output/control/candidate-mounts" \
-        CHAINMAN_WORKSPACE_TRANSACTION_ROOT="$update_output/workspace-transactions" CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
+        CHAINMAN_WORKSPACE_TRANSACTION_ROOT="$workspace_transactions" CHAINMAN_PROJECT_ROOT="$update_output/candidate" "$@"
 )
 expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) {
     root = builtins.getEnv "CHAINMAN_PROJECT_ROOT";

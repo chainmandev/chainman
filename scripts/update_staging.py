@@ -28,6 +28,9 @@ from transaction_state import Inspection, RuntimeMode, State
 from adapter_data import strings, table, text
 
 
+WORKSPACE_TRANSACTION_DIRECTORY = ".chainman-workspace-transactions"
+
+
 def directory(value: str | Path) -> Path:
     path = Path(value)
     if not path.is_absolute() or path.resolve() != path or not path.is_dir():
@@ -147,6 +150,21 @@ def index(root: Path) -> dict[str, tuple[str, str]]:
     return updates.staged_entries(root)
 
 
+def prepare_workspace_transactions(candidate: Path) -> Path:
+    """Create ignored scratch on the candidate's own rename domain."""
+    git_directory = directory(candidate / ".git")
+    exclude = git_directory / "info/exclude"
+    entry = f"/{WORKSPACE_TRANSACTION_DIRECTORY}/\n".encode()
+    current = exclude.read_bytes() if exclude.exists() else b""
+    if entry not in current.splitlines(keepends=True):
+        if current and not current.endswith(b"\n"):
+            current += b"\n"
+        tc.atomic_bytes(exclude, current + entry)
+    transactions = candidate / WORKSPACE_TRANSACTION_DIRECTORY
+    transactions.mkdir(mode=0o700)
+    return directory(transactions)
+
+
 def unchanged(root: Path, state: State) -> None:
     if (
         updates.repository(root, clean=False) != state.identity
@@ -236,6 +254,7 @@ def prepare(
                 updates.git(candidate, "symbolic-ref", "HEAD", identity[0])
                 if previous != identity[0]:
                     updates.git(candidate, "update-ref", "-d", previous)
+            prepare_workspace_transactions(candidate)
             candidate_before = updates.snapshot(candidate)
             candidate_modes = {
                 name: (candidate / name).stat().st_mode & 0o777

@@ -55,9 +55,11 @@ pin and archive. Resolution and reconciliation cannot replace the runtime,
 forwarded environment policy, host mounts or service declarations used by their
 next launch. Candidate launches receive a dedicated writable directory through
 `CHAINMAN_WORKSPACE_TRANSACTION_ROOT` for workspace tools that require atomic
-sibling staging. In container mode, only that directory is mounted; the private
-control directory and original checkout remain unavailable. It exists only for
-the retained update transaction and is removed with it after success. The candidate
+sibling staging. The root is ignored inside the candidate checkout, so staged
+files and their destinations remain on the same rename domain even in container
+mode; the private control directory and original checkout remain unavailable. It
+exists only for the retained update transaction and is removed with it after
+success. The candidate
 Git directory is mounted read-only, and its metadata never selects host administrative
 mounts or signing policy. Automatic Git maintenance is disabled in disposable
 checkouts so concurrent inspection cannot race packfile replacement. Inspection
