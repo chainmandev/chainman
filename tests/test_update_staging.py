@@ -491,6 +491,7 @@ commands=[["true"]]
         runtime = self.base / "verified-runtime"
         for name in (
             "VERSION",
+            "bootstrap/git-entry.sh",
             "bootstrap/chainman.sh",
             "bootstrap/fetch.nix",
             "nix/flake.nix",
