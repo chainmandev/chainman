@@ -649,9 +649,13 @@ timezone-qualified deadline for the bypass, normally the verified artifact
 publication time plus `minimum_age_days`. It is not an instruction to delete the
 entry blindly. Package ranges and API compatibility constraints still apply.
 
-Then run the relevant declared target, using its actual adapter or group name:
+Commit the policy changes first: a normal update requires a clean checkout and
+uses that committed policy as its frozen authority. Then run the relevant declared
+target, using its actual adapter or group name:
 
 ```sh
+git add chainman.toml deps-update.config.toml
+git commit -m "Permit the exact security fix while it matures"
 just chainman deps-update --skip-chainman -- --targets rust
 ```
 
