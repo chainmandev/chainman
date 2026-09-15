@@ -4,42 +4,24 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
-import hashlib
 import json
 import os
-import re
 import stat
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote
-from typing import Literal, NotRequired, TypedDict
 
 import adapter_data as ad
 import chainman
 import registry
+import git_runtime
 import source_updates
 import toolchain as tc
 import updates
 from transaction_state import Options
 
 type FileState = tuple[bytes, int]
-
-
-class RuntimePin(TypedDict):
-    schema: Literal[1]
-    version: str
-    revision: str
-    url: str
-    narHash: str
-    bundled_archive: NotRequired[str]
-
-
-class ReleaseAsset(TypedDict):
-    id: int
-    size: int
-    digest: str
 
 
 def managed_state(root: Path, name: str) -> FileState | None:
@@ -66,16 +48,7 @@ def managed_matches(first: FileState | None, second: FileState | None) -> bool:
 
 def managed_paths(root: Path) -> dict[str, str]:
     """Map declared identical runtime copies to their root-owned source files."""
-    names = ["chainman.lock", "scripts/chainman.sh", "scripts/chainman-fetch.nix"]
-    if (root / "chainman.lock").exists():
-        bundle = json.loads(tc.regular_input(root, "chainman.lock")).get(
-            "bundled_archive"
-        )
-        if bundle:
-            if not isinstance(bundle, str) or bundle in names:
-                raise ValueError("Bundled archive overlaps a managed bootstrap input")
-            tc.contained(root, bundle)
-            names.append(bundle)
+    names = ["chainman.lock"]
     cfg = (
         tc.config(root).get("runtime", {})
         if (root / "chainman.toml").exists() or (root / "toolchain.toml").exists()
@@ -155,63 +128,9 @@ class ManagedFiles:
 
 
 def fetch_source(root: Path, *, gc_root: Path) -> Path:
-    """Fetch with the trusted helper and register a root before Nix exits.
-
-    The caller owns gc_root and must retain it through the last source read or
-    execution. Container roots must be visible to the shared Nix daemon.
-    """
-    env = dict(
-        os.environ,
-        CHAINMAN_PROJECT_ROOT=str(root),
-        CHAINMAN_BOOTSTRAP_HELPER=str(chainman.RUNTIME / "bootstrap/fetch.nix"),
+    return git_runtime.store(
+        git_runtime.pin(tc.regular_input(root, "chainman.lock")), gc_root=gc_root
     )
-    expression = 'import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER")) { root = builtins.getEnv "CHAINMAN_PROJECT_ROOT"; action = "fetch"; archive = ""; }'
-    runtime = Path(
-        tc.managed_run(
-            [
-                tc.nix_command(),
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "build",
-                "--impure",
-                "--out-link",
-                str(gc_root),
-                "--print-out-paths",
-                "--expr",
-                expression,
-            ],
-            text=True,
-            cwd=root,
-            env=env,
-            capture_output=True,
-            check=True,
-        ).stdout.strip()
-    )
-    if runtime.parent != Path("/nix/store"):
-        raise ValueError("Runtime fetch did not return a Nix store tree")
-    return runtime
-
-
-def fetch_runtime(
-    candidate: Mapping[str, object], body: bytes, *, gc_root: Path
-) -> Path:
-    # Fetch exactly the downloaded bytes, before changing the live consumer pin.
-    # The trusted old helper validates their unpacked NAR hash; no candidate
-    # source is imported or executed while this temporary lock is evaluated.
-    with tempfile.TemporaryDirectory(prefix="chainman-candidate-") as directory:
-        staged = Path(directory)
-        (staged / "archive.tar.gz").write_bytes(body)
-        (staged / "chainman.lock").write_text(
-            json.dumps({**candidate, "bundled_archive": "archive.tar.gz"})
-        )
-        runtime = fetch_source(staged, gc_root=gc_root)
-    if (
-        runtime.parent != Path("/nix/store")
-        or runtime.is_symlink()
-        or not runtime.is_dir()
-    ):
-        raise ValueError("Runtime fetch did not return a real Nix store tree")
-    return runtime
 
 
 def validate_runtime(runtime: Path, version: str) -> None:
@@ -251,59 +170,27 @@ def validate_runtime(runtime: Path, version: str) -> None:
         raise ValueError("Candidate VERSION does not match release metadata")
 
 
-def published_assets(
-    selected: registry.Release,
-    policy: Mapping[str, object],
-    now: datetime,
-    names: tuple[str, ...],
-) -> tuple[dict[str, bytes], str]:
-    """Bind release maturity to the exact server-dated assets before execution."""
+def published_revision(
+    selected: registry.Release, policy: Mapping[str, object], now: datetime
+) -> str:
+    """Bind selection to the current stable release and its exact commit age."""
     repository = "chainmandev/chainman"
-    api = f"https://api.github.com/repos/{repository}"
-    release = registry.data(f"{api}/releases/tags/{quote(selected.version, safe='')}")
+    release = registry.data(
+        f"https://api.github.com/repos/{repository}/releases/tags/{quote(selected.version, safe='')}"
+    )
     if (
         not isinstance(release, dict)
         or release.get("tag_name") != selected.version
         or release.get("draft") is not False
         or release.get("prerelease") is not False
-        or release.get("immutable") is not True
         or registry.timestamp(release.get("published_at")) != selected.published
-        or not isinstance(release.get("assets"), list)
     ):
-        raise ValueError(
-            "Runtime release must be immutable and retain its publication evidence"
-        )
-    revision = registry.github_commit(repository, selected.version)
+        raise ValueError("Runtime release changed or is not a published stable release")
+    revision = registry.github_commit(repository, selected.version, fresh=True)
+    git_runtime.pin((revision + "\n").encode())
     published = max(
         selected.published, source_updates.commit_time(repository, revision)
     )
-    assets: dict[str, ReleaseAsset] = {}
-    for name in names:
-        matches = [
-            item
-            for item in release["assets"]
-            if isinstance(item, dict) and item.get("name") == name
-        ]
-        if len(matches) != 1:
-            raise ValueError("Runtime release lacks one exact required asset")
-        item = matches[0]
-        asset_id, size, digest = item.get("id"), item.get("size"), item.get("digest")
-        if (
-            type(asset_id) is not int
-            or asset_id <= 0
-            or item.get("state") != "uploaded"
-            or type(size) is not int
-            or size <= 0
-            or not isinstance(digest, str)
-            or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
-        ):
-            raise ValueError("Runtime asset lacks immutable checksum evidence")
-        published = max(
-            published,
-            registry.timestamp(item.get("created_at")),
-            registry.timestamp(item.get("updated_at")),
-        )
-        assets[name] = {"id": asset_id, "size": size, "digest": digest}
     registry.eligible(
         "github",
         [registry.Release(selected.version, published)],
@@ -311,33 +198,7 @@ def published_assets(
         repository,
         now,
     )
-    bodies = {}
-    for name in names:
-        asset = assets[name]
-        # Public assets may redirect to GitHub's download host. Request them
-        # anonymously from the outset; authenticated metadata stays no-redirect.
-        body = registry.fetch(
-            f"{api}/releases/assets/{asset['id']}",
-            accept="application/octet-stream",
-            anonymous=True,
-        )[0]
-        if (
-            len(body) != asset["size"]
-            or "sha256:" + hashlib.sha256(body).hexdigest() != asset["digest"]
-        ):
-            raise ValueError("Runtime asset bytes differ from dated release identity")
-        bodies[name] = body
-    if registry.github_commit(repository, selected.version, fresh=True) != revision:
-        raise ValueError("Runtime release tag changed during download")
-    return bodies, revision
-
-
-def release_assets(
-    selected: registry.Release, policy: Mapping[str, object], now: datetime
-) -> tuple[object, bytes, str]:
-    names = ("chainman-release.json", f"chainman-{selected.version.lstrip('v')}.tar.gz")
-    bodies, revision = published_assets(selected, policy, now, names)
-    return json.loads(bodies[names[0]]), bodies[names[1]], revision
+    return revision
 
 
 def runtime_candidate(
@@ -348,125 +209,57 @@ def runtime_candidate(
     *,
     gc_root: Path,
 ) -> Path:
-    lockpath = tc.contained(root, "chainman.lock")
-    if not lockpath.exists():
-        return chainman.RUNTIME
     lock_before = managed_state(root, "chainman.lock")
     if lock_before is None:
         raise ValueError("Runtime pin disappeared during preparation")
-    old = ad.table(json.loads(lock_before[0]), "Runtime pin")
-    inputs = {
-        name: managed_state(root, name)
-        for name in ("scripts/chainman.sh", "scripts/chainman-fetch.nix")
-    }
-    if old.get("bundled_archive"):
-        name = ad.text(old["bundled_archive"], "Bundled runtime archive")
-        if name in inputs or name == "chainman.lock":
-            raise ValueError("Bundled archive overlaps a managed bootstrap input")
-        inputs[name] = managed_state(root, name)
+    old = git_runtime.pin(lock_before[0])
     copies = {}
-    source_states = {"chainman.lock": lock_before, **inputs}
-    for target, source in managed_paths(root).items():
-        if target == source:
-            continue
+    for target in managed_paths(root):
         before = managed_state(root, target)
-        if before is None or not managed_matches(before, source_states[source]):
+        if not managed_matches(before, lock_before):
             raise ValueError(
                 f"Managed runtime copy was locally modified; reconcile it explicitly: {target}"
             )
-        copies[target] = (source, before)
-    selected = registry.select(
-        "github",
-        registry.github_releases("chainmandev/chainman"),
-        policy,
-        "chainmandev/chainman",
-        now,
-    )
+        copies[target] = before
+    repository = "chainmandev/chainman"
+    releases = registry.github_releases(repository)
+    # Commit time can be newer than release publication. Include it before
+    # selection so an immature newest tag does not hide an older eligible one.
+    resolved = {
+        item.version: registry.github_commit(repository, item.version)
+        for item in releases
+    }
+    dated = [
+        registry.Release(
+            item.version,
+            max(
+                item.published,
+                source_updates.commit_time(repository, resolved[item.version]),
+            ),
+        )
+        for item in releases
+    ]
+    selected_age = registry.select("github", dated, policy, repository, now)
+    selected = next(item for item in releases if item.version == selected_age.version)
+    version = (chainman.RUNTIME / "VERSION").read_text().strip()
     if registry.stable_version("github", selected.version) <= registry.stable_version(
-        "github", ad.text(old["version"], "Runtime version")
+        "github", version
     ):
         return chainman.RUNTIME
-    metadata, body, expected = release_assets(selected, policy, now)
-    if (
-        not isinstance(metadata, dict)
-        or metadata.get("schema") != 1
-        or not isinstance(metadata.get("version"), str)
-        or metadata["version"].lstrip("v") != selected.version.lstrip("v")
-    ):
-        raise ValueError("Runtime release metadata does not match selected version")
-    keys = ("version", "revision", "url", "narHash")
-    if any(not isinstance(metadata.get(key), str) or not metadata[key] for key in keys):
-        raise ValueError("Runtime release metadata lacks required identity fields")
-    required = {key: ad.text(metadata[key], f"Runtime {key}") for key in keys}
-    registry.artifact_url(required["url"])
-    if required["revision"] != expected:
-        raise ValueError("Runtime archive provenance differs from release tag")
-    candidate: RuntimePin = {
-        "schema": 1,
-        "version": required["version"],
-        "revision": required["revision"],
-        "url": required["url"],
-        "narHash": required["narHash"],
-    }
-    if (
-        old.get("bundled_archive") or metadata.get("archive_sha256") is not None
-    ) and hashlib.sha256(body).hexdigest() != metadata.get("archive_sha256"):
-        raise ValueError("Runtime archive checksum does not match release")
-    runtime = fetch_runtime(candidate, body, gc_root=gc_root)
-    validate_runtime(runtime, required["version"])
-    prepared: dict[str, tuple[FileState | None, FileState]] = {}
-    for source, target in (
-        ("chainman.sh", "chainman.sh"),
-        ("fetch.nix", "chainman-fetch.nix"),
-    ):
-        name = "scripts/" + target
-        before = inputs[name]
-        if before is not None:
-            prior = chainman.RUNTIME / "bootstrap" / source
-            if before[0] != prior.read_bytes():
-                raise ValueError(
-                    "Managed bootstrap was locally modified; reconcile it explicitly"
-                )
-            prepared[name] = (
-                before,
-                (
-                    (runtime / "bootstrap" / source).read_bytes(),
-                    0o755 if target.endswith(".sh") else 0o644,
-                ),
-            )
-    if old.get("bundled_archive"):
-        # A self-contained consumer remains self-contained after its runtime upgrade.
-        target = ad.text(old["bundled_archive"], "Bundled runtime archive")
-        prepared[target] = (inputs[target], (body, 0o644))
-        candidate["bundled_archive"] = target
-    prepared["chainman.lock"] = (
-        lock_before,
-        ((json.dumps(candidate, indent=2) + "\n").encode(), 0o644),
-    )
-    for target, (source, before) in copies.items():
-        prepared[target] = (before, prepared[source][1])
-    import recipes
-
-    for consumer in recipes.roots(root):
-        path = str((consumer / recipes.FILE).relative_to(root))
-        before = managed_state(root, path)
-        if before is None or before[0] != recipes.render(recipes.config(consumer)):
-            raise ValueError("Reconcile the declared recipe facade before updating")
-        rendered = tc.managed_run(
-            [
-                sys.executable,
-                str(runtime / "scripts/recipes.py"),
-                str(consumer),
-                "--render",
-            ],
-            capture_output=True,
-            check=True,
-        ).stdout
-        prepared[path] = (before, (rendered, 0o644))
+    revision = published_revision(selected, policy, now)
+    if revision != resolved[selected.version]:
+        raise ValueError("Runtime release tag changed during selection")
+    if revision == old:
+        raise ValueError("A newer runtime release reuses the current revision")
+    runtime = git_runtime.store(revision, gc_root=gc_root)
+    validate_runtime(runtime, selected.version)
+    if registry.github_commit(repository, selected.version, fresh=True) != revision:
+        raise ValueError("Runtime release tag changed during Git fetch")
+    after = ((revision + "\n").encode(), 0o644)
     publication = managed if managed is not None else ManagedFiles(root)
     try:
-        for name, (before, after) in prepared.items():
-            publication.publish(name, before, after)
+        for target, before in copies.items():
+            publication.publish(target, before, after)
     except BaseException:
         publication.restore()
         raise

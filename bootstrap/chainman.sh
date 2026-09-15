@@ -1,6 +1,5 @@
 #!/bin/sh
-# Copy this launcher and fetch.nix (as chainman-fetch.nix) into consumer scripts/.
-# The pinned image and this companion are the bootstrap trust base.
+# Runtime-owned execution machinery, loaded only from the pinned Git tree.
 # Child shell programs expand their own positional and environment values.
 # shellcheck disable=SC2016
 set -eu
@@ -14,7 +13,7 @@ fail() {
 }
 single_line() {
     case "$1" in *'
-'* | *''*) fail 'Newlines are not supported in bootstrap paths or options.' ;; esac
+'* | *"$(printf '\r')"*) fail 'Newlines are not supported in bootstrap paths or options.' ;; esac
 }
 develop_runtime() {
     develop_action=$1
@@ -45,15 +44,14 @@ if [ "$authority" != "$root" ]; then
         case "$root/" in "$authority/"*) fail 'Entry authority cannot contain the candidate.' ;; esac
         CHAINMAN_ENTRY_AUTHORITY=$authority
         export CHAINMAN_ENTRY_AUTHORITY
-        unset CHAINMAN_ARCHIVE
     else
         authority=$root
         unset CHAINMAN_ENTRY_AUTHORITY
     fi
 fi
-helper=$script_dir/chainman-fetch.nix
-[ -f "$helper" ] || helper=$script_dir/fetch.nix
-[ -f "$helper" ] && [ ! -L "$helper" ] || fail 'Missing regular chainman-fetch.nix companion.'
+source_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd)
+helper=$script_dir/fetch.nix
+export CHAINMAN_SOURCE_ROOT="$source_root"
 if [ "${1:-}" = script ]; then
     shift
     script_profile=
@@ -246,7 +244,7 @@ expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER"
     root = builtins.getEnv "CHAINMAN_PROJECT_ROOT";
     authority = let selected = builtins.getEnv "CHAINMAN_ENTRY_AUTHORITY";
       in if selected == "" then builtins.getEnv "CHAINMAN_PROJECT_ROOT" else selected;
-    archive = builtins.getEnv "CHAINMAN_ARCHIVE";
+    source = builtins.getEnv "CHAINMAN_SOURCE_ROOT";
     action = builtins.getEnv "CHAINMAN_BOOTSTRAP_ACTION";
 }'
 mode=${CHAINMAN_MODE:-container-nix}
@@ -277,6 +275,15 @@ elif [ "$CHAINMAN_WORKSPACE_TRANSACTION_ROOT" != "$root/.chainman/workspace-tran
     fail 'Candidate workspace transaction root must already exist.'
 fi
 export CHAINMAN_WORKSPACE_TRANSACTION_ROOT
+
+if [ "$CHAINMAN_REQUEST_ACTION" = recipe ]; then
+    shift
+    [ "$#" -ge 1 ] || fail 'usage: just chainman recipe NAME [ARGUMENTS...]'
+    recipe_name=$1
+    shift
+    recipe_plan=$("$self" _recipe-plan "$recipe_name")
+    exec sh -eu -c "$recipe_plan" chainman "$self" "$@"
+fi
 
 case "$CHAINMAN_REQUEST_ACTION" in
     deps-update | chainman-update | format)
@@ -337,28 +344,11 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=$1 \
             "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression"
     }
-    metadata=$(nix_eval metadata)
-    {
-        IFS= read -r _content_id
-        IFS= read -r nar_hash
-        IFS= read -r archive
-    } << EOF
-$metadata
-EOF
-    if [ "$archive" != - ]; then
-        case "$archive" in /*) ;; *) archive=$root/$archive ;; esac
-        single_line "$archive"
-        # Every component must be real; a local override cannot escape via links.
-        probe=$archive
-        while [ "$probe" != / ]; do
-            [ ! -L "$probe" ] || fail 'Archive paths must not contain symlinks.'
-            probe=$(dirname -- "$probe")
-        done
-        [ -f "$archive" ] || fail 'Local archive is missing or is not a regular file.'
-        CHAINMAN_ARCHIVE=$archive
-        export CHAINMAN_ARCHIVE
-    fi
-    # Fetch and register a normal Nix GC root in the same evaluator process.
+    IFS= read -r revision < "$authority/chainman.lock"
+    case "$revision" in '' | *[!0-9a-f]*) fail 'Invalid Git revision pin.' ;; esac
+    [ "${#revision}" = 40 ] || fail 'Expected a full Git revision pin.'
+    [ "$revision" = "${CHAINMAN_SOURCE_REVISION:-}" ] || fail 'Pin changed after verified runtime selection.'
+    # Import the verified Git export and register a normal Nix GC root in the same evaluator process.
     # A bare `nix eval --raw` result loses its temporary root before the next
     # `nix develop`, allowing automatic GC to remove even the runtime scripts.
     if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
@@ -377,7 +367,7 @@ EOF
         umask 077
         mkdir -p "$runtime_roots"
     )
-    runtime_root=$runtime_roots/$_content_id
+    runtime_root=$runtime_roots/$revision
     [ ! -e "$runtime_root" ] || [ -L "$runtime_root" ] || fail 'Runtime GC root must be a symlink.'
     fetch_runtime() {
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=fetch \
@@ -386,12 +376,12 @@ EOF
     }
     # A content-keyed root is immutable. Replacing it on every entry makes Nix's
     # PID-based temporary symlink names collide across container PID namespaces.
-    # Still evaluate the selected archive on every entry, including warm starts.
+    # Still evaluate the verified Git export on every entry, including warm starts.
     if [ -L "$runtime_root" ]; then
         store=$(fetch_runtime --no-link)
     elif ! store=$(fetch_runtime --out-link "$runtime_root"); then
         # Another first writer may have installed the same root. Re-evaluate the
-        # archive and require the exact link below; never accept a failed fetch
+        # source and require the exact link below; never accept a failed fetch
         # merely because some old source is cached.
         [ -L "$runtime_root" ] || fail 'Runtime GC root registration failed.'
         store=$(fetch_runtime --no-link)
@@ -406,11 +396,9 @@ EOF
         || ! printf '%s\n' "$registered_roots" | grep -F -x -q -- "$runtime_root -> $store"; then
         store=$(fetch_runtime --out-link "$runtime_root")
     fi
+    expected=$("$nix_bin" --extra-experimental-features nix-command hash path "$source_root")
     actual=$("$nix_bin" --extra-experimental-features nix-command hash path "$store")
-    [ "$actual" = "$nar_hash" ] || fail 'Runtime store source failed NAR verification.'
-    # Archives are source distributions: symlinks are excluded before evaluating
-    # even the verified flake, so extraction cannot introduce an outside path.
-    [ -z "$(find "$store" -type l -print -quit)" ] || fail 'Runtime archives must not contain symlinks.'
+    [ "$actual" = "$expected" ] || fail 'Runtime store differs from the verified Git source.'
     if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
         if [ "$(nix_eval schema)" = 3 ]; then
             route=$(develop_runtime run python3 -B "$store/scripts/bootstrap_plan.py" "$root" route)
@@ -612,23 +600,12 @@ plan_options() {
     if [ "$authority" != "$root" ]; then
         set -- --mount "type=bind,src=$authority,dst=$authority,readonly" --env "CHAINMAN_ENTRY_AUTHORITY=$authority" "$@"
     fi
-    if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
-        plan_archive=$CHAINMAN_ARCHIVE
-        case "$plan_archive" in /*) ;; *) plan_archive=$root/$plan_archive ;; esac
-        single_line "$plan_archive"
-        case "$plan_archive" in "$root"/*) ;; *)
-            [ -f "$plan_archive" ] && [ ! -L "$plan_archive" ] || fail 'Local archive override must be a regular file.'
-            set -- --mount "type=bind,src=$plan_archive,dst=$plan_archive,readonly" "$@"
-            ;;
-        esac
-        set -- --env "CHAINMAN_ARCHIVE=$plan_archive" "$@"
-    fi
     run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
         --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
-        --mount "type=bind,src=$script_dir,dst=/chainman-bootstrap,readonly" --env HOME=/tmp/chainman-home \
+        --mount "type=bind,src=$source_root,dst=$source_root,readonly" --env HOME=/tmp/chainman-home \
         --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
-        --env "CHAINMAN_BOOTSTRAP_HELPER=/chainman-bootstrap/$(basename -- "$helper")" \
+        --env "CHAINMAN_BOOTSTRAP_HELPER=$helper" --env "CHAINMAN_SOURCE_ROOT=$source_root" --env CHAINMAN_SOURCE_REVISION \
         --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
         --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
         "$@" "$image" sh -eu -c "$container_init" \
@@ -647,7 +624,7 @@ store = daemon' --env NIX_REMOTE=daemon \
                 "$2" _bootstrap-options "$CHAINMAN_REQUEST_ACTION" "$CHAINMAN_REQUEST_TASK"
         fi
         exec nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1"
-    ' sh "$expression" "/chainman-bootstrap/$(basename -- "$self")"
+    ' sh "$expression" "$self"
 }
 plan_options > "$temporary/options"
 if grep -q -- '^--controller$' "$temporary/options"; then
@@ -872,18 +849,7 @@ elif command -v git > /dev/null 2>&1; then
 elif [ -f "${GIT_CONFIG_GLOBAL:-${HOME:-/}/.gitconfig}" ]; then
     policy_unavailable=1
 fi
-if [ -n "${CHAINMAN_ARCHIVE:-}" ]; then
-    archive=$CHAINMAN_ARCHIVE
-    case "$archive" in /*) ;; *) archive=$root/$archive ;; esac
-    single_line "$archive"
-    case "$archive" in "$root"/*) ;; *)
-        [ -f "$archive" ] && [ ! -L "$archive" ] || fail 'Local archive override must be a regular file.'
-        set -- --mount "type=bind,src=$archive,dst=$archive,readonly" "$@"
-        ;;
-    esac
-    set -- --env "CHAINMAN_ARCHIVE=$archive" "$@"
-fi
-case "$self" in "$root"/*) ;; *) set -- --mount "type=bind,src=$script_dir,dst=$script_dir,readonly" "$@" ;; esac
+case "$self" in "$root"/*) ;; *) set -- --mount "type=bind,src=$source_root,dst=$source_root,readonly" "$@" ;; esac
 if [ "$authority" != "$root" ]; then
     if [ "$authority" != "$script_dir" ]; then set -- --mount "type=bind,src=$authority,dst=$authority,readonly" "$@"; fi
     set -- --env "CHAINMAN_ENTRY_AUTHORITY=$authority" "$@"
@@ -903,7 +869,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
-    --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT \
+    --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \

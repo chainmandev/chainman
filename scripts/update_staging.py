@@ -15,7 +15,9 @@ import hashlib
 import os
 import stat
 import tempfile
-import sys
+import shutil
+import shlex
+import git_runtime
 from pathlib import Path
 
 import chainman
@@ -40,13 +42,26 @@ def directory(value: str | Path) -> Path:
 
 def export_bootstrap(runtime: Path, target: Path) -> None:
     target.mkdir(exist_ok=True)
-    for source, name, mode in (
-        ("chainman.sh", "chainman.sh", 0o700),
-        ("fetch.nix", "chainman-fetch.nix", 0o600),
-    ):
-        tc.atomic_bytes(
-            target / name, tc.regular_input(runtime, "bootstrap/" + source), mode
-        )
+    source = target / "source"
+    if source.exists():
+        shutil.rmtree(source)
+    shutil.copytree(runtime, source)
+    # Nix store directories are read-only. The private owner needs directory
+    # write permission to dispose this export; candidate mounts remain read-only.
+    source.chmod(0o700)
+    for path in source.rglob("*"):
+        if path.is_dir():
+            path.chmod(0o700)
+    body = (
+        "#!/bin/sh\nset -eu\nexport CHAINMAN_ENTRY_AUTHORITY="
+        + shlex.quote(str(target))
+        + "\nIFS= read -r CHAINMAN_SOURCE_REVISION < "
+        + shlex.quote(str(target / "chainman.lock"))
+        + "\nexport CHAINMAN_SOURCE_REVISION\nexec "
+        + shlex.quote(str(source / "bootstrap/chainman.sh"))
+        + ' "$@"\n'
+    )
+    tc.atomic_bytes(target / "chainman.sh", body.encode(), 0o700)
 
 
 def export_authority(
@@ -81,14 +96,9 @@ def export_authority(
     tc.atomic_bytes(
         target / "git-directories", ("\n".join(git_directories) + "\n").encode()
     )
-    pin = json.loads(tc.regular_input(pin_root, "chainman.lock"))
-    if pin.get("bundled_archive"):
-        tc.atomic_bytes(
-            target / "runtime.tar.gz",
-            tc.regular_input(pin_root, pin["bundled_archive"]),
-        )
-        pin["bundled_archive"] = "runtime.tar.gz"
-    tc.atomic_json(target / "chainman.lock", pin)
+    pin = tc.regular_input(pin_root, "chainman.lock")
+    git_runtime.pin(pin)
+    tc.atomic_bytes(target / "chainman.lock", pin)
 
 
 def patterns(root: Path, policy: Mapping[str, object]) -> list[str]:
@@ -109,13 +119,9 @@ def patterns(root: Path, policy: Mapping[str, object]) -> list[str]:
 
 
 def runtime_files(root: Path) -> list[str]:
-    import recipes
-
     if not (root / "chainman.toml").is_file():
-        return []  # The source repository builds Chainman; it does not pin itself.
-    return list(runtime_updates.managed_paths(root)) + [
-        str((path / recipes.FILE).relative_to(root)) for path in recipes.roots(root)
-    ]
+        return []
+    return list(runtime_updates.managed_paths(root))
 
 
 def verification(root: Path, policy: Mapping[str, object]) -> list[str]:
@@ -453,39 +459,29 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
         ) != tc.regular_input(baseline, "chainman.lock"):
             import registry
 
-            pin = json.loads(tc.regular_input(root, "chainman.lock"))
-            selected = registry.select(
-                "github",
-                [
-                    release
-                    for release in registry.github_releases("chainmandev/chainman")
-                    if release.version.lstrip("v") == pin["version"].lstrip("v")
-                ],
-                settings,
-                "chainmandev/chainman",
-                now,
-            )
-            metadata, body, revision = runtime_updates.release_assets(
-                selected, settings, now
-            )
-            metadata = table(metadata, "Runtime release metadata")
-            if (
-                any(
-                    pin[key] != metadata[key]
-                    for key in ("version", "revision", "url", "narHash")
+            pin = git_runtime.pin(tc.regular_input(root, "chainman.lock"))
+            with tc.nix_temporary_directory("chainman-reaudit-runtime-") as rooted:
+                runtime = runtime_updates.fetch_source(
+                    root, gc_root=Path(rooted) / "runtime"
                 )
-                or pin["revision"] != revision
-            ):
-                raise ValueError(
-                    "Resumed runtime no longer matches its release evidence"
+                version = (runtime / "VERSION").read_text().strip()
+                selected = registry.select(
+                    "github",
+                    [
+                        release
+                        for release in registry.github_releases("chainmandev/chainman")
+                        if release.version.lstrip("v") == version
+                    ],
+                    settings,
+                    "chainmandev/chainman",
+                    now,
                 )
-            if (
-                pin.get("bundled_archive")
-                and tc.regular_input(root, pin["bundled_archive"]) != body
-            ):
-                raise ValueError(
-                    "Resumed runtime archive differs from release evidence"
-                )
+                revision = runtime_updates.published_revision(selected, settings, now)
+                runtime_updates.validate_runtime(runtime, selected.version)
+                if pin != revision:
+                    raise ValueError(
+                        "Resumed runtime no longer matches its release evidence"
+                    )
         if opts.only_chainman:
             return
         if settings.get("resolver"):
@@ -561,56 +557,14 @@ def candidate_unchanged(candidate: Path, state: State) -> None:
 
 
 def verified_runtime(candidate: Path, *, gc_root: Path) -> Path:
-    # Evaluate the old trusted fetch helper; never import candidate source merely
-    # because the resolver left it in the checkout.
     runtime = runtime_updates.fetch_source(candidate, gc_root=gc_root)
-    lock = json.loads(tc.regular_input(candidate, "chainman.lock"))
-    actual = tc.managed_run(
-        [
-            tc.nix_command(),
-            "--extra-experimental-features",
-            "nix-command",
-            "hash",
-            "path",
-            str(runtime),
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-    if actual != lock["narHash"]:
-        raise ValueError("Candidate runtime store source failed NAR verification")
-    runtime_updates.validate_runtime(runtime, lock["version"])
-    for source, target in (
-        ("chainman.sh", "chainman.sh"),
-        ("fetch.nix", "chainman-fetch.nix"),
-    ):
-        if tc.regular_input(candidate, "scripts/" + target) != tc.regular_input(
-            runtime, "bootstrap/" + source
-        ):
-            raise ValueError("Candidate bootstrap differs from the verified runtime")
+    runtime_updates.validate_runtime(runtime, (runtime / "VERSION").read_text().strip())
     for destination, source in runtime_updates.managed_paths(candidate).items():
         if not runtime_updates.managed_matches(
             runtime_updates.managed_state(candidate, destination),
             runtime_updates.managed_state(candidate, source),
         ):
             raise ValueError(f"Candidate runtime copy differs: {destination}")
-    import recipes
-
-    for consumer in recipes.roots(candidate):
-        expected = tc.managed_run(
-            [
-                sys.executable,
-                str(runtime / "scripts/recipes.py"),
-                str(consumer),
-                "--render",
-            ],
-            cwd=candidate,
-            capture_output=True,
-            check=True,
-        ).stdout
-        if tc.regular_input(consumer, recipes.FILE) != expected:
-            raise ValueError(f"Candidate recipe facade differs: {consumer}")
     return runtime
 
 

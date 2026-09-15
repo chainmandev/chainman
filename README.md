@@ -1,113 +1,194 @@
 # Chainman
 
-**Development environments and project-wide maintenance behind your `just` commands.**
+Chainman runs a repository's development commands in pinned Nix environments and
+coordinates setup, services, and verified dependency updates. The project owns its
+toolchains and workflows; Chainman supplies the execution machinery.
 
-Chainman brings Nix environments, dependency setup, development services, scoped
-caches, and verified dependency updates into a project's existing workflow. You
-check in a small launcher and a release pin. Nix fetches the pinned runtime and
-checks its hash before running it; languages and build tools come from pinned Nix
-shells. There is no global Chainman installation or runtime archive to vendor.
+Each repository records **one Chainman Git commit** in `chainman.lock` and a small
+bootstrap recipe in its justfile. Running `just chainman …` obtains that exact
+revision and uses it for the command. No global Chainman installation or permanent
+Chainman checkout is needed. See [chainman.dev](https://chainman.dev) for the introduction.
 
-Projects keep their own commands, toolchains, dependency policies, and acceptance
-tests. Chainman coordinates them, including projects with several languages or
-services. [chainman.dev](https://chainman.dev) explains the motivation and scope.
-
-**v0.1.0 is an experimental alpha, not recommended for general adoption.** Expect
-breaking changes, investigate failures, and qualify updates against your own
-application. See [release trust](docs/runtime.md) and
-[testing coverage](docs/testing.md) for the guarantees and their limits.
+**v0.1.0 is an alpha release.** Expect configuration and command changes as the
+interfaces mature. A project's pin changes only through an explicit edit or a
+verified update; launching a command never silently upgrades it.
 
 ## Prerequisites
 
 - Git and [just](https://just.systems).
-- **Docker or Podman**, running locally, for the default container Nix mode; or
-  **Nix 2.24 or later** for host Nix mode.
+- Docker or Podman for the default **container-Nix** mode, or **Nix 2.24+** for host mode.
+- Ordinary shell utilities available on supported Linux and macOS hosts.
 
-You do not need host Python, Node, `gh`, or a global package manager. Linux and
-macOS are supported; Windows uses WSL2 with the project in its Linux filesystem.
-Native Apple SDK work requires host Nix on macOS and the relevant Apple tools.
-Containers execute trusted project code with declared access; they are not a
-sandbox for hostile repositories.
+Python, Node, `gh`, curl and wget are not bootstrap prerequisites. Project SDKs come
+from the project's flake. Some workflows still require native Apple or Android SDKs;
+see [execution modes and native tools](docs/runtime.md).
 
-## Start a project
+## Adopt an existing project
 
-Run this with Docker or Podman available:
+Adoption is a deliberate integration. Start with one existing command, then add
+setup, service ownership, and updates as needed. Existing root or nested flakes
+need no Chainman import. Preserve your justfile and acceptance gates.
+
+### 1. Record the revision
+
+From your project directory, resolve the published lightweight `v0.1.0` tag and
+write its commit pin. This block fails if the tag is unavailable:
 
 ```sh
-git clone https://github.com/chainmandev/chainman.git chainman
-cd chainman
-just init ../my-project 0.1.0
-cd ../my-project
-git init
-git add .
-git commit -m "Adopt Chainman"
-just setup
-just exec python3 examples/core/greeting.py
+sh -eu <<'SH'
+remote=$(git ls-remote --exit-code https://github.com/chainmandev/chainman.git refs/tags/v0.1.0)
+printf '%s\n' "$remote" | cut -f1 > chainman.lock
+test "$(wc -c < chainman.lock)" -eq 41
+SH
+```
+
+Review the selected commit as you would any executable dependency. Future tag moves
+do not change the recorded SHA. See [release trust](docs/release-trust.md).
+
+### 2. Add this complete recipe to your justfile
+
+Keep your existing recipes. Reserve the name `chainman` for this entrypoint; if it
+already exists, rename that recipe deliberately before proceeding.
+
+```just
+# Stable consumer bootstrap. Runtime behavior belongs to the pinned Git revision.
+[group("Chainman")]
+[positional-arguments]
+chainman +args:
+    #!/bin/sh
+    set -eu
+    IFS= read -r revision < chainman.lock
+    case "$revision" in ''|*[!0-9a-f]*) echo 'chainman.lock requires a full lowercase Git SHA' >&2; exit 2 ;; esac
+    test "${#revision}" -eq 40 && test "$(wc -c < chainman.lock)" -eq 41
+    cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/git/github.com-chainmandev-chainman/$revision.git
+    g() (
+        unset $(GIT_CONFIG_PARAMETERS='' GIT_CONFIG_COUNT=0 git rev-parse --local-env-vars)
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_COUNT=0 GIT_TERMINAL_PROMPT=0 git --no-replace-objects -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"
+    )
+    if test ! -e "$cache"; then
+        mkdir -p "${cache%/*}"
+        temporary=$(mktemp -d "$cache.XXXXXX")
+        g init --bare --quiet --template= "$temporary"
+        ln -sn "$temporary" "$cache" 2>/dev/null || rm -rf "$temporary"
+    fi
+    if ! g --git-dir="$cache" cat-file -e "$revision" 2>/dev/null; then
+        g --git-dir="$cache" -c gc.auto=0 fetch --no-auto-maintenance --no-write-fetch-head https://github.com/chainmandev/chainman.git "$revision"
+    fi
+    g --git-dir="$cache" fsck --full --strict --no-reflogs --no-dangling
+    test "$(g --git-dir="$cache" cat-file -t "$revision")" = commit
+    entry=$(g --git-dir="$cache" cat-file blob "$revision:bootstrap/git-entry.sh")
+    exec sh -c "$entry" chainman "$PWD" "$cache" "$revision" "$@"
+```
+
+This is the entire committed bootstrap. Its Git cache is a download cache, not an
+installation or a mutable “current” version. Runtime updates leave this recipe
+unchanged. Cache behavior and repair are described in [troubleshooting](docs/troubleshooting.md).
+
+### 3. Route one existing command
+
+For a project whose existing flake exposes `devShells.<system>.default`, add
+`chainman.toml`:
+
+```toml
+schema = 3
+
+[project]
+default_profile = "default"
+
+[profiles.default]
+flake = ".#default"
+
+[tasks.check]
+commands = [["just", "check"]]
+```
+
+Then exercise the **existing** `check` recipe inside its existing environment:
+
+```sh
+just chainman run check
+```
+
+Use your actual recipe name in place of `check`. For a nested flake, use a reference
+such as `nix#default`. The command above must be a command that can already run
+*inside* the development environment. If `just check` currently enters Nix itself,
+starts Docker, requests credentials, or assumes it is on the host, first separate
+its environment entry from the underlying command. Do not create a forwarding
+loop between `check` and `just chainman run check`.
+
+For host Nix, select it explicitly:
+
+```sh
+CHAINMAN_MODE=host-nix just chainman run check
+```
+
+After the command behaves correctly, commit the recipe, pin, and configuration.
+Follow the [progressive adoption walkthrough](docs/adoption.md) for task routing,
+existing host wrappers, setup, services, and verification before updates.
+
+## Start a new project
+
+Use a disposable checkout to initialize a **new or empty** directory:
+
+```sh
+git clone --branch v0.1.0 --depth 1 https://github.com/chainmandev/chainman.git chainman-init
+just --justfile chainman-init/justfile init "../my-project" v0.1.0
+cd my-project
+just chainman setup
 just verify
 ```
 
-For host Nix, set this before the same commands:
+`just` resolves recipe paths from the checkout: `../my-project` above is next to
+`chainman-init`. Absolute destination paths also work. The checkout can be removed
+once initialization succeeds.
+
+`init` accepts a numeric version, `vVERSION`, or a full commit SHA. It rejects moving
+selectors such as `main` and `latest`. It obtains the selected revision and uses
+that revision's generator and templates. Version selection requires a published
+stable release and bypasses the automatic update age policy.
+
+The starter contains a small example, its verification command, and a project-owned
+flake and lock. Git initialization and the initial commit happen by default using
+your host identity, signing policy, and branch defaults. A commit failure preserves
+the files and prints recovery instructions. To generate files only:
 
 ```sh
-export CHAINMAN_MODE=host-nix
+just --justfile chainman-init/justfile init "../another-project" v0.1.0 --no-git
 ```
 
-`init` accepts a new or empty destination whose parent exists, including paths with
-spaces. It verifies the explicitly selected published release and creates an
-independent schema-3 starter with a URL-only lock. It does not initialize Git or
-run setup. After initialization, the new project does not depend on the Chainman
-checkout. The first command can take time while Nix downloads the pinned tools.
+Initialization does **not** run project setup or certify the application. The larger
+[language examples](examples/) remain in this repository for reference.
 
-The starter includes a working Python demo and optional JavaScript/TypeScript,
-Rust, Python, Go, Flutter/Dart, Swift, and Compose examples. Enable only the modules
-you need. For an existing repository, follow the
-[adoption guide](docs/getting-started.md#existing-projects).
-
-## Everyday commands
+## Commands and updates
 
 ```sh
-just --list
-just setup
-just exec python3 --version
-just config validate
-just setup-status
-just verify
-just deps-update mode=dry-run
-just deps-update commit=off
-just stop
+just chainman version
+just chainman shell
+just chainman exec -- python3 --version
+just chainman recipe verify
+just chainman deps-update --skip-chainman mode=dry-run
 ```
 
-Dependency updates allow major versions by default, apply a configurable **30-day
-minimum age**, and run project verification in an isolated candidate before
-applying changes. **Successful updates commit by default**; use `commit=off` to
-review the verified changes yourself. Failed verification retains the candidate
-for inspection and resume. Formatting also commits by default where the project
-uses Chainman's transaction-backed formatting recipe.
+The shell and exec commands use the project's default profile. Standard recipes
+such as `recipe verify` need [project bindings](docs/recipes.md); dependency updates
+need configured adapters and a complete verification gate. The starter includes
+both for its small example. The minimal existing-project configuration above
+intentionally introduces only one task.
 
-Explicit initial adoption can select a new release. Automatic runtime updates
-still apply the age policy. While v0.1.0 matures, update project dependencies with:
-
-```sh
-just deps-update --skip-chainman mode=dry-run
-just deps-update --skip-chainman commit=off
-```
-
-See [updates and recovery](docs/updates.md) before your first update.
+Runtime updates select stable published releases at least 30 days old by default,
+considering both publication and commit time. They test the proposed SHA and
+reconciled outputs in an isolated candidate before applying changes. Unqualified
+candidates are preserved for inspection and recovery. Without `mode=dry-run` or
+`commit=off`, successful updates commit the verified changes. Use `--skip-chainman`
+for project-only updates while the first runtime release matures.
 
 ## Documentation
 
-- [Guide index](docs/README.md) and [getting started](docs/getting-started.md)
-- [Configuration](docs/configuration.md), [recipes](docs/recipes.md), and [services](docs/services.md)
-- [Dependency updates](docs/updates.md) and [troubleshooting](docs/troubleshooting.md)
-- [Installation and release trust](docs/runtime.md)
-- [Contributing](docs/contributing.md) and [publishing releases](docs/releasing.md)
+Start with the [documentation index](docs/README.md):
 
-Chainman's source development uses host Nix:
-
-```sh
-just setup
-just verify
-just control-test
-```
-
-Licensed under [MIT](LICENSE).
+- [Adoption walkthrough](docs/adoption.md)
+- [Schema-3 configuration](docs/configuration.md) and [recipes](docs/recipes.md)
+- [Setup and services](docs/services.md)
+- [Dependency updates and recovery](docs/updates.md)
+- [Execution modes, caches, and native tools](docs/runtime.md)
+- [Troubleshooting](docs/troubleshooting.md) and [release trust](docs/release-trust.md)
+- [Contributing and qualification](docs/contributing.md)

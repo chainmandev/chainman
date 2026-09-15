@@ -1,8 +1,7 @@
 """Consumer contracts across shared execution, update transactions and runtime pins."""
 
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
-import hashlib
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -18,7 +17,6 @@ from urllib.parse import quote, unquote
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import chainman
 import chainman_updates as consumer_updates
-import registry
 import toolchain
 import updates
 import update_staging
@@ -575,18 +573,18 @@ class UpdateHookTests(ConsumerFixture):
         self.write(".gitignore", ".cache/\n.chainman/\n__pycache__/\n")
         self.write("deps.txt", "1.0\n")
         self.write("notes.txt", "Unrelated project intent\n")
-        self.write(
-            "chainman.lock",
-            json.dumps(
-                {
-                    "schema": 1,
-                    "version": "fixture",
-                    "revision": "fixture",
-                    "url": "https://example.invalid/runtime.tar.gz",
-                    "narHash": "sha256-" + "A" * 43 + "=",
-                }
-            ),
-        )
+        self.write("chainman.lock", "a" * 40 + "\n")
+        runtime = self.base / "runtime"
+        for name in ("bootstrap", "scripts", "nix"):
+            shutil.copytree(
+                chainman.RUNTIME / name,
+                runtime / name,
+                ignore=shutil.ignore_patterns("__pycache__"),
+            )
+        shutil.copy2(chainman.RUNTIME / "VERSION", runtime / "VERSION")
+        selected = patch.object(chainman, "RUNTIME", runtime)
+        selected.start()
+        self.addCleanup(selected.stop)
         self.write(
             "resolver.py",
             """import os,sys,subprocess
@@ -780,280 +778,6 @@ outputs=["deps.txt"]
                 [],
             )
         self.assertEqual((self.root / "deps.txt").read_text(), "1.0\n")
-
-
-class RuntimeReleaseTests(ConsumerFixture):
-    def setUp(self):
-        super().setUp()
-        self.now = datetime(2026, 9, 1, tzinfo=timezone.utc)
-        self.write(
-            "chainman.lock",
-            json.dumps(
-                {
-                    "schema": 1,
-                    "version": "0.1.0",
-                    "revision": "a" * 40,
-                    "url": "https://example.invalid/old.tar.gz",
-                    "narHash": "sha256-" + "A" * 43 + "=",
-                }
-            ),
-        )
-        self.initial_lock = (self.root / "chainman.lock").read_bytes()
-        self.policy = {"minimum_age_days": 30}
-        self.metadata = {
-            "schema": 1,
-            "version": "2.0.0",
-            "revision": "b" * 40,
-            "url": "https://example.invalid/new.tar.gz",
-            "narHash": "sha256-" + "B" * 43 + "=",
-            "archive_sha256": hashlib.sha256(b"expected archive").hexdigest(),
-        }
-        releases = [
-            registry.Release("v2.0.0", self.now - timedelta(days=40)),
-            registry.Release("v3.0.0", self.now - timedelta(days=5)),
-        ]
-        for name, value in (
-            ("github_releases", releases),
-            ("github_commit", "b" * 40),
-        ):
-            mocked = patch.object(registry, name, return_value=value)
-            mocked.start()
-            self.addCleanup(mocked.stop)
-        self.api = "https://api.github.com/repos/chainmandev/chainman"
-        dated = patch.object(
-            consumer_updates.source_updates,
-            "commit_time",
-            return_value=releases[0].published,
-        )
-        dated.start()
-        self.addCleanup(dated.stop)
-        metadata = patch.object(registry, "data", side_effect=self.release_metadata)
-        metadata.start()
-        self.addCleanup(metadata.stop)
-        downloaded = patch.object(registry, "fetch", side_effect=self.release_download)
-        self.download = downloaded.start()
-        self.addCleanup(downloaded.stop)
-
-    def release_metadata(self, url):
-        self.assertEqual(url, self.api + "/releases/tags/v2.0.0")
-        published = (self.now - timedelta(days=40)).isoformat()
-        return {
-            "tag_name": "v2.0.0",
-            "draft": False,
-            "prerelease": False,
-            "immutable": True,
-            "published_at": published,
-            "assets": [
-                {
-                    "id": number,
-                    "name": name,
-                    "state": "uploaded",
-                    "size": len(body),
-                    "digest": "sha256:" + hashlib.sha256(body).hexdigest(),
-                    "created_at": published,
-                    "updated_at": published,
-                }
-                for number, name, body in (
-                    (1, "chainman-release.json", json.dumps(self.metadata).encode()),
-                    (2, "chainman-2.0.0.tar.gz", b"expected archive"),
-                )
-            ],
-        }
-
-    def release_download(self, url, *, accept, anonymous):
-        self.assertEqual(accept, "application/octet-stream")
-        self.assertIs(anonymous, True)
-        if url == self.api + "/releases/assets/1":
-            return json.dumps(self.metadata).encode(), {}
-        self.assertEqual(url, self.api + "/releases/assets/2")
-        return b"expected archive", {}
-
-    def assert_downloaded_exact_assets(self):
-        self.assertEqual(
-            [call.args[0] for call in self.download.call_args_list],
-            [self.api + "/releases/assets/1", self.api + "/releases/assets/2"],
-        )
-
-    def test_ineligible_release_fails_without_fetching_or_rewriting_pin(self):
-        with (
-            patch.object(
-                registry,
-                "github_releases",
-                return_value=[registry.Release("v2.0.0", self.now - timedelta(days=2))],
-            ),
-            patch.object(toolchain, "managed_run") as fetch,
-        ):
-            with self.assertRaisesRegex(ValueError, "eligible"):
-                consumer_updates.runtime_candidate(
-                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
-                )
-            fetch.assert_not_called()
-            self.download.assert_not_called()
-        self.assertEqual((self.root / "chainman.lock").read_bytes(), self.initial_lock)
-
-    def test_release_metadata_or_provenance_mismatch_is_rejected(self):
-        for overrides in ({"version": "9.0.0"}, {"revision": "c" * 40}):
-            with (
-                self.subTest(overrides=overrides),
-                patch.dict(self.metadata, overrides),
-                patch.object(toolchain, "managed_run") as fetch,
-            ):
-                with self.assertRaises(ValueError):
-                    consumer_updates.runtime_candidate(
-                        self.root,
-                        self.policy,
-                        self.now,
-                        gc_root=self.base / "runtime-root",
-                    )
-                fetch.assert_not_called()
-                self.assert_downloaded_exact_assets()
-                self.download.reset_mock()
-                self.assertEqual(
-                    (self.root / "chainman.lock").read_bytes(), self.initial_lock
-                )
-
-    def test_nix_hash_verification_failure_is_not_concealed(self):
-        failed = subprocess.CalledProcessError(
-            1, ["nix", "eval"], stderr="hash mismatch"
-        )
-        with patch.object(toolchain, "managed_run", side_effect=failed):
-            with self.assertRaises(subprocess.CalledProcessError):
-                consumer_updates.runtime_candidate(
-                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
-                )
-        self.assert_downloaded_exact_assets()
-        self.assertEqual((self.root / "chainman.lock").read_bytes(), self.initial_lock)
-
-    @classmethod
-    def stored_candidate(cls):
-        if not hasattr(cls, "_candidate_tree"):
-            with tempfile.TemporaryDirectory(
-                prefix="chainman release fixture "
-            ) as directory:
-                source = Path(directory).resolve() / "candidate"
-                source.mkdir()
-                for directory in ("bootstrap", "scripts", "nix", "tests"):
-                    (source / directory).mkdir()
-                (source / "VERSION").write_text("2.0.0\n")
-                (source / "bootstrap/chainman.sh").write_text("#!/bin/sh\nexit 0\n")
-                (source / "bootstrap/fetch.nix").write_text("{}\n")
-                (source / "nix/flake.nix").write_text(
-                    'throw "fixture must never evaluate"\n'
-                )
-                (source / "nix/flake.lock").write_text("{}\n")
-                for name in (
-                    "scripts/chainman.py",
-                    "scripts/chainman_updates.py",
-                    "tests/test_candidate.py",
-                ):
-                    (source / name).write_text(
-                        "raise RuntimeError('fixture must never execute')\n"
-                    )
-                cls._candidate_tree = Path(
-                    subprocess.check_output(
-                        [
-                            "nix",
-                            "--extra-experimental-features",
-                            "nix-command flakes",
-                            "store",
-                            "add-path",
-                            str(source),
-                        ],
-                        text=True,
-                    ).strip()
-                )
-        return cls._candidate_tree
-
-    def test_latest_eligible_major_is_selected_with_young_release_excluded(self):
-        candidate = self.stored_candidate()
-        with patch.object(
-            toolchain,
-            "managed_run",
-            return_value=subprocess.CompletedProcess(["nix"], 0, str(candidate) + "\n"),
-        ) as fetch:
-            selected = consumer_updates.runtime_candidate(
-                self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
-            )
-        self.assertEqual(selected, candidate)
-        lock = json.loads((self.root / "chainman.lock").read_text())
-        self.assertEqual(lock["version"], "2.0.0")
-        self.assertEqual(lock["revision"], "b" * 40)
-        self.assertEqual(lock["narHash"], self.metadata["narHash"])
-        self.assertIn("--out-link", fetch.call_args.args[0])
-        self.assert_downloaded_exact_assets()
-
-    def test_bundled_checksum_failure_never_commits_or_replaces_bundle(self):
-        candidate = self.stored_candidate()
-        old = json.loads(self.initial_lock)
-        old["bundled_archive"] = "vendor/chainman/chainman.tar.gz"
-        self.write("chainman.lock", json.dumps(old))
-        self.write("vendor/chainman/chainman.tar.gz", "previous verified archive")
-        self.write(".gitignore", ".cache/\n.chainman/\n")
-        self.write("chainman.toml", "schema=1\n[updates]\nminimum_age_days=30\n")
-        initial = self.init_git()
-        with (
-            patch.object(
-                toolchain,
-                "managed_run",
-                return_value=subprocess.CompletedProcess(
-                    ["nix"], 0, str(candidate) + "\n"
-                ),
-            ),
-            patch.dict(self.metadata, {"archive_sha256": "0" * 64}),
-            patch.object(consumer_updates, "verify") as verify,
-        ):
-            with self.assertRaisesRegex(ValueError, "checksum"):
-                consumer_updates.runtime_candidate(
-                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
-                )
-            verify.assert_not_called()
-        self.assertEqual(self.git("rev-parse", "HEAD"), initial)
-        self.assertEqual(
-            (self.root / "vendor/chainman/chainman.tar.gz").read_text(),
-            "previous verified archive",
-        )
-        self.assertEqual(self.git("diff", "--cached", "--name-only"), "")
-
-    def test_non_store_fetch_result_is_rejected(self):
-        with patch.object(
-            toolchain,
-            "managed_run",
-            return_value=subprocess.CompletedProcess(["nix"], 0, str(self.base) + "\n"),
-        ):
-            with self.assertRaisesRegex(ValueError, "Nix store"):
-                consumer_updates.runtime_candidate(
-                    self.root, self.policy, self.now, gc_root=self.base / "runtime-root"
-                )
-
-    def test_candidate_runtime_drives_resolution_and_verification(self):
-        candidate = Path("/nix/store/00000000000000000000000000000000-candidate")
-        with (
-            patch.object(consumer_updates, "runtime_candidate", return_value=candidate),
-            patch.object(toolchain, "managed_run") as execute,
-        ):
-            selected = consumer_updates.perform(
-                self.root, self.policy, self.now, ["two words"], skip_runtime=False
-            )
-            self.assertEqual(selected, candidate)
-            consumer_updates.verify(self.root, self.policy, selected)
-        commands = [call.args[0] for call in execute.call_args_list]
-        self.assertTrue(
-            any(
-                str(candidate / "scripts/chainman_updates.py") in c
-                and "--resolve-root" in c
-                for c in commands
-            )
-        )
-        self.assertTrue(
-            any(
-                str(candidate / "scripts/chainman_updates.py") in c
-                and "--verify-root" in c
-                for c in commands
-            )
-        )
-        self.assertFalse(any(str(candidate / "tests") in c for c in commands))
-        for call in execute.call_args_list:
-            self.assertEqual(call.kwargs["env"]["TOOLCHAIN_FRESH"], "1")
 
 
 if __name__ == "__main__":

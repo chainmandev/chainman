@@ -1,390 +1,76 @@
-# Python reliability and test evidence
+# Qualification
 
-[Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
+[Documentation index](README.md) · [Contributing](contributing.md) · [Publishing](releasing.md)
 
-## Development gates
+## Source gates
 
-Use `just verify` for the complete core gate. `just type-check` runs its mypy
-portion for both Linux and Darwin, independent of the current host. This checks
-platform-specific Python APIs before native CI. To run the generated contracts alone:
+`just verify` runs formatting, strict typing for Linux and Darwin targets, unit and
+property tests, real Git transaction tests, host-Nix bootstrap tests, and the small
+example build. Native adapters and service ownership have additional focused gates
+listed in [contributing](contributing.md).
 
-```sh
-just exec python3 -B -m unittest discover -s tests -p test_properties.py -v
-just exec python3 -B -m unittest discover -s tests -p test_solver_properties.py -v
-just exec python3 -B -m unittest discover -s tests -p test_transaction_state.py -v
-just exec python3 -B -m unittest discover -s tests -p test_dependency_identity.py -v
-just exec python3 -B -m unittest discover -s tests -p test_adapter_data.py -v
-just exec python3 -B -m unittest discover -s tests -p test_application_recovery.py -v
-```
+The manually dispatched verification workflow binds every lane to the requested
+source SHA. It includes Linux x86-64/ARM64 and macOS ARM64/Intel host lanes,
+Docker/Podman container lanes, and language/native-tool checks. A source commit is
+qualified only by the lanes actually executed successfully. Availability of a
+workflow definition is not evidence that it has passed.
 
-All 49 production Python modules enforce `mypy --strict`, plus rejection of
-explicit `Any` and unreachable code, on both Linux and Darwin. `mypy.ini` checks
-the entire `scripts` directory, so new modules enter the gate automatically.
-There are no per-module exemptions or silent import traversal. CI exercises the
-primary development tools and the older pinned Intel macOS environment.
-An isolated source-copy probe adds a fiftieth module: an annotated control passes,
-while a missing annotation and a wrong return type each fail the ordinary gate.
-The Ruff gate includes explicit exception chaining (`B904`). Loop callback
-lifetime (`B023`) remains a direct-review concern because the resolver and
-configuration code deliberately use synchronous callbacks within loops.
+## Bootstrap and source identity
 
-Decoded configuration, registry payloads and saved update records enter as
-`object`. Each consuming boundary projects the fields it uses into strings,
-collections or named records. Unknown manifest and lockfile fields remain in the
-original documents. Mutable JSON/YAML/TOML edits preserve the serializer objects;
-regressions check both the intended written selection and retention of comments
-and unknown nested metadata. The local `semantic_version` stub describes the
-complete-version and npm-range API Chainman consumes, is included in source
-archives, and adds no consumer runtime code. There is no missing-import
-suppression for that dependency.
+The Git bootstrap tests exercise real Git objects with temporary repositories. Only
+the remote transport is substituted when public code is not yet available. They
+check the consumer recipe's size, malformed pins, cold and offline-warm startup,
+corruption, replacement refs, concurrency, interrupted fetches, source checkout
+modifications, literal arguments, stdin, process status, and signals.
 
-Subprocess wrappers distinguish text and binary results and declare their allowed
-options, streams and inherited descriptors. Environment, service address and task
-commands use typed collections. Resource and cache policy use immutable records;
-service exports have named JSON records matching the controller's inputs.
-Configuration maps retain unknown values until the relevant component reads them.
+The Git source tests separately exercise runtime materialization. Files must match
+the selected tree's bytes and executable identity, independent of attributes,
+untracked files, or worktree modifications. Unsupported tree modes and missing
+revisions fail explicitly. Source imported into Nix is checked against the verified
+Git export and rooted through execution.
 
-Dependency adapters share typed snapshot, resolution and final validation
-interfaces. SDK records include declarations, observations and selected source
-versions. Actions selections, OCI inventory, Nix snapshots, artifact observations
-and JavaScript snapshots have named records. Version ranking uses the pinned
-version libraries, with parsed non-optional stable versions at ranking sites.
-The JavaScript solver has typed states and peer conflict witnesses. Native
-resolvers declare Cargo node/edge identities, repair choices, Pub search states,
-file bytes/modes, restoration checkpoints and serializer callbacks. Complete raw
-native documents remain available for change detection.
+Bootstrap tests use restricted PATH fixtures without host language interpreters.
+Container-only qualification must also exclude host Nix. Keep these lanes distinct
+from unit tests that substitute a Nix store import or starter generation: those
+unit fixtures test the surrounding policy, not the substituted boundary.
 
-Useful boundary regressions include rejecting an incomplete two-source SDK
-baseline before either write; reporting both SDK source and output pins; retaining
-explicit-only runtime selection; snapshotting all adapters before mutation; and
-performing final validation after generators. Temporary native constraints must
-restore owned public bytes and modes while preserving concurrent changes for
-inspection. Command failures retain their original exit status and diagnostics.
-The report adapter's unit fixtures replace its external tools.
+## Updates and operations
 
-Hypothesis is pinned through the development Python shell. It is absent from
-the consumer bootstrap and update Python environments. Its tests run in ordinary
-unittest discovery, with no opt-in or dependency-missing skip. Each property
-requests up to 200 generated examples, uses deterministic generation and disables
-timing deadlines. Failures still shrink to small counterexamples. The properties
-perform no network requests, Nix evaluation or native package-manager operations.
+Unit transaction tests use real Git/index/raw-file state in disposable projects.
+They cover frozen authority, declared output scope, concurrent edits, verification
+failure, partial application, staged formatting, and resume. Runtime selection tests
+cover release age, commit age, changed tag identity, VERSION agreement, pin copies,
+unchanged versions, failed source acquisition, and rollback.
 
-The generated oracles cover:
+Real lifecycle tests run Git-pinned runtimes through Nix. They must demonstrate
+successful updates and cleanup, failed candidates, interruption/resume, and runtime
+upgrades that leave the consumer bootstrap byte-identical. Native service tests add
+readiness, startup failure, shared ownership, crash recovery, and volume lifecycle.
 
-- Nix follows resolution against an integer alias graph with known terminal
-  tree depths: root-relative references from nested nodes, reachable cycles,
-  missing paths, suffix traversal, repeated completed follows and unchanged input.
-  An isolated mutation resolving follows relative to the current node is detected
-  and shrinks to one alias pointing at the root.
-- Workflow ordering against worklist reachability and iterative removal of ready
-  vertices: requested closure only, dependencies first, no duplicate execution,
-  missing names and reachable cycles. Both acyclic and arbitrary graphs are
-  generated, including duplicate edges and requests.
-- Task inheritance against a small field-by-field reference: array replacement,
-  empty tables, nested overrides, exact origins, unchanged input and independence
-  of sibling results after mutation.
-- Unused inheritance cycles across every declaration kind.
-- Stable release selection against numeric version tuples and explicit age
-  comparisons, including deprecated/prerelease entries and input reordering.
-- Multiple observations of the same version straddling an age boundary. Both
-  observation orderings must reject it until the latest observation matures.
-- JavaScript peer solving against exhaustive integer-domain assignments, including
-  cycles, per-release constraints, impossible graphs and a duplicate package pin
-  across two scopes. There are at most 243 assignments, below the configured 256
-  visited-state bound. A selected tuple must satisfy the independent oracle, and
-  failure is allowed exactly when the oracle has no solution. Repeated solves
-  must agree. This does not impose a global version-preference optimum.
-- Resource budgets against an exact rational capacity calculation, including the
-  CPU/configuration caps, minimum one job and monotonicity with more resources.
-- Existing flat schema-1 checkpoints and schema-2 explicit runtime selections
-  against independent wire fixtures, with
-  distinct original/candidate Git identities and snapshots, inspected/uninspected
-  states, exact JSON compatibility and independence from later input mutation.
-- Dependency records against the existing five-string tuple/JSON contract,
-  including named-field order, hash/equality compatibility and duplicate removal.
-- Go native records against explicit module/replacement coordinates, preserving
-  requirement order and duplicate entries and remaining independent of later
-  input mutation. This checks the data boundary, not Go replacement precedence;
-  disposable native Go fixtures check that separately.
-- pnpm importer and snapshot records against independently generated section,
-  alias, declared specifier and resolved context coordinates. These consumed edge
-  coordinates are independently copied; unknown resolution keys remain visible
-  to source policy.
-- Application/recovery sequences against independent expected file bytes, full
-  modes, index entries and HEAD. The bounded state machine runs 20 examples of up
-  to 12 steps: interrupted application, refused resume over partial outputs,
-  explicit operator restoration, resumed inspection and successful application.
-  It uses real disposable Git repositories and no Nix or native resolver calls.
+Git transactions assume cooperating processes and are not a filesystem transaction
+against an adversarial same-user writer. Final application or commit interruption
+can preserve partially applied verified changes. Recovery checks must account for
+that state rather than resetting user work.
 
-These have deliberately bounded vocabularies. They do not establish complete
-SemVer/PEP 440 correctness, lock graph correctness or platform behavior.
-The peer property tests the solver with declared candidate domains and fixture
-metadata; registry decoding and native resolution retain their separate gates.
-It detected both deliberately substituted regressions: selecting every newest
-candidate while ignoring conflicts, and rejecting every graph indiscriminately.
+## Adoption and generated projects
 
-## What the existing tests establish
+Initializer tests check explicit version/SHA selection, moved tags, selected-revision
+templates, empty-destination rules, host Git identity/branch/signing, commit-failure
+recovery, and `--no-git`. Exercise the generated starter in both execution modes.
 
-Source-module setup treats unparseable JSON content and non-object readiness
-stamps as cache misses. A child-process fixture verifies that each invalid stamp
-causes one setup run, followed by reuse of the repaired stamp. Missing outputs
-and changed declared inputs invalidate readiness; failed setup preserves the
-previous stamp and cannot make absent outputs ready.
+For established consumers, preserve existing commands and flakes, review host-entry
+wrappers and name collisions, and run focused checks followed by the full declared
+gate in disposable qualification checkouts. Exosuit scaffolds and Rynet exports must
+remain synchronized and must not reintroduce copied runtime implementation.
 
-The reviewed transaction tests operate on disposable Git repositories and assert
-actual file bytes, index contents, commit identities and preservation of
-concurrent edits. Workflow tests execute fixture programs and inspect their
-outputs. These are useful behavioral checks.
+## Release evidence
 
-Mock assertions can also enforce useful contracts: rejecting an invalid Cargo
-attempt budget before registry/native work, bounding retries, and preventing a
-failed normalization from reaching publication. Those tests also check original
-manifest/lock contents. Call counts alone would not establish resolver semantics.
+Record the exact Chainman SHA, consumer candidate tips, test commands/results,
+platform omissions, and unrelated application failures. After publication, read the
+public lightweight tag and release metadata, then prove fresh public Git installation
+with host Nix and container-only prerequisites. Run the documented quickstarts and
+validate links/configuration examples.
 
-The fake npm/pnpm processes in the JavaScript unit suite are fault-injection
-fixtures. They cannot prove how the real package managers interpret a lockfile.
-`just javascript-test` supplies that separate evidence with the pinned binaries
-and a disposable local registry. The same distinction applies to other adapters:
-mocked native success is not evidence of native acceptance or compatibility.
-
-`just control-test` also sends a real Python-exported service plan through the
-packaged Go controller and Process Compose. Its service and readiness commands
-use the actual Python workflow entrypoints; the task checks readiness, returns
-exit code 7, and the test explicitly stops the service and waits for its process
-to exit. This covers the exporter/controller boundary alongside the focused
-ownership tests that construct controller plans directly.
-
-A repeat native JavaScript run exposed an intermittent upstream-override failure.
-The case and complete native suite then passed without production changes.
-Investigation confirmed that pnpm 11 ignored the fixture's `.npmrc` cache-directory
-setting, leaving metadata shared across neutral package fixtures. The fixture now
-sets `PNPM_CONFIG_CACHE_DIR` and checks the effective pnpm/npm cache paths through
-the real binaries. Cache interference is a plausible explanation for the original
-failure, not an established causal reproduction.
-The pnpm setup migration fixture also now closes stdin explicitly: capturing
-stdout/stderr did not remove an inherited terminal, so its intended noninteractive
-refusal case could hang waiting for confirmation when launched from a shell.
-
-`just python-test` qualifies pinned uv against a disposable loopback Simple API
-index with upload timestamps and real wheels. It checks direct and transitive
-selection, global/per-package cutoffs, exact no-op retention, retirement of
-per-package cutoffs, and rejection of a stale lock without rewriting it. Restored
-manifest/lock pairs must pass real offline `uv lock --check`. This is a native
-configuration/lock boundary test, not a full Python adapter or PyPI provenance
-audit; production artifact checks still use their separate registry evidence.
-
-The native fixture found a conservative boundary difference: uv 0.12.5 excludes
-artifacts exactly at its cutoff using millisecond precision; Chainman's shared
-eligibility check includes the cutoff. The test covers an upload immediately
-before, exactly at and immediately after it, then advances the cutoff one
-millisecond. Chainman retains uv's conservative behavior. See the
-[pinned uv comparison](https://github.com/astral-sh/uv/blob/0.12.5/crates/uv-resolver/src/version_map.rs#L524-L528).
-
-The public bootstrap suite includes real host-Nix update/recovery lifecycles.
-Bounded bootstrap calls retain captured stdout and stderr in timeout diagnostics,
-including output from cold container startup. A timeout remains a failed check;
-diagnostic reporting does not extend its deadline or retry the operation.
-Container fixtures stop and explicitly remove their service container before
-removing its network, avoiding asynchronous auto-removal races during cleanup.
-Combined and runtime-only updates use two independently packaged runtime
-generations. They assert that project resolution and verification run under the
-new runtime while the original checkout retains its old pin until application.
-Failed-verification resume keeps the prepared runtime, repeats evidence checks
-and verification, and does not rerun project resolution. Only the release
-transport is replaced with fixture responses. Project-only lifecycle cases retain
-their original runtime and exercise interruption, staged formatting and Git
-application independently. Legacy custom resolver arguments are also covered by
-real hook/Git tests; adapter argument validation remains a separate strict gate.
-Separate application tests inject failed writes, deletions and Git index/commit
-operations. They also kill a disposable Python child after its first completed
-write, immediately before branch publication and immediately after it. Assertions
-check preserved original/candidate bytes and modes, actual staged blobs, branch
-history and release of process leases. These are process-interruption checks,
-not a simulation of power loss or filesystem durability.
-
-`just gradle-test` enables the existing offline native Gradle fixture suite and
-runs in the compose job of the deliberate CI workflow. It checks child-project
-transitive locks, native composite-build source bindings, read-only inspection,
-resolution failure and termination of the build JVM. Building the Compose example
-and qualifying Chainman's Gradle adapter are separate checks.
-
-Container-engine and native controller tests have separate prerequisites/gates;
-skipped tests provide no evidence about those paths. Linux success does not
-establish macOS success.
-`just control-test` runs Go vet and the Go tests with the race detector, then the
-native controller/backend fixtures and four target cross-builds. Cross-builds
-establish compilation only. The deliberate CI matrix runs core and controller
-qualification natively on both Linux and macOS, on ARM64 and x86-64 runners.
-The formatting gate includes Actionlint's workflow and embedded-command checks;
-PyYAML stubs are pinned in the development shell alongside its implementation.
-Distribution tests compare the explicit source inventory with production Python,
-Go and test files, and check that statically imported local Python modules are
-present in the runtime archive. Dynamic imports and external commands still need
-their behavioral and packaged-runtime checks.
-Core tests evaluate an actual Nix flake under a directory containing spaces and
-URI characters, then provision and execute the native task controller from a
-copied runtime under such a path. The latter asserts child output and exit status.
-SDK recipe tests exercise the actual Just entrypoint with a fixture launcher;
-the macOS job separately runs the real Apple SDK preflight.
-Temporary fixture roots are canonicalized immediately after allocation: macOS
-can return `/tmp` through its `/private/tmp` alias, whereas Git and subprocesses
-report physical paths. Both Python and Go fixture roots use this convention.
-Explicit alias and symlink cases construct their own links after that common
-fixture setup. The Go race suite also runs successfully with an aliased `TMPDIR`.
-Source previews also canonicalize their internally allocated temporary root.
-A regression uses an aliased temporary directory and a real copied Git submodule:
-valid relative links remain readable, candidate edits verify in the copy, and the
-original bytes, index and HEAD remain unchanged.
-The bundled macOS Swift profile uses the Xcode selected by `xcode-select` for both
-its compiler and SDK. It restores `DEVELOPER_DIR` before refreshing `SDKROOT`,
-`CC` and `CXX` through `xcrun`; Nix's Apple SDK hook otherwise changes both the
-developer directory and SDK, including when entering from another Nix C shell.
-The bundled profiles use the main Nixpkgs lock on Linux and Apple Silicon.
-Intel macOS uses the separately locked `nixpkgs-darwin` input from
-`nixpkgs-26.05-darwin`, since unstable has removed that platform. The source
-dependency policy updates both inputs with the ordinary commit-age rule. Generated
-examples inherit both locks and update targets. Intel compatibility depends on
-the remaining upstream 26.05 support period; its retirement requires a new
-platform-support decision.
-Local comparisons of its Python tools record both interpreter versions and module
-import paths. Ad hoc `nix shell` checks clear inherited `PYTHONPATH` and
-`NIX_PYTHONPATH` before starting the selected Python environment; otherwise an
-older interpreter can still import the main shell's newer libraries.
-On Intel macOS, source and bootstrap entry make the compatibility input's Bash
-available through `nix shell` before `nix develop`. Nix selects its startup Bash
-from the input named `nixpkgs` independently of the devShell, and otherwise falls
-back to the host's Bash. A real-Nix fixture supplies a primary input that cannot
-provide Bash and a failing host Bash; both launchers must still deliver literal
-arguments and the child's exit status through the pinned shell. Native Intel CI
-also qualifies the actual compatibility packages.
-Darwin controller fixtures invoke `/bin/ps` directly for process-state evidence;
-system administration tools need not be on a selected Nix profile's `PATH`.
-
-`just rust-test` runs the production Cargo adapter with a loopback sparse index,
-real crate archives, and isolated source replacement/cache configuration. It
-checks exact direct selection, a native transitive conflict followed by eligible
-fallback, restored manifest syntax/modes, native acceptance with `--locked`,
-unsatisfiable resolution, and rejection/restoration of mismatched checksum
-evidence. The fixture supplies registry publication evidence; it does not qualify
-the crates.io HTTP client. A virtual workspace case checks one renamed dependency
-inherited by two members through ordinary and development dependencies, native
-alias binding, transitive repair and preservation of member manifest bytes/modes.
-
-`just swift-test` runs the production Swift adapter against disposable versioned
-Git repositories. A fixture-only Git transport rewrite preserves the declared
-GitHub URLs, and non-file transport is disabled. Native manifest evaluation,
-update, and frozen dependency graph inspection all use the pinned SwiftPM binary.
-The fixture isolates repository, configuration, fingerprint, and compiler caches.
-It checks direct selection, transitive versions/revisions, public manifest
-restoration, failed resolution, mismatched revision evidence, and read-only
-repeated audit. The fixture supplies GitHub publication evidence.
-A local-package case reaches remote parent/leaf dependencies through a contained
-bridge package. It checks the real frozen graph and command-root lock, preserves
-the local manifest, and rejects an incomplete lock despite an already populated
-native cache. Local closure discovery does not expand automatic pin ownership.
-
-The Swift test initially reproduced an audit failure after a valid update:
-`--skip-update` reused a shared repository cache lacking the newly selected
-commits. The audit now allows repository refresh while forcing the resolved
-versions and guarding the lock against changes. The native fixture deliberately
-populates its cache before publishing later local tags. Both new gates run in
-their corresponding deliberate CI jobs, including Swift on macOS.
-An isolated mutation restoring `--skip-update` makes the native success case
-fail again with missing Git objects; the test does not rely on checking flags alone.
-
-## Targeted test-sensitivity experiment
-
-On 2026-09-12, the baseline at `9c54804` passed 98 tests in `test_configuration`,
-`test_resources`, `test_registry` and `test_update_staging`. Each deliberate fault
-below was then injected into an imported production module in a separate Python
-process, leaving repository files unchanged. The corresponding test module was
-run against it. The experiment was repeated with the new generated contracts.
-
-| Deliberate fault | Baseline tests | With generated contracts |
-| --- | --- | --- |
-| Shallow-copy inherited lists, allowing sibling aliasing | Missed | Detected |
-| Concatenate inherited arrays instead of replacing them | Detected | Detected |
-| Round memory capacity up instead of down | Detected | Detected |
-| Exclude publication exactly at the maturity cutoff | Detected | Detected |
-| Use the oldest observation of a version instead of the latest | Missed | Detected |
-| Omit the original Git-index comparison before applying an update | Detected | Detected |
-
-This is six selected mutations, not a repository-wide mutation score. It verifies
-that specific assertions reject plausible regressions; it does not verify every
-test. In particular, an initial broad random inventory property still missed the
-oldest-observation mutation. Explicit generation of correlated observations was
-necessary. Generate important interactions deliberately instead of relying on
-independent random inputs to happen to contain them.
-
-The follow-up boundary work also injected four independent faults: preserving
-inspection on resume, confusing original and candidate indexes, bypassing
-malformed-baseline validation for an empty result, and swapping identity URL/hash
-fields. Each new targeted test failed on its corresponding fault. These mutations
-ran in separate Python processes without changing repository files. The codec
-checks have explicit field assertions in addition to round trips, so a paired
-encoder/decoder mistake cannot silently validate itself.
-
-The adapter follow-up injected four more faults in temporary Python processes:
-accepting malformed falsey Go lists as empty, swapping old/new Go replacement
-coordinates, serializing the npm projection and losing unknown native metadata,
-and deferring npm entry validation until after the frozen native check. All four
-were detected by the new tests. The npm cases exercise the production resolver
-and assert published lock contents or preserved original inputs, in addition to
-native call ordering. Their native processes remain fault-injection fixtures;
-the pinned npm/pnpm gate supplies separate real-binary evidence.
-
-The application follow-up reproduced an overwrite before adding destination
-rechecks: an edit made to a later output during application was replaced, and
-finalization reported success. The regression tests now cover changed bytes,
-deletion targets and modes. Three isolated mutation probes were detected:
-removing the destination recheck, retaining stale inspection on resume, and
-erasing a previously completed output after an application failure. The latter
-two were detected by the recovery state machine's assertions. These probes leave
-repository files unchanged and do not constitute a repository-wide mutation score.
-
-The JavaScript evidence follow-up detected two further isolated mutations:
-bypassing peer-metadata validation and making every declared peer optional.
-Assertions check successful fallback to a valid release, rejection when a required
-peer has no compatible release, and unchanged project manifests. Malformed
-metadata is tested separately from valid optional peers and unused older releases.
-The shared policy tests also check malformed tables and exception fields through
-actual release selection, alongside the existing age/floor/expiry oracles.
-
-## Boundary guarantees and next improvements
-
-Typed checkpoints now reject malformed records before operational decisions;
-resume invalidates prior inspection. The in-memory inspection record is not a
-verifier attestation: the launcher remains responsible for running verification
-before finalization. The persisted flat schema and dependency identity wire form
-remain compatible. Records have frozen fields, with copied mutable collections
-inside the transaction state; they are not deeply immutable.
-
-Native input projections now validate npm and pnpm package records, pnpm importer
-and snapshot edges, Go manifests/queries and Swift graph nodes before their fields
-drive adapter decisions. Go local and
-remote replacements use distinct records; Swift declarations use a tagged union.
-Go's native `null` list form remains valid; other falsey malformed values no
-longer silently mean no dependencies. npm retains the raw lock document for
-serialization, so validating a projection does not drop unknown native metadata.
-pnpm also retains the full document for normalization graph comparison. Tests
-inject malformed output after resolution, normalization and frozen verification:
-each must stop before publication and preserve original project inputs. Separate
-cases check both retention of unknown metadata and rejection of changes to it
-during normalization.
-In disposable module copies, five deliberate regressions failed the intended
-assertions: omitting optional dependency sections, crossing importer
-specifier/version fields, hiding unknown resolution keys, comparing only projected
-normalization data, and delaying validation until after normalization. The
-unmodified controls passed. Mypy separately rejected four incompatible importer,
-snapshot, package and resolved target values.
-Go records have immutable fields and tuple collections; Swift graph children are
-decoded one level at a time during iterative traversal, not deeply frozen.
-
-Future data-model changes should retain the global strict gate and validate new
-external fields where they are consumed. Split modules when that creates a useful
-boundary with independent contracts, rather than to meet a line-count target.
-
-Add differential tests against native resolvers when changing their adapters.
-Extend the native fixtures when changing supported resolver behavior. Application
-failures deliberately preserve partial results for inspection; the recovery model
-does not introduce automatic rollback or authorize resuming over changed inputs.
+Do not promote consumers before public readback and their required gates pass.
+Separate an unavailable platform lane or application blocker from a Chainman failure;
+do not weaken acceptance or dependency policy to turn either into a passing result.

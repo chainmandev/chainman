@@ -1,4 +1,4 @@
-"""Bootstrap qualification uses real Nix and neutral temporary runtime archives."""
+"""Runtime qualification uses real Nix behind the verified Git entrypoint."""
 
 import base64
 import hashlib
@@ -8,7 +8,6 @@ import shutil
 import shlex
 import signal
 import subprocess
-import tarfile
 import tempfile
 import time
 import unittest
@@ -135,20 +134,8 @@ class BootstrapTests(unittest.TestCase):
             "if '--wait' in sys.argv: time.sleep(60)\n"
             "if '--resolve-service' in sys.argv: print(socket.gethostbyname(os.environ['DEMO_SERVICE_ALIAS']))\n"
         )
-        cls.nar_hash = subprocess.check_output(
-            [
-                NIX,
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(cls.tree),
-            ],
-            text=True,
-        ).strip()
-        cls.archive = Path(cls.shared.name).resolve() / "runtime archive.tar.gz"
-        with tarfile.open(cls.archive, "w:gz") as archive:
-            archive.add(cls.tree, arcname="runtime")
+        shutil.copytree(SOURCE / "bootstrap", cls.tree / "bootstrap")
+        (cls.tree / "VERSION").write_text("0.1.0\n")
 
     @classmethod
     def cleanup_store(cls):
@@ -182,20 +169,12 @@ class BootstrapTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         (self.root / "scripts").mkdir()
         self.launcher = self.root / "scripts/chainman.sh"
-        shutil.copy2(SOURCE / "bootstrap/chainman.sh", self.launcher)
-        shutil.copy2(
-            SOURCE / "bootstrap/fetch.nix", self.root / "scripts/chainman-fetch.nix"
+        self.launcher.write_text(
+            '#!/bin/sh\nset -eu\nroot=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\nexec just --justfile "$root/justfile" chainman "$@"\n'
         )
-        shutil.copy2(self.archive, self.root / "bundle.tar.gz")
-        self.lock = {
-            "schema": 1,
-            "version": "test",
-            "revision": "fixture-only",
-            "url": "https://example.invalid/runtime.tar.gz",
-            "narHash": self.nar_hash,
-            "bundled_archive": "bundle.tar.gz",
-        }
-        self.write_lock()
+        self.launcher.chmod(0o755)
+        shutil.copy2(SOURCE / "bootstrap/chainman.just", self.root / "justfile")
+        self.repositories = {}
         self.env = {
             key: value
             for key, value in os.environ.items()
@@ -207,11 +186,14 @@ class BootstrapTests(unittest.TestCase):
             XDG_CACHE_HOME=str(Path(self.shared.name).resolve() / "cache"),
             CHAINMAN_NIX_VOLUME=self.test_volume,
         )
+        self.pin_runtime(self.tree)
 
     def write_lock(self):
-        (self.root / "chainman.lock").write_text(json.dumps(self.lock))
+        (self.root / "chainman.lock").write_text(self.lock + "\n")
 
     def run_bootstrap(self, *args, check=True, env=None):
+        args = args or ("status",)
+        self.prepare_cache(env or self.env)
         result = run_captured(
             [str(self.launcher), *args],
             cwd="/",
@@ -234,13 +216,16 @@ class BootstrapTests(unittest.TestCase):
         exported = tempfile.TemporaryDirectory(prefix="chainman entry authority ")
         self.addCleanup(exported.cleanup)
         authority = Path(exported.name).resolve()
-        for source, name in (
-            (SOURCE / "bootstrap/chainman.sh", "chainman.sh"),
-            (SOURCE / "bootstrap/fetch.nix", "chainman-fetch.nix"),
-            (self.root / "chainman.lock", "chainman.lock"),
-            (self.root / "bundle.tar.gz", "bundle.tar.gz"),
-        ):
-            shutil.copy2(source, authority / name)
+        shutil.copytree(self.root / "real-runtime", authority / "source")
+        (authority / "chainman.sh").write_text(
+            "#!/bin/sh\nexport CHAINMAN_ENTRY_AUTHORITY="
+            + shlex.quote(str(authority))
+            + "\nexec "
+            + shlex.quote(str(authority / "source/bootstrap/chainman.sh"))
+            + ' "$@"\n'
+        )
+        (authority / "chainman.sh").chmod(0o755)
+        shutil.copy2(self.root / "chainman.lock", authority / "chainman.lock")
         (authority / "authority-root").write_text(str(self.root) + "\n")
         (authority / "git-directories").write_text(".git\nnested input/.git\n")
         subprocess.run(
@@ -256,7 +241,11 @@ class BootstrapTests(unittest.TestCase):
             original
             + '\n[container]\nmounts=[{source="/candidate-chosen-source",target="/original-write-access",read_only=false}]\n'
         )
-        env = dict(self.env, CHAINMAN_PROJECT_ROOT=str(self.root))
+        env = dict(
+            self.env,
+            CHAINMAN_PROJECT_ROOT=str(self.root),
+            CHAINMAN_SOURCE_REVISION=self.lock,
+        )
         if container:
             env.update(
                 CHAINMAN_MODE="container-nix",
@@ -297,31 +286,77 @@ print('entry and Git authority are read-only')
 
     def use_real_runtime(self):
         runtime = self.root / "real-runtime"
-        inventory = json.loads((SOURCE / "release-files.json").read_text())[
-            "runtime_files"
-        ]
+        inventory = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(SOURCE),
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ],
+            text=True,
+        ).splitlines()
         for name in inventory:
+            if not (SOURCE / name).is_file():
+                continue
             target = runtime / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(SOURCE / name, target)
-        self.bundle_runtime(runtime)
+        self.pin_runtime(runtime)
         return runtime
 
-    def bundle_runtime(self, runtime):
-        self.lock["narHash"] = subprocess.check_output(
+    def pin_runtime(self, runtime):
+        repository = Path(tempfile.mkdtemp(prefix="fixture-git-", dir=self.shared.name))
+        subprocess.run(["git", "init", "--bare", "-q", str(repository)], check=True)
+        command = ["git", "--git-dir=" + str(repository), "--work-tree=" + str(runtime)]
+        subprocess.run([*command, "add", "-A"], check=True)
+        subprocess.run(
             [
-                NIX,
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(runtime),
+                *command,
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "commit",
+                "-qm",
+                "Runtime fixture",
             ],
-            text=True,
+            check=True,
+        )
+        self.lock = subprocess.check_output(
+            [*command, "rev-parse", "HEAD"], text=True
         ).strip()
-        with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
-            archive.add(runtime, arcname="runtime")
+        self.repositories[self.lock] = repository
         self.write_lock()
+        self.prepare_cache(self.env)
+
+    def prepare_cache(self, env):
+        if self.lock not in self.repositories:
+            return
+        cache = (
+            Path(env["XDG_CACHE_HOME"])
+            / "chainman/git/github.com-chainmandev-chainman"
+            / (self.lock + ".git")
+        )
+        if not cache.exists():
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--bare",
+                    "-q",
+                    str(self.repositories[self.lock]),
+                    str(cache),
+                ],
+                check=True,
+            )
 
     def lifecycle_git(self, *args):
         return subprocess.check_output(
@@ -329,11 +364,9 @@ print('entry and Git authority are read-only')
         ).strip()
 
     def update_lifecycle(self, *, reject=False, block=False):
-        runtime = self.use_real_runtime()
-        self.lock["version"] = (runtime / "VERSION").read_text().strip()
+        self.use_real_runtime()
         self.write_lock()
         self.launcher.chmod(0o755)
-        (self.root / "scripts/chainman-fetch.nix").chmod(0o644)
         # Reuse only the fixture's Nix/download cache between cases. Each test
         # owns its consumer and clears its transaction directory during cleanup.
         cache = Path(self.shared.name).resolve() / "lifecycle cache"
@@ -396,12 +429,6 @@ format-check=["format-check"]
             "    assert (root / 'partial.txt').read_text() == 'unstaged  \\n'\n"
             "print('fixture phase: ' + action, file=sys.stderr)\n"
         )
-        subprocess.run(
-            ["python3", str(runtime / "scripts/recipes.py"), str(self.root)],
-            check=True,
-            env=self.env,
-            capture_output=True,
-        )
         self.lifecycle_git("init", "-b", "main")
         self.lifecycle_git("config", "user.name", "Fixture")
         self.lifecycle_git("config", "user.email", "fixture@example.invalid")
@@ -457,6 +484,7 @@ format-check=["format-check"]
 
     def test_public_update_lifecycle_interruption_can_resume(self):
         before = self.update_lifecycle(block=True)
+        self.prepare_cache(self.env)
 
         def running(pid):
             try:
@@ -568,7 +596,7 @@ format-check=["format-check"]
         shutil.copytree(previous, next_runtime)
         responses_file = Path(temporary.name).resolve() / "release-responses.json"
         # Transport alone is a fixture. Keeping responses outside the immutable
-        # runtimes avoids a self-referential archive hash and supports fresh
+        # runtimes keeps Git identities fixed and supports fresh
         # reads by the new runtime when resuming a combined update.
         for runtime in (previous, next_runtime):
             with (runtime / "scripts/registry.py").open("a") as stream:
@@ -581,17 +609,8 @@ format-check=["format-check"]
         (next_runtime / "VERSION").write_text("0.2.0\n")
         with (next_runtime / "bootstrap/chainman.sh").open("a") as stream:
             stream.write("\n# Neutral second-generation bootstrap fixture.\n")
-        self.bundle_runtime(next_runtime)
-        body = (self.root / "bundle.tar.gz").read_bytes()
-        revision = "b" * 40
-        metadata = dict(
-            schema=1,
-            version="0.2.0",
-            revision=revision,
-            url="https://example.invalid/chainman-0.2.0.tar.gz",
-            narHash=self.lock["narHash"],
-            archive_sha256=hashlib.sha256(body).hexdigest(),
-        )
+        self.pin_runtime(next_runtime)
+        revision = self.lock
         published = "2026-01-01T00:00:00Z"
         release = dict(
             tag_name="v0.2.0",
@@ -603,22 +622,6 @@ format-check=["format-check"]
         )
         api = "https://api.github.com/repos/chainmandev/chainman"
         responses = {}
-        for number, name, data in (
-            (1, "chainman-release.json", json.dumps(metadata).encode()),
-            (2, "chainman-0.2.0.tar.gz", body),
-        ):
-            release["assets"].append(
-                dict(
-                    id=number,
-                    name=name,
-                    state="uploaded",
-                    size=len(data),
-                    digest="sha256:" + hashlib.sha256(data).hexdigest(),
-                    created_at=published,
-                    updated_at=published,
-                )
-            )
-            responses[f"{api}/releases/assets/{number}"] = data
         for url, value in {
             f"{api}/releases?per_page=100&page=1": [release],
             f"{api}/releases/tags/v0.2.0": release,
@@ -631,13 +634,15 @@ format-check=["format-check"]
             },
         }.items():
             responses[url] = json.dumps(value).encode()
-        # Selection, Nix unpacking, public orchestration, verification and
+        # Selection, verified Git materialization, orchestration, verification and
         # application use the actual implementations in both generations.
         encoded = {
             url: base64.b64encode(data).decode() for url, data in responses.items()
         }
         responses_file.write_text(json.dumps(encoded))
-        self.bundle_runtime(previous)
+        self.pin_runtime(previous)
+        old_revision = self.lock
+        bootstrap_before = (self.root / "justfile").read_bytes()
         workflow = self.root / "workflow.py"
         workflow.write_text(
             workflow.read_text()
@@ -650,7 +655,7 @@ format-check=["format-check"]
                 "assert (root / 'dependency.lock').read_text() == 'accepted\\n', 'fixture verification rejected'",
                 "assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'VERSION').read_text().strip() == '0.2.0'\n"
                 f"    assert not {reject!r} or (root / '.cache/accept-runtime').exists(), 'fixture runtime verification rejected'\n"
-                f"    assert __import__('json').loads(pathlib.Path({str(self.root / 'chainman.lock')!r}).read_text())['version'] == '0.1.0'",
+                f"    assert pathlib.Path({str(self.root / 'chainman.lock')!r}).read_text().strip() == {old_revision!r}",
             )
         )
         self.lifecycle_git("add", ".")
@@ -671,8 +676,8 @@ format-check=["format-check"]
             self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
             self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
             self.assertEqual(
-                json.loads((self.root / "chainman.lock").read_text())["version"],
-                "0.1.0",
+                (self.root / "chainman.lock").read_text().strip(),
+                old_revision,
             )
             candidates = list(self.update_cache.glob("candidate.*"))
             self.assertEqual(len(candidates), 1)
@@ -683,15 +688,14 @@ format-check=["format-check"]
         accepted = json.loads(result.stdout)
         self.assertEqual(
             set(accepted["changed"]),
-            {"chainman.lock", "bundle.tar.gz", "scripts/chainman.sh"}
+            {"chainman.lock"}
             | ({"dependency.lock"} if action == "deps-update" else set()),
         )
         self.assertEqual(accepted["commit"], self.lifecycle_git("rev-parse", "HEAD"))
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
         self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
-        self.assertEqual(
-            json.loads((self.root / "chainman.lock").read_text())["version"], "0.2.0"
-        )
+        self.assertEqual((self.root / "chainman.lock").read_text().strip(), revision)
+        self.assertEqual((self.root / "justfile").read_bytes(), bootstrap_before)
         new_path = Path(
             self.run_bootstrap(
                 "exec", "--profile", "host", "--", "python3", "-c", probe
@@ -1075,7 +1079,174 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertIsNone(record["active_profile"])
         self.assertIsNone(record["active_fingerprint"])
 
-    def test_verified_bundle_dispatch_and_repeated_generation(self):
+    def test_generated_starter_uses_its_own_flake(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+        )
+        destination = self.root / "new independent project"
+        self.run_bootstrap(
+            "exec",
+            "--profile",
+            "host",
+            "--",
+            "sh",
+            "-eu",
+            "-c",
+            'exec python3 "$CHAINMAN_RUNTIME/scripts/example.py" "$1" "$2"',
+            "sh",
+            str(destination),
+            self.lock,
+        )
+        result = run_captured(
+            ["just", "--justfile", str(destination / "justfile"), "verify"],
+            env=self.env,
+            cwd=destination,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Example verification passed", result.stdout)
+        self.assertEqual((destination / "chainman.lock").read_text(), self.lock + "\n")
+        self.assertNotIn("chainman", (destination / "flake.nix").read_text().lower())
+
+    def initializer_case(self, mode):
+        runtime = self.use_real_runtime()
+        checkout = self.root / "disposable initializer checkout"
+        shutil.copytree(runtime, checkout)
+        # Only transport is redirected. The bare repository, commit verification,
+        # Nix import, selected generator, host Git commit and starter are real.
+        if mode == "container-nix":
+            shutil.copytree(self.repositories[self.lock], checkout / "fixture.git")
+            repository = "file:///chainman/fixture.git"
+        else:
+            repository = self.repositories[self.lock].as_uri()
+        resolver = checkout / "scripts/git_runtime.py"
+        resolver.write_text(
+            resolver.read_text().replace(
+                'REPOSITORY = "https://github.com/chainmandev/chainman.git"',
+                "REPOSITORY = " + json.dumps(repository),
+            )
+        )
+        destination = self.root / "initialized project with spaces"
+        policy = self.root / "host Git policy"
+        policy.write_text(
+            "[user]\n name = Initializer fixture\n email = init@example.invalid\n[init]\n defaultBranch = project-start\n[commit]\n gpgsign = false\n"
+        )
+        env = dict(self.env, CHAINMAN_MODE=mode, GIT_CONFIG_GLOBAL=str(policy))
+        if mode == "container-nix":
+            env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
+        result = run_captured(
+            [str(checkout / "scripts/init.sh"), str(destination), self.lock],
+            cwd=self.root,
+            env=env,
+            timeout=600,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Setup and project verification have not been run", result.stdout)
+        self.assertEqual((destination / "chainman.lock").read_text(), self.lock + "\n")
+
+        def git(*args):
+            return subprocess.check_output(
+                ["git", "-C", str(destination), *args], env=env, text=True
+            ).strip()
+
+        self.assertEqual(git("branch", "--show-current"), "project-start")
+        self.assertEqual(git("status", "--porcelain"), "")
+        self.assertEqual(git("log", "-1", "--format=%an"), "Initializer fixture")
+        shutil.rmtree(checkout)
+        result = run_captured(["just", "verify"], cwd=destination, env=env, timeout=300)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Example verification passed", result.stdout)
+
+    def test_host_initializer_commits_selected_git_starter(self):
+        self.initializer_case("host-nix")
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
+    def test_container_initializer_commits_selected_git_starter(self):
+        self.initializer_case("container-nix")
+
+    def test_manual_adoption_preserves_existing_justfile_and_flake(self):
+        self.use_real_runtime()
+        shutil.copy2(SOURCE / "template/flake.nix", self.root / "flake.nix")
+        shutil.copy2(SOURCE / "nix/flake.lock", self.root / "flake.lock")
+        original = 'set shell := ["sh", "-eu", "-c"]\n\ncheck:\n    @python3 -c \'print("existing workflow passed")\'\n\n'
+        (self.root / "justfile").write_text(
+            original + (SOURCE / "bootstrap/chainman.just").read_text()
+        )
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="application"\n[profiles.application]\nflake=".#default"\n[tasks.check]\ncommands=[["just", "check"]]\n'
+        )
+        before = {
+            name: (self.root / name).read_bytes()
+            for name in ("justfile", "flake.nix", "flake.lock")
+        }
+        result = self.run_bootstrap("run", "check")
+        self.assertIn("existing workflow passed", result.stdout)
+        self.assertEqual(
+            {name: (self.root / name).read_bytes() for name in before}, before
+        )
+
+    def restricted_prerequisites(self, mode):
+        tools = self.root / "restricted host tools"
+        tools.mkdir()
+        allowed = "sh git just wc mkdir mktemp ln rm dirname basename date id uname tr grep sed awk cat readlink find sleep cksum cut chmod realpath sort head tail stat xargs touch env df rmdir ps".split()
+        if mode == "host-nix":
+            allowed += ["nix"]
+        else:
+            allowed += [self.test_engine]
+        for name in allowed:
+            executable = shutil.which(name) or shutil.which(name, path=os.defpath)
+            self.assertIsNotNone(executable, name)
+            (tools / name).symlink_to(executable)
+        (tools / "git").unlink()
+        (tools / "git").write_text(
+            '#!/bin/sh\ncase " $* " in *" fetch "*) test "${TEST_GIT_OFFLINE:-0}" = 0 || exit 73;; esac\nexec '
+            + shlex.quote(shutil.which("git"))
+            + " -c "
+            + shlex.quote(
+                "url."
+                + self.repositories[self.lock].as_uri()
+                + "/.insteadOf=https://github.com/chainmandev/chainman.git"
+            )
+            + ' -c protocol.file.allow=always "$@"\n'
+        )
+        (tools / "git").chmod(0o755)
+        env = dict(
+            self.env,
+            PATH=str(tools),
+            CHAINMAN_MODE=mode,
+            XDG_CACHE_HOME=str(self.root / "cold Git cache"),
+        )
+        if mode == "container-nix":
+            env.pop("CHAINMAN_NIX_BIN", None)
+            env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
+        # Call directly so the harness cannot preseed this cache.
+        observations = []
+        for offline in ("0", "1"):
+            result = run_captured(
+                [str(self.launcher), "status"],
+                env=dict(env, TEST_GIT_OFFLINE=offline),
+                cwd=self.root,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            observations.extend(self.records())
+            for record in self.root.glob("record-*.json"):
+                record.unlink()
+        self.assertEqual(len(observations), 2)
+
+    def test_host_bootstrap_with_only_declared_prerequisites(self):
+        self.restricted_prerequisites("host-nix")
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "select an available container engine",
+    )
+    def test_container_bootstrap_without_host_nix_or_languages(self):
+        self.restricted_prerequisites("container-nix")
+
+    def test_verified_git_dispatch_and_repeated_generation(self):
         self.run_bootstrap("status", "argument with spaces", "", "$(not-a-command)")
         first = self.records()[0]
         self.assertEqual(
@@ -1101,47 +1272,8 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             {record["runtime"] for record in self.records()}, {str(runtime)}
         )
 
-    def test_wrong_hash_fails_before_runtime_evaluation(self):
-        self.lock["narHash"] = "sha256-" + "A" * 43 + "="
-        self.write_lock()
-        result = self.run_bootstrap(check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.root / ".chainman").exists())
-        self.assertEqual(self.records(), [])
-
-    def test_missing_identity_fails_closed(self):
-        for key in ("schema", "version", "revision", "url", "narHash"):
-            with self.subTest(key=key):
-                value = self.lock.pop(key)
-                self.write_lock()
-                self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
-                self.lock[key] = value
-        self.assertFalse((self.root / ".chainman").exists())
-
-    def test_local_archive_override_and_explicit_root(self):
-        self.lock.pop("bundled_archive")
-        self.write_lock()
-        env = dict(
-            self.env,
-            CHAINMAN_ARCHIVE=str(self.archive),
-            CHAINMAN_PROJECT_ROOT=str(self.root),
-        )
-        self.run_bootstrap("status", env=env)
-        self.assertEqual(self.records()[0]["root"], str(self.root))
-
-    def test_archive_and_cache_symlinks_fail(self):
-        outside = self.root / "outside"
-        outside.mkdir()
-        (self.root / ".chainman").symlink_to(outside, target_is_directory=True)
-        self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
-        (self.root / ".chainman").unlink()
-        (self.root / "bundle.tar.gz").unlink()
-        (self.root / "bundle.tar.gz").symlink_to(self.archive)
-        self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
-        self.assertEqual(list(outside.iterdir()), [])
-
     def test_project_local_runtime_shadow_is_never_executed(self):
-        content_id = hashlib.sha256(self.nar_hash.encode()).hexdigest()
+        content_id = self.lock
         shadow = self.root / ".chainman" / content_id / "scripts"
         shadow.mkdir(parents=True)
         (shadow / "chainman.py").write_text("raise SystemExit(97)\n")
@@ -1227,29 +1359,12 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         candidate = self.root / "unique-runtime"
         shutil.copytree(self.tree, candidate)
         (candidate / "unique-source").write_text(str(self.root))
-        self.lock["narHash"] = subprocess.check_output(
-            [
-                NIX,
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(candidate),
-            ],
-            text=True,
-        ).strip()
-        with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
-            archive.add(candidate, arcname="runtime")
-        self.write_lock()
+        self.pin_runtime(candidate)
         cache = self.root / "private-cache"
         env = dict(self.env, XDG_CACHE_HOME=str(cache))
         self.run_bootstrap("first", env=env)
         runtime = Path(self.records()[0]["runtime"])
-        root = (
-            cache
-            / "chainman/runtime-roots"
-            / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
-        )
+        root = cache / "chainman/runtime-roots" / self.lock
         self.assertEqual(root.resolve(), runtime)
         nix_store = str(Path(NIX).resolve().with_name("nix-store"))
         roots = subprocess.check_output(
@@ -1273,11 +1388,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.run_bootstrap("first")
         runtime = Path(self.records()[0]["runtime"])
         cache = self.root / "private-cache"
-        root = (
-            cache
-            / "chainman/runtime-roots"
-            / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
-        )
+        root = cache / "chainman/runtime-roots" / self.lock
         root.parent.mkdir(parents=True)
         root.symlink_to(runtime)
         nix_store = str(Path(NIX).resolve().with_name("nix-store"))
@@ -1300,11 +1411,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         env = dict(self.env, XDG_CACHE_HOME=str(cache))
         self.run_bootstrap("first", env=env)
         runtime = self.records()[0]["runtime"]
-        root = (
-            cache
-            / "chainman/runtime-roots"
-            / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
-        )
+        root = cache / "chainman/runtime-roots" / self.lock
         wrappers = self.root / "observed nix"
         wrappers.mkdir()
         attempted = self.root / "registration-attempted"
@@ -1357,26 +1464,13 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         candidate = self.root / "unique-runtime"
         shutil.copytree(self.tree, candidate)
         (candidate / "unique-source").write_text(str(self.root))
-        self.lock["narHash"] = subprocess.check_output(
-            [
-                NIX,
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(candidate),
-            ],
-            text=True,
-        ).strip()
-        with tarfile.open(self.root / "bundle.tar.gz", "w:gz") as archive:
-            archive.add(candidate, arcname="runtime")
-        self.write_lock()
+        self.pin_runtime(candidate)
         consumers = []
         for index in range(6):
             consumer = self.root / f"parallel-{index}"
             consumer.mkdir()
             shutil.copytree(self.root / "scripts", consumer / "scripts")
-            for name in ("chainman.lock", "bundle.tar.gz"):
+            for name in ("chainman.lock", "justfile"):
                 shutil.copy2(self.root / name, consumer / name)
             consumers.append(consumer)
         env = dict(
@@ -1636,16 +1730,17 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         cache.mkdir()
         outside = self.root / "outside-cache"
         outside.mkdir()
-        (cache / "chainman").symlink_to(outside, target_is_directory=True)
+        (cache / "chainman").mkdir()
+        (cache / "chainman/runtime-roots").symlink_to(outside, target_is_directory=True)
         env = dict(self.env, XDG_CACHE_HOME=str(cache))
         self.assertIn(
             "must not contain symlinks", self.run_bootstrap(check=False, env=env).stderr
         )
         self.assertEqual(list(outside.iterdir()), [])
-        (cache / "chainman").unlink()
+        (cache / "chainman/runtime-roots").unlink()
         roots = cache / "chainman/runtime-roots"
         roots.mkdir(parents=True)
-        root = roots / hashlib.sha256(self.lock["narHash"].encode()).hexdigest()
+        root = roots / self.lock
         root.write_text("preserve this ordinary file")
         self.assertIn(
             "must be a symlink", self.run_bootstrap(check=False, env=env).stderr
@@ -1658,30 +1753,11 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         candidate = self.root / "candidate"
         shutil.copytree(self.tree, candidate)
         (candidate / "revision").write_text("candidate")
-        nar_hash = subprocess.check_output(
-            [
-                NIX,
-                "--extra-experimental-features",
-                "nix-command",
-                "hash",
-                "path",
-                str(candidate),
-            ],
-            text=True,
-        ).strip()
-        with tarfile.open(self.root / "candidate.tar.gz", "w:gz") as archive:
-            archive.add(candidate, arcname="runtime")
-        self.lock.update(
-            version="candidate",
-            revision="candidate",
-            bundled_archive="candidate.tar.gz",
-            narHash=nar_hash,
-        )
-        self.write_lock()
+        self.pin_runtime(candidate)
         self.run_bootstrap("new")
         self.assertTrue(old_runtime.is_dir())
         self.assertEqual(len({record["runtime"] for record in self.records()}), 2)
-        self.lock["narHash"] = "sha256-" + "A" * 43 + "="
+        self.lock = "0" * 40
         self.write_lock()
         self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
         self.assertTrue(old_runtime.is_dir())
@@ -1705,8 +1781,9 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
                 CHAINMAN_NIX_BIN=str(tools / "nix"),
                 DEMO_TEST_FD=str(write_fd),
             )
+            self.prepare_cache(env)
             result = subprocess.run(
-                [str(self.launcher)],
+                [str(self.launcher), "status"],
                 check=False,
                 cwd="/",
                 env=env,

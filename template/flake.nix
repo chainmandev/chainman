@@ -1,14 +1,33 @@
 {
-  description = "Shared Chainman SDK shell profiles";
+  description = "Project-owned development environment";
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   inputs.nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
   outputs =
-    inputs:
+    { nixpkgs, nixpkgs-darwin, ... }:
     let
-      runtime = import ./scripts/chainman-fetch.nix {
-        root = toString ./.;
-        action = "fetch";
-      };
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
     in
-    (import (builtins.toPath (runtime + "/nix/flake.nix"))).outputs inputs;
+    {
+      devShells = nixpkgs.lib.genAttrs systems (
+        system:
+        let
+          source = if system == "x86_64-darwin" then nixpkgs-darwin else nixpkgs;
+          pkgs = import source { inherit system; };
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              pkgs.python3
+              pkgs.git
+              pkgs.just
+            ];
+          };
+        }
+      );
+    };
 }

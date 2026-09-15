@@ -6,11 +6,12 @@ fail() {
     printf 'Chainman initialization: %s\n' "$*" >&2
     exit 2
 }
-[ "$#" = 2 ] || fail 'usage: just init DEST VERSION'
+[ "$#" = 2 ] || { [ "$#" = 3 ] && [ "$3" = --no-git ]; } || fail 'usage: just init DEST REF [--no-git]'
+no_git=${3:-}
 source_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." && pwd)
 case "$1" in /*) destination=$1 ;; *) destination=$PWD/$1 ;; esac
 case "$destination" in *'
-'* | *''*) fail 'Newlines are not supported in destination paths.' ;; esac
+'* | *"$(printf '\r')"*) fail 'Newlines are not supported in destination paths.' ;; esac
 version=$2
 mode=${CHAINMAN_MODE:-container-nix}
 case "$mode" in host-nix | container-nix) ;; *) fail 'CHAINMAN_MODE must be host-nix or container-nix.' ;; esac
@@ -75,4 +76,15 @@ fi
 [ ! -L "$destination" ] || fail 'Destination changed during initialization.'
 if [ -e "$destination" ]; then rmdir -- "$destination" || fail 'Destination is no longer empty.'; fi
 mv -- "$staging/project" "$destination"
-printf 'Created %s with Chainman %s.\nRun: cd "%s" && git init && git add . && git commit -m "Adopt Chainman" && just setup && just verify\n' "$destination" "$version" "$destination"
+project_git() (
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    git -C "$destination" "$@"
+)
+if [ "$no_git" != --no-git ]; then
+    if ! project_git init || ! project_git add . || ! project_git commit -m "Initialize project with Chainman"; then
+        printf 'Project files are preserved at %s. Fix Git identity/signing, then run:\n' "$destination" >&2
+        printf '  git -C "%s" init && git -C "%s" add . && git -C "%s" commit -m "Initialize project with Chainman"\n' "$destination" "$destination" "$destination" >&2
+        exit 1
+    fi
+fi
+printf 'Created %s. Setup and project verification have not been run.\nNext: cd "%s" && just verify\n' "$destination" "$destination"

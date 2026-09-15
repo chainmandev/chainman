@@ -1,94 +1,46 @@
 # Publishing a release
 
-[Guide index](README.md) · [Runtime and trust](runtime.md) · [Contributing](contributing.md)
+[Documentation index](README.md) · [Contributing](contributing.md) · [Release trust](release-trust.md)
 
-## Before dispatch
+Installation uses Git. A release is a qualified commit, a lightweight `vVERSION`
+tag pointing to that commit, and published GitHub release notes. There are no
+custom runtime archives, checksums, or generated asset inventories.
 
-Use one canonical public identity per version. v0.1.0 replaces incompatible local
-pre-publication artifacts; those artifacts are not a public release. Migrate any
-such consumer explicitly, including its revision and hashes: the normal updater
-skips an equal version. Historical pins are not retroactively made installable.
+## Prepare
 
-1. Commit the complete source, tests, inventories, and documentation. `VERSION`
-   must contain the requested numeric version.
-2. Run required local qualification and push that exact commit to
-   `chainmandev/chainman`. The selected workflow ref must point to that commit.
-3. In repository **Settings → Releases**, enable **release immutability before
-   publication**. Ensure Actions can write contents and attestations and request
-   an OIDC token. Leave the release tag absent: the workflow creates it at the exact
-   source SHA and rejects an existing tag. Do not publish a provisional release
-   under the final tag.
-4. Record the full source SHA with `git rev-parse HEAD`.
+1. Set `VERSION`, update the release notes, and commit implementation, tests, and docs.
+2. Run the required qualification described in [testing](testing.md). Record the
+   exact commit, test evidence, platform omissions, and consumer blockers.
+3. Ensure the intended version has neither a remote tag nor a release. Review the
+   full source commit; the workflow refuses to replace an existing identity.
+4. Push the qualified commit to `chainmandev/chainman` using the operator's credentials.
 
-The repository immutability-settings API requires administration access, which
-the workflow's normal token does not have. The workflow requires an explicit
-operator confirmation of that setting and checks the actual release's immutable
-status immediately after publication. Confirming the input does not enable the
-setting itself.
+The manually dispatched **Publish Chainman Git release** workflow takes:
 
-## Workflow inputs and behavior
+- `candidate_sha`: the full commit at the workflow ref you select.
+- `version`: its numeric `VERSION`, initially `0.1.0`.
 
-Open **Actions → Publish immutable Chainman release → Run workflow**. Select the
-ref at the qualified commit and supply:
+The workflow and checkout must both resolve to that exact SHA. Qualification runs
+before publication. Publication creates the lightweight tag atomically, publishes
+the notes, then clones the public tag, verifies its identity, and initializes and
+checks a fresh starter through public Git.
 
-| Input | Value |
-| --- | --- |
-| `version` | `0.1.0` for the first public release |
-| `candidate_sha` | Full 40-character source commit at the selected ref |
-| `immutability_enabled` | Checked only after enabling the repository setting |
+GitHub release immutability can remain enabled as publisher policy. Installation
+and release selection do not depend on it. No attestation client is required to
+launch Chainman. Dependency hashes and backend provenance still belong to their
+respective verification policies.
 
-The workflow checks the exact requested source/version, calls the portable and
-native qualification matrix, builds twice and compares every artifact, creates
-build-provenance attestations, creates a draft, uploads the complete asset set,
-then publishes. It verifies GitHub's release attestation and each asset and runs
-a fresh public installation. Qualification failure prevents publication.
+## Read back before promoting consumers
 
-| Asset | Purpose |
-| --- | --- |
-| `chainman-0.1.0.tar.gz` | Executable runtime and its Nix/tooling sources |
-| `chainman-source-0.1.0.tar.gz` | Source, tests, docs, examples, and starter |
-| `chainman-release.json` | Version, exact revision, archive URLs, flat SHA-256 and NAR hashes |
-| `SHA256SUMS` | Flat SHA-256 inventory for the other release files |
+Use a fresh download cache. Check the public tag commit, `VERSION`, and release's
+published/non-prerelease status. Qualify fresh host-Nix and container-Nix launches
+with no local Chainman checkout dependency. Verify each consumer's recorded SHA
+against that identity, including generated copies, then run its full declared gate.
 
-Ordering, timestamps, permissions, and compression are deterministic. Metadata is
-outside the archives to avoid self-referential hashes. There is no separate
-publication waiting period. Backend source hashes, provenance, and qualification
-remain required; consumers' automatic dependency age policy remains independent.
+Promote a rewritten consumer candidate only when those checks pass. Keep its
+recovery refs and historical mapping; never merge the original archive-bearing
+history into the replacement. Consumer pushes are a separate operator action.
 
-If upload fails while still a draft, inspect the draft, tag and uploaded asset
-inventory before retrying. A new workflow run rejects an existing tag; an operator
-must deliberately reconcile or remove an unpublished draft and its tag first.
-The workflow does not clobber existing tags or assets. Once published,
-corrections receive a **new version**. GitHub immutability applies to releases
-published after the setting is enabled and locks their tag and assets.
-[GitHub's guarantees](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
-
-## Public readback and adoption
-
-Read back the published tag's commit, immutable status, release metadata, and all
-asset sizes/digests. Compare them to the qualified local build. Then run the README
-quickstart in fresh host-Nix and container environments. A local archive override
-does not demonstrate public availability.
-
-Only after readback should a migration promote URL-only consumer pins. Record the
-version, full revision, flat hashes, and NAR hashes. New release selection rejects
-mutable releases, missing/inconsistent evidence, moved tags, and insufficient age.
-Ordinary launches use the checked-in pin and Nix hash verification without GitHub
-authentication or online attestation checks.
-
-## Optional attestation verification
-
-Maintainers can use the source checkout's pinned release shell; `gh` need not be
-installed on the host:
-
-```sh
-just exec-in release gh release verify v0.1.0 --repo chainmandev/chainman
-just exec-in release gh release verify-asset v0.1.0 dist/release/chainman-0.1.0.tar.gz --repo chainmandev/chainman
-just exec-in release gh attestation verify dist/release/chainman-0.1.0.tar.gz --repo chainmandev/chainman
-```
-
-GitHub CLI authentication may be required for these optional maintainer commands.
-GitHub's release attestation binds the release tag and uploaded assets. The build
-attestation additionally records the producing workflow and source. GitHub's
-automatically generated source ZIP/tar downloads are not our deterministic source
-asset. See [GitHub's attestation verification documentation](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/verify-attestations-offline).
+A failed publication is not permission to overwrite a tag. Inspect whether ref
+creation or release publication succeeded before retrying. Once a public release
+exists, corrections use a new version and a new commit.

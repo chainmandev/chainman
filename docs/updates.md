@@ -2,7 +2,7 @@
 
 [Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
 
-`./scripts/chainman.sh deps-check` validates the configured adapter names and
+`just chainman deps-check` validates the configured adapter names and
 ordered update steps without resolving dependencies, running hooks, or requiring
 a clean Git checkout. It accepts the same selection arguments as the resolver,
 for example `deps-check --targets core`. Every declared resolution step is checked,
@@ -10,16 +10,16 @@ including adapters that are not selected. Use it when testing generated consumer
 configuration against the pinned runtime. This is a configuration contract check,
 not dependency eligibility auditing or application verification.
 
-`just deps-update` selects current eligible stable releases, including majors, with
+`just chainman deps-update` selects current eligible stable releases, including majors, with
 a configurable 30-day maturity window. Resolution and verification run in a
 disposable checkout. The host launcher sequences preparation, resolution,
 inspection, verification and finalization; it needs neither host Python nor a
 container-engine socket inside project containers. `mode=dry-run` stops before applying
 the verified changes. `commit=off` applies them without committing, for a coordinated
 checkpoint. Untargeted updates and `targets=all` include the Chainman runtime pin,
-optional legacy bundled archive, managed bootstrap and recipe facades. Explicit application targets
+and its explicitly declared generated copies. The bootstrap recipe is unchanged. Explicit application targets
 retain the runtime pin; `--skip-chainman` also selects project-only updates.
-`just chainman-update` updates only the runtime and its managed companions.
+`just chainman chainman-update` updates only the runtime pin and its declared copies.
 Runtime selection happens before project resolution. Resolution, reconciliation
 and verification use the selected candidate runtime; the original checkout keeps
 its previous runtime until the combined candidate has passed verification.
@@ -34,7 +34,7 @@ while the candidate still matches its original contents. After preparation succe
 resume retains that runtime, rechecks its changed pin's release evidence, and
 re-audits/reverifies the candidate without rerunning project resolution.
 
-Schema 2 consumers declare `updates.verify_task = "verify"` (or another finite
+Schema 3 consumers declare `updates.verify_task = "verify"` (or another finite
 task). The launcher runs that ordinary task against the candidate's updated Nix
 lock and verified runtime. Its setup groups, service readiness, container namespaces
 and cleanup are identical to an ordinary task invocation. Start updates through the
@@ -53,7 +53,7 @@ Declare exactly one verification form.
 Resolvers and verifiers can write the disposable checkout, but only trusted runtime
 phases mount the private transaction metadata and original checkout. Candidate
 launches use a separate read-only export of the original configuration, runtime
-pin and archive. Resolution and reconciliation cannot replace the runtime,
+pin and verified source. Resolution and reconciliation cannot replace the runtime,
 forwarded environment policy, host mounts or service declarations used by their
 next launch. Candidate launches receive a dedicated writable directory through
 `CHAINMAN_WORKSPACE_TRANSACTION_ROOT` for workspace tools that require atomic
@@ -67,7 +67,7 @@ mounts or signing policy. Automatic Git maintenance is disabled in disposable
 checkouts so concurrent inspection cannot race packfile replacement. Inspection
 freezes the allowed candidate files before verification and exports a bootstrap from
 the verified runtime for host execution; it never executes the candidate's mutable
-bootstrap on the host. Finalization checks the original HEAD, index and raw source
+justfile on the host. Finalization checks the original HEAD, index and raw source
 snapshot again before applying anything. A resolver failure, verification failure,
 out-of-scope change or concurrent original edit leaves the original unchanged and
 preserves the candidate under the host's Chainman update cache for inspection.
@@ -109,8 +109,8 @@ hooks. It preserves nested submodules by the same rules. Submodule source, pin,
 initialization and `.gitmodules` changes require a separate transaction, even when
 the project's output patterns contain a wildcard.
 
-The standalone example uses built-in registry adapters, `dependencies.toml`, module
-manifests/lockfiles and `sdk-versions.toml`. Explicit constraints require reasons;
+The minimal starter declares its project-owned Nix inputs. The larger repository
+examples demonstrate ecosystem adapters and module manifests. Explicit constraints require reasons;
 security maturity exceptions need a narrowly scoped advisory, minimum safe version
 and expiry. Nix branch pins use commit age; container image pins use the registry
 update time bound to the manifest digest. Baseline artifacts do not retrospectively
@@ -152,7 +152,7 @@ targets = ["javascript", "assets"]
 commands = [["node", "scripts/generate-labels.mjs"]]
 ```
 
-`just deps-update targets=javascript,assets` selects these
+`just chainman deps-update targets=javascript,assets` selects these
 targets. For JavaScript, `--policy compatible` preserves original caret/tilde and
 complex dependency ranges, including their lower and `0.x` compatibility bounds.
 Simple exact versions are update templates bounded by the original version's caret
@@ -483,7 +483,7 @@ compatibility and peer audits cover every child, including nested registry child
 source retention does not exempt new child artifacts. Bundled dependencies and
 nested remote or local sources remain unsupported.
 
-Native integrations use `scripts/chainman.sh deps-query`: one JSON request on stdin,
+Native integrations use `just chainman deps-query`: one JSON request on stdin,
 one schema-versioned JSON response on stdout. Schema 1 supports `select`, `metadata`
 and `audit`; providers include npm, PyPI, crates, pub, GitHub, Docker, Go, Swift and
 Maven. Selection accepts `provider`, `package`, optional `current`, and an optional
@@ -555,7 +555,7 @@ copy, so version checks see the same baseline revision. Previews may include dir
 sources and create a disposable baseline commit instead. Neither copies remotes,
 hooks or older history.
 Before candidate code runs, entry authority freezes the main configuration,
-secondary dependency policy, runtime pin and archive outside the writable checkout.
+secondary dependency policy, runtime pin and verified source outside the writable checkout.
 Reconciliation task selection and its transports use those frozen inputs. Candidate
 Git administration, including every initialized nested submodule, is frozen as raw
 bytes and mounted read-only in containers. Trusted inspection checks that complete
@@ -573,14 +573,13 @@ Git configuration in the copy, and does not test the operator's signing backend 
 filters. It uses the existing development host and shared caches, so it is not a
 sandbox for hostile update scripts. Linked submodules require their own transactions.
 
-Self-updates require an immutable GitHub release and validate its metadata, source revision, SHA-256 identities, source
-tree types and version before running a candidate. The maturity window applies to
-the commit and both required release assets' creation/modification dates, as well
-as release publication. Downloads use asset IDs and must match GitHub's recorded
-SHA-256 and size; missing evidence and a tag moving during download fail before
-candidate evaluation. Locally edited bootstrap files
-must be reconciled explicitly. Consumer verification runs from refreshed environments.
-Until verification passes, the previous pin, bootstrap and optional legacy bundled archive remain
+Runtime updates select stable published releases, resolve their exact commits,
+and require matching `VERSION` files. The age window uses the later of publication
+and commit time. The tag is rechecked after source acquisition. Missing evidence,
+corrupt Git objects, or a moved tag fail explicitly. GitHub release immutability
+is optional publisher policy. Ordinary launches never query this metadata.
+Consumer verification runs from refreshed environments under the selected runtime.
+Until verification passes, the original pin remains
 untouched in the original checkout. Failed candidate files remain available for
 diagnosis. Prior installed runtime generations remain available throughout the
 transaction. Partial runtime publication inside the candidate restores only
@@ -599,16 +598,15 @@ starting another update.
 Runtime releases are qualified in the Chainman source project. Consumer runtime
 upgrades validate the candidate configuration and run the declared project verifier
 using the candidate runtime; they do not run Chainman's development test suite.
-The consumer archive consequently does not need to ship those tests.
+Git supplies the complete revision, but project acceptance does not invoke the
+Chainman development suite.
 
 ## Runtime copies in generated projects
 
 A repository that embeds the same runtime in templates or example projects can
 list their relative roots under `[runtime]`, for example
 `copies = ["templates/common", "examples/demo"]`. Each copy must contain identical
-lock, launcher, fetch helper and optional bundled archive bytes and Git executable
-identity, using
-the same relative paths as the root. Customized or missing copies are rejected
+plain `chainman.lock` bytes and Git executable identity at its relative root. Customized or missing copies are rejected
 before replacement; reconcile their ownership explicitly.
 Ordinary checkout umasks, immutable store permissions and canonical export modes
 may differ without changing that identity. Other mode flags must still match.
@@ -619,7 +617,7 @@ Updates that include Chainman prepare every declared copy from the verified runt
 same candidate transaction. The normal project gate verifies the complete change
 before any original files are applied. The original declaration fixes the output
 boundary, and ordinary dependency resolvers cannot change these runtime files.
-Only the runtime distribution files are copied; project configuration and source
+Only the declared pin files are copied; project configuration and source
 remain owned by their project or generator.
 
 See [standard recipes](recipes.md) for formatting, staged hooks, candidate resumption,

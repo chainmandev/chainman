@@ -1,18 +1,17 @@
 """Check explicit consumer roots against a released runtime without running them."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 from collections.abc import Mapping
 from typing import TypedDict
 
-import chainman
+import git_runtime
 import chainman_updates
 import config_inspection
 import configuration
 import toolchain as tc
-from adapter_data import table, text
+from adapter_data import table
 
 
 class ConsumerStatus(TypedDict):
@@ -29,34 +28,13 @@ def check(
     baseline: Mapping[str, object] | None = None,
 ) -> ConsumerStatus:
     cfg = config_inspection.validated(root)
+    pin = git_runtime.pin(tc.regular_input(root, "chainman.lock"))
+    if pin != release["revision"]:
+        raise ValueError("Consumer runtime revision differs from the candidate")
     if "recipes" in cfg:
         import recipes
 
-        for consumer in recipes.roots(root):
-            recipes.sync(consumer, check=True)
-    pin = table(json.loads(tc.regular_input(root, "chainman.lock")), "Runtime pin")
-    for field in ("version", "revision", "url", "narHash"):
-        if pin.get(field) != release[field]:
-            raise ValueError(f"Consumer runtime {field} differs from the candidate")
-    bundle = pin.get("bundled_archive")
-    if bundle and (
-        hashlib.sha256(
-            tc.regular_input(root, text(bundle, "Runtime bundle"))
-        ).hexdigest()
-        != release["archive_sha256"]
-    ):
-        raise ValueError("Consumer bundled archive differs from the candidate")
-    for source, destination in (
-        ("chainman.sh", "chainman.sh"),
-        ("fetch.nix", "chainman-fetch.nix"),
-    ):
-        if not chainman_updates.managed_matches(
-            chainman_updates.managed_state(root, f"scripts/{destination}"),
-            chainman_updates.managed_state(chainman.RUNTIME, f"bootstrap/{source}"),
-        ):
-            raise ValueError(
-                f"Consumer bootstrap differs from the candidate: {destination}"
-            )
+        recipes.verification(cfg)
     copies = chainman_updates.managed_paths(root)
     for destination, source in copies.items():
         if not chainman_updates.managed_matches(
@@ -86,11 +64,11 @@ def check(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--release", required=True, type=Path)
+    parser.add_argument("--revision", required=True)
     parser.add_argument("--baselines", type=Path)
     parser.add_argument("roots", nargs="+", type=Path)
     args = parser.parse_args()
-    release = table(json.loads(args.release.read_text()), "Candidate release")
+    release = {"revision": git_runtime.pin((args.revision + "\n").encode())}
     baselines = (
         table(json.loads(args.baselines.read_text()), "Consumer baselines")
         if args.baselines

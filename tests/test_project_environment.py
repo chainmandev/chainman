@@ -1,4 +1,3 @@
-import json
 import os
 from pathlib import Path
 import shutil
@@ -255,17 +254,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
     def test_service_transport_ports_are_selected_without_task_port_collisions(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            (root / "chainman.lock").write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "version": "fixture",
-                        "revision": "fixture",
-                        "url": "https://example.invalid/runtime.tar.gz",
-                        "narHash": "sha256-" + "a" * 43 + "=",
-                    }
-                )
-            )
+            (root / "chainman.lock").write_text("a" * 40 + "\n")
             (root / "chainman.toml").write_text(
                 'schema=2\n[container]\nhost_access=true\n[services.frontend.transport]\nports=["127.0.0.1:8080:8080"]\n[services.api.transport]\nports=["127.0.0.1:9090:9090"]\n[tasks.verify]\ncontext_environment={APP_CONTEXT="selected"}\ncommands=[["true"]]\n'
             )
@@ -281,7 +270,7 @@ class ProjectEnvironmentTests(unittest.TestCase):
                         "--impure",
                         "--raw",
                         "--expr",
-                        'import (builtins.toPath (builtins.getEnv "CHAINMAN_TEST_FETCH_HELPER")) { root = builtins.getEnv "CHAINMAN_TEST_CONSUMER_ROOT"; action = "options"; }',
+                        'import (builtins.toPath (builtins.getEnv "CHAINMAN_TEST_FETCH_HELPER")) { root = builtins.getEnv "CHAINMAN_TEST_CONSUMER_ROOT"; action = "options"; source = "unused"; }',
                     ],
                     env=dict(
                         os.environ,

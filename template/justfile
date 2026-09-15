@@ -1,22 +1,3 @@
-set positional-arguments
-set shell := ["sh", "-eu", "-c"]
-
-default:
-    @just --list
-
-import 'scripts/chainman.just'
-
-build:
-    @./scripts/chainman.sh run build
-
-test:
-    @./scripts/chainman.sh run test
-
-module name action="verify":
-    @./scripts/chainman.sh module "$@"
-
-sdk-doctor platform:
-    @./scripts/chainman.sh sdk-doctor "$1"
-
-ci-prune *args:
-    @./scripts/chainman.sh ci-prune "$@"
+# Project-owned forwarding recipes are optional; Chainman never rewrites them.
+verify:
+    @just chainman recipe verify

@@ -89,11 +89,3 @@ file = ".github/workflows/release.yml"
 format = "regex"
 representation = "action"
 pattern = '(?m)^      - uses: cachix/install-nix-action@(?P<value>[a-f0-9]{40} # v[0-9]+\.[0-9]+\.[0-9]+)$'
-
-[[pins]]
-provider = "github"
-name = "actions/attest"
-file = ".github/workflows/release.yml"
-format = "regex"
-representation = "action"
-pattern = '(?m)^        uses: actions/attest@(?P<value>[a-f0-9]{40} # v[0-9]+\.[0-9]+\.[0-9]+)$'

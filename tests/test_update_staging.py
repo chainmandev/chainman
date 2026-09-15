@@ -43,17 +43,18 @@ verify_task="verify"
 commands=[["true"]]
 """)
         (self.root / ".gitignore").write_text(".cache/\n")
-        (self.root / "chainman.lock").write_text(
-            json.dumps(
-                {
-                    "schema": 1,
-                    "version": "0.1.0",
-                    "revision": "test",
-                    "url": "https://example.invalid/runtime.tar.gz",
-                    "narHash": "sha256-" + "A" * 43 + "=",
-                }
+        (self.root / "chainman.lock").write_text("a" * 40 + "\n")
+        runtime = self.base / "runtime"
+        for name in ("bootstrap", "scripts", "nix"):
+            shutil.copytree(
+                chainman.RUNTIME / name,
+                runtime / name,
+                ignore=shutil.ignore_patterns("__pycache__"),
             )
-        )
+        shutil.copy2(chainman.RUNTIME / "VERSION", runtime / "VERSION")
+        selected_runtime = patch.object(chainman, "RUNTIME", runtime)
+        selected_runtime.start()
+        self.addCleanup(selected_runtime.stop)
         (self.root / "dependency.lock").write_text("old\n")
         (self.root / "source.txt").write_text("user source\n")
         updates.git(self.root, "init", "-b", "main")
@@ -177,9 +178,9 @@ commands=[["true"]]
             )
             + '\n[runtime]\ncopies=["templates/common"]\n'
         )
-        path = self.root / "templates/common/scripts/chainman.sh"
+        path = self.root / "templates/common/chainman.lock"
         path.parent.mkdir(parents=True)
-        path.write_text("old copy")
+        path.write_text("a" * 40 + "\n")
         updates.git(self.root, "add", ".")
         updates.git(
             self.root,
@@ -194,9 +195,7 @@ commands=[["true"]]
     def test_dependency_resolver_cannot_modify_declared_runtime_copy(self):
         self.add_runtime_copy()
         self.prepare()
-        (self.candidate / "templates/common/scripts/chainman.sh").write_text(
-            "changed copy"
-        )
+        (self.candidate / "templates/common/chainman.lock").write_text("changed copy")
         with self.assertRaisesRegex(ValueError, "must not change the runtime"):
             subject.inspect(self.root, self.stage)
         self.assertEqual(updates.snapshot(self.root), self.before)
@@ -204,7 +203,7 @@ commands=[["true"]]
     def test_runtime_copy_is_in_the_original_transaction_output_boundary(self):
         self.add_runtime_copy()
         self.prepare("--only-chainman")
-        relative = "templates/common/scripts/chainman.sh"
+        relative = "templates/common/chainman.lock"
 
         def runtime_candidate(root, policy, now, *, gc_root):
             (root / relative).write_text("verified copy")
@@ -232,12 +231,9 @@ commands=[["true"]]
         updates.git(self.root, "commit", "-m", "Declare runtime report")
         self.before = updates.snapshot(self.root)
         subject.prepare(self.root, self.stage, [])
-        before_pin = (self.root / "chainman.lock").read_bytes()
 
         def runtime_candidate(root, policy, now, *, gc_root):
-            pin = json.loads(before_pin)
-            pin["version"] = "0.2.0"
-            (root / "chainman.lock").write_text(json.dumps(pin))
+            (root / "chainman.lock").write_text("b" * 40 + "\n")
             return chainman.RUNTIME
 
         with patch.object(
@@ -248,10 +244,8 @@ commands=[["true"]]
         self.assertEqual(state.options.runtime.value, "include")
         self.assertIn("chainman.lock", state.runtime_snapshot)
         self.assertEqual(
-            json.loads((self.stage / "resolution-bootstrap/chainman.lock").read_text())[
-                "version"
-            ],
-            "0.2.0",
+            (self.stage / "resolution-bootstrap/chainman.lock").read_text(),
+            "b" * 40 + "\n",
         )
         (self.candidate / "dependency.lock").write_text("resolved with new runtime\n")
         (self.candidate / "runtime-report.txt").write_text(
@@ -270,9 +264,7 @@ commands=[["true"]]
             set(result["changed"]),
             {"chainman.lock", "dependency.lock", "runtime-report.txt"},
         )
-        self.assertEqual(
-            json.loads((self.root / "chainman.lock").read_text())["version"], "0.2.0"
-        )
+        self.assertEqual((self.root / "chainman.lock").read_text(), "b" * 40 + "\n")
         self.assertEqual(
             (self.root / "dependency.lock").read_text(), "resolved with new runtime\n"
         )
@@ -387,8 +379,10 @@ commands=[["true"]]
     def test_resolver_cannot_replace_bootstrap(self):
         self.prepare()
         (self.candidate / "scripts").mkdir()
-        (self.candidate / "scripts/chainman.sh").write_text("arbitrary host code")
-        with self.assertRaisesRegex(ValueError, "must not change the runtime"):
+        (self.candidate / "justfile").write_text("arbitrary host code")
+        with self.assertRaisesRegex(
+            ValueError, "Unexpected update/verification output"
+        ):
             subject.inspect(self.root, self.stage)
         self.assertFalse((self.stage / "candidate-bootstrap").exists())
 
@@ -473,32 +467,13 @@ commands=[["true"]]
         ):
             subject.inspect(self.root, self.stage)
 
-    def test_modified_runtime_store_is_rejected_before_export(self):
+    def test_invalid_runtime_identity_is_rejected_before_export(self):
         self.prepare()
-        (self.candidate / "chainman.lock").write_text(
-            json.dumps({"version": "0.1.0", "narHash": "expected"})
-        )
-        runtime = "/nix/store/00000000000000000000000000000000-candidate"
-        with (
-            patch.object(
-                subject.tc,
-                "managed_run",
-                side_effect=[
-                    subprocess.CompletedProcess([], 0, runtime + "\n"),
-                    subprocess.CompletedProcess([], 0, "modified\n"),
-                ],
-            ),
-            patch.object(
-                subject.runtime_updates,
-                "validate_runtime",
-                side_effect=AssertionError("unverified source inspected"),
-            ),
-        ):
-            # Bypass this class's integration-only fetch mock for this test.
-            with self.assertRaisesRegex(ValueError, "NAR verification"):
-                self.real_verified_runtime(
-                    self.candidate, gc_root=self.stage / "runtime-root"
-                )
+        (self.candidate / "chainman.lock").write_text("main\n")
+        with self.assertRaisesRegex(ValueError, "full lowercase Git SHA"):
+            self.real_verified_runtime(
+                self.candidate, gc_root=self.stage / "runtime-root"
+            )
 
     def test_verified_runtime_accepts_generated_copy_permissions(self):
         self.prepare()
@@ -537,7 +512,7 @@ commands=[["true"]]
             shutil.copy2(original, exported)
             original.chmod(0o775 if name.endswith(".sh") else 0o664)
             exported.chmod(0o755 if name.endswith(".sh") else 0o644)
-        nar = json.loads((self.candidate / "chainman.lock").read_text())["narHash"]
+        nar = "unused"
         with (
             patch.object(subject.runtime_updates, "fetch_source", return_value=runtime),
             patch.object(
@@ -552,7 +527,7 @@ commands=[["true"]]
                 ),
                 runtime,
             )
-            (self.candidate / "export/scripts/chainman.sh").chmod(0o644)
+            (self.candidate / "export/chainman.lock").write_text("b" * 40 + "\n")
             with self.assertRaisesRegex(ValueError, "runtime copy differs"):
                 self.real_verified_runtime(
                     self.candidate, gc_root=self.stage / "runtime-root"

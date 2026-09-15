@@ -46,17 +46,16 @@ another editable configuration.
 Schema-3 bootstrap routing and container transport also use this compiler from
 the verified runtime. Container planning runs with a read-only project mount,
 before applying project-declared mounts or executing project commands. The
-legacy bootstrap projection remains available for schema-1/2 consumers and old
-runtime archives; it does not implement template inheritance.
+legacy configuration projection remains available for schema-1/2 consumers; it does not implement template inheritance.
 
 ## Public inspection contract
 
-Use the project's checked-in launcher:
+Use the project's Git-pinned entrypoint:
 
 ```sh
-scripts/chainman.sh config validate
-scripts/chainman.sh config show --json
-scripts/chainman.sh explain unit --json
+just chainman config validate
+just chainman config show --json
+just chainman explain unit --json
 ```
 
 These actions validate declarations without executing project commands or
@@ -85,11 +84,11 @@ runtime before a consumer adopts it.
 From Chainman's source checkout, run:
 
 ```sh
-just consumer-check --release dist/release/chainman-release.json /path/to/consumer
+just consumer-check --revision FULL_COMMIT_SHA /path/to/consumer
 ```
 
-The check validates effective declarations, the selected release identity,
-optional legacy bundled archive digest, bootstrap bytes/modes, and every declared runtime copy.
+Replace `FULL_COMMIT_SHA` with the exact candidate commit. The check validates
+effective declarations, full Git commit identity and every declared pin copy.
 It never executes consumer workflows. `--baselines file.json` additionally
 compares effective declarations with an explicit mapping from absolute
 `chainman.toml` paths to parsed pre-migration configurations. Only the input

@@ -1,93 +1,81 @@
 # Troubleshooting
 
-[Guide index](README.md) · [Runtime](runtime.md) · [Updates](updates.md)
+[Documentation index](README.md) · [Runtime](runtime.md) · [Update recovery](updates.md)
 
-## Bootstrap and execution mode
+## Pin or Git cache failures
 
-For host Nix, use `export CHAINMAN_MODE=host-nix` and confirm `nix --version` is
-2.24 or later. For container Nix, start Docker or Podman and confirm its `info`
-command succeeds. `CHAINMAN_CONTAINER_ENGINE=podman` selects Podman explicitly.
-Do not install a host Python interpreter to repair bootstrap: Nix provides it.
+`chainman.lock` must contain one full lowercase 40-character commit SHA and a
+newline. Branches, tags, shortened SHAs, and the pre-publication JSON archive lock
+are not supported. A missing revision never falls back to a newer release.
 
-```sh
-just --list
-just config validate
-just exec python3 --version
-```
+A cold launch requires public Git access. Confirm the canonical repository is
+reachable with `git ls-remote https://github.com/chainmandev/chainman.git`. A warm
+launch uses existing verified objects without contacting GitHub. A successful warm
+bootstrap can still be followed by a project-tool download; inspect which operation
+failed before diagnosing the source cache.
 
-A release hash mismatch means the downloaded bytes or unpacked tree do not match
-the pin. Recheck the published release identity; do not replace the lock's hashes
-with hashes of unexpected bytes. An unavailable asset must be restored by a new
-release if the existing release is immutable. `CHAINMAN_ARCHIVE` is a local archive
-override for disposable qualification; it must still satisfy the pinned hash.
-Older consumers can retain `bundled_archive`, but new consumers use URL-only locks.
+If Git reports corruption, preserve or quarantine the affected revision's cache
+entry, then obtain a fresh copy of the same SHA. Do not edit the pin to suppress an
+integrity failure. The cache path is printed in Git diagnostics and lives under
+`${XDG_CACHE_HOME:-$HOME/.cache}/chainman/git/`. Do not repair active caches or remove
+Nix roots while operations are running.
 
-Initialization and new runtime selection read GitHub release metadata. If GitHub
-reports an API rate limit, wait for the reset or supply an optional `GITHUB_TOKEN`
-environment variable with access to the public repository. The initializer passes
-it to its temporary container when container mode is selected. Keep credentials
-out of project files and do not change the token during a command. Release assets
-are downloaded anonymously; ordinary launches need neither this token nor the
-release-metadata API. A missing release tag or incomplete asset set must be fixed
-by the publisher, rather than by changing the consumer's hashes.
+## Nix or container entry
+
+Container mode is the default. Start Docker/Podman, or explicitly choose
+`CHAINMAN_MODE=host-nix`. Host mode requires a compatible Nix installation.
+Chainman does not supply a host-language fallback.
+
+An existing wrapper that starts another Nix shell or Docker container may fail
+inside a managed environment. Route its underlying command instead; see
+[host wrappers](adoption.md#existing-justfiles-and-host-wrappers). A `host` profile
+inside container mode does not mean the physical host.
+
+Missing native SDKs require the project's platform setup. Do not broaden mount
+permissions to work around a missing tool. Declare the actual SDK path and the
+specific task that needs it.
+
+## Initialization and Git commit failure
+
+`init` accepts only a new or empty destination. Use manual adoption for an existing
+project. If the initial Git commit fails, the generated project remains in place.
+Follow the printed commands after correcting the host Git identity or signing
+backend. `--no-git` deliberately creates files without initializing Git.
+
+Initialization does not run setup or verification. Use the generated README for
+those next steps.
 
 ## Setup and services
 
 ```sh
-just setup-status
-just setup
-just services-status
-just stop
+just chainman setup-status
+just chainman setup
+just chainman services-status
+just chainman services-stop
 ```
 
-Setup readiness depends on declared inputs, fingerprints, and artifacts. When
-dependencies or toolchains change, setup reruns the affected work. Declare outputs
-that actually demonstrate readiness, rather than an arbitrary marker file. Keep
-service startup and stop commands with the project that owns their lifecycle.
-Use the service/task inspection commands listed by `just --list` to diagnose a
-failed readiness probe or dependency ordering issue.
+A stale setup check should name the changed inputs or missing readiness artifact.
+Check ownership before deleting installation directories. Service recovery uses
+saved ownership state; status and stop remain available even when current service
+configuration is broken. Destructive data reset requires its explicit reset option.
 
-## Verification and recovery
+## Updates and recovery
 
-Updates and transaction-backed formatting verify an isolated candidate before
-applying it. A failed run prints the retained worktree and resume location. Inspect
-that location and its logs, fix the cause, then pass the exact printed resume value
-to the same command, for example:
+Before the first release matures, use `just chainman deps-update --skip-chainman`.
+Missing age/provenance evidence is an error, not an implicit waiver.
+
+Updates prepare isolated candidates and preserve failures. Use the transaction path
+printed by the failure message:
 
 ```sh
-just deps-update resume=/absolute/path/printed/by/the/failed/run
+just chainman deps-update resume=/absolute/path/to/transaction
 ```
 
-Do not replace the placeholder with the original project directory. Resume checks
-recorded identity and state; it does not silently restart against a changed
-checkout. If interruption occurred while applying verified changes, inspect both
-the project Git status and retained transaction state before trying again. The
-[update contract](updates.md) explains partial application and recovery limits.
+Resume retains the selected runtime, rechecks original state and release evidence,
+and reruns acceptance. It cannot silently choose a different revision. Reconcile
+modified declared pin copies through their owning generator before retrying.
 
-Managed launchers or facades changed by hand can prevent runtime updates. Move
-custom behavior to project-owned configuration or scripts, then reconcile the
-managed files against the release you already trust. Preserve unrelated changes
-and staging; avoid a blanket reset.
-
-If no runtime satisfies the 30-day policy, use `just deps-update --skip-chainman`
-for project-only updates. Explicit initialization of a selected version and
-automatic release selection intentionally have different age requirements.
-
-## Caches and cold starts
-
-The first Nix realization downloads tools and may build missing substitutes.
-Subsequent launches reuse Nix and declared download/build caches. Use the cache
-inspection and cleanup recipes in `just --list` before deleting anything by hand.
-Chainman scopes mutable state and serializes destructive operations with active
-work. Nix-store garbage collection is separate from project cache cleanup; it can
-make the next command cold again. Initializer containers use a temporary store,
-so initialization and the first normal project command may each fetch tools.
-
-## Native SDKs and platform lanes
-
-Nix language tools do not replace platform SDKs, signing identities, simulators,
-devices, or native acceptance checks. Read the Flutter, Swift, or Compose example
-README before enabling it. Apple-native tasks need macOS, host Nix, and the
-appropriate Xcode selection. Container success on Linux does not qualify macOS,
-Windows, mobile packaging, or a physical device. Run the platform's declared lane
-and retain its evidence separately.
+If application or Git commit was interrupted, inspect the original diff, index,
+HEAD, and retained candidate first. Some already-verified writes or the commit may
+have completed. Do not assume an absent success message means no changes occurred.
+See [transaction limits and recovery](updates.md).

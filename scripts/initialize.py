@@ -1,4 +1,4 @@
-"""Initialize a consumer from an explicitly selected immutable public release."""
+"""Resolve an explicit Git identity, then run that revision's starter generator."""
 
 from __future__ import annotations
 
@@ -7,19 +7,16 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
-import tempfile
+import sys
 
-from adapter_data import table
+from adapter_data import table, text
 import chainman_updates
-import example
+import git_runtime
 import registry
+import toolchain as tc
 
 
-def initialize(destination: Path, version: str) -> dict[str, str | int]:
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        raise ValueError(
-            "Choose an explicit numeric release version, for example 0.1.0"
-        )
+def initialize(destination: Path, ref: str) -> dict[str, str | int]:
     for path in (destination, *destination.parents):
         if path.is_symlink():
             raise ValueError("Initialization destination must not contain symlinks")
@@ -27,52 +24,69 @@ def initialize(destination: Path, version: str) -> dict[str, str | int]:
         not destination.is_dir() or any(destination.iterdir())
     ):
         raise ValueError("Choose a new or empty project directory")
-    tag = f"v{version}"
-    base = "https://github.com/chainmandev/chainman/releases/download/" + tag
-    release = table(
-        registry.data(
-            f"https://api.github.com/repos/chainmandev/chainman/releases/tags/{tag}"
-        ),
-        "Public release",
-    )
-    selected = registry.Release(tag, registry.timestamp(release.get("published_at")))
-    runtime_name = f"chainman-{version}.tar.gz"
-    source_name = f"chainman-source-{version}.tar.gz"
-    # Explicit initial adoption is deliberate trust in this release. Automatic
-    # updates subsequently apply the generated project's normal maturity policy.
-    bodies, revision = chainman_updates.published_assets(
-        selected,
-        {"minimum_age_days": 0},
-        datetime.now(timezone.utc),
-        ("chainman-release.json", runtime_name, source_name),
-    )
-    metadata = table(json.loads(bodies["chainman-release.json"]), "Release metadata")
-    source = table(metadata.get("source"), "Source archive metadata")
-    if (
-        metadata.get("schema") != 1
-        or metadata.get("version") != version
-        or metadata.get("revision") != revision
-        or metadata.get("url") != f"{base}/{runtime_name}"
-        or source.get("filename") != source_name
-        or source.get("url") != f"{base}/{source_name}"
-    ):
-        raise ValueError("Release metadata does not match its public tag and assets")
-    with tempfile.TemporaryDirectory(prefix="chainman-initialize-") as temporary:
-        staging = Path(temporary)
-        for name, body in bodies.items():
-            (staging / name).write_bytes(body)
-        # The existing generator validates flat hashes, NAR hashes, source/runtime
-        # agreement, archive paths and file types before writing consumer files.
-        return example.create(destination, staging / "chainman-release.json")
+    selected = None
+    if re.fullmatch(r"[0-9a-f]{40}", ref):
+        revision = ref
+    elif re.fullmatch(r"v?[0-9]+\.[0-9]+\.[0-9]+", ref):
+        tag = "v" + ref.removeprefix("v")
+        releases = registry.github_releases("chainmandev/chainman")
+        selected = next(
+            (release for release in releases if release.version == tag), None
+        )
+        if selected is None:
+            raise ValueError("Choose a published stable Chainman release")
+        revision = chainman_updates.published_revision(
+            selected, {"minimum_age_days": 0}, datetime.now(timezone.utc)
+        )
+    else:
+        raise ValueError(
+            "Choose a numeric version, vVERSION, or full lowercase commit SHA; moving selectors are not supported"
+        )
+    with tc.nix_temporary_directory("chainman-initialize-") as temporary:
+        runtime = git_runtime.store(revision, gc_root=Path(temporary) / "runtime")
+        version = (
+            selected.version if selected else (runtime / "VERSION").read_text().strip()
+        )
+        chainman_updates.validate_runtime(runtime, version)
+        if (
+            selected
+            and registry.github_commit(
+                "chainmandev/chainman", selected.version, fresh=True
+            )
+            != revision
+        ):
+            raise ValueError("Release tag changed during initialization")
+        # Use the chosen revision's generator and templates, not this checkout's.
+        result = tc.managed_run(
+            [
+                sys.executable,
+                str(runtime / "scripts/example.py"),
+                str(destination),
+                revision,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    generated = table(json.loads(result.stdout), "Generated starter")
+    files = generated.get("files")
+    if not isinstance(files, int) or isinstance(files, bool) or files < 0:
+        raise ValueError("Starter generator returned an invalid file count")
+    return {
+        "directory": text(generated.get("directory"), "Starter directory"),
+        "revision": text(generated.get("revision"), "Starter revision"),
+        "version": text(generated.get("version"), "Starter version"),
+        "files": files,
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
-    parser.add_argument("version")
+    parser.add_argument("ref")
     args = parser.parse_args()
     try:
-        result = initialize(args.destination.absolute(), args.version)
+        result = initialize(args.destination.absolute(), args.ref)
     except (OSError, ValueError) as error:
         parser.exit(1, f"Chainman initialization: {error}\n")
     print(json.dumps(result, indent=2))

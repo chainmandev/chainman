@@ -1,9 +1,9 @@
-# Trusted bootstrap companion; it parses data without importing consumer code.
+# Runtime-owned configuration projection; never import consumer code here.
 {
   root,
   authority ? root,
   action ? "fetch",
-  archive ? "",
+  source,
 }:
 let
   b = builtins;
@@ -15,42 +15,6 @@ let
     else
       fail "expected a nonempty single-line string";
   lines = values: b.concatStringsSep "\n" (map line values) + "\n";
-  raw = b.fromJSON (b.readFile (authority + "/chainman.lock"));
-  lock =
-    if
-      raw.schema or null != 1
-      || !(b.all (key: raw ? ${key} && b.isString raw.${key}) [
-        "version"
-        "revision"
-        "url"
-        "narHash"
-      ])
-      || b.match "sha256-[A-Za-z0-9+/]{43}=" raw.narHash == null
-      || b.match "https://.+" raw.url == null
-    then
-      fail "chainman.lock requires schema 1, version, revision, HTTPS url, and SHA256 SRI narHash"
-    else
-      b.deepSeq (map line [
-        raw.version
-        raw.revision
-        raw.url
-        raw.narHash
-      ]) raw;
-  bundled = lock.bundled_archive or "";
-  local =
-    if archive != "" then
-      line archive
-    else if bundled == "" then
-      ""
-    else if
-      b.match "[^/].*" (line bundled) == null
-      || b.any (part: part == ".." || part == "." || part == "") (
-        b.filter b.isString (b.split "/" bundled)
-      )
-    then
-      fail "bundled_archive must be a contained consumer-relative file"
-    else
-      authority + "/" + bundled;
   config =
     if b.pathExists (authority + "/chainman.toml") then
       b.fromTOML (b.readFile (authority + "/chainman.toml"))
@@ -211,31 +175,12 @@ else if action == "options" then
       ""
   )
   + (if controlOnly || options == [ ] then "" else lines options)
-else if action == "metadata" then
-  lines [
-    (b.hashString "sha256" lock.narHash)
-    lock.narHash
-    (if local == "" then "-" else local)
-  ]
 else if action == "fetch" then
-  b.seq lock (
-    toString (
-      b.fetchTarball {
-        # Importing bytes is not executing them. A store filename also avoids URL
-        # escaping ambiguities for local archive names containing spaces or '#'.
-        url =
-          if local == "" then
-            lock.url
-          else
-            b.unsafeDiscardStringContext "file://${
-              b.path {
-                path = b.toPath local;
-                name = "chainman-archive";
-              }
-            }";
-        sha256 = lock.narHash;
-      }
-    )
+  toString (
+    b.path {
+      path = b.toPath source;
+      name = "chainman-source";
+    }
   )
 else
   fail "unknown bootstrap action"

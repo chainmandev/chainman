@@ -147,21 +147,20 @@ class RecipeTests(unittest.TestCase):
             ],
         )
 
-    def test_facade_uses_host_scripts_and_sequential_verification(self):
+    def test_runtime_plan_preserves_sequential_verification(self):
         cfg = {
             "tasks": {"pg": {}, "spanner": {}},
             "updates": {"verify_tasks": ["pg", "spanner"]},
             "recipes": {},
         }
-        body = recipes.render(cfg).decode()
-        self.assertIn("#!/bin/sh", body)
+        body = recipes.plan(cfg, "verify")
         self.assertIn(
-            './scripts/chainman.sh run pg\n    exec ./scripts/chainman.sh run spanner "$@"',
+            '"$entry" run pg\nexec "$entry" run spanner "$@"',
             body,
         )
         cfg["recipes"]["verify"] = ["pg"]
         with self.assertRaises(ValueError):
-            recipes.render(cfg)
+            recipes.plan(cfg, "verify")
 
 
 class FormatTransactions(unittest.TestCase):

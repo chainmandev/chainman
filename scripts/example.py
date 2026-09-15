@@ -1,184 +1,50 @@
-"""Create an independent consumer from a verified local Chainman release."""
-
-from __future__ import annotations
+"""Generate the minimal starter using templates from this selected Git revision."""
 
 import argparse
-from collections.abc import MutableMapping
-import hashlib
-import io
 import json
-from pathlib import Path, PurePosixPath
-import subprocess
-import tarfile
-import tempfile
-import tomlkit
+from pathlib import Path
+import shutil
 
-from adapter_data import table, text
-from package import FileContents
+import git_runtime
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
-def read_archive(body: bytes, version: str) -> FileContents:
-    result = {}
-    prefix = f"chainman-{version}/"
-    with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as archive:
-        for member in archive:
-            if (
-                not member.name.startswith(prefix)
-                or not member.isfile()
-                or member.mode not in {0o644, 0o755}
-            ):
-                raise ValueError(
-                    "Release archive must contain only regular source files"
-                )
-            name = member.name[len(prefix) :]
-            path = PurePosixPath(name)
-            if (
-                not name
-                or path.is_absolute()
-                or str(path) != name
-                or any(p in {"..", ".git"} for p in path.parts)
-                or name in result
-            ):
-                raise ValueError("Unsafe or duplicate archive path")
-            stream = archive.extractfile(member)
-            if stream is None:
-                raise ValueError("Regular release file has no content stream")
-            with stream:
-                result[name] = (stream.read(), member.mode)
-    return result
-
-
-def create(destination: Path, metadata_path: Path) -> dict[str, str | int]:
+def create(destination: Path, revision: str) -> dict[str, str | int]:
+    git_runtime.pin((revision + "\n").encode())
     for path in (destination, *destination.parents):
         if path.is_symlink():
-            raise ValueError("Example destination must not contain symlinks")
-    if destination.exists() and any(destination.iterdir()):
-        raise ValueError("Choose a new or empty example directory")
-    metadata = table(json.loads(metadata_path.read_text()), "Release metadata")
-    if metadata.get("schema") != 1:
-        raise ValueError("Unsupported release metadata")
-    version = text(metadata.get("version"), "Release version")
-    body = (metadata_path.parent / f"chainman-{version}.tar.gz").read_bytes()
-    if hashlib.sha256(body).hexdigest() != metadata["archive_sha256"]:
-        raise ValueError("Release archive checksum mismatch")
-    runtime_files = read_archive(body, version)
-    files = runtime_files
-    runtime_nar = text(metadata.get("narHash"), "Runtime NAR hash")
-    expected_nar = runtime_nar
-    if "source" in metadata:
-        source = table(metadata["source"], "Source archive metadata")
-        filename = text(source.get("filename"), "Source archive filename")
-        if filename != f"chainman-source-{version}.tar.gz":
-            raise ValueError("Invalid source archive filename")
-        source_body = (metadata_path.parent / filename).read_bytes()
-        if hashlib.sha256(source_body).hexdigest() != source["archive_sha256"]:
-            raise ValueError("Source archive checksum mismatch")
-        files = read_archive(source_body, version)
-        if any(files.get(name) != item for name, item in runtime_files.items()):
-            raise ValueError("Runtime and source archive content disagree")
-        expected_nar = text(source.get("narHash"), "Source NAR hash")
-    for selected_files, expected_hash in [
-        (runtime_files, runtime_nar),
-        (files, expected_nar),
-    ]:
-        with tempfile.TemporaryDirectory(prefix="chainman-example-") as directory:
-            tree = Path(directory)
-            for name, (data, mode) in selected_files.items():
-                path = tree / name
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
-                path.chmod(mode)
-            actual = subprocess.check_output(
-                [
-                    "nix",
-                    "--extra-experimental-features",
-                    "nix-command",
-                    "hash",
-                    "path",
-                    str(tree),
-                ],
-                text=True,
-            ).strip()
-            if actual != expected_hash:
-                raise ValueError("Release unpacked NAR hash mismatch")
-    selected = {
-        name: item
-        for name, item in files.items()
-        if name.startswith(("examples/", "modules/", "docs/"))
-        or name in {".gitignore", "dependencies.toml", "sdk-versions.toml", "LICENSE"}
-    }
-    # Consumer SDK profiles import the verified runtime. Do not export a second
-    # copy of its Nix implementation, native controller or backend source pins.
-    selected["flake.lock"] = files["nix/flake.lock"]
-    selected.update(
-        {
-            name[len("template/") :]: item
-            for name, item in files.items()
-            if name.startswith("template/")
-        }
-    )
-    for name, (data, mode) in selected.items():
-        if name.endswith(".md"):
-            # The template README moves up one level in the adopted project.
-            if name == "README.md":
-                data = data.replace(b"](../docs/", b"](docs/").replace(
-                    b"](../examples/", b"](examples/"
-                )
-            selected[name] = (
-                data.replace(b"TOOLCHAIN_MODE", b"CHAINMAN_MODE")
-                .replace(b"TOOLCHAIN_CONTAINER_ENGINE", b"CHAINMAN_CONTAINER_ENGINE")
-                .replace(b"toolchain.toml", b"chainman.toml"),
-                mode,
-            )
-    selected["scripts/chainman.sh"] = files["bootstrap/chainman.sh"]
-    selected["scripts/chainman-fetch.nix"] = files["bootstrap/fetch.nix"]
-    # Container image updates belong to the managed bootstrap/runtime release.
-    dependency_body, mode = selected["dependencies.toml"]
-    dependencies = tomlkit.parse(dependency_body.decode())
-    nix_policy = dependencies["nix"]
-    docker_policy = dependencies["docker"]
-    if not isinstance(nix_policy, MutableMapping) or not isinstance(
-        docker_policy, MutableMapping
+            raise ValueError("Starter destination must not contain symlinks")
+    if destination.exists() and (
+        not destination.is_dir() or any(destination.iterdir())
     ):
-        raise ValueError("Example dependency policies require Nix and Docker tables")
-    nix_policy["directory"] = "."
-    docker_policy["enabled"] = False
-    dependencies["pins"] = [
-        pin
-        for pin in dependencies.get("pins", [])
-        if not pin["file"].startswith("template/")
-        and pin["file"] != ".github/workflows/release.yml"
-    ]
-    selected["dependencies.toml"] = tomlkit.dumps(dependencies).encode(), mode
-    lock = {
-        key: metadata[key]
-        for key in ("schema", "version", "revision", "url", "narHash")
-    }
-    selected["chainman.lock"] = (json.dumps(lock, indent=2) + "\n").encode(), 0o644
-    for name, (data, mode) in sorted(selected.items()):
-        path = destination / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
-        path.chmod(mode)
+        raise ValueError("Choose a new or empty project directory")
+    shutil.copytree(ROOT / "template", destination, dirs_exist_ok=True)
+    # Nix store permissions describe immutable inputs, not project-owned output.
+    destination.chmod(0o755)
+    for path in destination.rglob("*"):
+        path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o100 else 0o644)
+    (destination / "chainman.lock").write_text(revision + "\n")
+    (destination / "justfile").write_bytes(
+        (ROOT / "bootstrap/chainman.just").read_bytes()
+        + b"\n"
+        + (ROOT / "template/justfile").read_bytes()
+    )
+    shutil.copyfile(ROOT / "nix/flake.lock", destination / "flake.lock")
+    (destination / ".gitignore").write_text(
+        ".chainman/\n.cache/\n__pycache__/\nresult\n"
+    )
     return {
         "directory": str(destination),
-        "files": len(selected),
-        "version": version,
+        "revision": revision,
+        "version": (ROOT / "VERSION").read_text().strip(),
+        "files": sum(path.is_file() for path in destination.rglob("*")),
     }
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("destination", type=Path)
-    parser.add_argument(
-        "--release",
-        type=Path,
-        default=Path(__file__).resolve().parents[1]
-        / "dist/release/chainman-release.json",
-    )
+    parser.add_argument("revision")
     args = parser.parse_args()
-    print(
-        json.dumps(
-            create(args.destination.absolute(), args.release.resolve()), indent=2
-        )
-    )
+    print(json.dumps(create(args.destination.absolute(), args.revision), indent=2))

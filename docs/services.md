@@ -30,17 +30,17 @@ services = ["preview"]
 wait_for_services = true
 ```
 
-Run the task through the checked-in launcher:
+Run the task through the project entrypoint:
 
 ```sh
-./scripts/chainman.sh run preview
+just chainman run preview
 ```
 
 From another terminal in the project:
 
 ```sh
-just services-status
-just stop
+just chainman services-status
+just chainman services-stop
 ```
 
 The command probe runs in the service's execution context. In container mode,

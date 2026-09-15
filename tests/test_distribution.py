@@ -1,280 +1,112 @@
-"""Distribution identity and extraction behavior independently of the launcher."""
+"""Git is the only runtime distribution; exports retain exact committed bytes."""
 
-import hashlib
-import ast
-import io
-import json
 import os
 from pathlib import Path
+import subprocess
 import sys
-import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import example
-import package
-import module_updates
+import git_runtime
 
 
 class DistributionTests(unittest.TestCase):
-    def test_distribution_inventory_covers_sources_and_runtime_import_closure(self):
-        inventory = json.loads((package.ROOT / "release-files.json").read_text())
-        sources = set(inventory["files"])
-        runtime = set(inventory["runtime_files"])
-        self.assertEqual(len(sources), len(inventory["files"]))
-        self.assertEqual(len(runtime), len(inventory["runtime_files"]))
-        self.assertFalse(runtime - sources)
-        required = {
-            path.relative_to(package.ROOT).as_posix()
-            for directory, pattern in (
-                ("scripts", "*.py"),
-                ("tests", "*.py"),
-                ("nix/control", "*.go"),
-                ("typings", "*.pyi"),
-            )
-            for path in (package.ROOT / directory).glob(pattern)
-        }
-        self.assertFalse(
-            required - sources,
-            f"Source inventory omissions: {sorted(required - sources)}",
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="chainman Git source ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.origin = self.root / "origin"
+        self.origin.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        (self.origin / "VERSION").write_text("0.1.0\n")
+        (self.origin / "executable").write_bytes(b"#!/bin/sh\nexit 0\n")
+        (self.origin / "executable").chmod(0o755)
+        (self.origin / "binary").write_bytes(b"\0binary\xff\n")
+        self.commit()
+        self.revision = self.git("rev-parse", "HEAD")
+        repository = patch.object(git_runtime, "REPOSITORY", self.origin.as_uri())
+        repository.start()
+        self.addCleanup(repository.stop)
+        environment = patch.dict(os.environ, XDG_CACHE_HOME=str(self.root / "cache"))
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def git(self, *args):
+        return subprocess.check_output(
+            ["git", "-C", str(self.origin), *args], text=True
+        ).strip()
+
+    def commit(self):
+        self.git("add", ".")
+        self.git(
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-qm",
+            "Runtime",
         )
-        modules = {
-            path.stem: path.relative_to(package.ROOT).as_posix()
-            for path in (package.ROOT / "scripts").glob("*.py")
-        }
-        for name in sorted(runtime):
-            if not name.startswith("scripts/") or not name.endswith(".py"):
-                continue
-            tree = ast.parse((package.ROOT / name).read_text(), filename=name)
-            dependencies = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    dependencies.update(item.name.split(".")[0] for item in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    dependencies.add(node.module.split(".")[0])
-            missing = {
-                modules[dependency]
-                for dependency in dependencies
-                if dependency in modules
-            } - runtime
-            self.assertFalse(
-                missing, f"Runtime imports omitted from {name}: {sorted(missing)}"
-            )
 
-    def test_example_keeps_one_runtime_implementation_and_its_own_sdk_lock(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            source = {
-                "bootstrap/chainman.sh": (b"#!/bin/sh\n", 0o755),
-                "bootstrap/fetch.nix": (b"verified fetcher", 0o644),
-                "nix/flake.lock": (b"consumer SDK lock", 0o644),
-                "nix/flake.nix": (b"shared SDK implementation", 0o644),
-                "nix/control/main.go": (b"shared controller", 0o644),
-                "dependencies.toml": (
-                    b'[nix]\ninputs = [{input="primary",repository="Example/packages",branch="current"}, {input="compat",repository="Example/packages",branch="compat"}]\n[docker]\n',
-                    0o644,
-                ),
-                "template/flake.nix": (b"import verified runtime", 0o644),
-            }
-            runtime = {
-                name: item
-                for name, item in source.items()
-                if not name.startswith("template/")
-            }
-            body = package.archive_bytes(runtime, "1.0.0")
-            source_body = package.archive_bytes(source, "1.0.0")
-            # Exercise archive verification/extraction without spawning Nix.
-            # Real host/container evaluation is an independent qualification.
-            metadata = {
-                "schema": 1,
-                "version": "1.0.0",
-                "revision": "a" * 40,
-                "url": "https://example.invalid/runtime.tar.gz",
-                "narHash": "digest",
-                "archive_sha256": hashlib.sha256(body).hexdigest(),
-                "source": {
-                    "filename": "chainman-source-1.0.0.tar.gz",
-                    "narHash": "digest",
-                    "archive_sha256": hashlib.sha256(source_body).hexdigest(),
-                },
-            }
-            (root / "chainman-1.0.0.tar.gz").write_bytes(body)
-            (root / metadata["source"]["filename"]).write_bytes(source_body)
-            manifest = root / "chainman-release.json"
-            manifest.write_text(json.dumps(metadata))
-            destination = root / "consumer"
-            with patch.object(
-                example.subprocess, "check_output", return_value="digest\n"
-            ):
-                example.create(destination, manifest)
-            self.assertFalse((destination / "nix").exists())
-            self.assertEqual(
-                (destination / "flake.lock").read_bytes(), b"consumer SDK lock"
-            )
-            self.assertEqual(
-                (destination / "flake.nix").read_bytes(), b"import verified runtime"
-            )
-            self.assertFalse((destination / "vendor").exists())
-            pin = json.loads((destination / "chainman.lock").read_text())
-            self.assertNotIn("bundled_archive", pin)
-            self.assertEqual(pin["narHash"], metadata["narHash"])
-            self.assertEqual(
-                example.tomlkit.parse((destination / "dependencies.toml").read_text())[
-                    "nix"
-                ]["directory"],
-                ".",
-            )
-            policy = example.tomlkit.parse(
-                (destination / "dependencies.toml").read_text()
-            )
-            self.assertEqual(
-                module_updates.nix_spec(policy)["inputs"],
-                [
-                    {
-                        "directory": ".",
-                        "input": "primary",
-                        "repository": "Example/packages",
-                        "branch": "current",
-                    },
-                    {
-                        "directory": ".",
-                        "input": "compat",
-                        "repository": "Example/packages",
-                        "branch": "compat",
-                    },
-                ],
-            )
+    def test_exact_export_ignores_checkout_changes_and_attributes(self):
+        (self.origin / ".gitattributes").write_text("binary export-ignore\n")
+        self.commit()
+        revision = self.git("rev-parse", "HEAD")
+        (self.origin / "VERSION").write_text("uncommitted\n")
+        (self.origin / "untracked").write_text("excluded")
+        destination = self.root / "export"
+        git_runtime.materialize(revision, destination)
+        self.assertEqual((destination / "VERSION").read_text(), "0.1.0\n")
+        self.assertEqual((destination / "binary").read_bytes(), b"\0binary\xff\n")
+        self.assertTrue((destination / "executable").stat().st_mode & 0o100)
+        self.assertFalse((destination / "untracked").exists())
+        self.assertFalse((destination / ".git").exists())
 
-    def test_release_reads_one_immutable_commit_when_head_moves(self):
-        self.release_revision_case(replace=False)
+    def test_warm_objects_work_without_origin(self):
+        git_runtime.materialize(self.revision, self.root / "first")
+        self.origin.rename(self.root / "offline")
+        git_runtime.materialize(self.revision, self.root / "second")
+        self.assertEqual(
+            (self.root / "first/binary").read_bytes(),
+            (self.root / "second/binary").read_bytes(),
+        )
 
-    def test_release_ignores_replacement_refs_added_after_revision_capture(self):
-        self.release_revision_case(replace=True)
+    def test_corrupt_git_blob_is_rejected(self):
+        cache = git_runtime.objects(self.revision)
+        oid = self.git("rev-parse", "HEAD:VERSION")
+        path = cache / "objects" / oid[:2] / oid[2:]
+        path.parent.mkdir(exist_ok=True)
+        if path.exists():
+            path.chmod(0o600)
+        path.write_bytes(zlib.compress(b"blob 6\0wrong\n"))
+        with self.assertRaises(subprocess.CalledProcessError):
+            git_runtime.materialize(self.revision, self.root / "bad")
+        self.assertFalse((self.root / "bad").exists())
 
-    def test_runtime_archive_excludes_authoring_inputs(self):
-        self.release_revision_case(replace=False, split=True)
+    def test_symlink_tree_is_rejected(self):
+        (self.origin / "link").symlink_to("VERSION")
+        self.commit()
+        with self.assertRaisesRegex(ValueError, "ordinary contained files"):
+            git_runtime.materialize(self.git("rev-parse", "HEAD"), self.root / "bad")
 
-    def release_revision_case(self, *, replace, split=False):
-        with (
-            tempfile.TemporaryDirectory(prefix="release source ") as temporary,
-            patch.dict(
-                os.environ,
-                {
-                    "GIT_CONFIG_GLOBAL": os.devnull,
-                    "GIT_CONFIG_NOSYSTEM": "1",
-                    "GIT_CONFIG_COUNT": "0",
-                },
-            ),
+    def test_unavailable_revision_cannot_fall_back(self):
+        with self.assertRaises(subprocess.CalledProcessError):
+            git_runtime.materialize("0" * 40, self.root / "bad")
+        self.assertFalse((self.root / "bad").exists())
+
+    def test_archive_lock_is_not_supported(self):
+        for body in (
+            b'{"revision":"' + b"a" * 40 + b'"}\n',
+            b"a" * 40,
+            b"A" * 40 + b"\n",
         ):
-            root = Path(temporary).resolve() / "source"
-            root.mkdir()
-            git = package.git
-            git(root, "init", "-b", "main")
-            git(root, "config", "user.name", "Release Test")
-            git(root, "config", "user.email", "release@example.invalid")
-            git(root, "config", "commit.gpgsign", "false")
-            git(root, "config", "core.hooksPath", os.devnull)
-            (root / "VERSION").write_text("1.0.0\n")
-            source = root / "input[one].sh"
-            source.write_text("original bytes\n")
-            source.chmod(0o644)
-            inventory = root / "release-files.json"
-            inventory.write_text(
-                json.dumps(
-                    {
-                        "schema": 1,
-                        "files": ["VERSION", source.name],
-                        **({"runtime_files": ["VERSION"]} if split else {}),
-                    }
-                )
-            )
-            git(root, "add", ".")
-            git(root, "commit", "-m", "original")
-            original = git(root, "rev-parse", "HEAD").decode().strip()
-            source.write_text("later bytes\n")
-            source.chmod(0o755)
-            (root / "unapproved.txt").write_text("later inventory input")
-            inventory.write_text(
-                json.dumps(
-                    {"schema": 1, "files": ["VERSION", source.name, "unapproved.txt"]}
-                )
-            )
-            git(root, "add", ".")
-            git(root, "commit", "-m", "later")
-            later = git(root, "rev-parse", "HEAD").decode().strip()
-            git(root, "checkout", "--detach", original)
-
-            def advancing_git(directory, *args):
-                result = git(directory, *args)
-                if args == ("rev-parse", "HEAD"):
-                    if replace:
-                        git(root, "replace", original, later)
-                    else:
-                        git(root, "checkout", "--detach", later)
-                return result
-
-            output = Path(temporary).resolve() / "release"
-            with patch.object(package, "git", side_effect=advancing_git):
-                metadata = package.release(root, output)
-            self.assertEqual(metadata["revision"], original)
-            self.assertEqual(
-                git(root, "rev-parse", "HEAD").decode().strip(),
-                original if replace else later,
-            )
-            self.assertEqual(
-                example.read_archive(
-                    (output / "chainman-1.0.0.tar.gz").read_bytes(), "1.0.0"
-                ),
-                {
-                    "VERSION": (b"1.0.0\n", 0o644),
-                    **({} if split else {source.name: (b"original bytes\n", 0o644)}),
-                },
-            )
-            self.assertEqual(
-                example.read_archive(
-                    (output / metadata["source"]["filename"]).read_bytes(), "1.0.0"
-                ),
-                {
-                    "VERSION": (b"1.0.0\n", 0o644),
-                    source.name: (b"original bytes\n", 0o644),
-                },
-            )
-
-    def test_deterministic_source_archive_preserves_bytes_and_executable_modes(self):
-        files = {
-            "dir with spaces/run.sh": (b"#!/bin/sh\nprintf 'hi\\n'\n", 0o755),
-            "VERSION": (b"1.2.3\n", 0o644),
-        }
-        left = package.archive_bytes(files, "1.2.3")
-        right = package.archive_bytes(dict(reversed(list(files.items()))), "1.2.3")
-        self.assertEqual(left, right)
-        self.assertEqual(example.read_archive(left, "1.2.3"), files)
-
-    def test_unsafe_paths_and_modes_are_rejected(self):
-        for name, mode in (
-            ("../outside", 0o644),
-            ("/outside", 0o644),
-            (".git/config", 0o644),
-            ("ok", 0o777),
-        ):
-            with self.subTest(name=name, mode=mode), self.assertRaises(ValueError):
-                package.archive_bytes({name: (b"x", mode)}, "1.0.0")
-
-    def test_archive_links_are_rejected(self):
-        buffer = io.BytesIO()
-        with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-            member = tarfile.TarInfo("chainman-1.0.0/link")
-            member.type, member.linkname = tarfile.SYMTYPE, "/outside"
-            archive.addfile(member)
-        with self.assertRaises(ValueError):
-            example.read_archive(buffer.getvalue(), "1.0.0")
-
-    def test_version_mismatch_is_not_an_adoptable_release(self):
-        body = package.archive_bytes({"VERSION": (b"1.2.3", 0o644)}, "1.2.3")
-        with self.assertRaises(ValueError):
-            example.read_archive(body, "1.2.4")
+            with self.assertRaises(ValueError):
+                git_runtime.pin(body)
 
 
 if __name__ == "__main__":

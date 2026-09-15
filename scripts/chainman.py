@@ -489,6 +489,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             import services
 
             return services.prepare_requested(root, rest)
+        elif args.action == "_recipe-plan":
+            import recipes
+
+            if len(rest) != 1:
+                raise ValueError("recipe requires one standard recipe name")
+            print(recipes.plan(cfg, rest[0]))
         elif args.action == "_format-plan":
             import recipes
 
@@ -559,7 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     return execute(root, name, rest, env=owned, check=False).returncode
         elif args.action in {"deps-update", "chainman-update"}:
             raise ValueError(
-                "Start updates through scripts/chainman.sh on the host; direct Python entry cannot orchestrate candidate services"
+                "Start updates through just chainman on the host; direct Python entry cannot orchestrate candidate services"
             )
         elif args.action == "deps-check":
             import dependency_api

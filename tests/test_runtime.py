@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tarfile
 import textwrap
 import time
 import unittest
@@ -18,6 +17,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import toolchain
 import native_tasks
+from git_fixtures import pin_tree
 
 
 class NixReferenceTests(unittest.TestCase):
@@ -73,6 +73,8 @@ class NixReferenceTests(unittest.TestCase):
             binaries = root / "host-bin"
             binaries.mkdir()
             (binaries / "nix").symlink_to(toolchain.nix_command())
+            for prerequisite in ("git", "just"):
+                (binaries / prerequisite).symlink_to(shutil.which(prerequisite))
             (binaries / "bash").write_text("#!/bin/sh\nexit 77\n")
             (binaries / "bash").chmod(0o755)
             (binaries / "uname").write_text(
@@ -100,43 +102,22 @@ class NixReferenceTests(unittest.TestCase):
                 (runtime / "scripts/chainman.py").write_text(
                     "import sys; print(sys.argv[-1]); raise SystemExit(7)\n"
                 )
-                nar_hash = subprocess.check_output(
-                    [
-                        toolchain.nix_command(),
-                        "--extra-experimental-features",
-                        "nix-command",
-                        "hash",
-                        "path",
-                        str(runtime),
-                    ],
-                    text=True,
-                    timeout=30,
-                ).strip()
+                shutil.copytree(toolchain.RUNTIME / "bootstrap", runtime / "bootstrap")
+                (runtime / "VERSION").write_text("0.1.0\n")
                 consumer = root / "consumer"
-                (consumer / "scripts").mkdir(parents=True)
+                consumer.mkdir()
                 shutil.copy2(
-                    toolchain.RUNTIME / "bootstrap/chainman.sh",
-                    consumer / "scripts/chainman.sh",
+                    toolchain.RUNTIME / "bootstrap/chainman.just", consumer / "justfile"
                 )
-                shutil.copy2(
-                    toolchain.RUNTIME / "bootstrap/fetch.nix",
-                    consumer / "scripts/chainman-fetch.nix",
-                )
-                with tarfile.open(consumer / "bundle.tar.gz", "w:gz") as archive:
-                    archive.add(runtime, arcname="runtime")
-                (consumer / "chainman.lock").write_text(
-                    json.dumps(
-                        {
-                            "schema": 1,
-                            "version": "fixture",
-                            "revision": "fixture-only",
-                            "url": "https://example.invalid/runtime.tar.gz",
-                            "narHash": nar_hash,
-                            "bundled_archive": "bundle.tar.gz",
-                        }
-                    )
-                )
-                command = [str(consumer / "scripts/chainman.sh"), "literal ' $ value"]
+                revision = pin_tree(runtime, root / "cache")
+                (consumer / "chainman.lock").write_text(revision + "\n")
+                command = [
+                    "just",
+                    "--justfile",
+                    str(consumer / "justfile"),
+                    "chainman",
+                    "literal ' $ value",
+                ]
                 # Keep runtime/cache identity local to this disposable fixture.
                 env = {
                     key: value

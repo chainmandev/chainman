@@ -1,4 +1,4 @@
-name: Publish immutable Chainman release
+name: Publish Chainman Git release
 "on":
   workflow_dispatch:
     inputs:
@@ -7,14 +7,9 @@ name: Publish immutable Chainman release
         required: true
         type: string
       candidate_sha:
-        description: Full commit at the selected workflow ref
+        description: Exact full commit at the selected workflow ref
         required: true
         type: string
-      immutability_enabled:
-        description: Repository Settings / Releases / Enable release immutability is enabled
-        required: true
-        type: boolean
-        default: false
 permissions:
   contents: read
 concurrency:
@@ -22,7 +17,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   qualify:
-    if: github.repository == 'chainmandev/chainman' && inputs.immutability_enabled
+    if: github.repository == 'chainmandev/chainman'
     uses: ./.github/workflows/verify.yml
     with:
       candidate_sha: ${{ inputs.candidate_sha }}
@@ -33,10 +28,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: write
-      id-token: write
-      attestations: write
     env:
-      VERSION: ${{ inputs.version }}
+      RELEASE_VERSION: ${{ inputs.version }}
       EXPECTED: ${{ inputs.candidate_sha }}
       GH_REPO: chainmandev/chainman
     steps:
@@ -49,46 +42,42 @@ jobs:
           EVENT: ${{ github.sha }}
         run: |
           set -eu
+          printf '%s\n' "$EXPECTED" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           test "$EVENT" = "$EXPECTED"
-          test "$(cat VERSION)" = "$VERSION"
+          test "$(cat VERSION)" = "$RELEASE_VERSION"
           test -z "$(git status --porcelain)"
-      - name: Build reproducible artifacts twice
-        run: |
-          set -eu
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- release
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- release dist/release-repeat
-          diff -r dist/release dist/release-repeat
-      - name: Attest the complete release
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: dist/release/*
-      - name: Upload complete draft and publish
+      - name: Publish lightweight tag and release notes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          # shellcheck disable=SC2016
-          nix --extra-experimental-features 'nix-command flakes' develop path:./nix#release --no-write-lock-file --command sh -eu -c '
-            gh api --method POST "repos/$GH_REPO/git/refs" \
-              -f "ref=refs/tags/v$VERSION" -f "sha=$EXPECTED" > /dev/null
-            gh release create "v$VERSION" --repo "$GH_REPO" --verify-tag --draft \
-              --title "Chainman v$VERSION" --notes-file docs/release-notes.md
-            gh release upload "v$VERSION" --repo "$GH_REPO" dist/release/*
-            test "$(gh api "repos/$GH_REPO/git/ref/tags/v$VERSION" --jq .object.sha)" = "$EXPECTED"
-            gh release edit "v$VERSION" --repo "$GH_REPO" --draft=false --latest
-            test "$(gh api "repos/$GH_REPO/releases/tags/v$VERSION" --jq .immutable)" = true
-            gh release verify "v$VERSION" --repo "$GH_REPO"
-            for asset in dist/release/*; do
-              gh release verify-asset "v$VERSION" "$asset" --repo "$GH_REPO"
-            done
-          '
-      - name: Qualify public installation and starter
+          # Ref creation is atomic and refuses an existing tag. Existing releases
+          # are also refused; interrupted publication requires operator review.
+          test -z "$(git ls-remote --tags origin "refs/tags/v$RELEASE_VERSION")"
+          releases=$(gh api "repos/$GH_REPO/releases" --paginate --jq '.[].tag_name')
+          if printf '%s\n' "$releases" | grep -Fxq "v$RELEASE_VERSION"; then
+            echo 'This release already exists.' >&2
+            exit 1
+          fi
+          gh api --method POST "repos/$GH_REPO/git/refs" \
+            -f "ref=refs/tags/v$RELEASE_VERSION" -f "sha=$EXPECTED" > /dev/null
+          gh release create "v$RELEASE_VERSION" --repo "$GH_REPO" --verify-tag \
+            --title "Chainman v$RELEASE_VERSION" --notes-file docs/release-notes.md
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/v$RELEASE_VERSION" --jq .object.type)" = commit
+          test "$(gh api "repos/$GH_REPO/git/ref/tags/v$RELEASE_VERSION" --jq .object.sha)" = "$EXPECTED"
+          test "$(gh api "repos/$GH_REPO/releases/tags/v$RELEASE_VERSION" --jq .draft)" = false
+          test "$(gh api "repos/$GH_REPO/releases/tags/v$RELEASE_VERSION" --jq .prerelease)" = false
+      - name: Read back public Git and qualify a fresh starter
         env:
           CHAINMAN_MODE: host-nix
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- init "$RUNNER_TEMP/released-consumer" "$VERSION"
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/released-consumer/justfile" setup
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/released-consumer/justfile" verify
+          git clone --branch "v$RELEASE_VERSION" --depth 1 https://github.com/chainmandev/chainman.git "$RUNNER_TEMP/public-chainman"
+          test "$(git -C "$RUNNER_TEMP/public-chainman" rev-parse HEAD)" = "$EXPECTED"
+          test "$(cat "$RUNNER_TEMP/public-chainman/VERSION")" = "$RELEASE_VERSION"
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/public-chainman/justfile" init "$RUNNER_TEMP/public-starter" "$RELEASE_VERSION" --no-git
+          test "$(cat "$RUNNER_TEMP/public-starter/chainman.lock")" = "$EXPECTED"
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/public-starter/justfile" chainman setup
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/public-starter/justfile" verify

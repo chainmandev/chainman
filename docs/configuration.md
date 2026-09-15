@@ -1,9 +1,9 @@
-# Project configuration
+# Schema-3 configuration reference
 
 [Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
 
-A consumer checks in `chainman.toml`, `chainman.lock`, the two bootstrap companions,
-and a small `justfile` adapter. **New projects use schema 3.** Profiles select the
+A consumer checks in `chainman.toml`, a plain Git SHA in `chainman.lock`,
+and the small bootstrap recipe in its existing justfile. **New projects use schema 3.** Profiles select the
 environment, setup groups declare frozen installation and readiness, tasks run
 commands and acquire services, and recipe bindings expose the public commands.
 
@@ -14,7 +14,7 @@ schema = 3
 default_profile = "default"
 
 [profiles.default]
-runtime_profile = "core" # Or a project-owned shell: flake = "nix#default"
+flake = ".#default" # Select the project-owned shell.
 
 [tasks.check]
 commands = [["python3", "-m", "unittest", "discover", "-s", "tests"]]
@@ -28,36 +28,20 @@ minimum_age_days = 30
 verify_task = "check"
 ```
 
-Use [getting started](getting-started.md#existing-projects) to generate and import
-the recipe facade. Run `just config validate`, `just config show --json`, or
-`just explain check --json` to inspect declarations before executing them.
+Use [manual adoption](adoption.md) to add the pin and bootstrap recipe.
+Run `just chainman config validate`, `just chainman config show --json`, or
+`just chainman explain check --json` to inspect declarations before executing them.
 Schema 3 also supports reusable [templates and composition](composition.md).
 
 ## Reference map
 
-- [Legacy schema-1 commands](#legacy-schema-1-commands)
+- [Profiles and environment](#profiles-arguments-and-environment)
+- [Legacy schema-1 compatibility](legacy-configuration.md)
 - [Named setup groups and tasks](#named-setup-groups-and-tasks)
 - [Services](#services), including readiness and lifecycle ownership
 - [Recipe bindings](recipes.md) and [dependency updates](updates.md)
 
-## Legacy schema-1 commands
-
-Schema 1 remains accepted for older consumers. Its command hooks below are a
-compatibility interface; use named tasks in schema 3 for new integrations:
-
-```toml
-schema = 1
-[project]
-default_profile = "default"
-[profiles.default]
-flake = "nix#default"
-[commands]
-setup = [["sh", "scripts/setup-project.sh"]]
-verify = [["just", "check"]] # Schema 1 hook; schema 2 uses verify_task = "check".
-[setup]
-inputs = ["nix/flake.nix", "nix/flake.lock", "package.json", "pnpm-lock.yaml"]
-artifacts = ["node_modules/.pnpm/lock.yaml"]
-```
+## Profiles, arguments, and environment
 
 Commands are arrays of argument arrays. `exec --profile NAME -- ARGS...` preserves
 literal arguments; shell expansion happens only in an explicitly chosen shell.
@@ -67,7 +51,7 @@ Each entry is a normal schema-1 query. The response contains `schema`, `operatio
 and an ordered `results` array. A batch uses one eligibility time and credential
 context; any failed query fails the whole response. Batches contain 1–128 entries,
 cannot nest, and retain the existing 4 MiB input bound and per-query network bounds.
-`run NAME` invokes a declared command. `command_profiles.NAME` overrides the project
+`run NAME` invokes a declared task (or a legacy schema-1 command). `command_profiles.NAME` overrides the project
 default for that command. `setup` uses manifest/toolchain fingerprints and declared
 artifacts. A profile selects a project-relative `path#shell` (also `flake.nix#shell`)
 or a built-in `runtime_profile`. Built-ins are core, javascript, rust, python, go,
@@ -174,8 +158,7 @@ publish specifications. The normal mount set is the project, the linked-worktree
 administrative paths where needed, and named Nix/download volumes. Relative sources
 resolve from the project; home/root/socket blanket mounts are rejected.
 
-A mount can use `source_env="SDK_DIRECTORY"` instead of `source`. The checked-in
-bootstrap reads that explicitly named host variable as a literal path; it never
+A mount can use `source_env="SDK_DIRECTORY"` instead of `source`. The verified runtime reads that explicitly named host variable as a literal path; it never
 executes it or discovers a fallback. If `target` is omitted, the same absolute path
 is visible in the container. Declare `environment.pass=["SDK_DIRECTORY"]` when
 commands also need its value. Unset or empty variables, socket sources, blanket
@@ -202,9 +185,6 @@ Bootstrap controls are `CHAINMAN_MODE` (container-nix by default),
 `CHAINMAN_NIX_BIN` (an explicit absolute executable), and `CHAINMAN_PROJECT_ROOT`
 (an explicit consumer root). Paths with spaces and invocation from another working
 directory are supported. Newlines and ambiguous container comma-paths are rejected.
-`CHAINMAN_ARCHIVE` selects a local archive override, but its contents must still
-match the committed lock hash. Mode changes inside an active shell are rejected.
-
 ## Named setup groups and tasks
 
 Schemas 2 and 3 support named setup groups and tasks. Inputs and artifacts are relative to the project;
