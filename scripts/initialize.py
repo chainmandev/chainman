@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import subprocess
 
 from adapter_data import table, text
 import chainman_updates
@@ -87,6 +88,11 @@ def main() -> None:
     args = parser.parse_args()
     try:
         result = initialize(args.destination.absolute(), args.ref)
+    except subprocess.CalledProcessError as error:
+        detail = error.stderr or str(error)
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        parser.exit(1, f"Chainman initialization: {detail.strip()}\n")
     except (OSError, ValueError) as error:
         parser.exit(1, f"Chainman initialization: {error}\n")
     print(json.dumps(result, indent=2))

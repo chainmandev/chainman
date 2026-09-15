@@ -1116,6 +1116,12 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         # Nix import, selected generator, host Git commit and starter are real.
         if mode == "container-nix":
             shutil.copytree(self.repositories[self.lock], checkout / "fixture.git")
+            # UID 0 has no DAC-override capability in the initializer container.
+            for path in [
+                checkout / "fixture.git",
+                *(checkout / "fixture.git").rglob("*"),
+            ]:
+                path.chmod(0o755 if path.is_dir() else 0o644)
             repository = "file:///chainman/fixture.git"
         else:
             repository = self.repositories[self.lock].as_uri()
@@ -1126,6 +1132,13 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
                 "REPOSITORY = " + json.dumps(repository),
             )
         )
+        if mode == "container-nix":
+            resolver.write_text(
+                resolver.read_text().replace(
+                    '"core.fsmonitor=false",',
+                    '"core.fsmonitor=false", "-c", "safe.directory=/chainman/fixture.git",',
+                )
+            )
         destination = self.root / "initialized project with spaces"
         policy = self.root / "host Git policy"
         policy.write_text(
@@ -1912,7 +1925,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         )
         for path in (
             self.root / "scripts",
-            self.root / "bundle.tar.gz",
+            self.root / "justfile",
             self.root / "chainman.lock",
         ):
             if path.is_dir():
@@ -1936,7 +1949,11 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             DEMO_TEST_VALUE="value with spaces",
             DEMO_TEST_CACHE="fixture-" + worktree.parent.name,
         )
-        self.run_bootstrap("status", env=env)
+        result = run_captured(
+            ["just", "--justfile", str(worktree / "justfile"), "chainman", "status"],
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record = json.loads(next(worktree.glob("record-*.json")).read_text())
         self.assertEqual(record["demo"], "value with spaces")
         self.assertEqual(record["container"], "1")
@@ -1944,7 +1961,11 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertEqual(record["git_root"], str(worktree))
         self.assertEqual(record["cache_hits"], 1)
         self.assertEqual((persistent_home / "home-marker").read_text(), "persistent")
-        self.run_bootstrap("status", env=env)
+        result = run_captured(
+            ["just", "--justfile", str(worktree / "justfile"), "chainman", "status"],
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             max(
                 json.loads(p.read_text())["cache_hits"]
@@ -1969,7 +1990,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         nested.mkdir()
         for path in (
             self.root / "scripts",
-            self.root / "bundle.tar.gz",
+            self.root / "justfile",
             self.root / "chainman.lock",
         ):
             if path.is_dir():
@@ -1985,7 +2006,11 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             DEMO_TEST_ADMIN=str(self.root / ".git"),
             GIT_CONFIG_GLOBAL=str(global_config),
         )
-        self.run_bootstrap("status", env=env)
+        result = run_captured(
+            ["just", "--justfile", str(nested / "justfile"), "chainman", "status"],
+            env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record = json.loads(next(nested.glob("record-*.json")).read_text())
         self.assertFalse(record["parent_admin_visible"])
         self.assertEqual(record["git_name"], "Global policy")
