@@ -181,11 +181,14 @@ Whole container HOME replacement requires a project-contained directory. Explici
 HOME subdirectory mounts remain available for those credential/SDK adapters; mounts
 over HOME or project ancestors are rejected.
 
-Bootstrap controls are `CHAINMAN_MODE` (container-nix by default),
-`CHAINMAN_CONTAINER_ENGINE` (`docker` or `podman`; `CHAINMAN_ENGINE` is an alias),
-`CHAINMAN_NIX_BIN` (an explicit absolute executable), and `CHAINMAN_PROJECT_ROOT`
-(an explicit consumer root). Paths with spaces and invocation from another working
+Execution controls are `CHAINMAN_MODE` (`container-nix` by default, `host-nix`,
+or the discouraged caller-maintained `host` mode), `CHAINMAN_CONTAINER_ENGINE`
+(`docker` or `podman`), and `CHAINMAN_NIX_BIN` (an explicit absolute executable
+for host Nix). See [execution modes](runtime.md) for capabilities and prerequisites.
+Runtime routing variables such as `CHAINMAN_PROJECT_ROOT` are internal; the
+consumer recipe selects its project. Paths with spaces and invocation from another working
 directory are supported. Newlines and ambiguous container comma-paths are rejected.
+
 ## Named setup groups and tasks
 
 Schemas 2 and 3 support named setup groups and tasks. Inputs and artifacts are relative to the project;
@@ -302,7 +305,7 @@ memory isolation. Workflows without a resource declaration perform no resource p
 
 ## Services
 
-Service workflows in schemas 2 and 3 use the checked-in host launcher. A task's `services`
+Service workflows in schemas 2 and 3 use host orchestration from the verified Git revision. A task's `services`
 array selects services and their declared dependencies. Each service declares one
 argument-array `command` with a `profile`, or a digest-pinned `container`. Optional
 `setup` groups hold shared artifact leases for the entire service lifetime.

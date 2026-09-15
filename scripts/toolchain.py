@@ -686,7 +686,12 @@ def operation(
                 operation_file(root, f"operations/{identity}", unique=True)
             )
             acquire_operation(lease.fileno())
-            if automatic_prune and not active and not nested_project:
+            if (
+                automatic_prune
+                and not host_mode()
+                and not active
+                and not nested_project
+            ):
                 prune(root)
             gate_descriptor = (
                 inherited_gate
@@ -800,8 +805,20 @@ def pnpm_environment(env: dict[str, str], values: dict[str, str]) -> None:
                 break
 
 
+def host_mode() -> bool:
+    """The deliberately unprovisioned execution mode."""
+    return os.environ.get("CHAINMAN_MODE") == "host"
+
+
 def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
     env = dict(os.environ)
+    if host_mode():
+        env.update(
+            CHAINMAN_ROOT=str(root.resolve()),
+            CHAINMAN_PROJECT_ROOT=str(root.resolve()),
+            CHAINMAN_RUNTIME=str(RUNTIME),
+        )
+        return env
     if _operation_id and env.get("TOOLCHAIN_OPERATION_ID") != _operation_id:
         # Public child commands own their server lifetime. Reusing the parent
         # owner with a new socket would spawn an unmanaged daemon; reusing its
@@ -921,6 +938,9 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
 def compiler_cache(
     profile: str | None, env: dict[str, str], root: Path = ROOT
 ) -> Iterator[dict[str, str]]:
+    if host_mode():
+        yield env
+        return
     profiles = ad.table(config(root).get("profiles", {}), "Profiles")
     owns_cache = ad.table(
         profiles.get(profile, {}) if profile is not None else {}, "Profile"

@@ -5,8 +5,8 @@
 ## Pin or Git cache failures
 
 `chainman.lock` must contain one full lowercase 40-character commit SHA and a
-newline. Branches, tags, shortened SHAs, and the pre-publication JSON archive lock
-are not supported. A missing revision never falls back to a newer release.
+newline. Branches, tags, and shortened SHAs are not valid pins. A missing
+revision never falls back to a different revision.
 
 A cold launch requires public Git access. Confirm the canonical repository is
 reachable with `git ls-remote https://github.com/chainmandev/chainman.git`. A warm
@@ -23,8 +23,10 @@ Nix roots while operations are running.
 ## Nix or container entry
 
 Container mode is the default. Start Docker/Podman, or explicitly choose
-`CHAINMAN_MODE=host-nix`. Host mode requires a compatible Nix installation.
-Chainman does not supply a host-language fallback.
+`CHAINMAN_MODE=host-nix`, which requires a compatible Nix installation.
+The explicitly selected `CHAINMAN_MODE=host` escape hatch uses caller-installed
+tools and rejects managed services and updates; see [its limits](runtime.md#caller-installed-tools-discouraged-escape-hatch).
+A Nix failure never switches modes automatically.
 
 An existing wrapper that starts another Nix shell or Docker container may fail
 inside a managed environment. Route its underlying command instead; see

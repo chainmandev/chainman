@@ -90,6 +90,8 @@ def profile(
             raise ValueError(f"Profile {name!r} is not declared")
         raw = {"runtime_profile": "core" if name == "default" else name}
     spec = table(raw, "Profile")
+    if tc.host_mode():
+        return None, spec
     if "flake" in spec:
         path, sep, attribute = field_text(spec["flake"], "Profile flake").partition("#")
         if not path or not sep or not re.fullmatch(r"[A-Za-z0-9_.-]+", attribute):
@@ -107,7 +109,11 @@ def profile(
 
 
 def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
-    digest = hashlib.sha256(str(RUNTIME).encode())
+    # Host exports have a fresh temporary path on every verified launch. Their
+    # identity is the pin below, not that disposable materialization path.
+    digest = hashlib.sha256(
+        ("host:" + name if tc.host_mode() else str(RUNTIME)).encode()
+    )
     digest.update((ref or "host").encode())
     for path in (root / "chainman.toml", root / "chainman.lock"):
         if path.exists():
@@ -236,7 +242,7 @@ def execute(
     selected = dict(os.environ if env is None else env)
     # Library callers can enter without the shell launcher. Capture their selected
     # Nix before a project flake refreshes PATH, just as bootstrap does.
-    if not selected.get("CHAINMAN_RUNTIME_NIX_BIN"):
+    if not tc.host_mode() and not selected.get("CHAINMAN_RUNTIME_NIX_BIN"):
         executable = shutil.which(tc.nix_command(selected), path=selected.get("PATH"))
         if executable:
             selected["CHAINMAN_RUNTIME_NIX_BIN"] = str(
@@ -249,7 +255,8 @@ def execute(
         TOOLCHAIN_MODE=selected.get("CHAINMAN_MODE", "host-nix"),
     )
     selected = profile_environment(root, spec, selected, overrides, cfg=cfg)
-    tc.runtime_nix_environment(selected)
+    if not tc.host_mode():
+        tc.runtime_nix_environment(selected)
     resource_policy = {}
     for settings in (
         cfg.get("resources", {}),
@@ -402,7 +409,16 @@ def run_project(root: Path, action: str, extra: list[str]) -> int | None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=(
+            "Commands: exec [--profile NAME] -- COMMAND ..., shell [--profile NAME], "
+            "run TASK ..., setup [GROUP ...], setup-status, config validate, "
+            "config show --json, explain TASK, version, doctor. "
+            "Use just chainman recipe NAME for project recipe bindings. "
+            "Services and verified updates require a Nix execution mode."
+        ),
+    )
     parser.add_argument(
         "--root", type=Path, default=Path(os.environ.get("CHAINMAN_ROOT", os.getcwd()))
     )
@@ -414,6 +430,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     timing.bootstrap()
     root = args.root.absolute()
     try:
+        if tc.host_mode():
+            import host_execution
+
+            host_execution.validate_action(root, args.action)
         if args.action in {
             "deps-update",
             "chainman-update",
@@ -717,9 +737,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "profiles": list(table(cfg.get("profiles", {}), "Profiles")),
                         "modules": cfg["modules"],
                         "configuration_schema": cfg["schema"],
-                        "nix_policy": "shared-container-daemon"
-                        if os.environ.get("CHAINMAN_MODE") == "container-nix"
-                        else "host-configuration",
+                        "nix_policy": (
+                            "caller-toolchain"
+                            if tc.host_mode()
+                            else "shared-container-daemon"
+                            if os.environ.get("CHAINMAN_MODE") == "container-nix"
+                            else "host-configuration"
+                        ),
                         "inspect": {
                             "configuration": ["config", "show", "--json"],
                             "setup": ["setup-status"],

@@ -248,7 +248,7 @@ expression='import (builtins.toPath (builtins.getEnv "CHAINMAN_BOOTSTRAP_HELPER"
     action = builtins.getEnv "CHAINMAN_BOOTSTRAP_ACTION";
 }'
 mode=${CHAINMAN_MODE:-container-nix}
-case "$mode" in host-nix | container-nix) ;; *) fail 'CHAINMAN_MODE must be host-nix or container-nix.' ;; esac
+case "$mode" in host | host-nix | container-nix) ;; *) fail 'CHAINMAN_MODE must be host, host-nix or container-nix.' ;; esac
 if [ "$mode" = container-nix ]; then
     case "$root$script_dir" in *,*) fail 'Container mount paths cannot contain commas.' ;; esac
     case "$root" in / | "${HOME:-/}") fail 'Consumer root cannot be the host root or home directory.' ;; esac
@@ -283,6 +283,16 @@ if [ "$CHAINMAN_REQUEST_ACTION" = recipe ]; then
     shift
     recipe_plan=$("$self" _recipe-plan "$recipe_name")
     exec sh -eu -c "$recipe_plan" chainman "$self" "$@"
+fi
+
+if [ "$mode" = host ]; then
+    IFS= read -r revision < "$authority/chainman.lock"
+    [ "$revision" = "${CHAINMAN_SOURCE_REVISION:-}" ] || fail 'Pin changed after verified runtime selection.'
+    command -v python3 > /dev/null 2>&1 || fail 'Host execution requires caller-installed Python 3.12+.'
+    python3 -E -s -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || fail 'Host execution requires Python 3.12+.'
+    export CHAINMAN_MODE=host CHAINMAN_ACTIVE_MODE=host TOOLCHAIN_MODE=host TOOLCHAIN_CONTAINER=0
+    export CHAINMAN_ROOT="$root" CHAINMAN_RUNTIME="$source_root"
+    exec python3 -E -s -B "$source_root/scripts/chainman.py" --root "$root" "$@"
 fi
 
 case "$CHAINMAN_REQUEST_ACTION" in

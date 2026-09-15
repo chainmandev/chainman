@@ -37,5 +37,5 @@ initialization and updates need public Git access to discover the current tip.
 
 Git is the sole Chainman installation identity. Hashes for Nix inputs, container
 images, native backends, and external dependency artifacts remain necessary and
-are verified by their existing owners. Removing Chainman's release archive protocol
-does not remove those checks.
+are verified by their existing owners. The Git pin identifies Chainman; these
+additional hashes identify the separate tools and dependencies it operates.

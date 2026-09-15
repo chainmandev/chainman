@@ -53,6 +53,35 @@ container mode that context remains in the container; it does not escape to the
 physical host. Existing wrappers that start Nix or Docker need review before being
 invoked inside a managed task. See [adoption](adoption.md#existing-justfiles-and-host-wrappers).
 
+## Caller-installed tools: discouraged escape hatch
+
+```sh
+CHAINMAN_MODE=host just chainman exec -- node --version
+CHAINMAN_MODE=host just chainman run check
+```
+
+This mode requires your own Python 3.12+, Bash when requested by the workflow,
+and every project tool. Chainman installs none of them. Use it only if you intend
+to maintain and diagnose that environment yourself; it does not establish a
+reproducible toolchain or qualify the project for managed updates.
+
+The Git pin and object checks still apply. The runtime executes from a private
+export of that revision, retained for the command's lifetime. It preserves your
+PATH and tool/cache settings and applies declared project/profile environment.
+It does not evaluate flakes, execute their shell hooks, or provision compiler
+caches. A profile's environment values still apply; its flake is not entered.
+
+Supported operations are `exec`, `shell`, ordinary tasks, project setup,
+`setup-status`, `version`, `doctor`, `config`, and `explain`. Setup commands can
+install project dependencies using your existing tools. Readiness is distinct
+from either Nix mode; switching modes requires setup to be checked again.
+
+Managed services, dependency/runtime updates, transactional formatting,
+initialization, and tasks requiring native timeouts or child-process containment
+require `host-nix` or `container-nix`. An unsupported task anywhere in a requested
+graph rejects the graph before setup or task commands run. Chainman does not
+silently disable those task contracts. Host mode does not prune managed caches.
+
 ## Three separate caches
 
 | Cache | Role |

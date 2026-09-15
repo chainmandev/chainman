@@ -16,12 +16,55 @@ verified update; launching a command never silently upgrades it.
 ## Prerequisites
 
 - Git and [just](https://just.systems).
-- Docker or Podman for the default **container-Nix** mode, or **Nix 2.24+** for host mode.
+- Docker or Podman for the default **container-Nix** mode, or **Nix 2.24+** for **host-Nix** mode.
 - Ordinary shell utilities available on supported Linux and macOS hosts.
 
-Python, Node, `gh`, curl and wget are not bootstrap prerequisites. Project SDKs come
+In these Nix modes, Python, Node, `gh`, curl and wget are not bootstrap prerequisites. Project SDKs come
 from the project's flake. Some workflows still require native Apple or Android SDKs;
-see [execution modes and native tools](docs/runtime.md).
+see [execution modes and native tools](docs/runtime.md). That guide also describes
+the discouraged, caller-maintained `CHAINMAN_MODE=host` escape hatch.
+
+## Start a new project
+
+Use a disposable checkout to initialize a **new or empty** directory:
+
+```sh
+git clone --depth 1 https://github.com/chainmandev/chainman.git chainman-init
+just --justfile chainman-init/justfile init "../my-project"
+cd my-project
+just chainman setup
+just verify
+```
+
+`just` resolves recipe paths from the checkout: `../my-project` above is next to
+`chainman-init`. Absolute destination paths also work. The checkout can be removed
+once initialization succeeds.
+
+`just init DEST [SHA] [--no-git]` selects the public default branch's current commit
+when SHA is omitted. Selection is frozen at the start; the selected revision's
+generator and templates produce the project. Ordinary launches use the resulting
+pin without checking for updates. No tag or GitHub release is needed.
+
+To reproduce an existing project's runtime, supply its full lowercase SHA explicitly:
+
+```sh
+revision=$(cat /absolute/path/to/existing-project/chainman.lock)
+just --justfile chainman-init/justfile init "../reproduced-project" "$revision"
+```
+
+Branch names, tags, and numeric versions are not accepted as the optional SHA.
+
+The starter contains a small example, its verification command, and a project-owned
+flake and lock. Git initialization and the initial commit happen by default using
+your host identity, signing policy, and branch defaults. A commit failure preserves
+the files and prints recovery instructions. To generate files only:
+
+```sh
+just --justfile chainman-init/justfile init "../another-project" --no-git
+```
+
+Initialization does **not** run project setup or certify the application. The larger
+[language examples](examples/) remain in this repository for reference.
 
 ## Adopt an existing project
 
@@ -127,48 +170,6 @@ CHAINMAN_MODE=host-nix just chainman run check
 After the command behaves correctly, commit the recipe, pin, and configuration.
 Follow the [progressive adoption walkthrough](docs/adoption.md) for task routing,
 existing host wrappers, setup, services, and verification before updates.
-
-## Start a new project
-
-Use a disposable checkout to initialize a **new or empty** directory:
-
-```sh
-git clone --depth 1 https://github.com/chainmandev/chainman.git chainman-init
-just --justfile chainman-init/justfile init "../my-project"
-cd my-project
-just chainman setup
-just verify
-```
-
-`just` resolves recipe paths from the checkout: `../my-project` above is next to
-`chainman-init`. Absolute destination paths also work. The checkout can be removed
-once initialization succeeds.
-
-`just init DEST [SHA] [--no-git]` selects the public default branch's current commit
-when SHA is omitted. Selection is frozen at the start; the selected revision's
-generator and templates produce the project. Ordinary launches use the resulting
-pin without checking for updates. No tag or GitHub release is needed.
-
-To reproduce an existing project's runtime, supply its full lowercase SHA explicitly:
-
-```sh
-revision=$(cat /absolute/path/to/existing-project/chainman.lock)
-just --justfile chainman-init/justfile init "../reproduced-project" "$revision"
-```
-
-Branch names, tags, and numeric versions are not accepted as the optional SHA.
-
-The starter contains a small example, its verification command, and a project-owned
-flake and lock. Git initialization and the initial commit happen by default using
-your host identity, signing policy, and branch defaults. A commit failure preserves
-the files and prints recovery instructions. To generate files only:
-
-```sh
-just --justfile chainman-init/justfile init "../another-project" --no-git
-```
-
-Initialization does **not** run project setup or certify the application. The larger
-[language examples](examples/) remain in this repository for reference.
 
 ## Commands and updates
 

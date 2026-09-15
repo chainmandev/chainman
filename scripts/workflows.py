@@ -541,6 +541,10 @@ def run(
     cfg = configuration(root)
     tasks = declarations(cfg, "tasks")
     task_names = order(tasks, [action]) if action != "setup" else []
+    if tc.host_mode():
+        import host_execution
+
+        host_execution.validate_tasks(tasks, task_names)
     exclusive = any(tasks[key].get("exclusive", False) for key in task_names)
     if exclusive and (
         service_context or any(tasks[key].get("services") for key in task_names)

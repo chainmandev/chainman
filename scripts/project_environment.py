@@ -106,8 +106,12 @@ def validate(root: Path, spec: object) -> None:
     for key in ("defaults", "values"):
         values(spec.get(key, {}))
     modes = spec.get("modes", {})
-    if not isinstance(modes, dict) or set(modes) - {"host-nix", "container-nix"}:
-        raise ValueError("Environment modes must be host-nix or container-nix")
+    if not isinstance(modes, dict) or set(modes) - {
+        "host",
+        "host-nix",
+        "container-nix",
+    }:
+        raise ValueError("Environment modes must be host, host-nix or container-nix")
     for mode in modes.values():
         if not isinstance(mode, dict) or set(mode) - {"defaults", "values"}:
             raise ValueError("Environment modes support defaults and values")
@@ -303,8 +307,8 @@ def apply(
         tc.pnpm_environment(env, applied)
     mode = env.get("CHAINMAN_MODE", "host-nix")
     modes = table(spec.get("modes", {}), "Environment modes")
-    if set(modes) - {"host-nix", "container-nix"}:
-        raise ValueError("Environment modes must be host-nix or container-nix")
+    if set(modes) - {"host", "host-nix", "container-nix"}:
+        raise ValueError("Environment modes must be host, host-nix or container-nix")
     selected = table(modes.get(mode, {}), "Selected environment mode")
     for index, values in enumerate(
         (
