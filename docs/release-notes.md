@@ -18,5 +18,11 @@ The SHA stays frozen through failure and resume. Project dependency updates reta
 their configurable 30-day policy. Successful updates commit by default; preview
 and no-commit modes remain available.
 
+Temporary security age exceptions are removed from TOML during verified dependency
+updates once all resolved artifacts in the audited scope are mature and safe, or
+the dependency has disappeared. Cleanup retains the original policy as transaction
+authority and does not maintain a second inventory of historical security floors.
+See the [exception lifecycle](updates.md#temporary-security-exceptions).
+
 `VERSION` is descriptive package metadata. Expect interface changes during alpha;
 review candidate changes and preserve each project's acceptance criteria.

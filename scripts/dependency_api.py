@@ -334,6 +334,13 @@ def run_steps(
 ) -> None:
     """Resolve in order, then audit every selected adapter after all project hooks."""
     names, modes, adapters = plan_steps(root, settings, extra)
+    import exception_retirement
+
+    policy_documents = (
+        exception_retirement.documents(root)
+        if exception_retirement.has_exceptions(settings)
+        else []
+    )
     steps = [
         table(value, "Update step")
         for value in array(settings["steps"], "Update steps")
@@ -396,6 +403,9 @@ def run_steps(
             )
         for name, (spec, chosen_policy) in adapters.items():
             implementation(spec).audit(root, spec, baselines[name], chosen_policy, now)
+        exception_retirement.retire(
+            root, policy_documents, settings, adapters, baselines, now
+        )
 
 
 def resolve_command(root: Path, args: list[str]) -> object:

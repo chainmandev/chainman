@@ -23,6 +23,7 @@ from pathlib import Path
 import chainman
 import chainman_updates as runtime_updates
 import dependency_api
+import exception_retirement
 import toolchain as tc
 import updates
 import workflows
@@ -105,6 +106,7 @@ def patterns(root: Path, policy: Mapping[str, object]) -> list[str]:
     result = [
         *strings(policy.get("outputs", []), "Update outputs"),
         *runtime_files(root),
+        *exception_retirement.output_paths(root),
     ]
     if not policy.get("resolver") and not policy.get("steps"):
         result += [
@@ -477,9 +479,11 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
             )
         _, _, adapters = dependency_api.plan_steps(baseline, settings, opts.extra)
         with dependency_api.transaction_environment(root, now):
-            for spec, policy in adapters.values():
+            baselines = {}
+            for name, (spec, policy) in adapters.items():
                 adapter = dependency_api.implementation(spec)
                 before = table(adapter.snapshot(baseline, spec), "Adapter snapshot")
+                baselines[name] = before
                 adapter.audit(root, spec, before, policy, now)
             if legacy_modules:
                 import module_updates
@@ -497,6 +501,14 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
                         raise ValueError(
                             "Resumed runtime image differs from fresh eligibility evidence"
                         )
+            exception_retirement.retire(
+                root,
+                exception_retirement.documents(baseline),
+                settings,
+                adapters,
+                baselines,
+                now,
+            )
 
 
 def git_directories(root: Path, prefix: str = "") -> Iterator[str]:
@@ -595,10 +607,15 @@ def inspect(root: Path, destination: Path) -> None:
             )
         # Check all output kinds before starting potentially expensive verification.
         updates.expected_entries(candidate, state.candidate_identity[1], paths)
-        if tc.config(candidate) != tc.config(root) or dependency_api.policy(
-            candidate
-        ) != dependency_api.policy(root):
-            raise ValueError("Update must not change its workflow or dependency policy")
+        exception_retirement.check_policy_changes(
+            root,
+            candidate,
+            allow_retirement=not (
+                state.options.format
+                or state.options.only_chainman
+                or dependency_api.policy(root).get("resolver")
+            ),
+        )
         if paths and not state.source:
             with tc.nix_temporary_directory("chainman-inspect-") as directory:
                 runtime = verified_runtime(

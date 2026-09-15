@@ -11,7 +11,7 @@ import dependency_api
 import sdk_versions
 import source_updates
 import toolchain as tc
-from adapter_data import Table, array, table, text
+from adapter_data import Table, array, table, text, strings
 
 
 def nix_spec(policy: Mapping[str, object]) -> Table | None:
@@ -135,6 +135,13 @@ def image_snapshot(root: Path, policy: Table) -> source_updates.ImageRecord | No
 
 
 def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> None:
+    import exception_retirement
+
+    policy_documents = (
+        exception_retirement.documents(root)
+        if exception_retirement.has_exceptions(policy)
+        else []
+    )
     configured = adapters(root, selected, policy)
     before = {
         name: table(
@@ -183,3 +190,17 @@ def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> No
             ):
                 raise ValueError("Runtime image drifted from its audited selection")
         sdk_versions.synchronize(root, selected, check=True)
+        if policy_documents:
+            exception_retirement.retire(
+                root,
+                policy_documents,
+                dict(
+                    policy,
+                    adapters=adapters(
+                        root, strings(tc.config(root)["modules"], "Modules"), policy
+                    ),
+                ),
+                {name: (spec, policy) for name, spec in configured.items()},
+                before,
+                now,
+            )

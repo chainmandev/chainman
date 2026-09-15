@@ -424,6 +424,74 @@ commands=[["true"]]
         self.assertFalse((self.stage / "candidate-bootstrap").exists())
         self.assertEqual(self.finish()["verification"], "no changes")
 
+    def exception_policy(self):
+        config = self.root / "chainman.toml"
+        config.write_text("""schema=2
+[project]
+default_profile="host"
+[updates]
+policy_file="policy.toml"
+verify_task="verify"
+outputs=["dependency.lock"]
+[updates.adapters.rust]
+adapter="rust"
+[[updates.steps]]
+resolve="rust"
+[tasks.verify]
+commands=[["true"]]
+""")
+        (self.root / "policy.toml").write_text("""[[exceptions]]
+package="crates:demo"
+version="1.2.3"
+minimum_safe="1.2.3"
+reason="security fix"
+advisory="https://example.invalid/advisory"
+expires="2026-12-01T00:00:00Z"
+""")
+        updates.git(self.root, "add", ".")
+        updates.git(self.root, "commit", "-m", "Declare temporary security policy")
+        self.before = updates.snapshot(self.root)
+
+    def test_retirement_only_transaction_is_verified_output(self):
+        self.exception_policy()
+        self.prepare("--no-commit")
+        (self.candidate / "policy.toml").write_text("exceptions=[]\n")
+        subject.inspect(self.root, self.stage)
+        self.assertEqual((self.stage / "control/changed").read_text(), "yes\n")
+        self.assertEqual((self.stage / "control/verify").read_text(), "run\nverify\n")
+        # Until successful finalization the original remains intact.
+        self.assertEqual(updates.snapshot(self.root), self.before)
+        self.assertEqual(self.finish()["changed"], ["policy.toml"])
+        self.assertEqual((self.root / "policy.toml").read_text(), "exceptions=[]\n")
+
+    def test_retirement_cannot_overwrite_original_policy_edit(self):
+        self.exception_policy()
+        self.prepare("--no-commit")
+        (self.candidate / "policy.toml").write_text("exceptions=[]\n")
+        subject.inspect(self.root, self.stage)
+        path = self.root / "policy.toml"
+        path.write_text(path.read_text() + "# concurrent user edit\n")
+        changed = path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Original checkout changed"):
+            self.finish()
+        self.assertEqual(path.read_bytes(), changed)
+
+    def test_opaque_resolver_cannot_retire_exceptions_without_adapter_proof(self):
+        self.exception_policy()
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                "[updates]\n",
+                '[updates]\neligibility="resolver"\nresolver=[["unused"]]\n',
+            )
+        )
+        updates.git(self.root, "add", ".")
+        updates.git(self.root, "commit", "-m", "Declare opaque resolver")
+        self.prepare("--no-commit")
+        (self.candidate / "policy.toml").write_text("exceptions=[]\n")
+        with self.assertRaisesRegex(ValueError, "dependency policy"):
+            subject.inspect(self.root, self.stage)
+
     def test_dependency_reaudit_uses_committed_blobs_after_edit_and_deletion(self):
         from datetime import datetime, timezone
         from types import SimpleNamespace

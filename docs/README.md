@@ -9,7 +9,7 @@
 | [Getting started](getting-started.md) | Choose manual adoption or the greenfield initializer |
 | [Recipes](recipes.md) | Bind project commands and keep optional familiar names |
 | [Services](services.md) | Readiness, ownership, persistent data, and cleanup |
-| [Updates](updates.md) | Configure adapters, preview changes, qualify and recover updates |
+| [Updates](updates.md) | Configure adapters, temporary security exceptions, preview, qualification and recovery |
 | [Runtime](runtime.md) | Host/container modes, caches, and native SDK boundaries |
 | [Troubleshooting](troubleshooting.md) | Diagnose bootstrap, setup, service, and update failures |
 | [Release trust](release-trust.md) | Understand what a Git pin establishes |

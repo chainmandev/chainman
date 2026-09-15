@@ -188,7 +188,9 @@ intentionally introduces only one task.
 
 Runtime updates resolve the current public default branch immediately and compare
 Git SHAs. A changed SHA is eligible even when `VERSION` is unchanged. Project
-dependencies retain their configurable 30-day maturity policy.
+dependencies retain their configurable 30-day maturity policy. Exact security
+fixes can use [temporary age exceptions](docs/updates.md#temporary-security-exceptions);
+verified updates remove those entries from TOML once they are no longer needed.
 
 ```sh
 just chainman chainman-update mode=dry-run

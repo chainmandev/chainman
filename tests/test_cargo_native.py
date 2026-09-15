@@ -19,6 +19,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import ecosystem_updates as native
+import dependency_api
 import registry
 import toolchain as tc
 
@@ -194,6 +195,60 @@ class NativeCargoTests(unittest.TestCase):
         self.assertTrue(self.manifest.read_text().startswith("# public comment\n"))
         self.assertEqual(self.manifest.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.source.read_bytes(), b"// unchanged application source\n")
+
+    def test_real_security_fix_then_mature_update_removes_exception(self):
+        config = self.root / "chainman.toml"
+        config.write_text("""schema=1
+[updates]
+minimum_age_days=30
+[updates.adapters.rust]
+adapter="rust"
+profile="rust"
+mode="compatible"
+[[updates.steps]]
+resolve="rust"
+[updates.constraints."crates:neutral-leaf"]
+range=">=1.0.0 <2.0.0"
+reason="The parent uses the leaf 1 API."
+[[updates.exceptions]]
+package="crates:neutral-leaf"
+version="1.6.0"
+minimum_safe="1.6.0"
+reason="Exact fixture security fix"
+advisory="https://example.invalid/fixture-advisory"
+expires="2026-08-30T00:00:00Z"
+""")
+        with (
+            patch.object(native.chainman, "execute", side_effect=self.execute),
+            patch.object(
+                registry,
+                "releases",
+                side_effect=lambda provider, name: self.releases[name],
+            ),
+        ):
+            dependency_api.run_steps(
+                self.root, dependency_api.policy(self.root), self.now, []
+            )
+            self.assertIn('minimum_safe="1.6.0"', config.read_text())
+            self.assertEqual(
+                {
+                    p["version"]
+                    for p in tomllib.loads(self.lock.read_text())["package"]
+                    if p["name"] == "neutral-leaf"
+                },
+                {"1.6.0"},
+            )
+            dependency_api.run_steps(
+                self.root,
+                dependency_api.policy(self.root),
+                self.now + timedelta(days=29),
+                [],
+            )
+            self.assertEqual(
+                tomllib.loads(config.read_text())["updates"]["exceptions"], []
+            )
+            self.assertNotIn("fixture-advisory", config.read_text())
+            self.cargo("metadata", "--quiet", "--locked", "--format-version", "1")
 
     def test_real_direct_selection_transitive_repair_and_restored_locked_graph(self):
         result = self.resolve()

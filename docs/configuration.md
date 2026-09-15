@@ -39,7 +39,8 @@ Schema 3 also supports reusable [templates and composition](composition.md).
 - [Legacy schema-1 compatibility](legacy-configuration.md)
 - [Named setup groups and tasks](#named-setup-groups-and-tasks)
 - [Services](#services), including readiness and lifecycle ownership
-- [Recipe bindings](recipes.md) and [dependency updates](updates.md)
+- [Recipe bindings](recipes.md) and [dependency updates](updates.md), including
+  [temporary security exceptions and automatic cleanup](updates.md#temporary-security-exceptions)
 
 ## Profiles, arguments, and environment
 

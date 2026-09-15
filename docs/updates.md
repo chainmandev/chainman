@@ -116,7 +116,9 @@ the project's output patterns contain a wildcard.
 The minimal starter declares its project-owned Nix inputs. The larger repository
 examples demonstrate ecosystem adapters and module manifests. Explicit constraints require reasons;
 security maturity exceptions need a narrowly scoped advisory, minimum safe version
-and expiry. Nix branch pins use commit age; container image pins use the registry
+and expiry. [Temporary security exceptions](#temporary-security-exceptions) are
+removed from TOML by a successful update once the audited dependency no longer
+needs the age bypass. Nix branch pins use commit age; container image pins use the registry
 update time bound to the manifest digest. Baseline artifacts do not retrospectively
 become release-age-qualified. Newly selected artifacts require eligibility evidence.
 Docker Hub discovery retains dated legacy tags whose digest is absent. An unselected
@@ -412,10 +414,12 @@ their explicit compatibility ranges. Exact SDK-owned dependencies can be declare
 as `held_dependencies` with a manifest, package and reason; changed artifacts still
 require age and identity evidence. Registry and native lock audits cover transitive
 artifacts as well as direct declarations. Expired security exceptions fail while
-still needed; a mature constrained safe alternative retires an otherwise valid
-exception. Retirement never exempts a newly selected young artifact.
-Every declared security safe floor also applies to mature and unchanged artifacts;
-peer constraints cannot force a fallback below it. Existing npm prerelease identities
+still needed; a mature constrained safe alternative disables an otherwise valid
+age bypass. Physical TOML cleanup additionally requires the actual resolved
+artifacts to be mature and safe, as described below. Retirement never exempts a
+newly selected young artifact. While an exception is present, its security floor
+also applies to mature and unchanged artifacts; peer constraints cannot force a
+fallback below it. Existing npm prerelease identities
 may remain only with unchanged registry artifact evidence and valid constraints.
 Stable candidate selection never introduces a prerelease.
 An existing deprecated npm artifact may also remain only with the same locked
@@ -606,6 +610,96 @@ upgrades validate the candidate configuration and run the declared project verif
 using the candidate runtime; they do not run Chainman's development test suite.
 Git supplies the complete revision, but project acceptance does not invoke the
 Chainman development suite.
+
+## Temporary security exceptions
+
+An age exception lets a project take an exact security fix before the normal
+dependency maturity window ends. It does not suppress vulnerability checks or
+authorize arbitrary newer releases. Keep vulnerability detection in the complete
+project gate (for example, `cargo deny check advisories` for Rust). The exception
+file is a temporary work list, not a permanent inventory of vulnerable versions.
+
+Declare the policy file in `chainman.toml`:
+
+```toml
+[updates]
+minimum_age_days = 30
+policy_file = "deps-update.config.toml"
+verify_task = "verify"
+```
+
+Add an entry to that file, replacing this illustrative package, advisory, and
+timestamp with verified release evidence:
+
+```toml
+[[exceptions]]
+package = "crates:example-package"
+version = "1.2.3"
+minimum_safe = "1.2.3"
+reason = "Permit the exact advisory fix while it completes the maturity window."
+advisory = "https://example.invalid/security/advisory"
+expires = "2026-11-01T12:00:00Z"
+```
+
+`package` is an exact `provider:name` identity, such as `crates:rustls` or
+`npm:@scope/package`. `version` admits only that exact release early;
+`minimum_safe` prevents resolution or baseline retention below the fix while the
+exception is active. `reason` and `advisory` explain the exception. `expires` is a
+timezone-qualified deadline for the bypass, normally the verified artifact
+publication time plus `minimum_age_days`. It is not an instruction to delete the
+entry blindly. Package ranges and API compatibility constraints still apply.
+
+Then run the relevant declared target, using its actual adapter or group name:
+
+```sh
+just chainman deps-update --skip-chainman -- --targets rust
+```
+
+The lifecycle is:
+
+1. **Resolve and audit with the original policy.** The minimum safe version applies
+   throughout the transaction, including its final audit and any resumed attempt.
+2. **Remove the entire entry in the candidate** when every actual artifact in its
+   audited scope satisfies ordinary maturity and the safe floor, or the package
+   has disappeared from that complete scope. A mature alternative merely being
+   available upstream is insufficient. An unchanged young lock entry is also
+   insufficient. Metadata errors fail explicitly.
+3. **Verify and apply the complete change.** Cleanup runs after adapter audits and
+   reconciliation, before the candidate is frozen and the complete project gate
+   runs. A cleanup-only update is a real change and still requires verification.
+   Failed verification leaves the original policy and lockfiles untouched.
+4. **Continue normal updates.** Successful cleanup removes `minimum_safe`, the
+   advisory, reason and expiry together. Nothing copies those floors into another
+   policy file. The lock records the installed version, vulnerability checks use
+   their advisory databases, and Git history retains the exception's rationale.
+
+An expired exception that is still needed fails the update and remains available
+for investigation. Once no longer needed, it can be removed even after expiry.
+Do not extend expiry merely to silence a failed gate.
+
+Global exceptions are removed only when every configured adapter that could use
+that provider/package has been selected and audited. A Rust-only update may retire
+a Rust exception while leaving JavaScript exceptions alone; it retains a global
+Rust exception if another Rust workspace or SDK adapter could still need it.
+Scope an exception under `[adapters.NAME.policy]` in the policy file (or
+`[updates.adapters.NAME.policy]` inline) when only that adapter should own it.
+Shadowed policy declarations and source pins without sufficient release evidence
+are retained rather than inferred safe. Opaque project resolvers own their own
+eligibility and cleanup; automatic cleanup requires the declared adapters.
+
+Inline `[[updates.exceptions]]`, external policy files, and the source repository's
+legacy `dependencies.toml` are supported. Chainman may leave `exceptions = []` to
+preserve an explicit empty override without reviving an inherited list. Unrelated
+policy, formatting and file permissions are preserved. Policy files containing
+exceptions are automatically admitted to the update's output inventory for this
+narrow cleanup; unrelated configuration changes remain forbidden. Formatting and
+runtime-only updates do not remove dependency exceptions.
+
+Retirement is reported in the update output and the policy file appears in its
+changed paths. Preview, explicit commit policy, concurrent-edit protection and
+[failure recovery](troubleshooting.md) work as for other dependency outputs. A
+resumed candidate is re-audited against the original policy; deleting an exception
+cannot authorize an unsafe candidate. Ordinary launches never edit policy files.
 
 ## Runtime copies in generated projects
 
