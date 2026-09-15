@@ -10,8 +10,8 @@ including adapters that are not selected. Use it when testing generated consumer
 configuration against the pinned runtime. This is a configuration contract check,
 not dependency eligibility auditing or application verification.
 
-`just chainman deps-update` selects current eligible stable releases, including majors, with
-a configurable 30-day maturity window. Resolution and verification run in a
+`just chainman deps-update` selects current eligible stable **project dependency**
+releases, including majors, with a configurable 30-day maturity window. Resolution and verification run in a
 disposable checkout. The host launcher sequences preparation, resolution,
 inspection, verification and finalization; it needs neither host Python nor a
 container-engine socket inside project containers. `mode=dry-run` stops before applying
@@ -24,14 +24,18 @@ Runtime selection happens before project resolution. Resolution, reconciliation
 and verification use the selected candidate runtime; the original checkout keeps
 its previous runtime until the combined candidate has passed verification.
 The Chainman source repository has no self-pin and updates only its declared tools.
-A missing release source or eligibility date is an error, never an implicit exemption.
-Before an eligible public Chainman release exists, use `--skip-chainman` for
-project-only updates. Development HEAD is never an implicit release source.
+Runtime selection resolves the public repository's advertised default branch to one
+exact SHA, without a version or age filter. A different SHA is a candidate even if
+`VERSION` is unchanged; an identical SHA retains normal no-change handling.
+Missing or inconsistent Git information fails explicitly. `--skip-chainman` remains
+available for project-only updates. Missing project dependency eligibility evidence
+is still an error, never an implicit exemption.
 
 Checkpoints retain the resolved runtime selection when resumed, regardless of later
 CLI defaults. A failed runtime preparation can be explicitly retried with `resume=`
-while the candidate still matches its original contents. After preparation succeeds,
-resume retains that runtime, rechecks its changed pin's release evidence, and
+while the candidate still matches its original contents. Selection is saved before
+fetching, so an interrupted download also retries the same SHA. After preparation succeeds,
+resume retains that runtime, verifies its exact Git objects, and
 re-audits/reverifies the candidate without rerunning project resolution.
 
 Schema 3 consumers declare `updates.verify_task = "verify"` (or another finite
@@ -573,11 +577,13 @@ Git configuration in the copy, and does not test the operator's signing backend 
 filters. It uses the existing development host and shared caches, so it is not a
 sandbox for hostile update scripts. Linked submodules require their own transactions.
 
-Runtime updates select stable published releases, resolve their exact commits,
-and require matching `VERSION` files. The age window uses the later of publication
-and commit time. The tag is rechecked after source acquisition. Missing evidence,
-corrupt Git objects, or a moved tag fail explicitly. GitHub release immutability
-is optional publisher policy. Ordinary launches never query this metadata.
+Runtime updates resolve the public default branch once, with Git as the sole runtime
+identity. Branch movement during qualification does not invalidate the snapshot.
+Resume uses the saved SHA; it never substitutes a newer tip. A later update discovers
+the newer default branch. `VERSION` is descriptive metadata, and release tags,
+publication dates, and GitHub release immutability are not selection requirements.
+Corrupt Git objects and unavailable selected revisions fail explicitly. Ordinary
+launches remain pinned and do not discover updates.
 Consumer verification runs from refreshed environments under the selected runtime.
 Until verification passes, the original pin remains
 untouched in the original checkout. Failed candidate files remain available for
@@ -595,7 +601,7 @@ If interruption happened after branch publication, the verified commit may alrea
 exist even though no success response was printed. Inspect HEAD and its diff before
 starting another update.
 
-Runtime releases are qualified in the Chainman source project. Consumer runtime
+Runtime revisions are qualified in the Chainman source project. Consumer runtime
 upgrades validate the candidate configuration and run the declared project verifier
 using the candidate runtime; they do not run Chainman's development test suite.
 Git supplies the complete revision, but project acceptance does not invoke the

@@ -25,4 +25,4 @@
 - [Contributing](contributing.md)
 - [Qualification](testing.md)
 - [Publishing](releasing.md)
-- [v0.1.0 release notes](release-notes.md)
+- [Alpha changes](release-notes.md)

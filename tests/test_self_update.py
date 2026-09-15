@@ -1,6 +1,6 @@
 """Git runtime selection preserves pins, frozen identity and concurrent edits."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import sys
@@ -32,6 +32,7 @@ class SelfUpdateTests(unittest.TestCase):
         self.candidate = self.base / "candidate"
         for tree, value in ((self.previous, "1.0.0"), (self.candidate, "2.0.0")):
             for name in (
+                "bootstrap/git-entry.sh",
                 "bootstrap/chainman.sh",
                 "bootstrap/fetch.nix",
                 "nix/flake.nix",
@@ -44,24 +45,17 @@ class SelfUpdateTests(unittest.TestCase):
                 path.write_text("fixture: must never execute")
             (tree / "VERSION").write_text(value + "\n")
         self.now = datetime(2026, 9, 15, tzinfo=timezone.utc)
-        self.published = self.now - timedelta(days=40)
-        self.release = registry.Release("v2.0.0", self.published)
-        self.metadata = {
-            "tag_name": "v2.0.0",
-            "draft": False,
-            "prerelease": False,
-            "immutable": False,
-            "published_at": self.published.isoformat(),
-        }
         patches = [
             patch.object(chainman, "RUNTIME", self.previous),
-            patch.object(registry, "github_releases", return_value=[self.release]),
-            patch.object(registry, "github_commit", return_value=self.new),
             patch.object(
-                subject.source_updates, "commit_time", return_value=self.published
+                subject.git_runtime, "default_revision", return_value=self.new
             ),
-            patch.object(registry, "data", side_effect=lambda _: dict(self.metadata)),
             patch.object(subject.git_runtime, "store", return_value=self.candidate),
+            patch.object(
+                registry,
+                "github_releases",
+                side_effect=AssertionError("Runtime selection must not query releases"),
+            ),
         ]
         self.mocks = [item.start() for item in patches]
         for item in patches:
@@ -87,7 +81,7 @@ class SelfUpdateTests(unittest.TestCase):
             stream.write('\n[runtime]\ncopies=["templates/common"]\n')
         return path
 
-    def test_mutable_published_release_updates_only_the_pin(self):
+    def test_default_branch_updates_only_the_pin(self):
         before_recipe = (self.root / "justfile").read_bytes()
         self.assertEqual(self.select(), self.candidate)
         self.assertEqual((self.root / "chainman.lock").read_text(), self.new + "\n")
@@ -96,15 +90,19 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertFalse(list(self.root.rglob("*.tar.gz")))
         self.assertTrue(self.previous.exists())
 
-    def test_newest_eligible_major_skips_a_young_release(self):
-        self.mocks[1].return_value = [
-            self.release,
-            registry.Release("v3.0.0", self.now - timedelta(days=5)),
-        ]
-        self.assertEqual(self.select(), self.candidate)
-        self.mocks[5].assert_called_once_with(
+    def test_runtime_ignores_project_maturity_and_version_order(self):
+        (self.candidate / "VERSION").write_text("1.0.0\n")
+        result = subject.runtime_candidate(
+            self.root,
+            {"minimum_age_days": 365},
+            self.now,
+            gc_root=self.base / "runtime-root",
+        )
+        self.assertEqual(result, self.candidate)
+        self.mocks[2].assert_called_once_with(
             self.new, gc_root=self.base / "runtime-root"
         )
+        self.mocks[3].assert_not_called()
 
     def test_candidate_runtime_drives_resolution_and_verification(self):
         with (
@@ -136,46 +134,33 @@ class SelfUpdateTests(unittest.TestCase):
         for call in execute.call_args_list:
             self.assertEqual(call.kwargs["env"]["TOOLCHAIN_FRESH"], "1")
 
-    def test_unchanged_version_does_not_fetch_or_rewrite(self):
-        (self.previous / "VERSION").write_text("2.0.0\n")
+    def test_unchanged_sha_does_not_fetch_or_rewrite(self):
+        self.mocks[1].return_value = self.old
         self.assertEqual(self.select(), self.previous)
-        self.mocks[5].assert_not_called()
+        self.mocks[2].assert_not_called()
         self.assertEqual(self.state(), self.before)
 
-    def test_drafts_prereleases_and_changed_publication_fail(self):
-        for key, value in (
-            ("draft", True),
-            ("prerelease", True),
-            ("published_at", self.now.isoformat()),
-        ):
-            with (
-                self.subTest(key=key),
-                patch.dict(self.metadata, {key: value}),
-                self.assertRaises(ValueError),
-            ):
-                self.select()
-        self.mocks[5].assert_not_called()
-        self.assertEqual(self.state(), self.before)
-
-    def test_commit_age_is_checked_before_candidate_fetch(self):
-        self.mocks[3].return_value = self.now
-        with self.assertRaisesRegex(ValueError, "No eligible"):
-            self.select()
-        self.mocks[5].assert_not_called()
-        self.assertEqual(self.state(), self.before)
-
-    def test_age_boundary_is_inclusive(self):
-        self.mocks[3].return_value = self.now - timedelta(days=30)
+    def test_branch_movement_during_fetch_keeps_selected_snapshot(self):
+        self.mocks[1].side_effect = [self.new, "c" * 40]
         self.assertEqual(self.select(), self.candidate)
+        self.mocks[1].assert_called_once_with()
+        self.assertEqual((self.root / "chainman.lock").read_text(), self.new + "\n")
 
-    def test_moved_tag_is_rejected_before_pin_publication(self):
-        self.mocks[2].side_effect = [self.new, self.new, "c" * 40]
-        with self.assertRaisesRegex(ValueError, "tag changed"):
-            self.select()
-        self.assertEqual(self.state(), self.before)
+    def test_saved_selection_does_not_rediscover_branch(self):
+        subject.runtime_candidate(
+            self.root,
+            {},
+            self.now,
+            gc_root=self.base / "runtime-root",
+            revision=self.new,
+        )
+        self.mocks[1].assert_not_called()
+        self.mocks[2].assert_called_once_with(
+            self.new, gc_root=self.base / "runtime-root"
+        )
 
-    def test_wrong_version_and_invalid_tree_fail_before_publication(self):
-        (self.candidate / "VERSION").write_text("9.0.0\n")
+    def test_invalid_metadata_and_tree_fail_before_publication(self):
+        (self.candidate / "VERSION").write_text("\n")
         with self.assertRaisesRegex(ValueError, "VERSION"):
             self.select()
         (self.candidate / "VERSION").write_text("2.0.0\n")
@@ -185,7 +170,7 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual(self.state(), self.before)
 
     def test_fetch_failure_preserves_pin(self):
-        self.mocks[5].side_effect = ValueError("Git object corruption")
+        self.mocks[2].side_effect = ValueError("Git object corruption")
         with self.assertRaisesRegex(ValueError, "corruption"):
             self.select()
         self.assertEqual(self.state(), self.before)
@@ -207,7 +192,7 @@ class SelfUpdateTests(unittest.TestCase):
         before = self.state()
         with self.assertRaisesRegex(ValueError, "locally modified"):
             self.select()
-        self.mocks[5].assert_not_called()
+        self.mocks[2].assert_not_called()
         self.assertEqual(self.state(), before)
 
     def test_copy_execution_bit_change_is_not_a_permission_normalization(self):
@@ -229,7 +214,7 @@ class SelfUpdateTests(unittest.TestCase):
             (self.root / "chainman.lock").write_text("c" * 40 + "\n")
             return self.candidate
 
-        self.mocks[5].side_effect = changed
+        self.mocks[2].side_effect = changed
         with self.assertRaisesRegex(ValueError, "changed during preparation"):
             self.select()
         self.assertEqual((self.root / "chainman.lock").read_text(), "c" * 40 + "\n")

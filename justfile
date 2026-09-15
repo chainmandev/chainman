@@ -68,11 +68,11 @@ sdk-doctor platform:
 example destination ref:
     @./scripts/init.sh "$1" "$2" --no-git
 
-# Initialize from an exact Git revision or stable release.
-init destination ref *args:
+# Initialize from the public default branch or an exact Git revision.
+init destination *args:
     @./scripts/init.sh "$@"
 
-# Real initializer/starter qualification; only public registry transport is a fixture.
+# Real initializer/starter qualification; only public Git transport is a fixture.
 init-test engine="host-nix":
     @case "$1" in host-nix|docker|podman) ;; *) exit 2;; esac; ./scripts/enter.sh core env CHAINMAN_TEST_ENGINE_PATH="$PATH" CHAINMAN_TEST_INIT="$1" sh -eu -c 'export PATH="$PATH:$CHAINMAN_TEST_ENGINE_PATH"; python3 -B -m unittest discover -s tests -p test_initialize.py -v; if [ "$CHAINMAN_TEST_INIT" != host-nix ]; then export CHAINMAN_TEST_CONTAINER="$CHAINMAN_TEST_INIT"; fi; python3 -B -m unittest discover -s tests -p test_bootstrap.py -k initializer -v'
 

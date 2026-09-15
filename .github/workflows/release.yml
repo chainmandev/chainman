@@ -1,19 +1,19 @@
-name: Publish Chainman Git release
+name: Publish rolling Chainman
 "on":
   workflow_dispatch:
     inputs:
-      version:
-        description: Numeric release version matching VERSION (for example 0.1.0)
+      candidate_sha:
+        description: Exact full commit at the selected staging workflow ref
         required: true
         type: string
-      candidate_sha:
-        description: Exact full commit at the selected workflow ref
+      expected_default_sha:
+        description: Public default-branch SHA observed before qualification
         required: true
         type: string
 permissions:
   contents: read
 concurrency:
-  group: chainman-release-${{ inputs.version }}
+  group: chainman-default-publication
   cancel-in-progress: false
 jobs:
   qualify:
@@ -21,63 +21,66 @@ jobs:
     uses: ./.github/workflows/verify.yml
     with:
       candidate_sha: ${{ inputs.candidate_sha }}
-      release_version: ${{ inputs.version }}
   publish:
     needs: qualify
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
-      RELEASE_VERSION: ${{ inputs.version }}
       EXPECTED: ${{ inputs.candidate_sha }}
-      GH_REPO: chainmandev/chainman
+      BASE: ${{ inputs.expected_default_sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-      - name: Confirm exact source and version
+          fetch-depth: 0
+      - name: Advance the default branch to the qualified commit
         env:
           EVENT: ${{ github.sha }}
-        run: |
-          set -eu
-          printf '%s\n' "$EXPECTED" | grep -Eq '^[0-9a-f]{40}$'
-          printf '%s\n' "$RELEASE_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'
-          test "$(git rev-parse HEAD)" = "$EXPECTED"
-          test "$EVENT" = "$EXPECTED"
-          test "$(cat VERSION)" = "$RELEASE_VERSION"
-          test -z "$(git status --porcelain)"
-      - name: Publish lightweight tag and release notes
-        env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          # Ref creation is atomic and refuses an existing tag. Existing releases
-          # are also refused; interrupted publication requires operator review.
-          test -z "$(git ls-remote --tags origin "refs/tags/v$RELEASE_VERSION")"
-          releases=$(gh api "repos/$GH_REPO/releases" --paginate --jq '.[].tag_name')
-          if printf '%s\n' "$releases" | grep -Fxq "v$RELEASE_VERSION"; then
-            echo 'This release already exists.' >&2
-            exit 1
-          fi
-          gh api --method POST "repos/$GH_REPO/git/refs" \
-            -f "ref=refs/tags/v$RELEASE_VERSION" -f "sha=$EXPECTED" > /dev/null
-          gh release create "v$RELEASE_VERSION" --repo "$GH_REPO" --verify-tag \
-            --title "Chainman v$RELEASE_VERSION" --notes-file docs/release-notes.md
-          test "$(gh api "repos/$GH_REPO/git/ref/tags/v$RELEASE_VERSION" --jq .object.type)" = commit
-          test "$(gh api "repos/$GH_REPO/git/ref/tags/v$RELEASE_VERSION" --jq .object.sha)" = "$EXPECTED"
-          test "$(gh api "repos/$GH_REPO/releases/tags/v$RELEASE_VERSION" --jq .draft)" = false
-          test "$(gh api "repos/$GH_REPO/releases/tags/v$RELEASE_VERSION" --jq .prerelease)" = false
-      - name: Read back public Git and qualify a fresh starter
-        env:
-          CHAINMAN_MODE: host-nix
+          printf '%s\n' "$EXPECTED" | grep -Eq '^[0-9a-f]{40}$'
+          printf '%s\n' "$BASE" | grep -Eq '^[0-9a-f]{40}$'
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$EVENT" = "$EXPECTED"
+          test -z "$(git status --porcelain)"
+          advertisement=$(git ls-remote --symref --exit-code origin HEAD)
+          default_ref=$(printf '%s\n' "$advertisement" | sed -n 's/^ref: \(refs\/heads\/[^[:space:]]*\)[[:space:]]HEAD$/\1/p')
+          git check-ref-format "$default_ref"
+          observed=$(printf '%s\n' "$advertisement" | awk '$1 != "ref:" && $2 == "HEAD" {print $1}')
+          test "$observed" = "$BASE"
+          git fetch --no-tags origin "$BASE"
+          git merge-base --is-ancestor "$BASE" "$EXPECTED"
+          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' \
+            push --force-with-lease="$default_ref:$BASE" origin "$EXPECTED:$default_ref"
+          test "$(git ls-remote --exit-code origin "$default_ref" | cut -f1)" = "$EXPECTED"
+  readback:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [host-nix, container-nix]
+    env:
+      EXPECTED: ${{ inputs.candidate_sha }}
+      CHAINMAN_MODE: ${{ matrix.mode }}
+      CHAINMAN_CONTAINER_ENGINE: docker
+    steps:
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Read public Git and initialize a fresh starter
         run: |
           set -eu
-          git clone --branch "v$RELEASE_VERSION" --depth 1 https://github.com/chainmandev/chainman.git "$RUNNER_TEMP/public-chainman"
-          test "$(git -C "$RUNNER_TEMP/public-chainman" rev-parse HEAD)" = "$EXPECTED"
-          test "$(cat "$RUNNER_TEMP/public-chainman/VERSION")" = "$RELEASE_VERSION"
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/public-chainman/justfile" init "$RUNNER_TEMP/public-starter" "$RELEASE_VERSION" --no-git
-          test "$(cat "$RUNNER_TEMP/public-starter/chainman.lock")" = "$EXPECTED"
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/public-starter/justfile" chainman setup
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- --justfile "$RUNNER_TEMP/public-starter/justfile" verify
+          git clone --depth 1 https://github.com/chainmandev/chainman.git "$RUNNER_TEMP/public checkout"
+          checkout="$RUNNER_TEMP/public checkout"
+          test "$(git -C "$checkout" rev-parse HEAD)" = "$EXPECTED"
+          export XDG_CACHE_HOME="$RUNNER_TEMP/fresh cache"
+          nix --extra-experimental-features 'nix-command flakes' build "path:$checkout/nix#just" --out-link "$RUNNER_TEMP/just"
+          "$RUNNER_TEMP/just/bin/just" --justfile "$checkout/justfile" init "$RUNNER_TEMP/public starter" --no-git
+          test "$(cat "$RUNNER_TEMP/public starter/chainman.lock")" = "$EXPECTED"
+          rm -rf "$checkout"
+          cd "$RUNNER_TEMP/public starter"
+          "$RUNNER_TEMP/just/bin/just" chainman setup
+          "$RUNNER_TEMP/just/bin/just" verify

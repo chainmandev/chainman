@@ -72,6 +72,11 @@ commands=[["true"]]
         mock = patch.object(subject, "verified_runtime", return_value=chainman.RUNTIME)
         mock.start()
         self.addCleanup(mock.stop)
+        discovery = patch.object(
+            subject.git_runtime, "default_revision", return_value="b" * 40
+        )
+        self.discovery = discovery.start()
+        self.addCleanup(discovery.stop)
 
     def prepare(self, *args):
         # Most fixtures exercise project-only transaction behavior without a
@@ -205,7 +210,7 @@ commands=[["true"]]
         self.prepare("--only-chainman")
         relative = "templates/common/chainman.lock"
 
-        def runtime_candidate(root, policy, now, *, gc_root):
+        def runtime_candidate(root, policy, now, *, gc_root, revision):
             (root / relative).write_text("verified copy")
             return chainman.RUNTIME
 
@@ -232,7 +237,7 @@ commands=[["true"]]
         self.before = updates.snapshot(self.root)
         subject.prepare(self.root, self.stage, [])
 
-        def runtime_candidate(root, policy, now, *, gc_root):
+        def runtime_candidate(root, policy, now, *, gc_root, revision):
             (root / "chainman.lock").write_text("b" * 40 + "\n")
             return chainman.RUNTIME
 
@@ -282,18 +287,24 @@ commands=[["true"]]
             patch.object(
                 subject.runtime_updates,
                 "runtime_candidate",
-                side_effect=OSError("release unavailable"),
+                side_effect=OSError("Git unavailable"),
             ),
             self.assertRaisesRegex(ValueError, "--skip-chainman"),
         ):
             subject.prepare_runtime(self.root, self.stage)
+        state, _ = subject.read_state(self.root, self.stage)
+        self.assertEqual(state.runtime_revision, "b" * 40)
+        self.discovery.side_effect = AssertionError(
+            "Resume must not resolve a moving branch"
+        )
         self.assertEqual(updates.snapshot(self.candidate), self.before)
         subject.resume(self.root, self.stage)
         self.assertEqual((self.stage / "control/retry-runtime").read_text(), "yes\n")
         with patch.object(
             subject.runtime_updates, "runtime_candidate", return_value=chainman.RUNTIME
-        ):
+        ) as selected:
             subject.prepare_runtime(self.root, self.stage)
+        self.assertEqual(selected.call_args.kwargs["revision"], "b" * 40)
         (self.candidate / "dependency.lock").write_text("resolved\n")
         subject.resume(self.root, self.stage)
         self.assertEqual((self.stage / "control/retry-runtime").read_text(), "no\n")

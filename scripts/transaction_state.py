@@ -9,6 +9,7 @@ candidate contents. Filesystem and Git authority checks remain in the coordinato
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
+import re
 
 
 def table(value: object, field: str) -> dict[str, object]:
@@ -177,6 +178,7 @@ class State:
     inspection: Inspection | None = None
     schema: int = 2
     runtime_snapshot: dict[str, str] | None = None
+    runtime_revision: str | None = None
 
     def require_inspection(self) -> Inspection:
         if self.inspection is None:
@@ -186,6 +188,8 @@ class State:
     def encode(self) -> dict[str, object]:
         data = asdict(self)
         data["options"] = self.options.encode(legacy=self.schema == 1)
+        if self.runtime_revision is None:
+            data.pop("runtime_revision")
         if self.runtime_snapshot is None:
             data.pop("runtime_snapshot")
         data["at"] = self.at.isoformat()
@@ -213,7 +217,16 @@ class State:
                 updated=string_map(data.get("updated"), "updated"),
                 paths=strings(data.get("paths"), "paths"),
             )
+        revision = data.get("runtime_revision")
+        if revision is not None and (
+            not isinstance(revision, str)
+            or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+        ):
+            raise ValueError(
+                "Invalid update state: runtime_revision must be a full lowercase SHA"
+            )
         return cls(
+            runtime_revision=revision,
             schema=schema,
             root=text(data.get("root"), "root"),
             candidate=text(data.get("candidate"), "candidate"),

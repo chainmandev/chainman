@@ -9,7 +9,7 @@ bootstrap recipe in its justfile. Running `just chainman …` obtains that exact
 revision and uses it for the command. No global Chainman installation or permanent
 Chainman checkout is needed. See [chainman.dev](https://chainman.dev) for the introduction.
 
-**v0.1.0 is an alpha release.** Expect configuration and command changes as the
+**Chainman is alpha software.** Expect configuration and command changes as the
 interfaces mature. A project's pin changes only through an explicit edit or a
 verified update; launching a command never silently upgrades it.
 
@@ -31,19 +31,22 @@ need no Chainman import. Preserve your justfile and acceptance gates.
 
 ### 1. Record the revision
 
-From your project directory, resolve the published lightweight `v0.1.0` tag and
-write its commit pin. This block fails if the tag is unavailable:
+From your project directory, resolve the public repository's current `HEAD` and
+record its full commit SHA. Git follows the advertised default branch; you do not
+need to know its name. Review an existing pin before replacing it.
 
 ```sh
 sh -eu <<'SH'
-remote=$(git ls-remote --exit-code https://github.com/chainmandev/chainman.git refs/tags/v0.1.0)
-printf '%s\n' "$remote" | cut -f1 > chainman.lock
-test "$(wc -c < chainman.lock)" -eq 41
+remote=$(git ls-remote --exit-code https://github.com/chainmandev/chainman.git HEAD)
+revision=$(printf '%s\n' "$remote" | cut -f1)
+case "$revision" in ''|*[!0-9a-f]*) echo 'Invalid public Git identity' >&2; exit 1 ;; esac
+test "${#revision}" -eq 40
+printf '%s\n' "$revision" > chainman.lock
 SH
 ```
 
-Review the selected commit as you would any executable dependency. Future tag moves
-do not change the recorded SHA. See [release trust](docs/release-trust.md).
+Review the selected commit as you would any executable dependency. This is a
+snapshot: future branch changes do not change your pin. See [Git trust](docs/release-trust.md).
 
 ### 2. Add this complete recipe to your justfile
 
@@ -130,8 +133,8 @@ existing host wrappers, setup, services, and verification before updates.
 Use a disposable checkout to initialize a **new or empty** directory:
 
 ```sh
-git clone --branch v0.1.0 --depth 1 https://github.com/chainmandev/chainman.git chainman-init
-just --justfile chainman-init/justfile init "../my-project" v0.1.0
+git clone --depth 1 https://github.com/chainmandev/chainman.git chainman-init
+just --justfile chainman-init/justfile init "../my-project"
 cd my-project
 just chainman setup
 just verify
@@ -141,10 +144,19 @@ just verify
 `chainman-init`. Absolute destination paths also work. The checkout can be removed
 once initialization succeeds.
 
-`init` accepts a numeric version, `vVERSION`, or a full commit SHA. It rejects moving
-selectors such as `main` and `latest`. It obtains the selected revision and uses
-that revision's generator and templates. Version selection requires a published
-stable release and bypasses the automatic update age policy.
+`just init DEST [SHA] [--no-git]` selects the public default branch's current commit
+when SHA is omitted. Selection is frozen at the start; the selected revision's
+generator and templates produce the project. Ordinary launches use the resulting
+pin without checking for updates. No tag or GitHub release is needed.
+
+To reproduce an existing project's runtime, supply its full lowercase SHA explicitly:
+
+```sh
+revision=$(cat /absolute/path/to/existing-project/chainman.lock)
+just --justfile chainman-init/justfile init "../reproduced-project" "$revision"
+```
+
+Branch names, tags, and numeric versions are not accepted as the optional SHA.
 
 The starter contains a small example, its verification command, and a project-owned
 flake and lock. Git initialization and the initial commit happen by default using
@@ -152,7 +164,7 @@ your host identity, signing policy, and branch defaults. A commit failure preser
 the files and prints recovery instructions. To generate files only:
 
 ```sh
-just --justfile chainman-init/justfile init "../another-project" v0.1.0 --no-git
+just --justfile chainman-init/justfile init "../another-project" --no-git
 ```
 
 Initialization does **not** run project setup or certify the application. The larger
@@ -174,12 +186,21 @@ need configured adapters and a complete verification gate. The starter includes
 both for its small example. The minimal existing-project configuration above
 intentionally introduces only one task.
 
-Runtime updates select stable published releases at least 30 days old by default,
-considering both publication and commit time. They test the proposed SHA and
-reconciled outputs in an isolated candidate before applying changes. Unqualified
-candidates are preserved for inspection and recovery. Without `mode=dry-run` or
-`commit=off`, successful updates commit the verified changes. Use `--skip-chainman`
-for project-only updates while the first runtime release matures.
+Runtime updates resolve the current public default branch immediately and compare
+Git SHAs. A changed SHA is eligible even when `VERSION` is unchanged. Project
+dependencies retain their configurable 30-day maturity policy.
+
+```sh
+just chainman chainman-update mode=dry-run
+just chainman chainman-update
+```
+
+Updates verify the selected SHA and reconciled outputs in an isolated candidate
+before applying changes. A branch advance during verification or resume does not
+replace that SHA; a later update discovers the newer tip. Failed candidates remain
+available for inspection and recovery. Without `mode=dry-run` or `commit=off`,
+successful updates commit the verified changes. Use `--skip-chainman` for
+project-only dependency updates.
 
 ## Documentation
 

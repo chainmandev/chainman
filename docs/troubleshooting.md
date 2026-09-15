@@ -61,8 +61,9 @@ configuration is broken. Destructive data reset requires its explicit reset opti
 
 ## Updates and recovery
 
-Before the first release matures, use `just chainman deps-update --skip-chainman`.
-Missing age/provenance evidence is an error, not an implicit waiver.
+Use `just chainman deps-update --skip-chainman` for project-only updates.
+Runtime selection needs an available advertised default branch, without an age delay.
+Missing project dependency age/provenance evidence is an error, not an implicit waiver.
 
 Updates prepare isolated candidates and preserve failures. Use the transaction path
 printed by the failure message:
@@ -71,7 +72,7 @@ printed by the failure message:
 just chainman deps-update resume=/absolute/path/to/transaction
 ```
 
-Resume retains the selected runtime, rechecks original state and release evidence,
+Resume retains the selected runtime, rechecks original state and the exact Git objects,
 and reruns acceptance. It cannot silently choose a different revision. Reconcile
 modified declared pin copies through their owning generator before retrying.
 

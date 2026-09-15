@@ -50,6 +50,37 @@ def git(*args: str, input: bytes | None = None) -> bytes:
     ).stdout
 
 
+def default_revision() -> str:
+    """Resolve one advertised default-branch snapshot, without naming the branch."""
+    try:
+        advertised = git(
+            "ls-remote", "--symref", "--exit-code", REPOSITORY, "HEAD", "refs/heads/*"
+        ).decode("utf-8")
+        entries = [line.split("\t") for line in advertised.splitlines()]
+        if any(len(entry) != 2 for entry in entries):
+            raise ValueError("malformed advertisement")
+        heads = [value for value, name in entries if name == "HEAD"]
+        symbolic = [
+            value.removeprefix("ref: ") for value in heads if value.startswith("ref: ")
+        ]
+        commits = [value for value in heads if not value.startswith("ref: ")]
+        if (
+            len(symbolic) != 1
+            or len(commits) != 1
+            or not symbolic[0].startswith("refs/heads/")
+        ):
+            raise ValueError("missing or ambiguous default branch")
+        git("check-ref-format", symbolic[0])
+        revision = pin((commits[0] + "\n").encode())
+        if [value for value, name in entries if name == symbolic[0]] != [revision]:
+            raise ValueError("default branch and HEAD disagree")
+        return revision
+    except (UnicodeError, ValueError, subprocess.CalledProcessError) as error:
+        raise ValueError(
+            f"Cannot resolve Chainman's public default branch: {error}"
+        ) from error
+
+
 def objects(revision: str) -> Path:
     pin((revision + "\n").encode())
     home = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))

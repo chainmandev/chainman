@@ -520,7 +520,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             return services.execute_internal(root, args.action, rest)
         elif args.action == "version":
-            print((RUNTIME / "VERSION").read_text().strip())
+            import git_runtime
+
+            revision = git_runtime.pin(tc.regular_input(root, "chainman.lock"))
+            print(f"{(RUNTIME / 'VERSION').read_text().strip()} (Git {revision})")
         elif args.action in {"config", "explain"}:
             import config_inspection
 
@@ -705,6 +708,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 json.dumps(
                     {
                         "version": (RUNTIME / "VERSION").read_text().strip(),
+                        "revision": tc.regular_input(root, "chainman.lock")
+                        .decode()
+                        .strip(),
                         "project": str(root),
                         "runtime": str(RUNTIME),
                         "mode": os.environ.get("CHAINMAN_MODE", "host-nix"),

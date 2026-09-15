@@ -124,9 +124,9 @@ just chainman deps-update --skip-chainman commit=off
 
 Start with a disposable branch or checkout and inspect the verified diff. The
 preview leaves the original unchanged; `commit=off` applies without committing.
-The default commits a successful verified update. Runtime updates can be added
-once a stable release satisfies the age policy. Explicit adoption of v0.1.0 is
-independent of that automatic-selection delay.
+The default commits a successful verified update. Runtime updates select the current public default-branch SHA immediately, while
+project dependencies retain their age policy. Add runtime updates after the full
+project gate reliably verifies the candidate under Chainman.
 
 ## Adoption is complete when
 

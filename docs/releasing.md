@@ -1,46 +1,64 @@
-# Publishing a release
+# Publishing a rolling revision
 
-[Documentation index](README.md) · [Contributing](contributing.md) · [Release trust](release-trust.md)
+[Documentation index](README.md) · [Contributing](contributing.md) · [Git trust](release-trust.md)
 
-Installation uses Git. A release is a qualified commit, a lightweight `vVERSION`
-tag pointing to that commit, and published GitHub release notes. There are no
-custom runtime archives, checksums, or generated asset inventories.
+New installations and runtime updates select the public default branch's current
+SHA. Publication means advancing that branch to a qualified commit. Tags, GitHub
+releases, and a changed `VERSION` are optional descriptive records, never installation
+requirements. Qualify before advancing the default branch: consumers can select
+its new tip immediately.
 
-## Prepare
+## Prepare and qualify
 
-1. Set `VERSION`, update the release notes, and commit implementation, tests, and docs.
-2. Run the required qualification described in [testing](testing.md). Record the
-   exact commit, test evidence, platform omissions, and consumer blockers.
-3. Ensure the intended version has neither a remote tag nor a release. Review the
-   full source commit; the workflow refuses to replace an existing identity.
-4. Push the qualified commit to `chainmandev/chainman` using the operator's credentials.
+1. Commit the implementation, tests, and documentation. `VERSION` is package metadata;
+   record the full Git SHA as the authoritative identity.
+2. Run [qualification](testing.md) in disposable fixtures. Record commands, results,
+   unavailable platforms, and consumer blockers against that exact source commit.
+3. Push the commit to a temporary **staging branch**, keeping the default branch at
+   its current qualified revision. Use a new staging branch name for each candidate.
+4. Dispatch **Publish rolling Chainman** (`release.yml`) at that staging ref, with
+   `candidate_sha` set to its full SHA and `expected_default_sha` set to the observed
+   public default-branch SHA. Both are required; the workflow code and checked-out
+   candidate must agree exactly.
 
-The manually dispatched **Publish Chainman Git release** workflow takes:
+For an already committed candidate, these operator commands discover the current
+public default branch without naming it:
 
-- `candidate_sha`: the full commit at the workflow ref you select.
-- `version`: its numeric `VERSION`, initially `0.1.0`.
+```sh
+candidate=$(git rev-parse HEAD)
+base=$(git ls-remote --exit-code https://github.com/chainmandev/chainman.git HEAD | cut -f1)
+staging="qualification/$candidate"
+git push origin "$candidate:refs/heads/$staging"
+gh workflow run release.yml --repo chainmandev/chainman --ref "$staging" \
+  -f candidate_sha="$candidate" -f expected_default_sha="$base"
+```
 
-The workflow and checkout must both resolve to that exact SHA. Qualification runs
-before publication. Publication creates the lightweight tag atomically, publishes
-the notes, then clones the public tag, verifies its identity, and initializes and
-checks a fresh starter through public Git.
+`gh` is an operator convenience for workflow dispatch; the GitHub Actions UI accepts
+the same inputs. It is not a consumer prerequisite. The workflow runs all required
+lanes before publishing. It discovers the default branch at publication, requires
+its expected old SHA and fast-forward ancestry, and uses an exact lease to reject
+concurrent movement. It then proves fresh public host/container initialization.
 
-GitHub release immutability can remain enabled as publisher policy. Installation
-and release selection do not depend on it. No attestation client is required to
-launch Chainman. Dependency hashes and backend provenance still belong to their
-respective verification policies.
+Repository Actions must permit the publication job's `contents: write`. Branch
+protection must allow that qualified workflow to advance the default branch. If
+policy requires a maintainer push, first run **Deliberate toolchain verification**
+at the exact staging SHA, inspect every lane, then perform a guarded fast-forward
+publication as the maintainer. Do not weaken required gates to bypass a failure.
 
 ## Read back before promoting consumers
 
-Use a fresh download cache. Check the public tag commit, `VERSION`, and release's
-published/non-prerelease status. Qualify fresh host-Nix and container-Nix launches
-with no local Chainman checkout dependency. Verify each consumer's recorded SHA
-against that identity, including generated copies, then run its full declared gate.
+After publication, use a fresh download cache to confirm that public Git advertises
+the expected SHA. Qualify fresh host-Nix and container-only installs in paths with
+spaces, without a permanent Chainman checkout. Record `VERSION` descriptively and
+verify every root/generated consumer pin against the exact Git identity.
 
-Promote a rewritten consumer candidate only when those checks pass. Keep its
-recovery refs and historical mapping; never merge the original archive-bearing
-history into the replacement. Consumer pushes are a separate operator action.
+Promote each rewritten consumer candidate only after public readback and its full
+project gate pass. Keep recovery refs and historical mappings; do not merge the
+original archive-bearing history into a replacement. Consumer pushes are a separate
+operator action.
 
-A failed publication is not permission to overwrite a tag. Inspect whether ref
-creation or release publication succeeded before retrying. Once a public release
-exists, corrections use a new version and a new commit.
+If the branch moved during qualification or publication was interrupted, inspect
+public Git before retrying. Qualify any revised candidate as a new exact commit.
+Published corrections use new commits; existing pins and retained update candidates
+continue to identify their original snapshots. Release immutability may remain a
+publisher policy, but does not govern installation or runtime selection.

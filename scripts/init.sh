@@ -6,13 +6,26 @@ fail() {
     printf 'Chainman initialization: %s\n' "$*" >&2
     exit 2
 }
-[ "$#" = 2 ] || { [ "$#" = 3 ] && [ "$3" = --no-git ]; } || fail 'usage: just init DEST REF [--no-git]'
-no_git=${3:-}
+[ "$#" -ge 1 ] && [ "$#" -le 3 ] || fail 'usage: just init DEST [SHA] [--no-git]'
 source_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." && pwd)
 case "$1" in /*) destination=$1 ;; *) destination=$PWD/$1 ;; esac
+shift
+no_git=
+revision=
+if [ "$#" -gt 0 ] && [ "$1" != --no-git ]; then
+    revision=$1
+    [ -n "$revision" ] || fail 'An explicit SHA must not be empty.'
+    shift
+fi
+if [ "$#" -gt 0 ] && [ "$1" = --no-git ]; then
+    no_git=$1
+    shift
+fi
+[ "$#" = 0 ] || fail 'usage: just init DEST [SHA] [--no-git]'
 case "$destination" in *'
 '* | *"$(printf '\r')"*) fail 'Newlines are not supported in destination paths.' ;; esac
-version=$2
+set --
+if [ -n "$revision" ]; then set -- "$revision"; fi
 mode=${CHAINMAN_MODE:-container-nix}
 case "$mode" in host-nix | container-nix) ;; *) fail 'CHAINMAN_MODE must be host-nix or container-nix.' ;; esac
 check_path=$destination
@@ -36,7 +49,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 if [ "$mode" = host-nix ]; then
-    "$source_root/scripts/enter.sh" updates python3 -B "$source_root/scripts/initialize.py" "$staging/project" "$version" >&2
+    "$source_root/scripts/enter.sh" updates python3 -B "$source_root/scripts/initialize.py" "$staging/project" "$@" >&2
 else
     candidates=${CHAINMAN_CONTAINER_ENGINE:-docker podman}
     for candidate in $candidates; do
@@ -48,6 +61,7 @@ else
     done
     [ -n "$engine" ] || fail 'Start Docker or Podman, or select CHAINMAN_MODE=host-nix.'
     IFS= read -r image < "$source_root/nix/container-image.txt"
+    # The positional arguments below belong to the container engine.
     set -- create --cap-drop ALL --security-opt no-new-privileges \
         --mount "type=bind,src=$source_root,dst=/chainman,readonly" \
         --env HOME=/tmp/chainman-home --env 'NIX_CONFIG=build-users-group =' \
@@ -63,12 +77,13 @@ else
         chmod 0555 /
         mkdir -p "$HOME"
         export CHAINMAN_RUNTIME_NIX_BIN="$(dirname "$(readlink -f "$(command -v nix)")")"
+        if [ -z "$1" ]; then shift; fi
         exec nix --extra-experimental-features "nix-command flakes" develop \
             path:/chainman/nix#updates --no-write-lock-file --command \
-            python3 -B /chainman/scripts/initialize.py /tmp/chainman-output "$1"
-    ' sh "$version")
+            python3 -B /chainman/scripts/initialize.py /tmp/chainman-output "$@"
+    ' sh "$revision")
     "$engine" start --attach "$container" >&2
-    [ "$("$engine" inspect --format '{{.State.ExitCode}}' "$container")" = 0 ] || fail 'The release could not be initialized.'
+    [ "$("$engine" inspect --format '{{.State.ExitCode}}' "$container")" = 0 ] || fail 'The selected revision could not be initialized.'
     # Engine copy creates host-owned files without a writable output mount.
     "$engine" cp "$container:/tmp/chainman-output" "$staging/project"
 fi

@@ -57,8 +57,7 @@ execute a candidate's mutable justfile to recover trusted host orchestration.
 
 ## Git fixtures and publication
 
-Tests can substitute transport with disposable Git repositories and bounded release
-metadata fixtures. Do not add production archive overrides or a second installation
+Tests can substitute transport with disposable Git repositories. Do not add production archive overrides or a second installation
 architecture for test convenience. Verify exact Git objects, checkout independence,
 source modes, and restricted host prerequisites independently of higher-level tests.
 
@@ -69,9 +68,9 @@ just example /absolute/path/to/new-fixture FULL_COMMIT_SHA
 ```
 
 Replace `FULL_COMMIT_SHA` with the full selected commit. Use the normal initializer
-for version-based adoption. There is no local release packaging step or distribution
+for rolling default-branch adoption. There is no local release packaging step or distribution
 inventory to update when adding runtime source files.
 
-Commit and qualify the exact revision before publication. Use the release workflow
+Commit and qualify the exact revision before publication. Use the publication workflow
 and public readback described in [publishing](releasing.md). Consumer promotion and
 remote replacement remain separate, guarded operations.

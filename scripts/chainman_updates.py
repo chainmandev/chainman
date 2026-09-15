@@ -14,9 +14,7 @@ from urllib.parse import quote
 
 import adapter_data as ad
 import chainman
-import registry
 import git_runtime
-import source_updates
 import toolchain as tc
 import updates
 from transaction_state import Options
@@ -133,7 +131,7 @@ def fetch_source(root: Path, *, gc_root: Path) -> Path:
     )
 
 
-def validate_runtime(runtime: Path, version: str) -> None:
+def validate_runtime(runtime: Path) -> None:
     if runtime.is_symlink() or not runtime.is_dir():
         raise ValueError("Candidate runtime must be a real directory")
 
@@ -151,6 +149,7 @@ def validate_runtime(runtime: Path, version: str) -> None:
                 )
     for name in (
         "VERSION",
+        "bootstrap/git-entry.sh",
         "bootstrap/chainman.sh",
         "bootstrap/fetch.nix",
         "nix/flake.nix",
@@ -164,41 +163,10 @@ def validate_runtime(runtime: Path, version: str) -> None:
                 f"Candidate runtime is missing a required regular file: {name}"
             )
     actual = (runtime / "VERSION").read_text().strip()
-    if registry.version("github", actual) is None or registry.version(
-        "github", actual
-    ) != registry.version("github", version):
-        raise ValueError("Candidate VERSION does not match release metadata")
-
-
-def published_revision(
-    selected: registry.Release, policy: Mapping[str, object], now: datetime
-) -> str:
-    """Bind selection to the current stable release and its exact commit age."""
-    repository = "chainmandev/chainman"
-    release = registry.data(
-        f"https://api.github.com/repos/{repository}/releases/tags/{quote(selected.version, safe='')}"
-    )
-    if (
-        not isinstance(release, dict)
-        or release.get("tag_name") != selected.version
-        or release.get("draft") is not False
-        or release.get("prerelease") is not False
-        or registry.timestamp(release.get("published_at")) != selected.published
-    ):
-        raise ValueError("Runtime release changed or is not a published stable release")
-    revision = registry.github_commit(repository, selected.version, fresh=True)
-    git_runtime.pin((revision + "\n").encode())
-    published = max(
-        selected.published, source_updates.commit_time(repository, revision)
-    )
-    registry.eligible(
-        "github",
-        [registry.Release(selected.version, published)],
-        policy,
-        repository,
-        now,
-    )
-    return revision
+    if not actual or len(actual.splitlines()) != 1:
+        raise ValueError(
+            "Candidate VERSION must contain descriptive single-line metadata"
+        )
 
 
 def runtime_candidate(
@@ -208,6 +176,7 @@ def runtime_candidate(
     managed: ManagedFiles | None = None,
     *,
     gc_root: Path,
+    revision: str | None = None,
 ) -> Path:
     lock_before = managed_state(root, "chainman.lock")
     if lock_before is None:
@@ -221,40 +190,12 @@ def runtime_candidate(
                 f"Managed runtime copy was locally modified; reconcile it explicitly: {target}"
             )
         copies[target] = before
-    repository = "chainmandev/chainman"
-    releases = registry.github_releases(repository)
-    # Commit time can be newer than release publication. Include it before
-    # selection so an immature newest tag does not hide an older eligible one.
-    resolved = {
-        item.version: registry.github_commit(repository, item.version)
-        for item in releases
-    }
-    dated = [
-        registry.Release(
-            item.version,
-            max(
-                item.published,
-                source_updates.commit_time(repository, resolved[item.version]),
-            ),
-        )
-        for item in releases
-    ]
-    selected_age = registry.select("github", dated, policy, repository, now)
-    selected = next(item for item in releases if item.version == selected_age.version)
-    version = (chainman.RUNTIME / "VERSION").read_text().strip()
-    if registry.stable_version("github", selected.version) <= registry.stable_version(
-        "github", version
-    ):
-        return chainman.RUNTIME
-    revision = published_revision(selected, policy, now)
-    if revision != resolved[selected.version]:
-        raise ValueError("Runtime release tag changed during selection")
+    revision = git_runtime.default_revision() if revision is None else revision
+    git_runtime.pin((revision + "\n").encode())
     if revision == old:
-        raise ValueError("A newer runtime release reuses the current revision")
+        return chainman.RUNTIME
     runtime = git_runtime.store(revision, gc_root=gc_root)
-    validate_runtime(runtime, selected.version)
-    if registry.github_commit(repository, selected.version, fresh=True) != revision:
-        raise ValueError("Runtime release tag changed during Git fetch")
+    validate_runtime(runtime)
     after = ((revision + "\n").encode(), 0o644)
     publication = managed if managed is not None else ManagedFiles(root)
     try:

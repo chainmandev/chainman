@@ -84,6 +84,20 @@ class TransactionStateTests(unittest.TestCase):
             wire["runtime_snapshot"]["new"] = "changed"
         self.assertEqual(json.loads(json.dumps(state.encode())), expected)
 
+    def test_saved_runtime_revision_round_trips_and_rejects_malformed_pins(self):
+        wire = checkpoint()
+        wire["schema"] = 2
+        wire["options"].pop("only_chainman")
+        wire["options"].pop("skip_chainman")
+        wire["options"].update(runtime="include")
+        wire["runtime_revision"] = "b" * 40
+        state = State.decode(wire)
+        self.assertEqual(state.runtime_revision, "b" * 40)
+        self.assertEqual(state.encode()["runtime_revision"], "b" * 40)
+        for invalid in ("main", "B" * 40, "b" * 39, "b" * 40 + "\n", 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                State.decode(dict(wire, runtime_revision=invalid))
+
     def test_checkpoint_versions_do_not_accept_ambiguous_runtime_selection(self):
         original = checkpoint()
         modern = deepcopy(original)

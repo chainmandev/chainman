@@ -39,8 +39,10 @@ unit fixtures test the surrounding policy, not the substituted boundary.
 Unit transaction tests use real Git/index/raw-file state in disposable projects.
 They cover frozen authority, declared output scope, concurrent edits, verification
 failure, partial application, staged formatting, and resume. Runtime selection tests
-cover release age, commit age, changed tag identity, VERSION agreement, pin copies,
-unchanged versions, failed source acquisition, and rollback.
+cover default-branch discovery and renaming, unavailable/empty remotes, rewritten
+history, same-version/different-SHA updates, unchanged pins, pin copies, failed
+source acquisition, and frozen selection across branch movement and resume.
+Project dependency age enforcement has separate regression coverage.
 
 Real lifecycle tests run Git-pinned runtimes through Nix. They must demonstrate
 successful updates and cleanup, failed candidates, interruption/resume, and runtime
@@ -54,7 +56,7 @@ that state rather than resetting user work.
 
 ## Adoption and generated projects
 
-Initializer tests check explicit version/SHA selection, moved tags, selected-revision
+Initializer tests check default-branch and explicit SHA selection, selected-revision
 templates, empty-destination rules, host Git identity/branch/signing, commit-failure
 recovery, and `--no-git`. Exercise the generated starter in both execution modes.
 
@@ -67,7 +69,7 @@ remain synchronized and must not reintroduce copied runtime implementation.
 
 Record the exact Chainman SHA, consumer candidate tips, test commands/results,
 platform omissions, and unrelated application failures. After publication, read the
-public lightweight tag and release metadata, then prove fresh public Git installation
+public default-branch identity, then prove fresh public Git installation
 with host Nix and container-only prerequisites. Run the documented quickstarts and
 validate links/configuration examples.
 

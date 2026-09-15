@@ -325,12 +325,17 @@ def prepare_runtime(root: Path, destination: Path) -> None:
             raise ValueError("Candidate runtime has already been prepared")
         if updates.snapshot(candidate) != state.candidate_before:
             raise ValueError("Candidate changed before runtime preparation")
+        if state.runtime_revision is None:
+            state = replace(state, runtime_revision=git_runtime.default_revision())
+            # Save selection before fetching: failed downloads resume this SHA.
+            tc.atomic_json(destination / "control/state.json", state.encode())
         with tc.nix_temporary_directory("chainman-runtime-stage-") as directory:
             try:
                 runtime = runtime_updates.runtime_candidate(
                     candidate,
                     dependency_api.policy(root),
                     state.at,
+                    revision=state.runtime_revision,
                     gc_root=Path(directory) / "runtime",
                 )
             except (OSError, ValueError) as error:
@@ -457,31 +462,13 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
         if not opts.skip_chainman and tc.regular_input(
             root, "chainman.lock"
         ) != tc.regular_input(baseline, "chainman.lock"):
-            import registry
-
-            pin = git_runtime.pin(tc.regular_input(root, "chainman.lock"))
+            # Resume already checks the saved runtime snapshot. Verify those exact
+            # objects again; a branch movement is irrelevant to this transaction.
             with tc.nix_temporary_directory("chainman-reaudit-runtime-") as rooted:
                 runtime = runtime_updates.fetch_source(
                     root, gc_root=Path(rooted) / "runtime"
                 )
-                version = (runtime / "VERSION").read_text().strip()
-                selected = registry.select(
-                    "github",
-                    [
-                        release
-                        for release in registry.github_releases("chainmandev/chainman")
-                        if release.version.lstrip("v") == version
-                    ],
-                    settings,
-                    "chainmandev/chainman",
-                    now,
-                )
-                revision = runtime_updates.published_revision(selected, settings, now)
-                runtime_updates.validate_runtime(runtime, selected.version)
-                if pin != revision:
-                    raise ValueError(
-                        "Resumed runtime no longer matches its release evidence"
-                    )
+                runtime_updates.validate_runtime(runtime)
         if opts.only_chainman:
             return
         if settings.get("resolver"):
@@ -558,7 +545,7 @@ def candidate_unchanged(candidate: Path, state: State) -> None:
 
 def verified_runtime(candidate: Path, *, gc_root: Path) -> Path:
     runtime = runtime_updates.fetch_source(candidate, gc_root=gc_root)
-    runtime_updates.validate_runtime(runtime, (runtime / "VERSION").read_text().strip())
+    runtime_updates.validate_runtime(runtime)
     for destination, source in runtime_updates.managed_paths(candidate).items():
         if not runtime_updates.managed_matches(
             runtime_updates.managed_state(candidate, destination),

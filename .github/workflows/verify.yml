@@ -8,9 +8,6 @@ name: Deliberate toolchain verification
       prune_hosted_sdks:
         type: boolean
         default: false
-      release_version:
-        type: string
-        default: ""
   workflow_dispatch:
     inputs:
       candidate_sha:
@@ -61,12 +58,10 @@ jobs:
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
           EVENT: ${{ github.sha }}
-          RELEASE_VERSION: ${{ inputs.release_version }}
         run: |
           set -eu
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           test "$EVENT" = "$EXPECTED"
-          if [ -n "$RELEASE_VERSION" ]; then test "$(cat VERSION)" = "$RELEASE_VERSION"; fi
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
       - name: Optional disposable SDK cleanup
         if: inputs.prune_hosted_sdks && runner.os == 'Linux'

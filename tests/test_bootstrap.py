@@ -1,6 +1,5 @@
 """Runtime qualification uses real Nix behind the verified Git entrypoint."""
 
-import base64
 import hashlib
 import json
 import os
@@ -594,52 +593,51 @@ format-check=["format-check"]
         previous = self.root / "real-runtime"
         next_runtime = Path(temporary.name).resolve() / "next-runtime"
         shutil.copytree(previous, next_runtime)
-        responses_file = Path(temporary.name).resolve() / "release-responses.json"
-        # Transport alone is a fixture. Keeping responses outside the immutable
-        # runtimes keeps Git identities fixed and supports fresh
-        # reads by the new runtime when resuming a combined update.
+        remote = Path(temporary.name).resolve() / "rolling.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
         for runtime in (previous, next_runtime):
-            with (runtime / "scripts/registry.py").open("a") as stream:
-                stream.write(
-                    f"\n_fixture_responses_file = {str(responses_file)!r}\n"
-                    "def _fetch(url, *args, **kwargs):\n"
-                    "    data = json.loads(__import__('pathlib').Path(_fixture_responses_file).read_text())\n"
-                    "    return base64.b64decode(data[url]), {}\n"
+            resolver = runtime / "scripts/git_runtime.py"
+            resolver.write_text(
+                resolver.read_text().replace(
+                    'REPOSITORY = "https://github.com/chainmandev/chainman.git"',
+                    "REPOSITORY = " + json.dumps(remote.as_uri()),
                 )
-        (next_runtime / "VERSION").write_text("0.2.0\n")
-        with (next_runtime / "bootstrap/chainman.sh").open("a") as stream:
-            stream.write("\n# Neutral second-generation bootstrap fixture.\n")
+            )
+        # VERSION deliberately stays unchanged: the Git SHA identifies this update.
+        (next_runtime / "rolling-marker").write_text("candidate runtime\n")
         self.pin_runtime(next_runtime)
         revision = self.lock
-        published = "2026-01-01T00:00:00Z"
-        release = dict(
-            tag_name="v0.2.0",
-            draft=False,
-            prerelease=False,
-            immutable=True,
-            published_at=published,
-            assets=[],
+        subprocess.run(
+            [
+                "git",
+                "--git-dir=" + str(remote),
+                "fetch",
+                str(self.repositories[revision]),
+                revision,
+            ],
+            check=True,
+            capture_output=True,
         )
-        api = "https://api.github.com/repos/chainmandev/chainman"
-        responses = {}
-        for url, value in {
-            f"{api}/releases?per_page=100&page=1": [release],
-            f"{api}/releases/tags/v0.2.0": release,
-            f"{api}/git/ref/tags/v0.2.0": {
-                "object": {"type": "commit", "sha": revision}
-            },
-            f"{api}/commits/{revision}": {
-                "sha": revision,
-                "commit": {"committer": {"date": published}},
-            },
-        }.items():
-            responses[url] = json.dumps(value).encode()
-        # Selection, verified Git materialization, orchestration, verification and
-        # application use the actual implementations in both generations.
-        encoded = {
-            url: base64.b64encode(data).decode() for url, data in responses.items()
-        }
-        responses_file.write_text(json.dumps(encoded))
+        subprocess.run(
+            [
+                "git",
+                "--git-dir=" + str(remote),
+                "update-ref",
+                "refs/heads/rolling-default",
+                revision,
+            ],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "--git-dir=" + str(remote),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/rolling-default",
+            ],
+            check=True,
+        )
         self.pin_runtime(previous)
         old_revision = self.lock
         bootstrap_before = (self.root / "justfile").read_bytes()
@@ -649,19 +647,17 @@ format-check=["format-check"]
             .replace(
                 "if action == 'resolve':",
                 "if action == 'resolve':\n"
-                "    assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'VERSION').read_text().strip() == '0.2.0'",
+                "    assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'rolling-marker').read_text().strip() == 'candidate runtime'",
             )
             .replace(
                 "assert (root / 'dependency.lock').read_text() == 'accepted\\n', 'fixture verification rejected'",
-                "assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'VERSION').read_text().strip() == '0.2.0'\n"
+                "assert (pathlib.Path(os.environ['CHAINMAN_RUNTIME']) / 'rolling-marker').read_text().strip() == 'candidate runtime'\n"
                 f"    assert not {reject!r} or (root / '.cache/accept-runtime').exists(), 'fixture runtime verification rejected'\n"
                 f"    assert pathlib.Path({str(self.root / 'chainman.lock')!r}).read_text().strip() == {old_revision!r}",
             )
         )
         self.lifecycle_git("add", ".")
-        self.lifecycle_git(
-            "commit", "-m", "Declare immutable release transport fixture"
-        )
+        self.lifecycle_git("commit", "-m", "Declare rolling Git transport fixture")
         before = self.lifecycle_git("rev-parse", "HEAD")
         probe = "import os; print(os.environ['CHAINMAN_RUNTIME'])"
         old_path = Path(
@@ -683,6 +679,38 @@ format-check=["format-check"]
             self.assertEqual(len(candidates), 1)
             candidate = candidates[0] / "candidate"
             (candidate / ".cache/accept-runtime").touch()
+            # Rename and move the public branch while qualification is retained.
+            subprocess.run(
+                [
+                    "git",
+                    "--git-dir=" + str(remote),
+                    "fetch",
+                    str(self.repositories[old_revision]),
+                    old_revision,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "--git-dir=" + str(remote),
+                    "update-ref",
+                    "refs/heads/renamed-default",
+                    old_revision,
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "--git-dir=" + str(remote),
+                    "symbolic-ref",
+                    "HEAD",
+                    "refs/heads/renamed-default",
+                ],
+                check=True,
+            )
             result = self.run_bootstrap(action, f"resume={candidates[0]}")
             self.assertNotIn("fixture phase: resolve", result.stderr)
         accepted = json.loads(result.stdout)
@@ -703,7 +731,7 @@ format-check=["format-check"]
         )
         self.assertNotEqual(old_path, new_path)
         self.assertEqual((old_path / "VERSION").read_text(), "0.1.0\n")
-        self.assertEqual((new_path / "VERSION").read_text(), "0.2.0\n")
+        self.assertEqual((new_path / "VERSION").read_text(), "0.1.0\n")
         self.assertIn("fixture phase: verify", result.stderr)
         self.assertEqual(list(self.update_cache.iterdir()), [])
 
@@ -1148,7 +1176,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         if mode == "container-nix":
             env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
         result = run_captured(
-            [str(checkout / "scripts/init.sh"), str(destination), self.lock],
+            [str(checkout / "scripts/init.sh"), str(destination)],
             cwd=self.root,
             env=env,
             timeout=600,

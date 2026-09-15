@@ -53,6 +53,55 @@ class DistributionTests(unittest.TestCase):
             "Runtime",
         )
 
+    def test_default_branch_discovery_and_rename(self):
+        self.assertEqual(git_runtime.default_revision(), self.revision)
+        self.git("branch", "-m", "renamed-default-δ")
+        self.assertEqual(git_runtime.default_revision(), self.revision)
+
+    def test_rewritten_history_and_branch_advance_are_new_snapshots(self):
+        selected = git_runtime.default_revision()
+        self.git("checkout", "--orphan", "replacement")
+        (self.origin / "binary").write_text("new history")
+        self.commit()
+        replacement = git_runtime.default_revision()
+        self.assertNotEqual(selected, replacement)
+        # Already-selected old commits still materialize after a branch rewrite.
+        git_runtime.materialize(selected, self.root / "old")
+        git_runtime.materialize(replacement, self.root / "new")
+        self.assertEqual((self.root / "old/binary").read_bytes(), b"\0binary\xff\n")
+        self.assertEqual((self.root / "new/binary").read_text(), "new history")
+
+    def test_empty_missing_and_detached_default_branch_fail(self):
+        self.git("symbolic-ref", "HEAD", "refs/heads/unborn")
+        with self.assertRaisesRegex(ValueError, "default branch"):
+            git_runtime.default_revision()
+        self.git("update-ref", "--no-deref", "HEAD", self.revision)
+        with self.assertRaisesRegex(ValueError, "default branch"):
+            git_runtime.default_revision()
+        self.origin.rename(self.root / "offline")
+        with self.assertRaisesRegex(ValueError, "default branch"):
+            git_runtime.default_revision()
+
+    def test_inconsistent_or_malformed_advertisements_fail(self):
+        for advertisement in (
+            b"",
+            b"ref: refs/heads/current\tHEAD\n",
+            b"a" * 40 + b"\tHEAD\n",
+            b"ref: refs/heads/current\tHEAD\n"
+            + b"a" * 40
+            + b"\tHEAD\n"
+            + b"b" * 40
+            + b"\trefs/heads/current\n",
+            b"ref: refs/tags/current\tHEAD\n" + b"a" * 40 + b"\tHEAD\n",
+            b"not a Git advertisement",
+        ):
+            with (
+                self.subTest(advertisement=advertisement),
+                patch.object(git_runtime, "git", return_value=advertisement),
+                self.assertRaisesRegex(ValueError, "default branch"),
+            ):
+                git_runtime.default_revision()
+
     def test_exact_export_ignores_checkout_changes_and_attributes(self):
         (self.origin / ".gitattributes").write_text("binary export-ignore\n")
         self.commit()

@@ -35,9 +35,10 @@ just chainman deps-update --skip-chainman commit=off
 
 The first command verifies an isolated candidate and leaves the original unchanged.
 The second applies verified changes without a commit. Without either option, updates
-apply and commit after verification. Automatic runtime updates require a mature
-stable release (30 days by default); explicit initial adoption bypasses that delay.
+apply and commit after verification. Runtime updates select the current public default-branch SHA immediately and
+freeze it through verification and resume. Ordinary launches stay pinned. The
+30-day maturity policy applies to project dependencies.
 
-Read the [adoption guide](https://github.com/chainmandev/chainman/blob/main/docs/adoption.md),
-[configuration reference](https://github.com/chainmandev/chainman/blob/main/docs/configuration.md),
-and [update and recovery guide](https://github.com/chainmandev/chainman/blob/main/docs/updates.md).
+Read the [adoption guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/adoption.md),
+[configuration reference](https://github.com/chainmandev/chainman/blob/HEAD/docs/configuration.md),
+and [update and recovery guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/updates.md).

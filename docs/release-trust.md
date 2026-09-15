@@ -1,4 +1,4 @@
-# Release trust and Git pins
+# Git trust and runtime pins
 
 [Documentation index](README.md) · [Updates](updates.md) · [Publishing](releasing.md)
 
@@ -15,21 +15,25 @@ source. Uncommitted files in an installation checkout cannot alter that runtime.
 
 A commit pin identifies code; it does not establish that the code is trustworthy.
 Initial adoption is the project's explicit decision to trust a selected revision.
-Review the repository and the release provenance to the degree your project needs.
+Review the repository and its qualification evidence to the degree your project needs.
 The public HTTPS Git repository is the installation source. Loss of public access
 can prevent a cold fetch; it cannot silently select substitute code.
 
-For version-based initialization and automatic updates, Chainman resolves a stable,
-published GitHub release to its full commit, requires `VERSION` agreement, and
-checks the tag again after obtaining the source. Drafts and prereleases are excluded.
-Moving a tag during selection fails. Moving a tag after adoption does not alter an
-existing pin; resuming an update cannot substitute a different revision.
+Initialization without an explicit SHA and runtime updates resolve one snapshot of
+Git's advertised default branch. The advertised `HEAD` must name a branch and agree
+with its full commit SHA. Missing, malformed, or inconsistent remote information
+fails explicitly. No hardcoded branch, tag, or release API is consulted.
 
-Automatic updates additionally enforce the configured age policy using the later
-of release publication and commit time. Explicit initialization bypasses that age
-requirement. Ordinary launches do not call the release API and need neither `gh`
-nor a GitHub token. Selection can use an optional `GITHUB_TOKEN` through the explicit
-secret environment; it must never be written into project files.
+Selection is frozen before source acquisition. Branch advances, renames, or history
+rewrites do not replace a saved SHA during verification or resume. A future update
+may select the new tip, even if its `VERSION` is unchanged or its history is unrelated.
+Review the candidate diff and qualification accordingly. Explicit SHA initialization
+obtains that exact revision without default-branch discovery.
+
+Runtime selection has no age delay. The configurable 30-day maturity window applies
+to project dependencies. Ordinary launches make no update query and need neither
+`gh` nor GitHub authentication. An available verified cache supports offline launches;
+initialization and updates need public Git access to discover the current tip.
 
 Git is the sole Chainman installation identity. Hashes for Nix inputs, container
 images, native backends, and external dependency artifacts remain necessary and
