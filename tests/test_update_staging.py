@@ -476,6 +476,66 @@ expires="2026-12-01T00:00:00Z"
             self.finish()
         self.assertEqual(path.read_bytes(), changed)
 
+    def nested_retirement_transaction(self, inline):
+        from datetime import datetime, timedelta
+        import registry
+        import tomlkit
+
+        self.exception_policy()
+        config = self.root / "chainman.toml"
+        policy = self.root / "policy.toml"
+        entry = tomlkit.parse(policy.read_text())["exceptions"]
+        if inline:
+            document = tomlkit.parse(config.read_text())
+            document["updates"]["exceptions"] = entry
+            config.write_text(tomlkit.dumps(document))
+            policy.write_text("")
+        else:
+            policy.write_text(
+                policy.read_text().replace(
+                    "[[exceptions]]", "[[adapters.rust.policy.exceptions]]"
+                )
+            )
+        (self.root / "Cargo.toml").write_text(
+            '[package]\nname="fixture"\nversion="0.1.0"\n[dependencies]\ndemo="1.2"\n'
+        )
+        (self.root / "Cargo.lock").write_text(
+            'version=4\n[[package]]\nname="demo"\nversion="1.2.3"\n'
+            'source="registry+https://github.com/rust-lang/crates.io-index"\n'
+            'checksum="' + "a" * 64 + '"\n'
+        )
+        updates.git(self.root, "add", ".")
+        updates.git(self.root, "commit", "-m", "Declare nested policy and Cargo lock")
+        self.before = updates.snapshot(self.root)
+        self.prepare("--no-commit")
+        at = (self.stage / "control/at").read_text().strip()
+        published = datetime.fromisoformat(at) - timedelta(days=40)
+        release = registry.Release(
+            "1.2.3",
+            published,
+            artifacts=(
+                registry.Artifact(
+                    "https://example.invalid/1.2.3", "sha256:" + "a" * 64, published
+                ),
+            ),
+        )
+        with patch.object(registry, "releases", return_value=[release]):
+            subject.reaudit(self.candidate, at, ["--skip-chainman"])
+            subject.inspect(self.root, self.stage)
+            subject.resume(self.root, self.stage)
+            subject.reaudit(self.candidate, at, ["--skip-chainman"])
+            subject.inspect(self.root, self.stage)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+        path = "chainman.toml" if inline else "policy.toml"
+        self.assertNotIn("minimum_safe", (self.candidate / path).read_text())
+        self.assertEqual(self.finish()["changed"], [path])
+
+    def test_inline_retirement_survives_inspection_and_resumed_audit(self):
+        self.nested_retirement_transaction(True)
+
+    def test_adapter_retirement_survives_inspection_and_resumed_audit(self):
+        self.nested_retirement_transaction(False)
+
     def test_opaque_resolver_cannot_retire_exceptions_without_adapter_proof(self):
         self.exception_policy()
         config = self.root / "chainman.toml"

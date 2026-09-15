@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import dependency_api as api
 import exception_retirement as subject
 import registry
+from dependency_identity import Identity
+import updates
 
 NOW = datetime(2026, 9, 15, tzinfo=timezone.utc)
 
@@ -308,6 +310,43 @@ checksum = "'''
             self.retire()
         self.assertEqual(self.policy_path.read_bytes(), original)
 
+    def test_retained_npm_deprecated_and_prerelease_artifacts_keep_evidence(self):
+        policy = {"minimum_age_days": 30}
+        for version, deprecated in (("1.2.3", True), ("1.2.4-beta.1", False)):
+            with self.subTest(version=version):
+                released = self.release(version, 40)
+                retained = registry.Release(
+                    version,
+                    released.published,
+                    artifacts=released.artifacts,
+                    deprecated=deprecated,
+                )
+                artifact = retained.artifacts[0]
+                identities = {
+                    Identity("npm", "demo", version, artifact.url, artifact.digest)
+                }
+
+                def available(provider, package, **options):
+                    return [self.release("1.3.0", 40)] + (
+                        [retained]
+                        if options.get("include_deprecated")
+                        and options.get("include_prerelease")
+                        else []
+                    )
+
+                with patch.object(registry, "releases", side_effect=available):
+                    updates.audit_identities(
+                        self.root, identities, identities, policy, NOW
+                    )
+                    self.assertTrue(
+                        subject.mature_artifacts(self.root, identities, policy, NOW)
+                    )
+                    self.assertFalse(
+                        subject.mature_artifacts(
+                            self.root, identities, policy, NOW - timedelta(days=11)
+                        )
+                    )
+
     def test_unsafe_candidate_and_policy_edits_are_rejected(self):
         self.write_lock("1.2.2")
         with self.assertRaisesRegex(ValueError, "safe floor"):
@@ -350,6 +389,7 @@ checksum = "'''
         )
         self.originals = subject.documents(self.root)
         self.assertEqual(self.retire(), ["crates:demo@1.2.3"])
+        self.assertEqual(self.retire(), ["crates:demo@1.2.3"])
 
     def test_inline_exceptions_and_inherited_empty_list(self):
         config = self.root / "chainman.toml"
@@ -360,6 +400,7 @@ checksum = "'''
         document["updates"]["exceptions"] = [entry]
         config.write_text(tomlkit.dumps(document))
         self.originals = subject.documents(self.root)
+        self.retire()
         self.retire()
         self.assertEqual(tomllib.loads(config.read_text())["updates"]["exceptions"], [])
         self.assertEqual(api.policy(self.root)["exceptions"], [])

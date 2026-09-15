@@ -88,7 +88,10 @@ def permitted(
     for path, entries in lists(original).items():
         parent = new
         for key in path[:-1]:
-            parent = ad.table(parent.get(key, {}), "Policy")
+            nested = parent.get(key)
+            if not isinstance(nested, dict):
+                return False
+            parent = nested
         remaining = list(ad.array(parent.get(path[-1], []), "Exceptions"))
         for index, entry in enumerate(entries):
             if remaining and remaining[0] == entry:
@@ -148,11 +151,14 @@ def mature_artifacts(
     if not identities:
         return True
     provider, package = next(iter(identities))[:2]
-    releases = (
-        lock_adapters.evidence(root, provider, package, identities)
-        if provider in {"go", "swift", "maven"}
-        else registry.releases(provider, package)
-    )
+    if provider in {"go", "swift", "maven"}:
+        releases = lock_adapters.evidence(root, provider, package, identities)
+    elif provider == "npm":
+        releases = registry.releases(
+            provider, package, include_prerelease=True, include_deprecated=True
+        )
+    else:
+        releases = registry.releases(provider, package)
     cutoff = now - timedelta(days=registry.minimum_age(policy))
     safe = registry.minimum_safe(provider, policy, package)
     mature = True
