@@ -240,7 +240,8 @@ with a newer timestamp can require a frozen reinstall. Do not disable that check
 Include every workspace manifest and patch file in the group's inputs.
 
 Ordinary commands ask once before repairing their required setup groups, using the
-controlling terminal independently of stdin (including in container mode). Decline,
+controlling terminal independently of piped stdin. Interactive containers use their
+own terminal; piped commands use a host-side consent relay. Decline,
 EOF, or no terminal aborts with the exact recovery command. Explicit `just setup`
 does not prompt. For CI, run setup first or explicitly opt into automatic repair:
 

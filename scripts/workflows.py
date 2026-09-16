@@ -317,9 +317,14 @@ def stamp_path(root: Path, key: str) -> Path:
 
 
 def current(
-    root: Path, key: str, spec: Mapping[str, object], env: dict[str, str]
+    root: Path,
+    key: str,
+    spec: Mapping[str, object],
+    env: dict[str, str],
+    *,
+    pass_fds: tuple[int, ...] = (),
 ) -> bool:
-    return setup_detail(root, key, spec, env)["current"]
+    return setup_detail(root, key, spec, env, pass_fds=pass_fds)["current"]
 
 
 def artifact_ready(root: Path, item: object, env: dict[str, str]) -> bool:
@@ -367,7 +372,8 @@ def setup_use(
             ) from None
         with timing.span("setup_validation", env):
             details = {
-                key: setup_detail(root, key, spec, env) for key, spec in specs.items()
+                key: setup_detail(root, key, spec, env, pass_fds=(lease.fileno(),))
+                for key, spec in specs.items()
             }
             repairs = {
                 key: detail.get("diagnostic", detail["reason"])
@@ -385,7 +391,7 @@ def setup_use(
                     "Setup is stale while another task uses installed artifacts; finish that task before reinstalling"
                 ) from None
             for key, spec in specs.items():
-                if current(root, key, spec, env):
+                if current(root, key, spec, env, pass_fds=(lease.fileno(),)):
                     continue
                 expected = fingerprint(root, spec, env)
                 # An interrupted repair must not leave an earlier success stamp.
@@ -408,7 +414,9 @@ def setup_use(
                     raise ValueError(
                         f"Setup group {key} did not create its declared artifacts"
                     )
-                diagnostic = setup_readiness.check(root, spec, env)
+                diagnostic = setup_readiness.check(
+                    root, spec, env, pass_fds=(lease.fileno(),)
+                )
                 if diagnostic:
                     raise ValueError(
                         f"Setup group {key} failed validation after installation: {diagnostic}"
@@ -436,13 +444,13 @@ def setup_use(
 
 
 @contextmanager
-def inspection_lock(root: Path, name: str) -> Iterator[None]:
+def inspection_lock(root: Path, name: str) -> Iterator[tuple[int, ...]]:
     """Borrow an existing lock without creating or touching project state."""
     path = tc.contained(root, f".cache/toolchain/{name}")
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        yield
+        yield ()
         return
     with os.fdopen(descriptor, "rb") as lease:
         if not stat.S_ISREG(os.fstat(lease.fileno()).st_mode):
@@ -453,11 +461,16 @@ def inspection_lock(root: Path, name: str) -> Iterator[None]:
             raise ValueError(
                 "Setup state is changing; retry after the active operation finishes"
             ) from None
-        yield
+        yield (lease.fileno(),)
 
 
 def setup_detail(
-    root: Path, key: str, spec: Mapping[str, object], env: dict[str, str]
+    root: Path,
+    key: str,
+    spec: Mapping[str, object],
+    env: dict[str, str],
+    *,
+    pass_fds: tuple[int, ...] = (),
 ) -> SetupDetail:
     try:
         recorded = json.loads(stamp_path(root, key).read_text())
@@ -478,7 +491,7 @@ def setup_detail(
         elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
             reason = "artifact-content-changed"
         else:
-            diagnostic = setup_readiness.check(root, spec, env)
+            diagnostic = setup_readiness.check(root, spec, env, pass_fds=pass_fds)
             if diagnostic:
                 return {
                     "current": False,
@@ -501,13 +514,17 @@ def setup_detail(
 def setup_status(root: Path, requested: list[str]) -> int:
     """Validate readiness without installing or recording Chainman success stamps."""
     cfg = configuration(root)
-    with inspection_lock(root, "writer.lock"), inspection_lock(root, "setup-use.lock"):
+    with (
+        inspection_lock(root, "writer.lock") as writer_fds,
+        inspection_lock(root, "setup-use.lock") as setup_fds,
+    ):
         env = tc.environment(root, create=False)
         specs = group_specs(
             root, cfg, requested or list(declarations(cfg, "setup")), env
         )
         details = {
-            key: setup_detail(root, key, spec, env) for key, spec in specs.items()
+            key: setup_detail(root, key, spec, env, pass_fds=(*writer_fds, *setup_fds))
+            for key, spec in specs.items()
         }
         result = {key: value["current"] for key, value in details.items()}
         print(

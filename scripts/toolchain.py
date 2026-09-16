@@ -812,6 +812,9 @@ def host_mode() -> bool:
 
 def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
     env = dict(os.environ)
+    # Checking/running dependencies must not install them, including bare host.
+    # This guard does not select a package store or provision caller tools.
+    pnpm_environment(env, {"PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "error"})
     if host_mode():
         env.update(
             CHAINMAN_ROOT=str(root.resolve()),

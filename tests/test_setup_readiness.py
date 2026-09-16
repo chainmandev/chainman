@@ -1,6 +1,10 @@
 """Real setup probes reject stale installs before task admission."""
 
 import io
+import fcntl
+import signal
+import subprocess
+import time
 import json
 import os
 from pathlib import Path
@@ -165,6 +169,77 @@ class SetupReadinessTests(unittest.TestCase):
                 spec, toolchain.environment(self.root), self.root, explicit=True
             )
         self.assertFalse((self.root / ".cache/toolchain/setup/fixture.json").exists())
+
+    def test_host_tools_keep_pnpm_validation_without_managing_caches(self):
+        with patch.dict(
+            os.environ, {"CHAINMAN_MODE": "host", "PATH": "/caller/tools"}, clear=True
+        ):
+            env = toolchain.environment(self.root)
+        for name in toolchain.PNPM_SETTING_VARIABLES[2]:
+            self.assertEqual(env[name], "error")
+        self.assertEqual(env["PATH"], "/caller/tools")
+        self.assertNotIn("PNPM_CONFIG_STORE_DIR", env)
+        self.assertNotIn("CARGO_HOME", env)
+
+    def test_probe_retains_setup_lease_after_inspecting_parent_dies(self):
+        self.assertEqual(self.run_cli("setup").returncode, 0)
+        for action in (["setup-status"], ["run", "build"]):
+            with self.subTest(action=action):
+                ready = self.root / "probe-pid"
+                release = self.root / "release-probe"
+                ready.unlink(missing_ok=True)
+                release.unlink(missing_ok=True)
+                (self.root / "check.py").write_text(
+                    "from pathlib import Path; import os,time\n"
+                    "Path('probe-pid').write_text(str(os.getpid()))\n"
+                    "while not Path('release-probe').exists(): time.sleep(.01)\n"
+                )
+                parent = subprocess.Popen(
+                    [
+                        sys.executable,
+                        str(Path(toolchain.__file__).with_name("chainman.py")),
+                        "--root",
+                        str(self.root),
+                        *action,
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                try:
+                    deadline = time.monotonic() + 5
+                    while (
+                        not ready.exists()
+                        and parent.poll() is None
+                        and time.monotonic() < deadline
+                    ):
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    parent.kill()
+                    parent.wait(timeout=3)
+                    with (self.root / ".cache/toolchain/setup-use.lock").open() as lock:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        release.touch()
+                        while time.monotonic() < deadline:
+                            try:
+                                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                break
+                            except BlockingIOError:
+                                time.sleep(0.01)
+                        else:
+                            self.fail(
+                                "Probe did not release setup lease after completion"
+                            )
+                finally:
+                    release.touch()
+                    if parent.poll() is None:
+                        parent.kill()
+                    parent.wait(timeout=3)
+                    if ready.exists():
+                        try:
+                            os.killpg(int(ready.read_text()), signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
 
     def test_prompt_answers_and_noninteractive_recovery(self):
         class Terminal(io.StringIO):

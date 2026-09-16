@@ -6,6 +6,12 @@ shift
 if [ "${CHAINMAN_SETUP:-prompt}" != prompt ] || ! (: < /dev/tty) 2> /dev/null; then
     exec "$engine" run "$@"
 fi
+# Docker/Podman owns stdin in TTY mode. Let the verified runtime use the
+# container's controlling terminal; a second host reader would steal replies.
+# Piped input (including Git pre-push) still uses the host relay below.
+if [ -t 0 ] && [ -t 1 ]; then
+    exec "$engine" run "$@"
+fi
 umask 077
 channel=$(mktemp -d "${TMPDIR:-/tmp}/chainman-setup-prompt.XXXXXXXX")
 mkfifo "$channel/request" "$channel/response"

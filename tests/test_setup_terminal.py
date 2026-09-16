@@ -104,5 +104,56 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
     def test_container_decline(self):
         self.run_prompt("container", b"n\n")
 
+    def test_interactive_container_owns_terminal_input(self):
+        with tempfile.TemporaryDirectory(prefix="setup interactive tty ") as directory:
+            root = Path(directory)
+            engine = root / "engine"
+            engine.write_text(f"""#!{sys.executable}
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(ROOT / "scripts")!r})
+import setup_readiness
+# An attached engine owns the terminal. The relay must not add a second reader.
+assert not any(arg.startswith('type=bind,src=') for arg in sys.argv)
+setup_readiness.authorize({{'javascript':'stale'}}, {{}})
+Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.readline())
+""")
+            engine.chmod(0o755)
+            master, slave = pty.openpty()
+
+            def terminal():
+                os.setsid()
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+            child = subprocess.Popen(
+                ["sh", str(ROOT / "bootstrap/setup-prompt.sh"), str(engine)],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                preexec_fn=terminal,
+                env=dict(os.environ, CHAINMAN_SETUP="prompt"),
+            )
+            os.close(slave)
+            try:
+                output = b""
+                deadline = time.monotonic() + 5
+                while b"[Y/n]" not in output and time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.1)[0]:
+                        try:
+                            output += os.read(master, 4096)
+                        except OSError:
+                            break
+                self.assertIn(b"[Y/n]", output)
+                os.write(master, b"y\nliteral terminal input\n")
+                self.assertEqual(child.wait(timeout=3), 0)
+                self.assertEqual(
+                    (root / "input").read_bytes(), b"literal terminal input\n"
+                )
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=3)
+                os.close(master)
+
     def test_container_interruption(self):
         self.run_prompt("container", None)

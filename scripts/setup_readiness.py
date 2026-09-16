@@ -26,7 +26,13 @@ def declaration(value: object) -> Table:
     return probe
 
 
-def check(root: Path, spec: Mapping[str, object], env: Mapping[str, str]) -> str | None:
+def check(
+    root: Path,
+    spec: Mapping[str, object],
+    env: Mapping[str, str],
+    *,
+    pass_fds: tuple[int, ...] = (),
+) -> str | None:
     if "readiness" not in spec:
         return None
     probe = declaration(spec["readiness"])
@@ -44,6 +50,7 @@ def check(root: Path, spec: Mapping[str, object], env: Mapping[str, str]) -> str
             env=dict(env, CHAINMAN_SETUP="error"),
             cwd=root / text(spec["directory"], "Setup directory"),
             stdin=subprocess.DEVNULL,
+            pass_fds=pass_fds,
             capture_output=True,
             text=True,
             check=False,
