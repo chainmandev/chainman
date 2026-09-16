@@ -18,7 +18,7 @@ def declaration(value: object) -> Table:
     if set(probe) - {"command", "timeout_seconds"}:
         raise ValueError("Unknown setup readiness field")
     argv = strings(probe.get("command"), "Setup readiness command")
-    if not argv or any("\0" in arg for arg in argv):
+    if not argv or not argv[0] or any("\0" in arg for arg in argv):
         raise ValueError("Setup readiness requires a nonempty argument-array command")
     timeout = probe.get("timeout_seconds", 30)
     if type(timeout) is not int or not 1 <= timeout <= 300:

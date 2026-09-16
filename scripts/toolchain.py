@@ -1245,6 +1245,52 @@ def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
     return candidate.is_file() and candidate.resolve() == expected.resolve()
 
 
+def setup_reason(
+    spec: Mapping[str, object], env: dict[str, str], root: Path = ROOT
+) -> str | None:
+    if not spec.get("cache_setup", True):
+        return "uncached legacy setup"
+    stamp = contained(root, f".cache/toolchain/setup/{spec['name']}.json")
+    try:
+        recorded: object = json.loads(stamp.read_text())
+    except (FileNotFoundError, ValueError):
+        recorded = {}
+    if (
+        isinstance(recorded, dict)
+        and recorded.get("fingerprint") == fingerprint(spec, root)
+        and all(
+            artifact_ready(root, item, env)
+            for item in ad.array(spec.get("artifacts", []), "Module artifacts")
+        )
+    ):
+        return None
+    return "legacy setup inputs or artifacts changed"
+
+
+def setup_many(
+    specs: Sequence[Mapping[str, object]],
+    env: dict[str, str],
+    root: Path = ROOT,
+    *,
+    explicit: bool = False,
+) -> None:
+    import setup_readiness
+
+    setup_readiness.policy(env)
+    repairs = {
+        ad.text(spec["name"], "Module name"): reason
+        for spec in specs
+        if (reason := setup_reason(spec, env, root)) is not None
+    }
+    if repairs and not explicit:
+        setup_readiness.authorize(
+            repairs, env, recovery=["just", "chainman", "modules", "setup"]
+        )
+    # Admit the complete module operation before installing or running any task.
+    for spec in specs:
+        setup(spec, env, root, explicit=True)
+
+
 def setup(
     spec: Mapping[str, object],
     env: dict[str, str],
@@ -1255,42 +1301,22 @@ def setup(
     import setup_readiness
 
     setup_readiness.policy(env)
-    if not spec.get("cache_setup", True):
-        # An opaque project adapter owns its readiness checks until it explicitly
-        # declares fingerprint inputs; never cache an unknown manifest surface.
-        if not explicit:
-            setup_readiness.authorize(
-                {ad.text(spec["name"], "Module name"): "uncached legacy setup"},
-                env,
-                recovery=["just", "chainman", "modules", "setup"],
-            )
-        run_commands(spec, "setup", env, root)
-        return
-    # A project-local installed environment can belong to only one active context.
-    # A stamp per context would falsely reuse files last installed by another mode.
-    stamp = contained(root, f".cache/toolchain/setup/{spec['name']}.json")
-    expected = fingerprint(spec, root)
-    artifacts = ad.array(spec.get("artifacts", []), "Module artifacts")
-    try:
-        recorded: object = json.loads(stamp.read_text())
-    except (FileNotFoundError, ValueError):
-        recorded = {}
-    if (
-        isinstance(recorded, dict)
-        and recorded.get("fingerprint") == expected
-        and all(artifact_ready(root, p, env) for p in artifacts)
-    ):
+    reason = setup_reason(spec, env, root)
+    if reason is None:
         return
     if not explicit:
         setup_readiness.authorize(
-            {
-                ad.text(
-                    spec["name"], "Module name"
-                ): "legacy setup inputs or artifacts changed"
-            },
+            {ad.text(spec["name"], "Module name"): reason},
             env,
             recovery=["just", "chainman", "modules", "setup"],
         )
+    if not spec.get("cache_setup", True):
+        # Opaque legacy adapters do not receive a fingerprint-based stamp.
+        run_commands(spec, "setup", env, root)
+        return
+    stamp = contained(root, f".cache/toolchain/setup/{spec['name']}.json")
+    expected = fingerprint(spec, root)
+    artifacts = ad.array(spec.get("artifacts", []), "Module artifacts")
     stamp.unlink(missing_ok=True)
     run_commands(spec, "setup", env, root)
     if not all(artifact_ready(root, p, env) for p in artifacts):
@@ -1491,11 +1517,11 @@ def main() -> int:
                 action = args.arguments[1] if len(args.arguments) == 2 else "verify"
                 if action not in ("setup", "build", "test", "verify", "format"):
                     raise ValueError("unsupported module action")
-            for name in selected:
-                spec = module(name)
-                if action != "format":
-                    setup(spec, env, explicit=action == "setup")
-                if action != "setup":
+            specs = [module(name) for name in selected]
+            if action != "format":
+                setup_many(specs, env, explicit=action == "setup")
+            if action != "setup":
+                for spec in specs:
                     run_commands(spec, action, env)
         return 0
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:

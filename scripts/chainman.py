@@ -399,11 +399,11 @@ def run_project(root: Path, action: str, extra: list[str]) -> int | None:
             return None
         if extra:
             raise ValueError("Module actions do not accept extra arguments")
-        for name in strings(cfg["modules"], "Modules"):
-            spec = tc.module(name, root)
-            if action != "format":
-                tc.setup(spec, env, root, explicit=action == "setup")
-            if action != "setup":
+        specs = [tc.module(name, root) for name in strings(cfg["modules"], "Modules")]
+        if action != "format":
+            tc.setup_many(specs, env, root, explicit=action == "setup")
+        if action != "setup":
+            for spec in specs:
                 tc.run_commands(spec, action, env, root)
     return None
 
@@ -661,11 +661,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 is True,
             ):
                 env = tc.environment(root)
-                for module_name in selected:
-                    spec = tc.module(module_name, root)
-                    if action != "format":
-                        tc.setup(spec, env, root, explicit=action == "setup")
-                    if action != "setup":
+                specs = [tc.module(module_name, root) for module_name in selected]
+                if action != "format":
+                    tc.setup_many(specs, env, root, explicit=action == "setup")
+                if action != "setup":
+                    for spec in specs:
                         tc.run_commands(spec, action, env, root)
         elif args.action in {"clean", "cache-prune"}:
             if any(a != "--all" for a in rest):
