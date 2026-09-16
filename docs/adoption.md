@@ -24,7 +24,7 @@ independent environments, add profiles and assign tasks explicitly.
 
 Record the full Git pin and paste the complete bootstrap from the README. Review
 those additions before committing. A disposable checkout used to inspect Chainman
-or resolve a version has no ongoing relationship with your repository.
+or inspect a revision has no ongoing relationship with your repository.
 
 ## 2. Route one command
 
@@ -40,7 +40,7 @@ just chainman run check
 CHAINMAN_MODE=host-nix just chainman run check
 ```
 
-Container mode uses the project and declared mounts. Host mode runs on the host
+Container mode uses the project and declared mounts. Host-Nix mode runs on the host
 through Nix. Compare outputs and failure behavior with your existing workflow
 before routing more commands.
 
@@ -62,8 +62,10 @@ Review command-name collisions. A project can retain its public `check` name wit
 an optional forwarding recipe after its underlying operation is separate:
 
 ```just
-check:
-    @just chainman run check
+[positional-arguments]
+check *args:
+    #!/bin/sh
+    exec just chainman run check -- "$@"
 ```
 
 Do not configure the `check` task to call this same `just check` recipe: that would

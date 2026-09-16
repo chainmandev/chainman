@@ -3,6 +3,8 @@
 from pathlib import Path
 import re
 import sys
+import subprocess
+import tempfile
 import unittest
 from urllib.parse import unquote
 import tomllib
@@ -14,6 +16,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_adoption_forwarder_bypasses_global_shell_and_preserves_arguments(self):
+        guide = (ROOT / "docs/adoption.md").read_text()
+        forwarder = re.findall(r"```just\n(.*?)```", guide, re.S)[0]
+        with tempfile.TemporaryDirectory(prefix="chainman adoption ") as temporary:
+            root = Path(temporary)
+            (root / "justfile").write_text(
+                'set shell := ["sh", "-c", "exit 89"]\n'
+                + forwarder
+                + "\n[positional-arguments]\nchainman +args:\n"
+                '    #!/bin/sh\n    printf "%s\\0" "$@"\n'
+            )
+            result = subprocess.run(
+                ["just", "check", "space argument", "", "$(literal)"],
+                cwd=root,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(
+                result.stdout.split(b"\0")[:-1],
+                [b"run", b"check", b"--", b"space argument", b"", b"$(literal)"],
+            )
+
     def test_readme_contains_the_complete_current_bootstrap(self):
         readme = (ROOT / "README.md").read_text()
         blocks = re.findall(r"```just\n(.*?)```", readme, re.S)

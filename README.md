@@ -45,7 +45,9 @@ when SHA is omitted. Selection is frozen at the start; the selected revision's
 generator and templates produce the project. Ordinary launches use the resulting
 pin without checking for updates. No tag or GitHub release is needed.
 
-To reproduce an existing project's runtime, supply its full lowercase SHA explicitly:
+The following alternatives run from the directory containing `chainman-init`
+(return there first if you followed the quickstart's `cd my-project`). To reproduce
+an existing project's runtime, supply its full lowercase SHA explicitly:
 
 ```sh
 revision=$(cat /absolute/path/to/existing-project/chainman.lock)

@@ -5,7 +5,7 @@ justfile fetches and verifies that Git revision. Chainman is not installed globa
 any checkout used to generate this project can be deleted.
 
 Install **Git + just + Docker or Podman**. Container Nix is the default. Alternatively,
-install Nix 2.24 or newer and select host mode:
+install Nix 2.24 or newer and select host-Nix mode:
 
 ```sh
 export CHAINMAN_MODE=host-nix
