@@ -44,7 +44,7 @@ access. Container mode does not make untrusted code safe to execute.
 CHAINMAN_MODE=host-nix just chainman run check
 ```
 
-Host mode requires Nix 2.24 or newer and uses the selected host installation. An
+Host-Nix mode requires Nix 2.24 or newer and uses the selected host installation. An
 explicit `CHAINMAN_NIX_BIN` must be an absolute executable path. Chainman does not
 replace the host's Nix. The same project flake supplies its language tools.
 
