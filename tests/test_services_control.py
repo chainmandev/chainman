@@ -1152,6 +1152,73 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
         self.run_control("stop", check=0)
         self.assertFalse(self.alive(pid))
 
+    def assert_single_shutdown_signal(self, backend):
+        worker = self.root / "worker.py"
+        worker.write_text("""import os,signal,time
+from pathlib import Path
+count = 0
+def stop(*_):
+    global count
+    count += 1
+    Path('signals').write_text(str(count))
+    time.sleep(.75)
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+Path('pid').write_text(str(os.getpid()))
+Path('ready').touch()
+while True: time.sleep(.1)
+""")
+        self.plan["services"]["worker"]["shutdown_seconds"] = 3
+        self.run_control("up", check=0)
+        owner = json.loads((self.state / "worker.owner.json").read_text())["identity"][
+            "pid"
+        ]
+        if backend:
+            import hashlib
+
+            socket = (
+                Path("/tmp").resolve()
+                / f"chainman-control-{os.geteuid()}"
+                / (hashlib.sha256(str(self.state).encode()).hexdigest()[:24] + ".sock")
+            )
+            command = [
+                BACKEND,
+                "--use-uds",
+                "--unix-socket",
+                str(socket),
+                "process",
+                "stop",
+                "worker",
+            ]
+        else:
+            command = [CONTROL, "stop", str(self.state)]
+        # Pause the forwarding owner so a direct group signal cannot coalesce
+        # with the owner's later forward and conceal duplicate delivery.
+        os.kill(owner, signal.SIGSTOP)
+        stopper = None
+        try:
+            stopper = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+            time.sleep(0.25)
+            self.assertFalse(
+                (self.root / "signals").exists(),
+                "shutdown bypassed the forwarding owner",
+            )
+        finally:
+            os.kill(owner, signal.SIGCONT)
+            if stopper is not None:
+                stdout, stderr = stopper.communicate(timeout=15)
+                self.assertEqual(stopper.returncode, 0, stdout + stderr)
+        self.wait_until(lambda: not self.alive(self.pid()))
+        self.assertEqual((self.root / "signals").read_text(), "1")
+
+    def test_controller_sends_single_shutdown_signal(self):
+        self.assert_single_shutdown_signal(backend=False)
+
+    def test_backend_sends_single_shutdown_signal(self):
+        self.assert_single_shutdown_signal(backend=True)
+
     def test_stale_identity_does_not_signal_unrelated_process(self):
         self.run_control("up", check=0)
         self.run_control("stop", check=0)

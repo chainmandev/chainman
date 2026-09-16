@@ -438,7 +438,9 @@ func configuration(p Plan, self string) error {
 		if e != nil {
 			return e
 		}
-		d := map[string]any{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" exec \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation), "is_template_disabled": true, "availability": map[string]any{"restart": s.Restart}, "shutdown": map[string]any{"timeout_seconds": s.Shutdown + 2}}
+		// The owner forwards graceful signals; group delivery here would signal
+		// the application twice. Backend timeout escalation still kills the group.
+		d := map[string]any{"command": "exec \"$CHAINMAN_CONTROL_EXECUTABLE\" exec \"$CHAINMAN_CONTROL_STATE\" " + quote(n) + " " + quote(generation), "is_template_disabled": true, "availability": map[string]any{"restart": s.Restart}, "shutdown": map[string]any{"timeout_seconds": s.Shutdown + 2, "parent_only": true}}
 		deps := map[string]any{}
 		for _, name := range s.Dependencies {
 			condition := "process_started"
@@ -852,7 +854,8 @@ func stopReceipt(p Plan, n, receipt string, shutdown int) error {
 		return e
 	}
 	if o.Identity.alive() {
-		if e = syscall.Kill(-o.Identity.PID, syscall.SIGTERM); e != nil && e != syscall.ESRCH {
+		// The native owner forwards this signal to its application group once.
+		if e = syscall.Kill(o.Identity.PID, syscall.SIGTERM); e != nil && e != syscall.ESRCH {
 			return e
 		}
 		deadline := time.Now().Add(time.Duration(shutdown) * time.Second)

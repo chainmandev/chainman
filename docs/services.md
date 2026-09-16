@@ -61,6 +61,12 @@ uses `wait_for_services = true` to retain ownership until stop or interruption.
 Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
 
+Graceful stop sends one initial termination signal to the service, allowing its
+shutdown handler to close resources within `shutdown_seconds`. Remaining
+foreground descendants are terminated after that grace period. Services must
+clean up children that create independent sessions; keep their main supervisor
+in the foreground.
+
 Projects own database reset/migration semantics, application credentials, adapters,
 and specialized cleanup. A shared lifecycle manager cannot decide whether a
 database is safe to reset. Declare narrow mounts and forwarded environment names;
