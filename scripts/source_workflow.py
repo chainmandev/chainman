@@ -28,7 +28,9 @@ def format_source(root: Path, *, check: bool = False, staged: bool = False) -> N
         tc.managed_run(
             [*tc.entry_command(root, "core"), *argv],
             cwd=root,
-            env=dict(tc.environment(root), CHAINMAN_UPDATE_ACTIVE="1"),
+            env=dict(
+                tc.environment(root), CHAINMAN_UPDATE_ACTIVE="1", CHAINMAN_SETUP="auto"
+            ),
             check=True,
         )
 

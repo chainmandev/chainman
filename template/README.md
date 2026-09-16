@@ -42,3 +42,7 @@ freeze it through verification and resume. Ordinary launches stay pinned. The
 Read the [adoption guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/adoption.md),
 [configuration reference](https://github.com/chainmandev/chainman/blob/HEAD/docs/configuration.md),
 and [update and recovery guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/updates.md).
+
+`just chainman setup` validates every declared setup group and repairs stale
+installations. Ordinary commands prompt before required repairs; unattended
+automatic repair requires `CHAINMAN_SETUP=auto`.

@@ -56,7 +56,14 @@ just chainman services-status
 just chainman services-stop
 ```
 
-A stale setup check should name the changed inputs or missing readiness artifact.
+A stale setup check names changed inputs, missing artifacts, or a failed readiness
+command. Run `just setup` to validate and repair the entire project, or
+`just chainman setup GROUP` for the reported group. A pnpm “Patches were modified”
+error can result from timestamps even when patch contents match the lockfile;
+setup must refresh pnpm validation before continuing. Do not bypass the check.
+Ordinary commands prompt on the controlling terminal before repair. Without a
+terminal they fail with guidance; CI can run setup explicitly or opt into
+`CHAINMAN_SETUP=auto`.
 Check ownership before deleting installation directories. Service recovery uses
 saved ownership state; status and stop remain available even when current service
 configuration is broken. Destructive data reset requires its explicit reset option.

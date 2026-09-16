@@ -20,6 +20,13 @@ import update_staging
 
 
 class RecipeTests(unittest.TestCase):
+    def test_explicit_setup_validates_all_groups_before_project_tasks(self):
+        cfg = {
+            "tasks": {"hooks": {"commands": [["true"]]}},
+            "recipes": {"setup": ["hooks"]},
+        }
+        self.assertEqual(recipes.actions(cfg)["setup"], [["setup"], ["run", "hooks"]])
+
     def test_public_sdk_recipe_routes_each_platform_without_nested_shell_parsing(self):
         with tempfile.TemporaryDirectory(prefix="chainman SDK recipe ") as temporary:
             root = Path(temporary).resolve()

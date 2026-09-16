@@ -25,7 +25,7 @@ FIELDS = {
         "commands profile directory depends_on setup services cleanup_children timeout_seconds timeout_env shutdown_seconds wait_for_services environment context_environment transport exclusive exclusive_services serial_group network_service".split()
     ),
     "setup": set(
-        "commands profile directory depends_on inputs exclude_inputs environment_inputs artifacts".split()
+        "commands profile directory depends_on inputs exclude_inputs environment_inputs artifacts readiness".split()
     ),
     "services": set(
         "command profile directory environment depends_on readiness restart shutdown_seconds container setup watch scope transport network_service".split()

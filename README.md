@@ -218,3 +218,8 @@ Start with the [documentation index](docs/README.md):
 - [Execution modes, caches, and native tools](docs/runtime.md)
 - [Troubleshooting](docs/troubleshooting.md) and [release trust](docs/release-trust.md)
 - [Contributing and qualification](docs/contributing.md)
+
+Setup validates every declared installation, including package-manager readiness
+checks, before reporting success. Ordinary commands prompt before required repairs;
+CI should run setup explicitly or opt into `CHAINMAN_SETUP=auto`. See
+[setup and readiness](docs/configuration.md#named-setup-groups-and-tasks).

@@ -208,7 +208,7 @@ update_dispatch() {
     fi
     update_candidate "$update_resolver" _update-tasks "$@" > "$update_output/control/tasks"
     while IFS= read -r update_task; do
-        CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_resolver" run "$update_task" < /dev/null >&2
+        CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_resolver" run "$update_task" < /dev/null >&2
     done < "$update_output/control/tasks"
     if [ "$update_resume" = 1 ] || [ -s "$update_output/control/tasks" ]; then
         update_candidate "$update_resolver" _update-reaudit "$update_at" "$@" >&2
@@ -218,7 +218,7 @@ update_dispatch() {
     IFS= read -r update_changed < "$update_output/control/changed"
     if [ "$update_changed" = yes ]; then
         while IFS= read -r update_action && IFS= read -r update_task; do
-            CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
+            CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
                 "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2
         done < "$update_output/control/verify"
     fi
@@ -878,7 +878,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --workdir "$root" \
     --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
-    --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
+    --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
     --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
@@ -888,5 +888,5 @@ store = daemon' --env NIX_REMOTE=daemon \
 if [ -t 0 ] && [ -t 1 ]; then set -- --tty "$@"; fi
 rm -rf -- "$temporary"
 trap - EXIT HUP INT TERM
-if [ "$engine" = podman ]; then exec "$engine" run --userns=keep-id "$@"; fi
-exec "$engine" run "$@"
+if [ "$engine" = podman ]; then set -- --userns=keep-id "$@"; fi
+exec sh "$script_dir/setup-prompt.sh" "$engine" "$@"

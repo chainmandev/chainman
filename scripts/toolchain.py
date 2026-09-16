@@ -1245,10 +1245,25 @@ def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
     return candidate.is_file() and candidate.resolve() == expected.resolve()
 
 
-def setup(spec: Mapping[str, object], env: dict[str, str], root: Path = ROOT) -> None:
+def setup(
+    spec: Mapping[str, object],
+    env: dict[str, str],
+    root: Path = ROOT,
+    *,
+    explicit: bool = False,
+) -> None:
+    import setup_readiness
+
+    setup_readiness.policy(env)
     if not spec.get("cache_setup", True):
         # An opaque project adapter owns its readiness checks until it explicitly
         # declares fingerprint inputs; never cache an unknown manifest surface.
+        if not explicit:
+            setup_readiness.authorize(
+                {ad.text(spec["name"], "Module name"): "uncached legacy setup"},
+                env,
+                recovery=["just", "chainman", "modules", "setup"],
+            )
         run_commands(spec, "setup", env, root)
         return
     # A project-local installed environment can belong to only one active context.
@@ -1266,6 +1281,17 @@ def setup(spec: Mapping[str, object], env: dict[str, str], root: Path = ROOT) ->
         and all(artifact_ready(root, p, env) for p in artifacts)
     ):
         return
+    if not explicit:
+        setup_readiness.authorize(
+            {
+                ad.text(
+                    spec["name"], "Module name"
+                ): "legacy setup inputs or artifacts changed"
+            },
+            env,
+            recovery=["just", "chainman", "modules", "setup"],
+        )
+    stamp.unlink(missing_ok=True)
     run_commands(spec, "setup", env, root)
     if not all(artifact_ready(root, p, env) for p in artifacts):
         raise ValueError(f"{spec['name']} setup did not create its declared artifacts")
@@ -1464,7 +1490,7 @@ def main() -> int:
             for name in selected:
                 spec = module(name)
                 if action != "format":
-                    setup(spec, env)
+                    setup(spec, env, explicit=action == "setup")
                 if action != "setup":
                     run_commands(spec, action, env)
         return 0

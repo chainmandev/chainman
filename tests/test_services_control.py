@@ -30,6 +30,9 @@ WATCHER = os.environ.get("CHAINMAN_TEST_WATCHEXEC")
 )
 class ServiceControlTests(unittest.TestCase):
     def setUp(self):
+        setup_policy = patch.dict(os.environ, {"CHAINMAN_SETUP": "auto"})
+        setup_policy.start()
+        self.addCleanup(setup_policy.stop)
         temporary = tempfile.TemporaryDirectory(prefix="chainman service ")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()

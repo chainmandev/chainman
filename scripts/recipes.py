@@ -80,10 +80,10 @@ def actions(cfg: Mapping[str, object]) -> dict[str, list[list[str]]]:
     actions = {name: [argv] for name, argv in BUILTINS.items()}
     for name in BINDINGS - {"format-hygiene"}:
         tasks = verification(cfg) if name == "verify" else declared.get(name, [])
-        if tasks:
+        if name == "setup":
+            actions[name] = [["setup"], *[["run", task] for task in tasks]]
+        elif tasks:
             actions[name] = [["run", task] for task in tasks]
-        elif name == "setup":
-            actions[name] = [["setup"]]
         elif name == "format-staged":
             continue
         elif name in {

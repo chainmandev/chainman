@@ -181,6 +181,7 @@ class BootstrapTests(unittest.TestCase):
         }
         self.env.update(
             CHAINMAN_MODE="host-nix",
+            CHAINMAN_SETUP="auto",
             CHAINMAN_NIX_BIN=NIX,
             XDG_CACHE_HOME=str(Path(self.shared.name).resolve() / "cache"),
             CHAINMAN_NIX_VOLUME=self.test_volume,
@@ -789,6 +790,52 @@ format-check=["format-check"]
             {"schema": 1, "configuration_schema": 3, "valid": True},
         )
         self.assertEqual(self.run_bootstrap("run", "probe").stdout, "composed-command")
+
+    def setup_readiness_smoke(self, *, container=False):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[setup.fixture]
+inputs=["input.txt"]
+artifacts=["ready"]
+commands=[["sh","-c","cp input.txt ready"]]
+readiness={command=["sh","-c","cmp input.txt ready"],timeout_seconds=5}
+[tasks.check]
+setup=["fixture"]
+commands=[["cat","ready"]]
+""")
+        (self.root / "input.txt").write_text("ready\n")
+        env = dict(self.env, CHAINMAN_SETUP="error")
+        if container:
+            env.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+                CHAINMAN_NIX_VOLUME=os.environ.get(
+                    "CHAINMAN_TEST_WARM_VOLUME", self.test_volume
+                ),
+            )
+        denied = self.run_bootstrap("run", "check", env=env, check=False)
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("just chainman setup fixture", denied.stderr)
+        self.assertFalse((self.root / "ready").exists())
+        self.run_bootstrap("setup", env=env)
+        self.assertEqual(self.run_bootstrap("run", "check", env=env).stdout, "ready\n")
+        (self.root / "ready").write_text("damaged\n")
+        self.assertNotEqual(
+            self.run_bootstrap("setup-status", env=env, check=False).returncode, 0
+        )
+        self.run_bootstrap("setup", env=env)
+        self.assertEqual(self.run_bootstrap("run", "check", env=env).stdout, "ready\n")
+
+    def test_host_setup_readiness_smoke(self):
+        self.setup_readiness_smoke()
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_setup_readiness_smoke(self):
+        self.setup_readiness_smoke(container=True)
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),

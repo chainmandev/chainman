@@ -54,7 +54,7 @@ context; any failed query fails the whole response. Batches contain 1–128 entr
 cannot nest, and retain the existing 4 MiB input bound and per-query network bounds.
 `run NAME` invokes a declared task (or a legacy schema-1 command). `command_profiles.NAME` overrides the project
 default for that command. `setup` uses manifest/toolchain fingerprints and declared
-artifacts. A profile selects a project-relative `path#shell` (also `flake.nix#shell`)
+artifacts and optional readiness commands. A profile selects a project-relative `path#shell` (also `flake.nix#shell`)
 or a built-in `runtime_profile`. Built-ins are core, javascript, rust, python, go,
 flutter, swift, compose and browser. Without a named project override, default maps
 to core. The special `host` profile runs directly in the already bootstrapped core
@@ -185,6 +185,8 @@ Execution controls are `CHAINMAN_MODE` (`container-nix` by default, `host-nix`,
 or the discouraged caller-maintained `host` mode), `CHAINMAN_CONTAINER_ENGINE`
 (`docker` or `podman`), and `CHAINMAN_NIX_BIN` (an explicit absolute executable
 for host Nix). See [execution modes](runtime.md) for capabilities and prerequisites.
+`CHAINMAN_SETUP=prompt|auto|error` controls repair before ordinary commands;
+`prompt` is the default. Explicit setup always authorizes installation.
 Runtime routing variables such as `CHAINMAN_PROJECT_ROOT` are internal; the
 consumer recipe selects its project. Paths with spaces and invocation from another working
 directory are supported. Newlines and ambiguous container comma-paths are rejected.
@@ -201,9 +203,10 @@ default_profile = "default"
 [profiles.default]
 flake = "nix#default"
 [setup.javascript]
-inputs = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]
+inputs = ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches/**"]
 artifacts = ["node_modules/.pnpm/lock.yaml"]
 commands = [["pnpm", "install", "--frozen-lockfile", "--config.confirmModulesPurge=false"]]
+readiness = { command = ["pnpm", "exec", "node", "-e", ""], timeout_seconds = 30 }
 [tasks.build]
 setup = ["javascript"]
 commands = [["pnpm", "run", "build"]]
@@ -215,9 +218,43 @@ commands = [["pnpm", "test"]]
 
 `run test` executes dependency tasks once, then the requested task. Extra arguments
 are appended literally to the final command of the requested task. `setup javascript`
-ensures one group; `setup` ensures all declared groups. Setup groups also support
+ensures one group and its dependencies; `setup` validates all declared groups,
+repairs missing or stale installations, and verifies readiness after repair.
+The standard `just setup` recipe does this before project setup tasks. Setup groups also support
 `depends_on` and `profile`. Task and setup dependency cycles or unknown references
 fail before execution. Tasks request setup explicitly; inspection tasks can omit it.
+
+
+Readiness commands run in the group's profile and working directory, with no stdin.
+They must not install dependencies or edit tracked files. A check may refresh its
+package manager's validation metadata. `setup-status` uses the same checks but
+never installs or records a Chainman success stamp. The default timeout is 30
+seconds after entering the profile; `timeout_seconds` accepts integers from 1
+through 300. Initial Nix profile provisioning can take additional time. Failure diagnostics
+name the group and include bounded command output. A failed post-install check
+invalidates the old stamp and prevents tasks or services from starting.
+
+The pnpm check above asks pnpm itself to validate the installation before an empty
+Node command. Chainman keeps `verifyDepsBeforeRun=error`: unchanged patch bytes
+with a newer timestamp can require a frozen reinstall. Do not disable that check.
+Include every workspace manifest and patch file in the group's inputs.
+
+Ordinary commands ask once before repairing their required setup groups, using the
+controlling terminal independently of stdin (including in container mode). Decline,
+EOF, or no terminal aborts with the exact recovery command. Explicit `just setup`
+does not prompt. For CI, run setup first or explicitly opt into automatic repair:
+
+```sh
+just setup
+just verify
+# Alternatively, authorize setup for this unattended operation:
+CHAINMAN_SETUP=auto just verify
+```
+
+`CHAINMAN_SETUP=error` always refuses implicit repair. Already-ready commands do not
+prompt. Verified update and formatting transactions authorize setup in their
+isolated candidates. Installation retains exclusive artifact ownership; consent
+does not override another task's lease.
 
 A task can declare `context_environment = { APP_WORKERS = "false" }` for values
 shared by its setup groups, dependency tasks, services, readiness probes, and watch

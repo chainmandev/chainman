@@ -46,6 +46,7 @@ jobs:
       run:
         working-directory: ${{ github.workspace }}/checkout with spaces
     env:
+      CHAINMAN_SETUP: auto
       TOOLCHAIN_MODE: ${{ matrix.mode }}
       TOOLCHAIN_CONTAINER_ENGINE: ${{ matrix.engine }}
       MODULE: ${{ matrix.module }}

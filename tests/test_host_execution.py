@@ -38,6 +38,7 @@ class HostExecutionTests(unittest.TestCase):
             (self.binaries / executable).symlink_to(path)
         self.env.update(
             CHAINMAN_MODE="host",
+            CHAINMAN_SETUP="auto",
             RUSTC_WRAPPER="caller-wrapper",
             CARGO_HOME="caller-cargo",
         )

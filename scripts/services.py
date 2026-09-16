@@ -1061,6 +1061,7 @@ def prepare_setup(
             "setup",
             list(dict.fromkeys(groups)),
             context_task=context_task or name,
+            setup_authorized=False,
         )
         if groups
         else 0

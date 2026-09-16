@@ -402,7 +402,7 @@ def run_project(root: Path, action: str, extra: list[str]) -> int | None:
         for name in strings(cfg["modules"], "Modules"):
             spec = tc.module(name, root)
             if action != "format":
-                tc.setup(spec, env, root)
+                tc.setup(spec, env, root, explicit=action == "setup")
             if action != "setup":
                 tc.run_commands(spec, action, env, root)
     return None
@@ -664,7 +664,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for module_name in selected:
                     spec = tc.module(module_name, root)
                     if action != "format":
-                        tc.setup(spec, env, root)
+                        tc.setup(spec, env, root, explicit=action == "setup")
                     if action != "setup":
                         tc.run_commands(spec, action, env, root)
         elif args.action in {"clean", "cache-prune"}:

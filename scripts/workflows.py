@@ -19,6 +19,7 @@ import chainman
 import toolchain as tc
 import project_environment
 import timing
+import setup_readiness
 from adapter_data import Table, array, string_map, strings, table, text
 
 
@@ -26,6 +27,7 @@ class SetupDetail(TypedDict):
     current: bool
     reason: str
     recovery: NotRequired[list[str]]
+    diagnostic: NotRequired[str]
 
 
 def declarations(cfg: Mapping[str, object], section: str) -> dict[str, Table]:
@@ -138,6 +140,8 @@ def configuration(root: Path) -> Table:
                 text(spec.get("profile", default_profile(cfg)), "Workflow profile")
             )
             if section == "setup":
+                if "readiness" in spec:
+                    setup_readiness.declaration(spec["readiness"])
                 environment_inputs = spec.get("environment_inputs", [])
                 if not isinstance(environment_inputs, list):
                     raise ValueError("Setup environment inputs must be variable names")
@@ -339,8 +343,14 @@ def artifact_digests(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
 
 @contextmanager
 def setup_use(
-    root: Path, cfg: Mapping[str, object], requested: Iterable[str], env: dict[str, str]
+    root: Path,
+    cfg: Mapping[str, object],
+    requested: Iterable[str],
+    env: dict[str, str],
+    *,
+    explicit: bool = False,
 ) -> Iterator[tuple[int, ...]]:
+    setup_readiness.policy(env)
     with timing.span("setup_validation", env):
         specs = group_specs(root, cfg, requested, env)
     if not specs:
@@ -356,10 +366,17 @@ def setup_use(
                 "Another setup operation is installing project artifacts"
             ) from None
         with timing.span("setup_validation", env):
-            stale = any(
-                not current(root, key, spec, env) for key, spec in specs.items()
-            )
-        if stale:
+            details = {
+                key: setup_detail(root, key, spec, env) for key, spec in specs.items()
+            }
+            repairs = {
+                key: detail.get("diagnostic", detail["reason"])
+                for key, detail in details.items()
+                if not detail["current"]
+            }
+        if repairs:
+            if not explicit:
+                setup_readiness.authorize(repairs, env)
             fcntl.flock(lease, fcntl.LOCK_UN)
             try:
                 fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -371,6 +388,8 @@ def setup_use(
                 if current(root, key, spec, env):
                     continue
                 expected = fingerprint(root, spec, env)
+                # An interrupted repair must not leave an earlier success stamp.
+                stamp_path(root, key).unlink(missing_ok=True)
                 for argv in commands(spec["commands"]):
                     chainman.execute(
                         root,
@@ -388,6 +407,11 @@ def setup_use(
                 ):
                     raise ValueError(
                         f"Setup group {key} did not create its declared artifacts"
+                    )
+                diagnostic = setup_readiness.check(root, spec, env)
+                if diagnostic:
+                    raise ValueError(
+                        f"Setup group {key} failed validation after installation: {diagnostic}"
                     )
                 if fingerprint(root, spec, env) != expected:
                     raise ValueError(
@@ -447,12 +471,28 @@ def setup_detail(
         elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
             reason = "artifact-content-changed"
         else:
-            return {"current": True, "reason": "current"}
+            diagnostic = setup_readiness.check(root, spec, env)
+            if diagnostic:
+                return {
+                    "current": False,
+                    "reason": "readiness-failed",
+                    "diagnostic": diagnostic,
+                    "recovery": ["setup", key],
+                }
+            if recorded.get("fingerprint") != fingerprint(root, spec, env):
+                reason = "inputs-changed-during-readiness"
+            elif not all(
+                artifact_ready(root, item, env)
+                for item in array(spec["artifacts"], "Setup artifacts")
+            ) or recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
+                reason = "artifacts-changed-during-readiness"
+            else:
+                return {"current": True, "reason": "current"}
     return {"current": False, "reason": reason, "recovery": ["setup", key]}
 
 
 def setup_status(root: Path, requested: list[str]) -> int:
-    """Inspect readiness without creating caches, installing or blessing outputs."""
+    """Validate readiness without installing or recording Chainman success stamps."""
     cfg = configuration(root)
     with inspection_lock(root, "writer.lock"), inspection_lock(root, "setup-use.lock"):
         env = tc.environment(root, create=False)
@@ -537,6 +577,7 @@ def run(
     *,
     service_context: bool = False,
     context_task: str | None = None,
+    setup_authorized: bool = True,
 ) -> int:
     cfg = configuration(root)
     tasks = declarations(cfg, "tasks")
@@ -569,7 +610,13 @@ def run(
         if action != "setup":
             env = context_environment(root, cfg, action, env)
         if action == "setup":
-            with setup_use(root, cfg, extra or list(declarations(cfg, "setup")), env):
+            with setup_use(
+                root,
+                cfg,
+                extra or list(declarations(cfg, "setup")),
+                env,
+                explicit=setup_authorized,
+            ):
                 return 0
         if not service_context and any(
             tasks[key].get("services") for key in task_names

@@ -27,6 +27,7 @@ class WorkflowTests(unittest.TestCase):
             if not k.startswith(("CHAINMAN_", "TOOLCHAIN_"))
         }
         env["TOOLCHAIN_DOWNLOAD_CACHE"] = str(self.root / "downloads")
+        env["CHAINMAN_SETUP"] = "auto"
         context = patch.dict(os.environ, env, clear=True)
         context.start()
         self.addCleanup(context.stop)
@@ -320,13 +321,13 @@ readiness={command=["python3","probe.py"]}
         endpoints = []
         real_setup_use = workflows.setup_use
 
-        def setup_use(root, cfg, requested, env):
+        def setup_use(root, cfg, requested, env, **kwargs):
             self.assertTrue(tc._operation_id)
             self.assertTrue(env["SCCACHE_SERVER_UDS"].endswith(tc._operation_id))
             self.assertNotIn("CHAINMAN_COMPILER_OWNER", env)
             self.assertEqual(env["FIXTURE_SEED"], "from file")
             endpoints.append(env["SCCACHE_SERVER_UDS"])
-            return real_setup_use(root, cfg, requested, env)
+            return real_setup_use(root, cfg, requested, env, **kwargs)
 
         with patch.object(workflows, "setup_use", side_effect=setup_use):
             for _ in range(2):

@@ -1063,6 +1063,7 @@ def verify(root: Path, selected: list[str]) -> None:
     env = environment(root)
     env["TOOLCHAIN_FRESH"] = "1"
     env["CHAINMAN_UPDATE_ACTIVE"] = "1"
+    env["CHAINMAN_SETUP"] = "auto"
     sdk_versions.synchronize(root, selected, check=True)
     manifests.configure_build_dependencies(root, selected, check=True)
     for name in selected:

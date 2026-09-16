@@ -251,6 +251,7 @@ def perform(
                     CHAINMAN_PROJECT_ROOT=str(root),
                     TOOLCHAIN_FRESH="1",
                     CHAINMAN_UPDATE_ACTIVE="1",
+                    CHAINMAN_SETUP="auto",
                 ),
                 check=True,
             )
@@ -274,6 +275,7 @@ def resolve_current(
         CHAINMAN_PROJECT_ROOT=str(root),
         CHAINMAN_RUNTIME=str(chainman.RUNTIME),
         CHAINMAN_UPDATE_ACTIVE="1",
+        CHAINMAN_SETUP="auto",
         CHAINMAN_UPDATE_AT=now.isoformat(),
     )
     if policy.get("steps"):
@@ -328,6 +330,7 @@ def verify(root: Path, policy: Mapping[str, object], runtime: Path) -> None:
         CHAINMAN_RUNTIME=str(runtime),
         TOOLCHAIN_FRESH="1",
         CHAINMAN_UPDATE_ACTIVE="1",
+        CHAINMAN_SETUP="auto",
     )
     tc.managed_run(
         [
@@ -354,7 +357,7 @@ def verify_current(root: Path) -> None:
 
     policy = dependency_api.policy(root)
     env = tc.environment(root)
-    env.update(TOOLCHAIN_FRESH="1", CHAINMAN_UPDATE_ACTIVE="1")
+    env.update(TOOLCHAIN_FRESH="1", CHAINMAN_UPDATE_ACTIVE="1", CHAINMAN_SETUP="auto")
     if policy.get("verify"):
         chainman.run_hook(
             root,
