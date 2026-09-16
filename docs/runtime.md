@@ -79,7 +79,9 @@ from either Nix mode; switching modes requires setup to be checked again.
 Managed services, dependency/runtime updates, transactional formatting,
 initialization, and tasks requiring native timeouts or child-process containment
 require `host-nix` or `container-nix`. An unsupported task anywhere in a requested
-graph rejects the graph before setup or task commands run. Chainman does not
+graph rejects the graph before setup or task commands run. Standard recipes also
+check every bound task and its dependencies before their first step, while keeping
+the declared sequential execution order. Chainman does not
 silently disable those task contracts. Host mode does not prune managed caches.
 
 ## Three separate caches

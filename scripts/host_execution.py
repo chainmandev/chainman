@@ -68,3 +68,18 @@ def validate_tasks(tasks: Mapping[str, object], names: Sequence[str]) -> None:
                 f"Task {name} requires Nix execution ({', '.join(required)}); "
                 "select CHAINMAN_MODE=host-nix or container-nix"
             )
+
+
+def validate_recipe(root: Path, name: str) -> None:
+    """Admit the whole sequential recipe before its first operation starts."""
+    import recipes
+    import workflows
+
+    commands = recipes.actions(tc.config(root)).get(name)
+    if commands is None:
+        raise ValueError(f"Unknown standard recipe: {name}")
+    for command in commands:
+        validate_action(root, command[0])
+        if command[0] == "run":
+            tasks = workflows.declarations(workflows.configuration(root), "tasks")
+            validate_tasks(tasks, workflows.order(tasks, [command[1]]))

@@ -514,6 +514,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             if len(rest) != 1:
                 raise ValueError("recipe requires one standard recipe name")
+            if tc.host_mode():
+                host_execution.validate_recipe(root, rest[0])
             print(recipes.plan(cfg, rest[0]))
         elif args.action == "_format-plan":
             import recipes

@@ -120,6 +120,39 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
                 self.assertIn(b"requires Nix execution", result.stderr)
                 self.assertFalse((self.project / "prepared").exists())
 
+    def test_entire_recipe_rejected_before_earlier_setup_and_commands(self):
+        for requirement in (
+            "cleanup_children = true",
+            "timeout_seconds = 2",
+            'timeout_env = "DEADLINE"',
+            'services = ["database"]',
+        ):
+            with self.subTest(requirement=requirement):
+                (self.project / "chainman.toml").write_text(
+                    self.config
+                    + '\n[tasks.blocked]\ncommands=[["true"]]\n'
+                    + requirement
+                    + '\n[tasks.last]\ndepends_on=["blocked"]\ncommands=[["true"]]\n'
+                    + '[recipes]\nverify=["check", "last"]\n'
+                )
+                result = self.run_entry("recipe", "verify")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"requires Nix execution", result.stderr)
+                self.assertEqual(result.stdout, b"")
+                self.assertFalse((self.project / "prepared").exists())
+
+    def test_supported_recipe_keeps_order_arguments_and_failure_status(self):
+        (self.project / "chainman.toml").write_text(
+            self.config
+            + '\n[tasks.last]\ncommands=[["sh", "-c", '
+            + '"test -f prepared; printf \'%s\\\\n\' \\"$@\\"; exit 37", "last"]]\n'
+            + '[recipes]\nverify=["check", "last"]\n'
+        )
+        result = self.run_entry("recipe", "verify", "--", "literal argument", "")
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertEqual(result.stdout, b"project:profile:host\nliteral argument\n\n")
+        self.assertTrue((self.project / "prepared").exists())
+
     def test_unsupported_operations_never_provision(self):
         for command in (
             "deps-update",
