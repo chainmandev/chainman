@@ -413,6 +413,13 @@ def setup_use(
                     raise ValueError(
                         f"Setup group {key} failed validation after installation: {diagnostic}"
                     )
+                if not all(
+                    artifact_ready(root, item, env)
+                    for item in array(spec["artifacts"], "Setup artifacts")
+                ):
+                    raise ValueError(
+                        f"Setup artifacts changed during validation of {key}; readiness was not recorded"
+                    )
                 if fingerprint(root, spec, env) != expected:
                     raise ValueError(
                         f"Setup inputs changed during installation of {key}; readiness was not recorded"

@@ -1295,7 +1295,11 @@ def setup(
     run_commands(spec, "setup", env, root)
     if not all(artifact_ready(root, p, env) for p in artifacts):
         raise ValueError(f"{spec['name']} setup did not create its declared artifacts")
-    atomic_json(stamp, {"fingerprint": fingerprint(spec, root)})
+    if fingerprint(spec, root) != expected:
+        raise ValueError(
+            f"{spec['name']} setup inputs changed during installation; readiness was not recorded"
+        )
+    atomic_json(stamp, {"fingerprint": expected})
 
 
 def size(path: Path, *, allow_external_links: bool = False) -> int:

@@ -102,6 +102,40 @@ class SetupReadinessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("inputs-changed-during-readiness", result.stdout)
 
+    def test_post_install_probe_cannot_remove_a_required_artifact(self):
+        (self.root / "check.py").write_text(
+            "from pathlib import Path; Path('installed').unlink()"
+        )
+        result = self.run_cli("setup")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("artifacts changed during validation", result.stderr)
+        self.assertFalse(
+            (self.root / ".cache/toolchain/setup-groups/dependencies.json").exists()
+        )
+
+    def test_legacy_setup_does_not_stamp_changed_inputs(self):
+        spec = {
+            "name": "fixture",
+            "directory": ".",
+            "profile": "host",
+            "inputs": ["input.lock"],
+            "artifacts": ["input.lock"],
+            "commands": {
+                "setup": [
+                    [
+                        "python3",
+                        "-c",
+                        "from pathlib import Path; Path('input.lock').write_text('changed')",
+                    ]
+                ]
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "inputs changed during installation"):
+            toolchain.setup(
+                spec, toolchain.environment(self.root), self.root, explicit=True
+            )
+        self.assertFalse((self.root / ".cache/toolchain/setup/fixture.json").exists())
+
     def test_prompt_answers_and_noninteractive_recovery(self):
         class Terminal(io.StringIO):
             def __init__(self, answer):
