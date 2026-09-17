@@ -125,6 +125,14 @@ class ServiceNetworkTests(unittest.TestCase):
                 changed["services"][key].update(changes)
                 with self.subTest(changes=changes), self.assertRaises(ValueError):
                     services.declarations(root, changed)
+            for transport in (
+                {"ports": ["127.0.0.1:8000:8000"]},
+                {"host_access": True},
+            ):
+                changed = deepcopy(cfg)
+                changed["profiles"] = {"host": {"transport": transport}}
+                with self.assertRaisesRegex(ValueError, "Borrowed networks"):
+                    services.declarations(root, changed)
             changed = deepcopy(cfg)
             changed["tasks"]["test"]["services"] = []
             with self.assertRaises(ValueError):

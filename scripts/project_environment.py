@@ -41,10 +41,19 @@ def variable(name: object) -> str:
 
 
 def transport(spec: object) -> None:
-    if not isinstance(spec, dict) or set(spec) - {"ports", "mounts", "host_access"}:
-        raise ValueError("Transport supports only ports, mounts and host_access")
+    if not isinstance(spec, dict) or set(spec) - {
+        "ports",
+        "mounts",
+        "host_access",
+        "display",
+    }:
+        raise ValueError(
+            "Transport supports only ports, mounts, host_access and display"
+        )
     if type(spec.get("host_access", False)) is not bool:
         raise ValueError("Transport host_access must be boolean")
+    if "display" in spec and spec["display"] != "x11":
+        raise ValueError("Transport display supports only x11")
     ports = spec.get("ports", [])
     if not isinstance(ports, list) or any(
         not isinstance(port, str)
@@ -63,6 +72,7 @@ def transport(spec: object) -> None:
             "source_env",
             "target",
             "read_only",
+            "optional",
         }:
             raise ValueError(
                 "Transport mounts require a source or source_env and optional target/read_only"
@@ -79,6 +89,8 @@ def transport(spec: object) -> None:
             not isinstance(mount["target"], str) or not mount["target"].startswith("/")
         ):
             raise ValueError("Mount target must be absolute")
+        if type(mount.get("optional", False)) is not bool:
+            raise ValueError("Mount optional must be boolean")
         if type(mount.get("read_only", True)) is not bool:
             raise ValueError("Mount read_only must be boolean")
 

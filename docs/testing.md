@@ -76,3 +76,13 @@ validate links/configuration examples.
 Do not promote consumers before public readback and their required gates pass.
 Separate an unavailable platform lane or application blocker from a Chainman failure;
 do not weaken acceptance or dependency policy to turn either into a passing result.
+
+### Scoped transport checks
+
+`test_execution_transport.py` uses neutral declarations and synthetic X11 records
+to check composition, optional inputs, inspection, credential scoping and cleanup.
+`test_bootstrap.py` includes opt-in real-container profile and display-helper
+checks. The display-helper fixture uses a local Unix socket and synthetic cookie;
+it proves transport behavior, not browser rendering or a real desktop login.
+Run these focused tests sequentially; no application build or production account
+is needed.

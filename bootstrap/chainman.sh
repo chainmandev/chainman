@@ -89,8 +89,28 @@ fi
 CHAINMAN_REQUEST_ACTION=${1:-doctor}
 CHAINMAN_REQUEST_TASK=${2:-}
 export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK
+case "$CHAINMAN_REQUEST_ACTION" in
+    exec | shell)
+        CHAINMAN_REQUEST_PROFILE=
+        if [ "${2:-}" = --profile ]; then CHAINMAN_REQUEST_PROFILE=${3:-}; fi
+        # Internal compiler/installer entry deliberately carries no profile mounts.
+        if [ "${2:-}" = --reuse-operation ]; then CHAINMAN_REQUEST_PROFILE=; fi
+        export CHAINMAN_REQUEST_PROFILE
+        ;;
+    _bootstrap-options | _display-prepare) ;;
+    *) unset CHAINMAN_REQUEST_PROFILE ;;
+esac
 # Do not let a validation container drain the following command's input.
-if [ "$CHAINMAN_REQUEST_ACTION" = preflight ]; then exec < /dev/null; fi
+if [ "$CHAINMAN_REQUEST_ACTION" = preflight ]; then
+    exec < /dev/null
+    CHAINMAN_PREFLIGHT_TASKS=$(
+        first=1
+        for task in "$@"; do
+            if [ "$first" = 1 ]; then first=0; else printf '%s\n' "$task"; fi
+        done
+    )
+    export CHAINMAN_PREFLIGHT_TASKS
+fi
 control_dispatch() {
     if [ "$1" = services-logs ]; then
         [ "$#" = 1 ] || { [ "$#" = 2 ] && [ "$2" = --follow ]; } || fail 'usage: services-logs [--follow]'
@@ -634,6 +654,11 @@ plan_options() {
     if [ "$authority" != "$root" ]; then
         set -- --mount "type=bind,src=$authority,dst=$authority,readonly" --env "CHAINMAN_ENTRY_AUTHORITY=$authority" "$@"
     fi
+    if [ "${display_prepare:-0}" = 1 ]; then
+        set -- --mount "type=bind,src=$xauthority,dst=/chainman-x11-source,readonly" \
+            --mount "type=bind,src=$temporary/x11,dst=/chainman-x11-output" \
+            --env DISPLAY --env "CHAINMAN_X11_HOSTNAME=$(uname -n)" --env CHAINMAN_DISPLAY_PREPARE=1 "$@"
+    fi
     run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
         --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
         --mount "type=bind,src=$source_root,dst=$source_root,readonly" --env HOME=/tmp/chainman-home \
@@ -642,7 +667,7 @@ plan_options() {
 store = daemon' --env NIX_REMOTE=daemon \
         --env "CHAINMAN_BOOTSTRAP_HELPER=$helper" --env "CHAINMAN_SOURCE_ROOT=$source_root" --env CHAINMAN_SOURCE_REVISION \
         --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
-        --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK \
+        --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK --env CHAINMAN_REQUEST_PROFILE --env CHAINMAN_HOST_PLATFORM --env CHAINMAN_PREFLIGHT_TASKS \
         "$@" "$image" sh -eu -c "$container_init" \
         sh sh -eu -c '
         attempt=0
@@ -651,6 +676,9 @@ store = daemon' --env NIX_REMOTE=daemon \
             [ "$attempt" -lt 30 ] || { echo "Shared Nix store daemon did not become ready." >&2; exit 2; }
             sleep 1
         done
+        if [ "${CHAINMAN_DISPLAY_PREPARE:-0}" = 1 ]; then
+            exec env CHAINMAN_BOOTSTRAP_CONTAINER=1 CHAINMAN_MODE=container-nix "$2" _display-prepare
+        fi
         schema=$(CHAINMAN_BOOTSTRAP_ACTION=schema nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1")
         if [ "$schema" = 3 ]; then
             # Reuse the normal verified runtime/GC-root path in this read-only
@@ -662,6 +690,23 @@ store = daemon' --env NIX_REMOTE=daemon \
     ' sh "$expression" "$self"
 }
 plan_options > "$temporary/options"
+if grep -q -e '^--display$' -e '^--display-check$' "$temporary/options"; then
+    [ "$CHAINMAN_HOST_PLATFORM" = Linux ] || fail 'X11 container transport requires a Linux host; select host-nix for a native display.'
+    display=${DISPLAY:?X11 transport requires DISPLAY}
+    case "$display" in :* | unix/:* | unix:*) ;; *) fail 'X11 transport requires a local DISPLAY such as :0.' ;; esac
+    display_number=${display#*:}
+    display_number=${display_number%%.*}
+    case "$display_number" in '' | *[!0-9]*) fail 'Invalid X11 display number.' ;; esac
+    x_socket=/tmp/.X11-unix/X$display_number
+    [ -S "$x_socket" ] || fail "Missing X11 display socket: $x_socket"
+    xauthority=${XAUTHORITY:-${HOME:?}/.Xauthority}
+    case "$xauthority" in /*) ;; *) xauthority=$root/$xauthority ;; esac
+    single_line "$xauthority"
+    case "$xauthority" in *,*) fail 'X11 authority path cannot contain commas.' ;; esac
+    [ -f "$xauthority" ] && [ ! -L "$xauthority" ] || fail 'X11 transport requires a regular XAUTHORITY file (or ~/.Xauthority).'
+    mkdir -m 700 "$temporary/x11"
+    display_prepare=1 plan_options > /dev/null
+fi
 if grep -q -- '^--controller$' "$temporary/options"; then
     rm -rf -- "$temporary"
     trap - EXIT HUP INT TERM
@@ -702,6 +747,10 @@ if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
         printf '%s\n%s\n' "$option" "$value" >> "$temporary/options"
     done < "$temporary/extra"
 fi
+# Freeze the request before replacing positional arguments with engine options.
+prepare_action=$CHAINMAN_REQUEST_ACTION
+prepare_task=$CHAINMAN_REQUEST_TASK
+prepare_profile=
 set -- "$image" sh -eu -c "$container_init" sh "$self" "$@"
 while IFS= read -r option; do
     [ -n "$option" ] || continue
@@ -713,13 +762,30 @@ while IFS= read -r option; do
             printf '%s\n' "$value" >> "$temporary/patterns"
             continue
             ;;
-        --mount-env)
+        --transport-declaration)
+            set -- --env "CHAINMAN_ACTIVE_TRANSPORT=$value" "$@"
+            continue
+            ;;
+        --transport-prepare)
+            prepare_profile=$value
+            continue
+            ;;
+        --display-check) continue ;;
+        --display)
+            set -- --mount "type=bind,src=$x_socket,dst=$x_socket,readonly" \
+                --mount "type=bind,src=$temporary/x11/authority,dst=/chainman-x11-authority,readonly" "$@"
+            continue
+            ;;
+        --mount-env | --mount-env-optional)
             source_name=${value%%:*}
             remainder=${value#*:}
             target=${remainder%:*}
             access=${remainder##*:}
             case "$source_name" in '' | [!A-Za-z_]* | *[!A-Za-z0-9_]*) fail 'Invalid mount environment variable.' ;; esac
-            source=$(printenv "$source_name" && printf '.') || fail "Mount environment variable is unset: $source_name"
+            if ! source=$(printenv "$source_name" && printf '.'); then
+                [ "$option" != --mount-env-optional ] || continue
+                fail "Mount environment variable is unset: $source_name"
+            fi
             source=${source%.}
             # Remove printenv's delimiter, preserving any newline in the value.
             source=${source%?}
@@ -733,7 +799,7 @@ while IFS= read -r option; do
                 *) fail 'Invalid mount access mode.' ;;
             esac
             ;;
-        --mount)
+        --mount | --mount-optional)
             case "$value" in type=bind,src=*,dst=*) ;; *) fail 'Only explicit bind mounts are accepted.' ;; esac
             source=${value#type=bind,src=}
             source=${source%%,dst=*}
@@ -774,6 +840,16 @@ while IFS= read -r option; do
             continue
             ;;
         --publish | -p)
+            binding=${value%:*}
+            protocol=${value##*/}
+            [ "$protocol" != "$value" ] || protocol=tcp
+            binding=$binding/$protocol
+            if [ -f "$temporary/ports" ]; then
+                while IFS= read -r old_binding && IFS= read -r old_port; do
+                    [ "$old_binding" != "$binding" ] || [ "$old_port" = "$value" ] || fail "Conflicting port binding: $binding"
+                done < "$temporary/ports"
+            fi
+            printf '%s\n%s\n' "$binding" "$value" >> "$temporary/ports"
             if [ "$network_mode" != host ]; then set -- "$option" "$value" "$@"; fi
             continue
             ;;
@@ -785,7 +861,10 @@ while IFS= read -r option; do
     esac
     case "$source" in /*) ;; *) source=$root/$source ;; esac
     case "$source$target" in *,*) fail 'Container mount paths cannot contain commas.' ;; esac
-    [ -e "$source" ] && [ ! -S "$source" ] || fail 'Mount source must exist and cannot be a socket.'
+    if [ ! -e "$source" ] && [ ! -L "$source" ]; then
+        case "$option" in --mount-optional | --mount-env-optional) continue ;; esac
+    fi
+    { [ -d "$source" ] || { [ -f "$source" ] && [ ! -L "$source" ]; }; } || fail 'Mount source must be a directory or regular nonsymlink file.'
     if [ -d "$source" ]; then
         source=$(CDPATH='' cd -P -- "$source" && pwd)
     else source=$(CDPATH='' cd -P -- "$(dirname -- "$source")" && pwd)/$(basename -- "$source"); fi
@@ -793,19 +872,37 @@ while IFS= read -r option; do
     case "${HOME:-/}/" in "$source/"*) fail 'Blanket host or socket mounts are not supported.' ;; esac
     case "$target" in /*) ;; *) fail 'Mount target must be absolute.' ;; esac
     case "$target/" in *'/../'* | *'/./'* | *'//'*) fail 'Mount target must be normalized.' ;; esac
-    case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
+    case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-x11-authority | /chainman-x11-source | /chainman-x11-output | /chainman-inspection-options | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
     case "$root/" in "$target/"*) fail 'Mount shadows the project through an ancestor.' ;; esac
     if [ "$authority" != "$root" ]; then
         case "$target/" in "$authority/"*) fail 'Mount shadows update entry authority.' ;; esac
         case "$authority/" in "$target/"*) fail 'Mount shadows update entry authority.' ;; esac
     fi
+    if [ -d "$temporary/x11" ]; then
+        case "$target" in /tmp/.X11-unix | "$x_socket") fail 'Mount conflicts with the selected display socket.' ;; esac
+    fi
     if [ "$target" = /tmp/chainman-home ]; then
         case "$source" in "$root"/*) ;; *) fail 'Persistent container HOME must be a project-contained directory.' ;; esac
         [ -d "$source" ] || fail 'Persistent container HOME must be a directory.'
     fi
+    # Reject conflicts after host environment paths and option files resolve.
     # Normalize volume forms so source paths are interpreted on the host.
     readonly=
     case "$value" in *,readonly | *,ro | *:ro) readonly=,readonly ;; esac
+    existing=
+    if [ -f "$temporary/mounts" ]; then
+        while IFS= read -r old_target && IFS= read -r old_source; do
+            if [ "$old_target" = "$target" ]; then
+                existing=$old_source
+                break
+            fi
+        done < "$temporary/mounts"
+    fi
+    if [ -n "$existing" ]; then
+        [ "$existing" = "$source$readonly" ] || fail "Conflicting mount target: $target"
+        continue
+    fi
+    printf '%s\n%s\n' "$target" "$source$readonly" >> "$temporary/mounts"
     set -- --mount "type=bind,src=$source,dst=$target$readonly" "$@"
 done < "$temporary/options"
 while IFS= read -r pattern; do
@@ -815,12 +912,21 @@ while IFS= read -r pattern; do
         # These validated values intentionally select names with shell globs.
         # shellcheck disable=SC2254
         case "$name" in $pattern)
+            case "$name" in DISPLAY | XAUTHORITY)
+                if [ -d "$temporary/x11" ]; then continue; fi
+                ;;
+            esac
             case "$name" in CHAINMAN_* | TOOLCHAIN_CONTAINER | HOME | PATH | GIT_CONFIG_* | NIX_*) continue ;; esac
             set -- --env "$name" "$@"
             ;;
         esac
     done < "$temporary/names"
 done < "$temporary/patterns"
+
+if grep -q '^--display$' "$temporary/options"; then
+    # Override ordinary environment forwarding with the scoped authority.
+    set -- --env "DISPLAY=:$display_number" --env XAUTHORITY=/chainman-x11-authority "$@"
+fi
 
 # A linked worktree needs only its Git administrative directory, not its other
 # checkout. Identity and signing policy cross the boundary as effective settings.
@@ -911,7 +1017,26 @@ store = daemon' --env NIX_REMOTE=daemon \
     --env "TOOLCHAIN_GIT_POLICY_UNAVAILABLE=$policy_unavailable" --env CI --env TERM \
     --env GIT_AUTHOR_NAME --env GIT_AUTHOR_EMAIL --env GIT_COMMITTER_NAME --env GIT_COMMITTER_EMAIL "$@"
 if [ -t 0 ] && [ -t 1 ]; then set -- --tty "$@"; fi
+if [ "$engine" = podman ]; then set -- --userns=keep-id "$@"; fi
+if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
+    case "$prepare_action" in config | explain)
+        set -- --mount "type=bind,src=$temporary/extra,dst=/chainman-inspection-options,readonly" \
+            --env CHAINMAN_INSPECTION_OPTIONS=/chainman-inspection-options "$@"
+        ;;
+    esac
+fi
+if [ -n "$prepare_profile" ]; then
+    # Setup gets no execution mounts. The final readiness check may fail on a
+    # concurrent change, but cannot install with workload credentials present.
+    "$self" _transport-prepare "$prepare_action" "$prepare_task" "$prepare_profile" < /dev/null >&2
+    CHAINMAN_SETUP=error
+    export CHAINMAN_SETUP
+fi
+if [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
+    # The supervisor owns cleanup through interruption and normal exit.
+    trap - EXIT HUP INT TERM
+    exec sh "$script_dir/transport-run.sh" "$temporary" sh "$script_dir/setup-prompt.sh" "$engine" "$@"
+fi
 rm -rf -- "$temporary"
 trap - EXIT HUP INT TERM
-if [ "$engine" = podman ]; then set -- --userns=keep-id "$@"; fi
 exec sh "$script_dir/setup-prompt.sh" "$engine" "$@"

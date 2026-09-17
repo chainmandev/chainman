@@ -150,6 +150,34 @@ def main(arguments: list[str]) -> int:
             file,
             *tail,
         ]
+    if os.environ.get("CHAINMAN_ACTIVE_MODE") == "container-nix" and args[:1] != [
+        "preflight"
+    ]:
+        import execution_transport
+
+        cfg = workflows.configuration(root)
+        if args[:1] == ["run"] and len(args) >= 2:
+            selected_transport = execution_transport.effective(
+                cfg, workflows.declarations(cfg, "tasks")[args[1]]
+            )
+        else:
+            if args[1:2] == ["--profile"] and len(args) < 3:
+                raise ValueError("--profile requires a name")
+            selected_profile = (
+                args[2]
+                if args[1:2] == ["--profile"]
+                else workflows.default_profile(cfg)
+            )
+            selected_transport = execution_transport.effective(
+                cfg, {}, profile=selected_profile
+            )
+        active_transport = json.loads(
+            os.environ.get("CHAINMAN_ACTIVE_TRANSPORT", '{"mounts": [], "ports": []}')
+        )
+        if selected_transport != active_transport:
+            raise ValueError(
+                "Nested entry requires different container transport; start it from the host"
+            )
     if args[:1] == ["run"] and len(args) >= 2:
         borrowed = borrow(root, args[1])
         tail = args[2:]

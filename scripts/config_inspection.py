@@ -12,6 +12,7 @@ import toolchain as tc
 import workflows
 import project_environment
 import resources
+import execution_transport
 from adapter_data import Table, array, table, text
 
 
@@ -26,12 +27,18 @@ def validated(root: Path) -> dict[str, object]:
     for profile in table(cfg.get("profiles", {}), "Profiles"):
         _, spec = chainman.profile(root, profile, cfg=cfg)
         project_environment.values(spec.get("environment", {}))
+        project_environment.transport(spec.get("transport", {}))
         resources.validate(
             {
                 **table(cfg.get("resources", {}), "Project resources"),
                 **table(spec.get("resources", {}), "Profile resources"),
             }
         )
+    for section in ("tasks", "services"):
+        for raw in table(cfg.get(section, {}), section).values():
+            spec = table(raw, "Execution")
+            if "container" not in spec:
+                execution_transport.effective(cfg, spec)
     if "recipes" in cfg:
         import recipes
 
@@ -81,6 +88,20 @@ def document(root: Path, action: str, arguments: list[str]) -> Table:
             configuration=redacted(cfg),
             origins=origins,
             field_sources=source.origins,
+        )
+    if arguments[:1] == ["--profile"]:
+        if len(arguments) not in (2, 3) or (
+            len(arguments) == 3 and arguments[2] != "--json"
+        ):
+            raise ValueError("Use explain --profile NAME [--json]")
+        name = workflows.name(arguments[1])
+        chainman.profile(root, name, cfg=cfg)
+        return dict(
+            result,
+            profile=name,
+            field_sources=source.origins,
+            origins=origins,
+            transport=execution_transport.inspect(root, cfg, {}, profile=name),
         )
     if len(arguments) not in (1, 2) or (
         len(arguments) == 2 and arguments[1] != "--json"
@@ -175,6 +196,16 @@ def document(root: Path, action: str, arguments: list[str]) -> Table:
         result,
         field_sources=source.origins,
         task=selected,
+        transport={
+            kind: {
+                name: execution_transport.inspect(
+                    root, cfg, spec, label=f"{kind}.{name}"
+                )
+                for name, spec in declarations[kind].items()
+                if "container" not in spec
+            }
+            for kind in ("tasks", "services")
+        },
         order={
             "tasks": tasks,
             "services": service_names,

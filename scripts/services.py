@@ -205,7 +205,6 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
     }
     setup_entries = table(cfg.get("setup", {}), "Setup groups")
     project = table(cfg.get("project", {}), "Project")
-    global_transport = table(cfg.get("container", {}), "Global transport")
     checked_profiles: set[str] = set()
     for key, spec in entries.items():
         workflows.name(key)
@@ -379,9 +378,12 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
                 spec.get("transport", {}), "Transport"
             ).get("host_access"):
                 raise ValueError("A borrowed network publishes ports only on its owner")
-            if global_transport.get("ports") or global_transport.get("host_access"):
+            import execution_transport
+
+            combined = execution_transport.effective(cfg, spec)
+            if combined.get("ports") or combined.get("host_access"):
                 raise ValueError(
-                    "Borrowed networks cannot combine global ports or host aliases"
+                    "Borrowed networks cannot combine profile/global ports or host aliases"
                 )
     return entries
 

@@ -31,7 +31,7 @@ FIELDS = {
         "command profile directory environment depends_on readiness restart shutdown_seconds container setup watch scope transport network_service".split()
     ),
     "profiles": set(
-        "flake runtime_profile compiler_cache environment resources inputs entry_setup allowed_modes allowed_platforms".split()
+        "flake runtime_profile compiler_cache environment resources inputs entry_setup allowed_modes allowed_platforms transport".split()
     ),
 }
 TABLES = {
@@ -41,7 +41,7 @@ TABLES = {
     "http_get": set("port path status_code".split()),
     "watch": set("task paths ignore debounce_ms startup_seconds".split()),
     "container": set("image command ports environment volumes read_only user".split()),
-    "transport": set("ports mounts host_access".split()),
+    "transport": set("ports mounts host_access display".split()),
     "resources": set("max_jobs memory_per_job_gib job_variables".split()),
 }
 BOOLEANS = set(

@@ -1002,6 +1002,115 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
         self.assertIn("unset", result.stderr)
 
     @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_scoped_profile_transport_real_container(self):
+        self.use_real_runtime()
+        outside = tempfile.TemporaryDirectory(prefix="chainman private scope ")
+        self.addCleanup(outside.cleanup)
+        key = Path(outside.name).resolve() / "key with spaces"
+        key.write_text("neutral credential")
+        installer = "from pathlib import Path; assert not Path('/fixture-key').exists(); Path('ready').touch()"
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n[profiles.private]\nruntime_profile="bootstrap"\nentry_setup=["prepare"]\n'
+            'transport={mounts=[{source_env="DEMO_KEY",target="/fixture-key"},{source_env="DEMO_ABSENT",target="/absent",optional=true}]}\n'
+            '[setup.prepare]\nprofile="host"\ncommands=[["python3","-c",'
+            + json.dumps(installer)
+            + ']]\ninputs=["chainman.toml"]\nartifacts=["ready"]\n'
+        )
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            DEMO_KEY=str(key),
+        )
+        code = "import pathlib,sys; assert pathlib.Path('/fixture-key').read_text() == 'neutral credential'; assert not pathlib.Path('/absent').exists(); print(repr(sys.argv[1:])); print(sys.stdin.read()); sys.exit(23)"
+        self.prepare_cache(env)
+        result = subprocess.run(
+            [
+                str(self.launcher),
+                "exec",
+                "--profile",
+                "private",
+                "python3",
+                "-c",
+                code,
+                "two words",
+                "$(false)",
+                "",
+            ],
+            input="literal input",
+            env=env,
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
+        self.assertIn("['two words', '$(false)', '']", result.stdout)
+        self.assertIn("literal input", result.stdout)
+        self.assertTrue((self.root / "ready").exists())
+        plain = self.run_bootstrap(
+            "exec",
+            "python3",
+            "-c",
+            "import pathlib; assert not pathlib.Path('/fixture-key').exists()",
+            env=env,
+        )
+        self.assertEqual(plain.returncode, 0)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_x11_transport_real_container_helper(self):
+        self.use_real_runtime()
+        import struct
+
+        socket_dir = Path("/tmp/.X11-unix")
+        created = not socket_dir.exists()
+        socket_dir.mkdir(exist_ok=True)
+        if created:
+            self.addCleanup(socket_dir.rmdir)
+        server = socket.socket(socket.AF_UNIX)
+        number = 10000 + os.getpid() % 40000
+        socket_path = socket_dir / f"X{number}"
+        server.bind(str(socket_path))
+        self.addCleanup(socket_path.unlink)
+        self.addCleanup(server.close)
+        outside = tempfile.TemporaryDirectory(prefix="chainman display scope ")
+        self.addCleanup(outside.cleanup)
+        authority = Path(outside.name).resolve() / "authority"
+        data = struct.pack("!H", 256)
+        for item in (
+            socket.gethostname().encode(),
+            str(number).encode(),
+            b"MIT-MAGIC-COOKIE-1",
+            b"0123456789abcdef",
+        ):
+            data += struct.pack("!H", len(item)) + item
+        authority.write_bytes(data)
+        code = (
+            "import os,pathlib,stat; a=pathlib.Path(os.environ['XAUTHORITY']); assert a.read_bytes()[:2] == bytes([255,255]); assert stat.S_IMODE(a.stat().st_mode)==384; assert not pathlib.Path("
+            + repr(str(authority))
+            + ").exists(); print('scoped display')"
+        )
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n[environment]\npass=["DISPLAY","XAUTHORITY"]\n[tasks.probe]\ncommands=[["python3","-c",'
+            + json.dumps(code)
+            + ']]\ntransport={display="x11"}\n'
+        )
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            DISPLAY=f":{number}",
+            XAUTHORITY=str(authority),
+        )
+        result = self.run_bootstrap("run", "probe", env=env)
+        self.assertEqual(result.stdout.strip(), "scoped display")
+        self.assertEqual(authority.read_bytes(), data)
+
+    @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
         "set CHAINMAN_TEST_CONTAINER to execute the real container engine",
     )

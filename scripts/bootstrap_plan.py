@@ -12,6 +12,7 @@ import sys
 import config_inspection
 import chainman
 import project_environment
+import execution_transport
 import workflows
 from adapter_data import array, strings, table, text
 
@@ -73,11 +74,14 @@ def transport(
             raise ValueError("Container mount paths cannot contain commas")
         readonly = mount.get("read_only", True)
         if "source_env" in mount:
-            result += ["--mount-env", f"{source}:{target}:{'ro' if readonly else 'rw'}"]
+            result += [
+                "--mount-env-optional" if mount.get("optional") else "--mount-env",
+                f"{source}:{target}:{'ro' if readonly else 'rw'}",
+            ]
         else:
             absolute = Path(source) if Path(source).is_absolute() else root / source
             result += [
-                "--mount",
+                "--mount-optional" if mount.get("optional") else "--mount",
                 f"type=bind,src={absolute},dst={target}{',readonly' if readonly else ''}",
             ]
     for port in strings(spec.get("ports", []), "Container ports"):
@@ -105,6 +109,8 @@ def transport(
         result += ["--publish", line(port)]
     if spec.get("host_access", False):
         result += ["--add-host", "host.docker.internal:host-gateway"]
+    if spec.get("display"):
+        result += ["--display", "x11"]
     return result
 
 
@@ -150,7 +156,77 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         selected = table(tasks.get(name, {}), "Task")
     else:
         selected = table(tasks.get(request, {}), "Task")
-    transports = [cfg.get("container", {}), selected.get("transport", {})]
+    executable = (
+        request
+        in {
+            "exec",
+            "shell",
+            "_workflow-task",
+            "_workflow-service",
+            "_workflow-probe",
+            "run",
+        }
+        or request in tasks
+    )
+    if request in {"exec", "shell"} and name == "--reuse-operation":
+        executable = False
+    requested_profile = (
+        os.environ.get("CHAINMAN_REQUEST_PROFILE")
+        if request in {"exec", "shell"}
+        else None
+    )
+    transports = (
+        [execution_transport.effective(cfg, selected, profile=requested_profile)]
+        if executable
+        else [table(cfg.get("container", {}), "Container transport")]
+        if request
+        in {
+            "setup",
+            "_transport-prepare",
+            "_service-prepare",
+            "_workflow-prepare",
+            "_workflow-task",
+        }
+        else []
+    )
+    # Admit graphical requirements across a graph before setup or services.
+    if controller or request == "preflight":
+        import admission
+
+        graph = admission.graph(
+            root,
+            cfg,
+            os.environ.get("CHAINMAN_PREFLIGHT_TASKS", name).splitlines()
+            if request == "preflight"
+            else [
+                name
+                if request in {"services-up", "services-run", "services-reset"}
+                else task
+            ],
+        )
+        if any(
+            execution_transport.effective(cfg, table(entries[key], "Execution")).get(
+                "display"
+            )
+            for section, entries in (("tasks", tasks), ("services", services))
+            for key in graph[section]
+            if "container" not in table(entries[key], "Execution")
+        ):
+            options += ["--display-check", "x11"]
+    if (
+        executable
+        and task in tasks
+        and os.environ.get("CHAINMAN_MODE", "container-nix") == "container-nix"
+    ):
+        for dependency in workflows.order(tasks, [task]):
+            entry = table(tasks[dependency], "Task")
+            if (
+                entry.get("commands")
+                and execution_transport.effective(cfg, entry) != transports[0]
+            ):
+                raise ValueError(
+                    "Tasks in one container execution require identical transport; start differently scoped tasks separately from the host"
+                )
     env = None
     if any(
         "{" in port
@@ -177,13 +253,23 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         )
         _, profile = chainman.profile(
             root,
-            text(selected.get("profile", workflows.default_profile(cfg)), "Profile"),
+            requested_profile
+            or text(selected.get("profile", workflows.default_profile(cfg)), "Profile"),
             cfg=cfg,
         )
         env = chainman.profile_environment(
             root, profile, env, selected.get("environment", {}), cfg=cfg
         )
     for value in transports:
+        if any(value.get(key) for key in ("mounts", "ports", "host_access", "display")):
+            import json
+
+            options += ["--transport-declaration", json.dumps(value, sort_keys=True)]
+            if request in {"exec", "shell", "run"} or request in tasks:
+                options += [
+                    "--transport-prepare",
+                    requested_profile or workflows.default_profile(cfg),
+                ]
         options += transport(root, value, env)
     return controller, options
 

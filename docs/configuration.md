@@ -643,8 +643,8 @@ container mode. `{bind}` is loopback in host mode and `0.0.0.0` inside a contain
 Use `container.host_access = true` to add the host gateway alias when a project
 container needs a declared host service. It does not mount an engine socket.
 
-Each task or command service may have its own `transport` table with `ports`,
-`mounts` and `host_access`. Port mappings explicitly bind host loopback. These
+Each profile, task or command service may have its own `transport` table with
+`ports`, `mounts`, `host_access` and opt-in `display = "x11"`. Port mappings explicitly bind host loopback. These
 options apply only to that task's or service's Nix container; a verification task
 does not inherit a frontend service's published ports. Data containers use their
 own `container` declaration instead. Project-wide container options remain additive.
@@ -695,3 +695,78 @@ application cleanup, `exclusive = true` takes the same project maintenance gate 
 shared cache cleanup and updates. It refuses independent active tasks and cannot
 acquire or borrow services. Project cleanup commands still declare exactly which
 application outputs they own; the exclusive gate supplies concurrency protection.
+
+### Scoped execution transport
+
+Profiles, tasks and command services accept `transport`. Chainman combines the
+project-wide `container` table, selected profile transport and execution transport.
+Identical mounts are deduplicated; conflicting targets or host port bindings fail.
+Explicit nested mounts are allowed, for example writable state below read-only
+credentials. A service receives its own profile and transport, not its caller's.
+Data containers retain their separate `container` declarations.
+
+```toml
+[profiles.operations]
+flake = "flake.nix#operations"
+[profiles.operations.transport]
+mounts = [
+  { source_env = "APP_CREDENTIAL_DIRECTORY", target = "/credentials" },
+  { source_env = "APP_STATE_DIRECTORY", target = "/credentials/state", read_only = false },
+  { source_env = "APP_OPTIONAL_KEY", target = "/optional-key", optional = true },
+]
+```
+
+The same profile access applies to `exec --profile operations`,
+`shell --profile operations`, and tasks selecting that profile. `source_env`
+uses the named host input as a path, without forwarding its value into the
+workload. Optional mounts skip an unset variable or absent path; empty values,
+invalid declarations and unsafe existing sources still fail. Chainman does not
+create these directories. Projects own credential selection and state preparation.
+
+Setup for an entry with transport runs separately without profile/task mounts.
+The workload rechecks readiness with installation disabled; a concurrent change
+fails with setup recovery guidance. Task graphs share one execution container,
+so tasks with commands must declare identical effective transport. Split commands
+requiring different access into separate host entries. Nested entry cannot change
+container transport; leave the active shell and enter the selected profile from
+the host. Containers isolate access paths, not mutually distrustful project code.
+
+### Graphical tasks
+
+```toml
+[tasks.browser-interactive]
+profile = "browser"
+commands = [["playwright", "test", "--headed"]]
+transport = { display = "x11" }
+```
+
+X11 transport is opt-in and currently supports local Linux X11/Xwayland displays
+in container Nix. Set `DISPLAY=:0` (use your actual display number); `XAUTHORITY`
+selects an authority file, defaulting to `~/.Xauthority`. The file must be regular
+and not a symlink. Remote/TCP display selectors and native Wayland transport are
+unsupported. Host modes use the caller's graphical environment without adaptation.
+
+Chainman validates display availability before setup or services. A verified
+helper reads at most 1 MiB of authority data, selecting the local display's
+MIT-MAGIC-COOKIE-1 authentication. The workload receives only the selected socket
+and a private, mode-0600 authority file, removed on exit or interruption. The
+original file is never mounted into the workload or modified. No `xhost` changes
+or host-language installation are needed. A graphical application still has the
+access granted by the selected X server; this does not isolate applications from
+one another on that desktop.
+
+### Inspecting access
+
+```sh
+just chainman explain browser-interactive --json
+just chainman explain --profile operations --json
+```
+
+Task inspection reports transport separately for tasks and command services.
+Profile inspection describes direct shell/exec access. Reports include declaration
+origins, field-source files, optional omissions, unresolved host inputs and explicit
+container-option contributions. Source environment values and authentication
+contents are not printed. Inspection does not prepare credentials, install project
+dependencies or start services. Port placeholders remain declarative in inspection;
+execution resolves and validates them against the selected environment. Host Nix
+ignores container transport, and ordinary launches remain headless by default.

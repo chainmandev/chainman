@@ -491,7 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=__doc__,
         epilog=(
             "Commands: exec [--profile NAME] -- COMMAND ..., shell [--profile NAME], "
-            "run TASK ..., preflight TASK ..., setup [GROUP ...], setup-status, config validate, "
+            "run TASK ..., preflight TASK ..., setup [GROUP ...], setup-status, config validate, explain TASK or --profile NAME, "
             "config show --json, explain TASK, version, doctor. "
             "Use just chainman recipe NAME for project recipe bindings. "
             "Services and verified updates require a Nix execution mode."
@@ -569,6 +569,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             import services
 
             return services.export(root, args.arguments)
+        if args.action == "_display-prepare":
+            import display_transport
+
+            display_transport.prepare(
+                Path("/chainman-x11-source"),
+                Path("/chainman-x11-output/authority"),
+                os.environ.get("DISPLAY", ""),
+                os.environ.get("CHAINMAN_X11_HOSTNAME", ""),
+            )
+            return 0
         if args.action == "_bootstrap-options":
             import bootstrap_plan
 
@@ -642,6 +652,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             import workflows
 
             return workflows.setup_status(root, rest)
+        elif args.action == "_transport-prepare":
+            import admission
+            import workflows
+
+            if len(rest) != 3:
+                raise ValueError(
+                    "Transport preparation requires action, task and profile"
+                )
+            action, task, selected_profile = rest
+            groups = (
+                admission.entry(root, cfg, selected_profile)
+                if action in {"exec", "shell"}
+                else admission.graph(root, cfg, [task if action == "run" else action])[
+                    "setup"
+                ]
+            )
+            with tc.operation(root, exclusive=False, new_execution=True):
+                env = tc.environment(root)
+                if action not in {"exec", "shell"}:
+                    env = workflows.context_environment(
+                        root, cfg, task if action == "run" else action, env
+                    )
+                with workflows.setup_use(root, cfg, groups, env):
+                    return 0
         elif args.action == "preflight":
             import admission
             import workflows
