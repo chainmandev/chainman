@@ -133,8 +133,9 @@ revision=$(git rev-parse HEAD)
 just chainman trojan-source "$revision"
 ```
 
-Default source extensions are defined in the runtime's `scripts/trojan_source.py`.
-Override `hooks.trojan_source.paths` to select project source formats. A narrow
+Defaults include common source formats (including Dart, Astro, Nix and Just),
+Justfiles, Dockerfiles and executable regular files regardless of extension.
+The exact patterns are in the runtime's `scripts/trojan_source.py`. Override `hooks.trojan_source.paths` to select project source formats. A narrow
 exception names the **exact path and blob**, plus a reason; editing that file
 invalidates the exception:
 

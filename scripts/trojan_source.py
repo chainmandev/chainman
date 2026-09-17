@@ -15,8 +15,8 @@ from adapter_data import array, strings, table, text
 
 DEFAULT_PATHS = [
     "*." + suffix
-    for suffix in "c h cc cpp hpp cs css go html java js jsx mjs cjs json kt kts lua m mts cts php pl py r rb rs sh bash sql swift toml ts tsx vue xml yaml yml".split()
-]
+    for suffix in "astro bash c cc cpp cs css cts dart go gql graphql h hpp html j2 java js json jsx just kt kts less lua m mdx mjs mts nix php pl py r rb rs scss sh sql svelte swift toml ts tsx vue xml yaml yml".split()
+] + ["[Jj]ustfile", "**/[Jj]ustfile", "Dockerfile", "**/Dockerfile"]
 SCANNER = "anti-trojan-source@1.12.1:high:v1"
 
 
@@ -113,7 +113,10 @@ def run(root: Path, arguments: list[str]) -> int:
             if (
                 mode not in {"100644", "100755"}
                 or object_type != "blob"
-                or not formatters.matches(path, patterns)
+                or not (
+                    formatters.matches(path, patterns)
+                    or ("paths" not in spec and mode == "100755")
+                )
                 or (path, blob) in allowed
             ):
                 continue

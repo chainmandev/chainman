@@ -139,6 +139,46 @@ setup=["extension"]
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TROJAN_SOURCE"), "requires pinned hooks profile"
     )
+    def test_default_scan_covers_consumer_languages_and_executable_scripts(self):
+        paths = [
+            "main.dart",
+            "page.astro",
+            "flake.nix",
+            "justfile",
+            "nested/Justfile",
+            "Dockerfile",
+            "shell/bin/entry",
+            "template.rs.j2",
+        ]
+        for name in paths:
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# harmless Unicode fixture \u202e\n")
+        (self.root / "shell/bin/entry").chmod(0o755)
+        self.git("add", ".")
+        self.git("commit", "-qm", "Language coverage fixture")
+        revision = self.git("rev-parse", "HEAD")
+
+        def execute(root, name, argv, **kwargs):
+            return subprocess.run(
+                argv, input=kwargs.get("input"), capture_output=True, check=True
+            )
+
+        with patch.object(chainman, "execute", execute):
+            with contextlib.redirect_stderr(io.StringIO()) as diagnostic:
+                with self.assertRaisesRegex(ValueError, "suspicious"):
+                    trojan_source.run(self.root, [revision])
+            for name in paths:
+                self.assertIn(repr(name), diagnostic.getvalue())
+            config = self.root / "chainman.toml"
+            config.write_text(
+                config.read_text() + '\n[hooks.trojan_source]\npaths=["*.ts"]\n'
+            )
+            self.assertEqual(trojan_source.run(self.root, [revision]), 0)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TROJAN_SOURCE"), "requires pinned hooks profile"
+    )
     def test_real_upstream_scanner_checks_committed_content_and_exact_exception(self):
         (self.root / "source.ts").write_text("// harmless fixture \u202e\n")
         self.git("add", ".")
