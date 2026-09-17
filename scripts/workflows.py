@@ -348,6 +348,24 @@ def artifact_ready(root: Path, item: object, env: dict[str, str]) -> bool:
     return tc.artifact_ready(root, item, env)
 
 
+def artifact_environment(
+    root: Path, spec: Mapping[str, object], env: dict[str, str]
+) -> dict[str, str]:
+    """Validate interpreter selection before any installer can have effects."""
+    if not any(
+        isinstance(item, dict) and item.get("interpreter") == "python"
+        for item in array(spec["artifacts"], "Setup artifacts")
+    ):
+        return env
+    _, profile = chainman.profile(root, text(spec["profile"], "Setup profile"))
+    selected = chainman.profile_environment(root, profile, env)
+    expected = tc.python_artifact_interpreter(selected)
+    # In host mode uv must use the same caller-owned interpreter that readiness
+    # checks. No flake hook exists to supply this default in that mode.
+    selected.setdefault("UV_PYTHON", str(expected))
+    return selected
+
+
 def artifact_digests(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
     result: dict[str, str] = {}
     for item in array(spec["artifacts"], "Setup artifacts"):
@@ -373,6 +391,9 @@ def setup_use(
     setup_readiness.policy(env)
     with timing.span("setup_validation", env):
         specs = group_specs(root, cfg, requested, env)
+        environments = {
+            key: artifact_environment(root, spec, env) for key, spec in specs.items()
+        }
     if not specs:
         yield ()
         return
@@ -406,6 +427,7 @@ def setup_use(
                     "Setup is stale while another task uses installed artifacts; finish that task before reinstalling"
                 ) from None
             for key, spec in specs.items():
+                group_env = environments[key]
                 if current(root, key, spec, env, pass_fds=(lease.fileno(),)):
                     continue
                 inputs = setup_inputs(root, spec)
@@ -417,28 +439,28 @@ def setup_use(
                         root,
                         text(spec["profile"], "Setup profile"),
                         argv,
-                        env=env,
+                        env=group_env,
                         cwd=tc.contained(
                             root, text(spec["directory"], "Setup directory")
                         ),
                         pass_fds=(lease.fileno(),),
                     )
                 if not all(
-                    artifact_ready(root, item, env)
+                    artifact_ready(root, item, group_env)
                     for item in array(spec["artifacts"], "Setup artifacts")
                 ):
                     raise ValueError(
                         f"Setup group {key} did not create its declared artifacts"
                     )
                 diagnostic = setup_readiness.check(
-                    root, spec, env, pass_fds=(lease.fileno(),)
+                    root, spec, group_env, pass_fds=(lease.fileno(),)
                 )
                 if diagnostic:
                     raise ValueError(
                         f"Setup group {key} failed validation after installation: {diagnostic}"
                     )
                 if not all(
-                    artifact_ready(root, item, env)
+                    artifact_ready(root, item, group_env)
                     for item in array(spec["artifacts"], "Setup artifacts")
                 ):
                     raise ValueError(
@@ -489,6 +511,7 @@ def setup_detail(
     *,
     pass_fds: tuple[int, ...] = (),
 ) -> SetupDetail:
+    artifact_env = artifact_environment(root, spec, env)
     try:
         recorded = json.loads(stamp_path(root, key).read_text())
     except FileNotFoundError:
@@ -529,14 +552,16 @@ def setup_detail(
                     "recovery": ["setup", key],
                 }
         elif not all(
-            artifact_ready(root, item, env)
+            artifact_ready(root, item, artifact_env)
             for item in array(spec["artifacts"], "Setup artifacts")
         ):
             reason = "artifact-missing-or-incompatible"
         elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
             reason = "artifact-content-changed"
         else:
-            diagnostic = setup_readiness.check(root, spec, env, pass_fds=pass_fds)
+            diagnostic = setup_readiness.check(
+                root, spec, artifact_env, pass_fds=pass_fds
+            )
             if diagnostic:
                 return {
                     "current": False,
@@ -547,7 +572,7 @@ def setup_detail(
             if recorded.get("fingerprint") != fingerprint(root, spec, env):
                 reason = "inputs-changed-during-readiness"
             elif not all(
-                artifact_ready(root, item, env)
+                artifact_ready(root, item, artifact_env)
                 for item in array(spec["artifacts"], "Setup artifacts")
             ) or recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
                 reason = "artifacts-changed-during-readiness"

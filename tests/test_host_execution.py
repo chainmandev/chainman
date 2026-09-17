@@ -121,6 +121,91 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
                 self.assertIn(b"requires Nix execution", result.stderr)
                 self.assertFalse((self.project / "prepared").exists())
 
+    def python_setup(self):
+        self.env.pop("UV_PYTHON", None)
+        (self.project / "chainman.toml").write_text(
+            self.config.replace(
+                'artifacts = ["prepared"]',
+                'artifacts = ["prepared", {path=".venv/bin/python", interpreter="python"}]',
+            ).replace(
+                'commands = [["sh", "-c", "printf x >> prepared"]]',
+                'commands = [["python3", "-c", '
+                + json.dumps(
+                    "import os; from pathlib import Path; "
+                    "p=Path('.venv/bin/python'); p.parent.mkdir(parents=True,exist_ok=True); "
+                    "p.unlink(missing_ok=True); p.symlink_to(os.environ['UV_PYTHON']); "
+                    "p=Path('prepared'); p.write_text((p.read_text() if p.exists() else '')+'x')"
+                )
+                + "]]",
+            )
+        )
+
+    def test_host_python_readiness_uses_caller_path_and_repairs_mismatch(self):
+        self.python_setup()
+        for _ in range(2):
+            result = self.run_entry("setup")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            result = self.run_entry("setup-status")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.project / "prepared").read_text(), "x")
+        interpreter = self.project / ".venv/bin/python"
+        self.assertEqual(interpreter.readlink(), self.binaries / "python3")
+        interpreter.unlink()
+        interpreter.symlink_to(self.binaries / "sh")
+        result = self.run_entry("setup-status")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(b"artifact-missing-or-incompatible", result.stdout)
+        self.assertEqual((self.project / "prepared").read_text(), "x")
+        result = self.run_entry("setup")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.project / "prepared").read_text(), "xx")
+
+    def test_invalid_python_selection_rejected_before_any_setup(self):
+        self.python_setup()
+        config = self.project / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                "[setup.prepare]",
+                '[setup.earlier]\ninputs=["input.txt"]\nartifacts=["earlier"]\n'
+                'commands=[["sh","-c","echo installed > earlier"]]\n[setup.prepare]',
+            )
+        )
+        for value in ("", "3.13", str(self.project / "missing-python")):
+            with self.subTest(value=value):
+                result = self.run_entry("setup", UV_PYTHON=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"Python readiness", result.stderr)
+                self.assertNotIn(b"Traceback", result.stderr)
+                self.assertFalse((self.project / "prepared").exists())
+                self.assertFalse((self.project / "earlier").exists())
+                self.assertFalse(
+                    (self.project / ".cache/toolchain/setup-groups").exists()
+                )
+
+    def test_host_python_profile_selection_and_failed_install_leave_no_stamp(self):
+        self.python_setup()
+        config = self.project / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                "[profiles.default.environment]",
+                "[profiles.default.environment]\nUV_PYTHON="
+                + json.dumps(str(self.binaries / "python3")),
+            )
+        )
+        result = self.run_entry("setup", UV_PYTHON="invalid-caller-value")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config.write_text(
+            config.read_text().replace(
+                "p.symlink_to(os.environ['UV_PYTHON'])", "p.symlink_to('missing')"
+            )
+        )
+        result = self.run_entry("setup")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"did not create its declared artifacts", result.stderr)
+        self.assertFalse(
+            (self.project / ".cache/toolchain/setup-groups/prepare.json").exists()
+        )
+
     def test_entire_recipe_rejected_before_earlier_setup_and_commands(self):
         for requirement in (
             "cleanup_children = true",
@@ -189,7 +274,7 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
             "--",
             "python3",
             "-c",
-            "import signal,time; print('ready',flush=True); signal.signal(signal.SIGTERM,lambda *_:exit(42)); time.sleep(20)",
+            "import signal,time; signal.signal(signal.SIGTERM,lambda *_:exit(42)); print('ready',flush=True); time.sleep(20)",
         ]
         child = subprocess.Popen(
             command,

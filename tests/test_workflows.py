@@ -483,6 +483,24 @@ readiness={command=["python3","probe.py"]}
                 with self.assertRaises(ValueError):
                     workflows.configuration(self.root)
 
+    def test_nix_python_selection_is_required_before_installation(self):
+        self.body = self.body.replace(
+            'artifacts=["installed"]',
+            'artifacts=[{path=".venv/bin/python",interpreter="python"}]',
+        )
+        self.write_config()
+        for value in (None, "/usr/bin/python3", "/nix/store/missing-python"):
+            with self.subTest(value=value):
+                os.environ.pop("UV_PYTHON", None)
+                if value is not None:
+                    os.environ["UV_PYTHON"] = value
+                result = self.run_cli("setup")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("Traceback", result.stderr)
+                self.assertRegex(result.stderr, "Python readiness|pinned Nix shell")
+                self.assertFalse((self.root / "installed").exists())
+                self.assertFalse((self.root / "install-count").exists())
+
     def test_setup_group_can_be_requested_explicitly(self):
         result = self.run_cli("setup", "dependencies")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -76,6 +76,11 @@ Supported operations are `exec`, `shell`, ordinary tasks, project setup,
 install project dependencies using your existing tools. Readiness is distinct
 from either Nix mode; switching modes requires setup to be checked again.
 
+For Python virtual-environment readiness, host setup uses `python3` on your PATH
+unless you select an absolute executable with `UV_PYTHON`. The installer receives
+that same selection. Supply the project's required Python version yourself;
+Chainman's Python 3.12 minimum does not establish compatibility with the project.
+
 Managed services, dependency/runtime updates, transactional formatting,
 initialization, and tasks requiring native timeouts or child-process containment
 require `host-nix` or `container-nix`. An unsupported task anywhere in a requested

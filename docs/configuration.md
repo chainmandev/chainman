@@ -330,8 +330,14 @@ the option and keep the existing lightweight path.
 For a Python virtual environment, declare an artifact such as
 `{path=".venv/bin/python", interpreter="python"}`. Its final component may be a
 symlink, while all parent directories remain confined to the project. Readiness
-requires it to resolve to the selected pinned `UV_PYTHON`; an interpreter from a
-different environment is stale. Ordinary and digest artifacts still reject links.
+requires it to resolve to the selected pinned `UV_PYTHON` in Nix modes; an
+interpreter from a different environment is stale. In bare-host mode, select an
+absolute executable path with `UV_PYTHON`, or use the caller's `python3` on PATH.
+Chainman passes that selection to the group's installer and checks it afterward.
+Project/profile environment values apply to this selection. Invalid selections
+fail before any requested setup group installs. No Python is downloaded or
+provisioned by Chainman; supply a version compatible with the project's own
+requirements. Ordinary and digest artifacts still reject links.
 
 Installed artifacts have shared use leases for task lifetimes. Reinstallation takes
 exclusive access and fails visibly while another task uses them. Child commands

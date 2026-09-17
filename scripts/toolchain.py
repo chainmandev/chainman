@@ -1226,6 +1226,29 @@ def run_commands(
             launch(ad.strings(argv, "Module command"), selected_env)
 
 
+def python_artifact_interpreter(env: Mapping[str, str]) -> Path:
+    selected = env.get("UV_PYTHON")
+    if host_mode() and selected is None:
+        selected = shutil.which("python3", path=env.get("PATH", ""))
+    if not selected or not Path(selected).is_absolute():
+        raise ValueError(
+            "Python readiness requires an absolute UV_PYTHON executable"
+            + (
+                " or python3 on the caller PATH"
+                if host_mode()
+                else " from the pinned Nix shell"
+            )
+        )
+    expected = Path(selected)
+    if not host_mode() and not str(expected).startswith("/nix/store/"):
+        raise ValueError(
+            "Virtual environment interpreter must come from the pinned Nix shell"
+        )
+    if not expected.is_file() or not os.access(expected, os.X_OK):
+        raise ValueError(f"Python readiness interpreter is not executable: {expected}")
+    return expected
+
+
 def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
     if isinstance(artifact, str):
         return contained(root, artifact).exists()
@@ -1238,12 +1261,8 @@ def artifact_ready(root: Path, artifact: object, env: dict[str, str]) -> bool:
     path = Path(artifact["path"])
     parent = contained(root, str(path.parent))
     candidate = parent / path.name
-    expected = Path(env["UV_PYTHON"])
-    if not expected.is_absolute() or not str(expected).startswith("/nix/store/"):
-        raise ValueError(
-            "Virtual environment interpreter must come from the pinned Nix shell"
-        )
-    # Permit only this declared interpreter link into the selected Nix Python.
+    expected = python_artifact_interpreter(env)
+    # Permit only this declared interpreter link into the selected Python.
     # Source and cleanup containment never use this special readiness rule.
     return candidate.is_file() and candidate.resolve() == expected.resolve()
 
