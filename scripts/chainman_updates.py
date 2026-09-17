@@ -407,9 +407,9 @@ def options(args: list[str]) -> Options:
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     opts = parser.parse_args(args)
     if opts.staged:
-        if not opts.format or opts.preview:
-            raise ValueError("Staged formatting requires format without preview")
-        opts.no_commit = True
+        raise ValueError(
+            "Use just format-staged (or just chainman format-staged); update transactions cannot format the index"
+        )
     if opts.format:
         if opts.only_chainman or opts.include_chainman or opts.extra:
             raise ValueError("Format does not select dependency targets")

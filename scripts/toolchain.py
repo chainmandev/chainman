@@ -793,6 +793,21 @@ PNPM_SETTING_VARIABLES = (
         "pnpm_config_verify_deps_before_run",
         "npm_config_verify_deps_before_run",
     ),
+    (
+        "PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS",
+        "pnpm_config_manage_package_manager_versions",
+        "npm_config_manage_package_manager_versions",
+    ),
+    (
+        "PNPM_CONFIG_PM_ON_FAIL",
+        "pnpm_config_pm_on_fail",
+        "npm_config_pm_on_fail",
+    ),
+    (
+        "PNPM_CONFIG_PACKAGE_MANAGER_STRICT_VERSION",
+        "pnpm_config_package_manager_strict_version",
+        "npm_config_package_manager_strict_version",
+    ),
 )
 
 
@@ -814,7 +829,15 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
     env = dict(os.environ)
     # Checking/running dependencies must not install them, including bare host.
     # This guard does not select a package store or provision caller tools.
-    pnpm_environment(env, {"PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "error"})
+    pnpm_environment(
+        env,
+        {
+            "PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN": "error",
+            "PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS": "false",
+            "PNPM_CONFIG_PM_ON_FAIL": "error",
+            "PNPM_CONFIG_PACKAGE_MANAGER_STRICT_VERSION": "true",
+        },
+    )
     if host_mode():
         env.update(
             CHAINMAN_ROOT=str(root.resolve()),

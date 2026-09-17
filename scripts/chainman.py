@@ -87,6 +87,9 @@ def profile(
             "swift",
             "compose",
             "browser",
+            "hooks",
+            "format-text",
+            "format-rust",
         }:
             raise ValueError(f"Profile {name!r} is not declared")
         raw = {"runtime_profile": "core" if name == "default" else name}
@@ -153,7 +156,12 @@ def profile_inputs(root: Path, name: str, ref: str | None) -> dict[str, str]:
     result.update(
         {
             path: hashlib.sha256(body).hexdigest()
-            for path, body in configuration_files.read(root).documents.items()
+            for path, body in configuration_files.read(
+                tc.configuration_root(root),
+                "chainman.toml"
+                if (tc.configuration_root(root) / "chainman.toml").is_file()
+                else "toolchain.toml",
+            ).documents.items()
         }
     )
     # Bare host mode does not evaluate or depend on the declared Nix toolchain.
@@ -648,6 +656,57 @@ def main(argv: Sequence[str] | None = None) -> int:
             import config_inspection
 
             config_inspection.run(root, args.action, rest)
+        elif args.action == "hooks":
+            import hooks
+
+            return hooks.execute(root, rest)
+        elif args.action == "trojan-source":
+            import trojan_source
+
+            return trojan_source.run(root, rest)
+        elif args.action == "setup":
+            import hooks
+            import recipes
+            import admission
+
+            no_hooks = "--no-hooks" in rest
+            groups = [value for value in rest if value != "--no-hooks"]
+            if any(value.startswith("-") for value in groups):
+                raise ValueError("Use setup [GROUP ...] [--no-hooks]")
+            complete = not groups
+            extensions = recipes.bindings(cfg).get("setup", []) if complete else []
+            admission.graph(
+                root,
+                cfg,
+                extensions,
+                groups=groups or list(table(cfg.get("setup", {}), "Setup")),
+            )
+            install_hooks = (
+                complete
+                and not no_hooks
+                and hooks.declaration(cfg).get("enabled", False)
+                and not os.environ.get("CHAINMAN_UPDATE_ACTIVE")
+            )
+            if install_hooks and tc.host_mode():
+                raise ValueError(
+                    "Complete setup with managed hooks requires a Nix mode; use setup --no-hooks for limited bare-host preparation"
+                )
+            if install_hooks:
+                hooks.check_installation(root)
+            run_project(root, "setup", groups)
+            for task in extensions:
+                run_project(root, task, [])
+            if install_hooks:
+                return hooks.execute(root, ["install"])
+        elif args.action == "format-staged":
+            import staged_format
+
+            if rest:
+                raise ValueError("format-staged accepts no arguments")
+            with tc.operation(
+                root, exclusive=True, new_execution=True, automatic_prune=False
+            ):
+                return staged_format.run(root)
         elif args.action == "setup-status":
             import workflows
 

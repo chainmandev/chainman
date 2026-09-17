@@ -32,7 +32,7 @@ Use a disposable checkout to initialize a **new or empty** directory:
 git clone --depth 1 https://github.com/chainmandev/chainman.git chainman-init
 just --justfile chainman-init/justfile init "../my-project"
 cd my-project
-just chainman setup
+just setup
 just verify
 ```
 
@@ -64,6 +64,10 @@ the files and prints recovery instructions. To generate files only:
 ```sh
 just --justfile chainman-init/justfile init "../another-project" --no-git
 ```
+
+The starter opts into [Git hooks](docs/hooks.md): `just setup` installs them.
+Pre-commit formats staged content; pre-push checks outgoing source for suspicious
+Unicode. Both defaults can be overridden by project configuration.
 
 Initialization does **not** run project setup or certify the application. The larger
 [language examples](examples/) remain in this repository for reference.

@@ -39,6 +39,11 @@ def validated(root: Path) -> dict[str, object]:
             spec = table(raw, "Execution")
             if "container" not in spec:
                 execution_transport.effective(cfg, spec)
+    import formatters
+    import hooks
+
+    formatters.declarations(cfg)
+    hooks.declaration(cfg)
     if "recipes" in cfg:
         import recipes
 

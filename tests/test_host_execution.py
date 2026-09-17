@@ -23,7 +23,7 @@ class HostExecutionTests(unittest.TestCase):
             self.origin / "scripts",
             ignore=shutil.ignore_patterns("__pycache__"),
         )
-        for filename in ("chainman.sh", "git-entry.sh"):
+        for filename in ("chainman.sh", "git-entry.sh", "lifetime.sh"):
             shutil.copy2(
                 SOURCE / "bootstrap" / filename, self.origin / "bootstrap" / filename
             )
@@ -32,7 +32,15 @@ class HostExecutionTests(unittest.TestCase):
         self.git_run("-c", "commit.gpgsign=false", "commit", "-qm", "Host runtime")
         self.revision = self.git_run("rev-parse", "HEAD").stdout.strip()
         (self.project / "chainman.lock").write_text(self.revision + "\n")
-        for executable in ("python3", "dirname", "basename", "sed", "env", "bash"):
+        for executable in (
+            "python3",
+            "dirname",
+            "basename",
+            "sed",
+            "env",
+            "bash",
+            "uname",
+        ):
             path = shutil.which(executable)
             self.assertIsNotNone(path, executable)
             (self.binaries / executable).symlink_to(path)
@@ -112,6 +120,7 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
             with self.subTest(requirement=requirement):
                 (self.project / "chainman.toml").write_text(
                     self.config
+                    + '\n[services.database]\ncommand=["sleep","1"]\n'
                     + '\n[tasks.blocked]\ndepends_on = ["check"]\ncommands = [["true"]]\n'
                     + requirement
                     + "\n"
@@ -271,6 +280,7 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
             with self.subTest(requirement=requirement):
                 (self.project / "chainman.toml").write_text(
                     self.config
+                    + '\n[services.database]\ncommand=["sleep","1"]\n'
                     + '\n[tasks.blocked]\ncommands=[["true"]]\n'
                     + requirement
                     + '\n[tasks.last]\ndepends_on=["blocked"]\ncommands=[["true"]]\n'

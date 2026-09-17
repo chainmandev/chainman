@@ -15,7 +15,7 @@ The initializer generated files and, unless `--no-git` was selected, made the in
 Git commit. It did not run setup or verification.
 
 ```sh
-just chainman setup
+just setup
 just verify
 just chainman exec -- python3 scripts/demo.py
 just chainman shell
@@ -43,6 +43,14 @@ Read the [adoption guide](https://github.com/chainmandev/chainman/blob/HEAD/docs
 [configuration reference](https://github.com/chainmandev/chainman/blob/HEAD/docs/configuration.md),
 and [update and recovery guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/updates.md).
 
-`just chainman setup` validates every declared setup group and repairs stale
+`just setup` validates every declared setup group and repairs stale
 installations. Ordinary commands prompt before required repairs; unattended
 automatic repair requires `CHAINMAN_SETUP=auto`.
+
+`just setup` prepares the complete project and installs its Git hooks. Use
+`just setup --no-hooks` in disposable CI. `just hooks status` checks installation;
+`just hooks config` shows the effective lefthook configuration. Pre-commit formats
+staged Python files without linting; pre-push scans outgoing source for suspicious
+Unicode. Partial staging is preserved through a three-way merge. See
+[the hook guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/hooks.md)
+for overrides, formatter declarations and conflict recovery.

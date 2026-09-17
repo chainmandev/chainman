@@ -1,3 +1,17 @@
 # Project-owned forwarding recipes are optional; Chainman never rewrites them.
 verify:
     @just chainman recipe verify
+
+# Install all declared setup groups and the Git hooks.
+[positional-arguments]
+setup *args:
+    #!/bin/sh
+    exec just chainman setup "$@"
+
+format-staged:
+    @just chainman format-staged
+
+[positional-arguments]
+hooks +args:
+    #!/bin/sh
+    exec just chainman hooks "$@"

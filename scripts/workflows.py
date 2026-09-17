@@ -114,6 +114,10 @@ def configuration(root: Path) -> Table:
                 raise ValueError(
                     f"Unknown fields in {section}.{key}: {', '.join(sorted(set(spec) - allowed))}"
                 )
+            if section == "setup" and spec.get("pnpm"):
+                import pnpm_setup
+
+                spec.update(pnpm_setup.expand(spec))
             if section == "tasks":
                 import admission
 
@@ -252,6 +256,10 @@ def order(entries: Mapping[str, object], requested: Iterable[str]) -> list[str]:
 
 def group_spec(cfg: Mapping[str, object], key: str) -> Table:
     spec = declarations(cfg, "setup")[key]
+    if spec.get("pnpm") and "commands" not in spec:
+        import pnpm_setup
+
+        spec.update(pnpm_setup.expand(spec))
     spec.setdefault("directory", ".")
     spec.setdefault("profile", default_profile(cfg))
     return spec

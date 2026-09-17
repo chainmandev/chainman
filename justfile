@@ -32,7 +32,7 @@ format-write:
     @./scripts/enter.sh core python3 scripts/format.py
 
 format-staged:
-    @./scripts/enter.sh core python3 scripts/source_workflow.py format --staged
+    @./scripts/enter.sh core python3 scripts/staged_format.py
 
 format-check:
     @./scripts/enter.sh core python3 scripts/format.py --check

@@ -68,6 +68,17 @@
               )
             else
               pkgs;
+          # Use the upstream library directly; its optional CLI dependencies are
+          # not needed to inspect literal Git blobs. npm tarball is hash-pinned.
+          trojanSource = pkgs.stdenvNoCC.mkDerivation {
+            pname = "anti-trojan-source";
+            version = "1.12.1";
+            src = pkgs.fetchurl {
+              url = "https://registry.npmjs.org/anti-trojan-source/-/anti-trojan-source-1.12.1.tgz";
+              hash = "sha256-KjA3s/WevVXpqXJjFyAhDQldQ+bhP8lcuNwyGapAr0g=";
+            };
+            installPhase = "mkdir -p $out; cp -r src package.json $out/";
+          };
           runtimeBase = with pkgs; [
             python3
             git
@@ -134,6 +145,17 @@
           # Consumer entry needs the runtime, not Chainman's source formatters or
           # a C compiler. Language toolchains still come from the chosen profile.
           bootstrap = shellWith pkgs.mkShellNoCC runtimeBase "bootstrap" [ ] "";
+          hooks = shellWith pkgs.mkShellNoCC runtimeBase "hooks" [ pkgs.lefthook nodejs ] ''
+            export CHAINMAN_TROJAN_SOURCE=${trojanSource}/src/main.js
+          '';
+          format-text = shellWith pkgs.mkShellNoCC runtimeBase "format-text" [
+            prettier
+            pkgs.ruff
+            pkgs.taplo
+            pkgs.shfmt
+            pkgs.nixfmt
+          ] "";
+          format-rust = shellWith pkgs.mkShellNoCC runtimeBase "format-rust" [ pkgs.rustfmt ] "";
           updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ ] "";
           release = shellWith pkgs.mkShellNoCC (updateBase ++ [ pkgs.gh ]) "release" [ ] "";
           core = shell "core" [ ] "";

@@ -6,6 +6,15 @@ default_profile = "default"
 [profiles.default]
 flake = ".#default"
 
+[hooks]
+enabled = true
+
+[formatters.python]
+paths = ["*.py"]
+profile = "format-text"
+write = ["ruff", "--isolated", "format", "--"]
+check = ["ruff", "--isolated", "format", "--check", "--"]
+
 [tasks.verify]
 commands = [["python3", "scripts/demo.py", "--check"]]
 

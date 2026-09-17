@@ -787,3 +787,40 @@ selected environment. Both literal and resolved ports must be integers from 1
 through 65535, with a loopback binding and optional `/tcp` or `/udp` suffix. This
 also applies to explicit container-option port mappings. Host Nix
 ignores container transport, and ordinary launches remain headless by default.
+
+## Formatter and hook declarations
+
+`[formatters.NAME]` declares `paths`, optional `exclude`, `profile`, optional
+`setup`, and argument-vector `write`/`check` commands. These are the only operations
+used by staged formatting; task bindings for full formatting are independent.
+`[hooks] enabled=true` opts into formatting-only pre-commit and outgoing-source
+pre-push checks through pinned lefthook. `hooks.config` optionally selects an
+upstream lefthook override file. See the complete [hook guide](hooks.md).
+
+## Reusable pnpm setup
+
+A setup group can set `pnpm=true` instead of spelling out `commands` and
+`readiness`. Keep the project profile, fingerprint inputs and readiness artifacts
+explicit:
+
+```toml
+[setup.javascript]
+pnpm = true
+profile = "javascript"
+inputs = ["package.json", "**/package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", "patches/**"]
+exclude_inputs = ["**/node_modules/**", ".cache/**", ".chainman/**"]
+artifacts = ["node_modules/.modules.yaml"]
+```
+
+The helper checks the selected profile's pnpm against the exact `packageManager`
+version, disables pnpm's automatic package-manager download, installs with a frozen
+lockfile, and asks pnpm to validate dependencies before a harmless Node command.
+A mismatch names both versions and requires reconciliation of the project flake
+and manifest. Normal dependency age, integrity and build-approval policies still
+apply. No global Corepack shims are created. Custom installers can retain explicit
+commands/readiness instead; do not combine them with `pnpm=true`.
+
+Complete `setup` also runs `recipes.setup` extensions and installs declared hooks.
+`setup --no-hooks` explicitly opts out for CI; selecting individual setup groups
+never installs hooks. Ordinary targeted repair remains subject to
+`CHAINMAN_SETUP=prompt|auto|error`.

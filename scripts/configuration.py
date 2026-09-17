@@ -25,7 +25,7 @@ FIELDS = {
         "commands profile directory depends_on setup services cleanup_children timeout_seconds timeout_env shutdown_seconds wait_for_services environment context_environment transport exclusive exclusive_services serial_group network_service allowed_modes allowed_platforms".split()
     ),
     "setup": set(
-        "commands profile directory depends_on inputs exclude_inputs environment_inputs artifacts readiness".split()
+        "commands profile directory depends_on inputs exclude_inputs environment_inputs artifacts readiness pnpm".split()
     ),
     "services": set(
         "command profile directory environment depends_on readiness restart shutdown_seconds container setup watch scope transport network_service".split()
@@ -45,7 +45,7 @@ TABLES = {
     "resources": set("max_jobs memory_per_job_gib job_variables".split()),
 }
 BOOLEANS = set(
-    "compiler_cache cleanup_children wait_for_services exclusive exclusive_services read_only host_access".split()
+    "pnpm compiler_cache cleanup_children wait_for_services exclusive exclusive_services read_only host_access".split()
 )
 ARRAYS = set(
     "commands command depends_on setup services inputs exclude_inputs environment_inputs artifacts paths ignore ports mounts volumes job_variables entry_setup allowed_modes allowed_platforms".split()

@@ -555,33 +555,99 @@ format-check=["format-check"]
                 if pid is not None and running(pid):
                     os.kill(pid, signal.SIGKILL)
 
-    def test_public_update_lifecycle_staged_format_preserves_other_bytes_and_index(
-        self,
-    ):
-        before = self.update_lifecycle()
+    def test_public_staged_format_uses_index_snapshot_and_no_project_gate(self):
+        self.update_lifecycle()
+        with (self.root / "chainman.toml").open("a") as config:
+            config.write(
+                '\n[formatters.text]\npaths=["*.txt"]\nprofile="host"\nwrite=["python3","formatter.py"]\ncheck=["true"]\n'
+            )
+        (self.root / "formatter.py").write_text(
+            "import pathlib, sys\nfor name in sys.argv[1:]:\n p=pathlib.Path(name); p.write_text(''.join(line.rstrip()+'\\n' for line in p.read_text().splitlines()))\n"
+        )
+        self.lifecycle_git("add", "chainman.toml", "formatter.py")
+        self.lifecycle_git("commit", "-m", "Declare file formatter")
+        before = self.lifecycle_git("rev-parse", "HEAD")
         (self.root / "selected.txt").write_text("selected  \n")
-        (self.root / "partial.txt").write_text("staged  \n")
+        (self.root / "partial.txt").write_text("staged  \nkeep\nkeep\nlast\n")
         self.lifecycle_git("add", "selected.txt", "partial.txt")
-        (self.root / "partial.txt").write_text("unstaged  \n")
+        (self.root / "partial.txt").write_text("staged  \nkeep\nkeep\nunstaged\n")
         (self.root / "excluded.txt").write_text("excluded  \n")
-        partial = self.lifecycle_git("ls-files", "--stage", "partial.txt")
-        result = self.run_bootstrap("format", "--staged", "--json")
-        accepted = json.loads(result.stdout)
-        self.assertEqual(accepted["changed"], ["selected.txt"])
-        self.assertIsNone(accepted["commit"])
+        result = self.run_bootstrap("format-staged")
+        self.assertIn("Formatted 2", result.stdout)
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
         self.assertEqual((self.root / "selected.txt").read_text(), "selected\n")
-        self.assertEqual(self.lifecycle_git("show", ":selected.txt"), "selected")
-        self.assertEqual((self.root / "excluded.txt").read_text(), "excluded  \n")
-        self.assertEqual((self.root / "partial.txt").read_text(), "unstaged  \n")
         self.assertEqual(
-            self.lifecycle_git("ls-files", "--stage", "partial.txt"), partial
+            self.lifecycle_git("show", ":partial.txt"), "staged\nkeep\nkeep\nlast"
         )
-        self.assertIn("fixture phase: format-check", result.stderr)
-        self.assertEqual(list(self.update_cache.iterdir()), [])
+        self.assertEqual((self.root / "excluded.txt").read_text(), "excluded  \n")
+        self.assertEqual(
+            (self.root / "partial.txt").read_text(), "staged\nkeep\nkeep\nunstaged\n"
+        )
+        self.assertNotIn("fixture phase", result.stderr)
 
     def test_public_runtime_update_lifecycle_switches_only_after_verification(self):
         self.runtime_update_lifecycle("chainman-update")
+
+    def test_public_hook_setup_and_commit_a(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[hooks]
+enabled=true
+config="lefthook.yml"
+[tasks.capture-input]
+profile="host"
+commands=[["python3","-c","import sys,pathlib; pathlib.Path('received-input').write_bytes(sys.stdin.buffer.read())"]]
+[formatters.text]
+paths=["*.txt"]
+profile="host"
+write=["python3","formatter.py"]
+check=["true"]
+""")
+        (self.root / ".gitignore").write_text(".cache/\n.chainman/\nreal-runtime/\n")
+        (self.root / "formatter.py").write_text(
+            "import pathlib, sys\nfor name in sys.argv[1:]:\n p=pathlib.Path(name); p.write_text(p.read_text().replace('BAD','GOOD'))\n"
+        )
+        (self.root / "lefthook.yml").write_text(
+            "pre-push:\n  commands:\n    capture-input:\n      run: '\"$CHAINMAN_HOOK_ENTRY\" run capture-input'\n"
+        )
+        for name in ("a.txt", "b.txt"):
+            (self.root / name).write_text("initial\n")
+        self.lifecycle_git("init", "-q")
+        self.lifecycle_git("config", "user.name", "Fixture")
+        self.lifecycle_git("config", "user.email", "fixture@example.invalid")
+        self.lifecycle_git("config", "commit.gpgsign", "false")
+        self.lifecycle_git("add", ".")
+        self.lifecycle_git("commit", "-qm", "Initial")
+        self.run_bootstrap("setup")
+        installed = json.loads(self.run_bootstrap("hooks", "status").stdout)
+        self.assertTrue(installed["installed"])
+        (self.root / "a.txt").write_text("BAD\n")
+        self.lifecycle_git("add", "a.txt")
+        (self.root / "b.txt").write_text("BAD\n")
+        result = run_captured(
+            ["git", "-C", str(self.root), "commit", "-am", "Hook fixture"], env=self.env
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.lifecycle_git("show", "HEAD:a.txt"), "GOOD")
+        self.assertEqual(self.lifecycle_git("show", "HEAD:b.txt"), "GOOD")
+        self.assertEqual(self.lifecycle_git("diff", "--name-only"), "")
+
+        tip = self.lifecycle_git("rev-parse", "HEAD")
+        base = self.lifecycle_git("rev-parse", "HEAD^")
+        records = f"refs/heads/fixture {tip} refs/heads/fixture {base}\n"
+        result = subprocess.run(
+            [str(self.launcher), "hooks", "run", "pre-push", "origin", "unused"],
+            env=self.env,
+            input=records,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "received-input").read_text(), records)
+        self.assertIn("Trojan Source: checked", result.stdout + result.stderr)
 
     def test_public_full_update_resolves_and_verifies_with_the_new_runtime(self):
         self.runtime_update_lifecycle("deps-update")

@@ -25,7 +25,8 @@ class RecipeTests(unittest.TestCase):
             "tasks": {"hooks": {"commands": [["true"]]}},
             "recipes": {"setup": ["hooks"]},
         }
-        self.assertEqual(recipes.actions(cfg)["setup"], [["setup"], ["run", "hooks"]])
+        # Raw setup owns extensions too; recipe dispatch must not run them twice.
+        self.assertEqual(recipes.actions(cfg)["setup"], [["setup"]])
 
     def test_public_sdk_recipe_routes_each_platform_without_nested_shell_parsing(self):
         with tempfile.TemporaryDirectory(prefix="chainman SDK recipe ") as temporary:
@@ -72,7 +73,6 @@ class RecipeTests(unittest.TestCase):
             (["--skip-chainman", "targets=all"], "exclude"),
             (["--only-chainman"], "only"),
             (["--format"], "exclude"),
-            (["--format", "--staged"], "exclude"),
             (["--message", "targets=js"], "include"),
             (["--", "2.0"], "include"),
             (["--skip-chainman", "--", "2.0"], "exclude"),
@@ -208,30 +208,6 @@ class FormatTransactions(unittest.TestCase):
             self.finish()
         self.assertEqual((self.root / "source.txt").read_text(), "new user work\n")
 
-    def test_staged_formatting_keeps_partial_and_unrelated_changes(self):
-        (self.root / "source.txt").write_text("selected\n")
-        updates.git(self.root, "add", "source.txt")
-        (self.root / "dependency.lock").write_text("staged version\n")
-        updates.git(self.root, "add", "dependency.lock")
-        (self.root / "dependency.lock").write_text("unstaged version\n")
-        self.prepare("--format", "--staged")
-        (self.candidate / "source.txt").write_text("formatted selected\n")
-        (self.candidate / "dependency.lock").write_text("formatted other\n")
-        update_staging.inspect(self.root, self.stage)
-        self.assertEqual(
-            (self.candidate / "dependency.lock").read_text(), "unstaged version\n"
-        )
-        self.finish()
-        self.assertEqual(
-            updates.git(self.root, "show", ":source.txt"), "formatted selected"
-        )
-        self.assertEqual(
-            updates.git(self.root, "show", ":dependency.lock"), "staged version"
-        )
-        self.assertEqual(
-            (self.root / "dependency.lock").read_text(), "unstaged version\n"
-        )
-
     def test_resume_rechecks_original_identity_and_refreezes_candidate(self):
         self.prepare("--format")
         (self.candidate / "source.txt").write_text("first attempt\n")
@@ -244,66 +220,12 @@ class FormatTransactions(unittest.TestCase):
         self.finish()
         self.assertEqual((self.root / "source.txt").read_text(), "reconciled\n")
 
-    def test_staged_formatting_rejects_clean_filter_changes(self):
-        (self.root / ".gitattributes").write_text("source.txt filter=change\n")
-        updates.git(
-            self.root, "config", "filter.change.clean", "sed s/formatted/altered/g"
-        )
-        updates.git(self.root, "add", ".gitattributes")
-        updates.git(self.root, "commit", "-m", "Declare clean filter")
-        (self.root / "source.txt").write_text("selected\n")
-        updates.git(self.root, "add", "source.txt")
-        self.prepare("--format", "--staged")
-        (self.candidate / "source.txt").write_text("formatted\n")
-        update_staging.inspect(self.root, self.stage)
-        with self.assertRaisesRegex(ValueError, "staged tree differs"):
-            self.finish()
-        self.assertEqual((self.root / "source.txt").read_text(), "formatted\n")
-        self.assertEqual(updates.git(self.root, "show", ":source.txt"), "altered")
-
-    def test_staged_formatting_rejects_ignored_executable_mode(self):
-        updates.git(self.root, "config", "core.filemode", "false")
-        (self.root / "source.txt").write_text("selected\n")
-        updates.git(self.root, "add", "source.txt")
-        self.prepare("--format", "--staged")
-        (self.candidate / "source.txt").chmod(0o755)
-        update_staging.inspect(self.root, self.stage)
-        with self.assertRaisesRegex(ValueError, "staged tree differs"):
-            self.finish()
-        self.assertEqual((self.root / "source.txt").stat().st_mode & 0o777, 0o755)
-        self.assertEqual(updates.staged_entries(self.root)["source.txt"][0], "100644")
-
-    def test_staged_resume_keeps_selection(self):
-        (self.root / "source.txt").write_text("selected\n")
-        updates.git(self.root, "add", "source.txt")
-        self.prepare("--format", "--staged")
-        update_staging.resume(self.root, self.stage)
-        self.assertIn(
-            "--staged",
-            (self.stage / "control/resume-arguments").read_text().splitlines(),
-        )
-
-    def test_staged_acceptance_checks_the_effective_tree(self):
-        (self.root / "source.txt").write_text("old pair\n")
-        updates.git(self.root, "add", "source.txt")
-        (self.root / "dependency.lock").write_text("old pair\n")
-        self.prepare("--format", "--staged")
-        for name in ("source.txt", "dependency.lock"):
-            (self.candidate / name).write_text("new pair\n")
-        (self.candidate / "unselected-new.txt").write_text("exclude\n")
-        update_staging.inspect(self.root, self.stage)
-
-        # This cross-file gate would have passed on the formatter's full output.
-        # It must reject the partial application, before anything is finalized.
-        def verify_pair(root):
-            return (root / "source.txt").read_bytes() == (
-                root / "dependency.lock"
-            ).read_bytes()
-
-        self.assertFalse(verify_pair(self.candidate))
-        self.assertTrue(verify_pair(self.root))
-        self.assertFalse((self.candidate / "unselected-new.txt").exists())
-
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StagedDispatchTests(unittest.TestCase):
+    def test_update_transaction_cannot_fall_back_to_repository_formatter(self):
+        with self.assertRaisesRegex(ValueError, "format-staged"):
+            chainman_updates.options(["--format", "--staged"])

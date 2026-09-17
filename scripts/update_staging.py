@@ -205,7 +205,7 @@ def prepare(
             tc.atomic_bytes(control / "help", b"")
         raise
     with tc.operation(root):
-        identity = updates.repository(root, clean=not (opts.preview or opts.staged))
+        identity = updates.repository(root, clean=not opts.preview)
         before = updates.snapshot(root)
         policy = updates.settings(root) if source else dependency_api.policy(root)
         if opts.format and not source:
@@ -245,16 +245,8 @@ def prepare(
                 policy.get("reconcile_outputs", []), "Reconcile outputs"
             )
         selected = None
-        if opts.staged:
-            staged = set(
-                updates.git(
-                    root, "diff", "--cached", "--name-only", "-z", "--diff-filter=ACM"
-                ).split("\0")
-            ) - {""}
-            unstaged = set(updates.git(root, "diff", "--name-only", "-z").split("\0"))
-            selected = sorted(staged - unstaged)
         with updates.preview_git_environment():
-            if opts.preview or opts.staged:
+            if opts.preview:
                 updates.prepare_preview(root, candidate, before)
             else:
                 # Keep clean-source revision metadata meaningful to project
@@ -380,6 +372,10 @@ def read_state(root: Path, destination: Path) -> tuple[State, Path]:
     state = State.decode(
         json.loads(tc.regular_input(directory(destination / "control"), "state.json"))
     )
+    if state.options.staged:
+        raise ValueError(
+            "Old staged-format transaction preserved; review its candidate and use just format-staged"
+        )
     if state.root != str(root) or state.candidate != str(destination / "candidate"):
         raise ValueError("Update transaction identity changed")
     return state, directory(state.candidate)
@@ -578,19 +574,6 @@ def inspect(root: Path, destination: Path) -> None:
         candidate_unchanged(candidate, state)
         updated = updates.snapshot(candidate)
         paths = updates.changed(state.candidate_before, updated)
-        if state.options.staged:
-            if state.selected is None:
-                raise ValueError("Staged update state lacks its selected paths")
-            # Verification must see the exact effective working tree to be
-            # applied, including the original bytes of every excluded path.
-            updates.restore_paths(
-                candidate,
-                state.candidate_identity[1],
-                [path for path in paths if path not in state.selected],
-                state.candidate_modes,
-            )
-            updated = updates.snapshot(candidate)
-            paths = updates.changed(state.candidate_before, updated)
         if set(paths) & (set(updates.gitlinks(candidate)) | {".gitmodules"}):
             raise ValueError(
                 "Submodule inputs and metadata require a separate transaction"
@@ -694,36 +677,6 @@ def finalize(root: Path, destination: Path) -> None:
                     inspected.paths,
                     opts.message,
                 )
-            elif opts.staged:
-                # Preserve partial/unrelated staging, but require selected entries
-                # to contain exactly the verified raw bytes and executable modes.
-                # Git clean filters and core.filemode can otherwise silently
-                # turn a successful format check into an unverified staged tree.
-                expected_index = {
-                    name: value
-                    for name, value in state.index.items()
-                    if name not in inspected.paths
-                }
-                expected_index.update(
-                    {
-                        name: value
-                        for name, value in updates.raw_entries(
-                            root, inspected.paths
-                        ).items()
-                    }
-                )
-                updates.git(root, "add", "--", *inspected.paths)
-                if index(root) != expected_index:
-                    raise ValueError(
-                        "The staged tree differs from verified bytes/modes or contains unrelated index changes; inspect Git filters and the preserved index"
-                    )
-                if (
-                    updates.repository(root, clean=False) != state.identity
-                    or updates.snapshot(root) != expected
-                ):
-                    raise ValueError(
-                        "Original checkout changed during staged formatting; inspect the preserved changes"
-                    )
         result = dict(
             schema=1,
             changed=inspected.paths,
@@ -746,9 +699,7 @@ def run(root: Path, action: str, args: list[str]) -> int:
             import recipes
 
             declared = recipes.bindings(cfg)
-            tasks = (
-                [] if opts.staged else declared.get("generate", [])
-            ) + declared.get("format-write", [])
+            tasks = declared.get("generate", []) + declared.get("format-write", [])
         else:
             tasks = strings(
                 dependency_api.policy(root).get("reconcile_tasks", []),

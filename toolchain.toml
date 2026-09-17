@@ -16,3 +16,22 @@ outputs = ["nix/flake.lock", "nix/container-image.txt", "bootstrap/chainman.sh",
 [ci]
 # Explicit ci-prune only; never part of normal setup, verification or cleanup.
 disposable_sdks = ["android", "dotnet", "haskell"]
+
+
+[formatters.python]
+paths = ["*.py", "*.pyi"]
+profile = "core"
+write = ["ruff", "--isolated", "format", "--no-cache", "--"]
+check = ["ruff", "--isolated", "format", "--no-cache", "--check", "--"]
+
+[formatters.shell]
+paths = ["*.sh"]
+profile = "core"
+write = ["shfmt", "-i", "4", "-bn", "-ci", "-sr", "-w", "--"]
+check = ["shfmt", "-i", "4", "-bn", "-ci", "-sr", "-d", "--"]
+
+[formatters.nix]
+paths = ["*.nix"]
+profile = "core"
+write = ["nixfmt", "--"]
+check = ["nixfmt", "--check", "--"]

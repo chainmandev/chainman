@@ -335,6 +335,13 @@ if [ "$mode" = host ]; then
     exec python3 -E -s -B "$source_root/scripts/chainman.py" --root "$root" "$@"
 fi
 
+if [ "$CHAINMAN_REQUEST_ACTION" = format ] && [ "${2:-}" = --staged ]; then
+    [ "$#" = 2 ] || fail 'usage: format --staged'
+    set -- format-staged
+    CHAINMAN_REQUEST_ACTION=format-staged
+    export CHAINMAN_REQUEST_ACTION
+fi
+
 case "$CHAINMAN_REQUEST_ACTION" in
     deps-update | chainman-update | format)
         [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || fail 'Start updates through the host launcher so candidate verification can control its own services.'
@@ -1006,7 +1013,26 @@ elif command -v git > /dev/null 2>&1; then
             ;;
         esac
     fi
-    for key in user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
+    case "$CHAINMAN_REQUEST_ACTION" in
+        hooks | format-staged)
+            if [ -n "${GIT_INDEX_FILE:-}" ]; then
+                case "$GIT_INDEX_FILE" in /*) ;; *) GIT_INDEX_FILE=$root/$GIT_INDEX_FILE ;; esac
+                single_line "$GIT_INDEX_FILE"
+                case "$GIT_INDEX_FILE" in
+                    "$root"/* | "$admin"/* | "$gitdir"/*) ;;
+                    *)
+                        index_parent=$(dirname -- "$GIT_INDEX_FILE")
+                        case "$index_parent" in / | /tmp | /var/tmp | "${HOME:-/}" | *,*) fail 'Use an alternate index in a dedicated directory or the Git administrative directory for container hooks.' ;; esac
+                        [ -d "$index_parent" ] && [ ! -L "$index_parent" ] || fail 'Alternate index needs a real parent directory.'
+                        set -- --mount "type=bind,src=$index_parent,dst=$index_parent" "$@"
+                        ;;
+                esac
+                export GIT_INDEX_FILE
+                set -- --env GIT_INDEX_FILE "$@"
+            fi
+            ;;
+    esac
+    for key in core.hooksPath user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
         status=0
         if [ "$git_owner" = "$root" ]; then
             value=$(git -C "$root" config --get "$key" 2> /dev/null) || status=$?

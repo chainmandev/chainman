@@ -95,8 +95,10 @@ class SetupReadinessTests(unittest.TestCase):
         env = dict(toolchain.environment(self.root), CHAINMAN_SETUP="error")
         with self.assertRaisesRegex(ValueError, "just chainman modules setup"):
             toolchain.setup(spec, env, self.root)
-        toolchain.setup(spec, env, self.root, explicit=True)
-        toolchain.setup(spec, env, self.root)
+        with toolchain.operation(self.root):
+            env = dict(toolchain.environment(self.root), CHAINMAN_SETUP="error")
+            toolchain.setup(spec, env, self.root, explicit=True)
+            toolchain.setup(spec, env, self.root)
 
     def test_legacy_modules_share_one_admission_before_any_install(self):
         specs = [
@@ -118,11 +120,19 @@ class SetupReadinessTests(unittest.TestCase):
                 toolchain.setup_many(specs, env, self.root)
             self.assertEqual(list(consent.call_args.args[0]), ["first", "second"])
             self.assertFalse((self.root / "installed").exists())
-        with patch("setup_readiness.authorize") as consent:
+        with (
+            toolchain.operation(self.root),
+            patch("setup_readiness.authorize") as consent,
+        ):
+            env = dict(toolchain.environment(self.root), CHAINMAN_SETUP="prompt")
             toolchain.setup_many(specs, env, self.root)
             consent.assert_called_once()
         self.assertEqual((self.root / "install-count").read_text(), "2")
-        with patch("setup_readiness.authorize") as consent:
+        with (
+            toolchain.operation(self.root),
+            patch("setup_readiness.authorize") as consent,
+        ):
+            env = dict(toolchain.environment(self.root), CHAINMAN_SETUP="prompt")
             toolchain.setup_many(specs, env, self.root)
             consent.assert_not_called()
         self.assertEqual((self.root / "install-count").read_text(), "2")
@@ -164,7 +174,10 @@ class SetupReadinessTests(unittest.TestCase):
                 ]
             },
         }
-        with self.assertRaisesRegex(ValueError, "inputs changed during installation"):
+        with (
+            toolchain.operation(self.root),
+            self.assertRaisesRegex(ValueError, "inputs changed during installation"),
+        ):
             toolchain.setup(
                 spec, toolchain.environment(self.root), self.root, explicit=True
             )

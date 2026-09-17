@@ -14,7 +14,6 @@ BINDINGS = {
     "generate",
     "format-write",
     "format-check",
-    "format-staged",
     "format-hygiene",
     "verify",
     "verify-lite",
@@ -25,7 +24,9 @@ BUILTINS = {
     "exec": ["exec", "--"],
     "shell": ["shell"],
     "format": ["format"],
-    "format-staged": ["format", "--staged"],
+    "format-staged": ["format-staged"],
+    "hooks": ["hooks"],
+    "trojan-source": ["trojan-source"],
     "deps-update": ["deps-update"],
     "chainman-update": ["chainman-update"],
     "cache-status": ["cache-status"],
@@ -81,7 +82,7 @@ def actions(cfg: Mapping[str, object]) -> dict[str, list[list[str]]]:
     for name in BINDINGS - {"format-hygiene"}:
         tasks = verification(cfg) if name == "verify" else declared.get(name, [])
         if name == "setup":
-            actions[name] = [["setup"], *[["run", task] for task in tasks]]
+            actions[name] = [["setup"]]
         elif tasks:
             actions[name] = [["run", task] for task in tasks]
         elif name == "format-staged":

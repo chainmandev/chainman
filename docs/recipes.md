@@ -42,12 +42,13 @@ implementations; project doctor and clean tasks supplement those defaults.
 
 | Recipe | Contract |
 |---|---|
-| `setup` | Prepare the declared project prerequisites and readiness artifacts |
+| `setup` | Prepare every setup group, run setup extensions and install declared Git hooks; `--no-hooks` opts out |
+| `hooks` | Manage or inspect the pinned lefthook preset |
 | `generate` | Generate declared outputs in place, without committing |
 | `format` | Generate, format/autofix, check formatting and hygiene in an isolated candidate, then commit the exact verified result |
 | `format-write` | Run the declared formatter/autofix tasks in place |
 | `format-check` | Check formatting without changing source |
-| `format-staged` | Format and restage fully staged files; preserve partial and unrelated edits |
+| `format-staged` | Format the active staged snapshot; merge formatting into partial working edits |
 | `verify` | Run the complete declared project gate |
 | `verify-lite` | Run the declared smaller gate |
 | `deps-update` | Resolve, audit, reconcile, verify and commit dependency updates |
@@ -83,8 +84,10 @@ the candidate has already passed its declared gate, retain configured commit sig
 and identity, and never push. All intended generated and formatted additions,
 modifications and deletions are eligible; runtime files and submodules have separate
 ownership. The original HEAD, index and source bytes must remain unchanged throughout.
-Verification cannot mutate the frozen candidate. Staged formatting does not commit
-and skips files with both staged and unstaged edits.
+Verification cannot mutate the frozen candidate. Staged formatting has a separate
+[formatter-only transaction](hooks.md), supports partial staging and `commit -a`,
+and never commits. It requires explicit formatter declarations and never falls
+back to the repository-wide format tasks.
 
 A failed transaction retains its candidate and prints its transaction directory.
 Reconcile there, including project-required semantic review, then use

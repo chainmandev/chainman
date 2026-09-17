@@ -8,6 +8,7 @@
 | [Progressive adoption](adoption.md) | Integrate an existing flake and just workflows deliberately |
 | [Getting started](getting-started.md) | Choose manual adoption or the greenfield initializer |
 | [Recipes](recipes.md) | Bind project commands and keep optional familiar names |
+| [Git hooks](hooks.md) | Complete setup, formatter-only commits, partial staging and outgoing-source checks |
 | [Services](services.md) | Readiness, ownership, persistent data, and cleanup |
 | [Updates](updates.md) | Configure adapters, temporary security exceptions, preview, qualification and recovery |
 | [Runtime](runtime.md) | Host/container modes, caches, and native SDK boundaries |
