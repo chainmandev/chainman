@@ -141,6 +141,15 @@ diagnostics identify commit, path, line, column and character. Each hook check g
 the original pre-push ref stream independently. Setup prompts use the controlling
 terminal, leaving that stream untouched.
 
+Source-classified files are scanned as UTF-8, including embedded NULs; unsupported
+encodings fail with a commit/path diagnostic. Only the implicit executable-file
+fallback skips recognized native binaries, reporting the skip without caching a
+clean-source result. The classification identity invalidates older clean caches.
+Traversal inventories the first outgoing tree, then its successive differences;
+it retains one diagnostic location per distinct source blob, not every unchanged
+occurrence in history. Every outgoing tree is still covered, including intermediate
+changes and merge resolutions. Large history walks report progress on stderr.
+
 Scan a particular committed tree explicitly:
 
 ```sh

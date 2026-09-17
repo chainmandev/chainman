@@ -17,11 +17,11 @@ DEFAULT_PATHS = [
     "*." + suffix
     for suffix in "astro bash c cc cpp cs css cts dart go gql graphql h hpp html j2 java js json jsx just kt kts less lua m mdx mjs mts nix php pl py r rb rs scss sh sql svelte swift toml ts tsx vue xml yaml yml".split()
 ] + ["[Jj]ustfile", "**/[Jj]ustfile", "Dockerfile", "**/Dockerfile"]
-SCANNER = "anti-trojan-source@1.12.1:high:v1"
+SCANNER = "anti-trojan-source@1.12.1:high:v2"
 
 
 def outgoing(root: Path, records: bytes) -> list[str]:
-    commits: set[str] = set()
+    commits: dict[str, None] = {}
     direct: set[str] = set()
     for line in records.splitlines():
         fields = line.split()
@@ -53,15 +53,77 @@ def outgoing(root: Path, records: bytes) -> list[str]:
                         file=sys.stderr,
                     )
             commits.update(
-                staged_format.git(root, "rev-list", *arguments)
-                .stdout.decode()
-                .splitlines()
+                dict.fromkeys(
+                    staged_format.git(
+                        root, "rev-list", "--topo-order", "--reverse", *arguments
+                    )
+                    .stdout.decode()
+                    .splitlines()
+                )
             )
         elif kind in {b"tree", b"blob"}:
             direct.add(peeled)
         else:
             raise ValueError(f"Unsupported outgoing Git object {local}")
-    return sorted(commits | direct)
+    return list(dict.fromkeys([*commits, *sorted(direct)]))
+
+
+def tree_changes(
+    root: Path, previous: str | None, revision: str
+) -> list[tuple[str, str, str]]:
+    """Enumerate the first tree, then only destination entries changed between trees.
+
+    The traversal visits every selected tree, including merge resolutions. A new
+    path is evaluated even when its blob already appeared at an excepted path.
+    """
+    if previous is None:
+        result = []
+        for record in staged_format.git(
+            root, "ls-tree", "-r", "-z", revision
+        ).stdout.split(b"\0"):
+            if record:
+                header, path = record.split(b"\t", 1)
+                mode, kind, blob = header.decode().split()
+                if kind == "blob":
+                    result.append((mode, blob, os.fsdecode(path)))
+        return result
+    records = staged_format.git(
+        root,
+        "diff-tree",
+        "--no-commit-id",
+        "--raw",
+        "--no-abbrev",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        previous,
+        revision,
+    ).stdout.split(b"\0")
+    return [
+        (header.split()[1].decode(), header.split()[3].decode(), os.fsdecode(path))
+        for header, path in zip(records[0:-1:2], records[1::2], strict=True)
+    ]
+
+
+def binary_executable(body: bytes) -> bool:
+    # Only the implicit executable fallback permits recognized native binaries.
+    # An explicit source pattern must never be bypassed by a NUL or magic bytes.
+    return body.startswith(
+        (
+            b"\x7fELF",
+            b"MZ",
+            b"\xfe\xed\xfa\xce",
+            b"\xce\xfa\xed\xfe",
+            b"\xfe\xed\xfa\xcf",
+            b"\xcf\xfa\xed\xfe",
+            b"\xca\xfe\xba\xbe",
+            b"\xbe\xba\xfe\xca",
+            b"\xca\xfe\xba\xbf",
+            b"\xbf\xba\xfe\xca",
+        )
+    )
 
 
 def run(root: Path, arguments: list[str]) -> int:
@@ -96,31 +158,28 @@ def run(root: Path, arguments: list[str]) -> int:
         roots = [arguments[0]]
     else:
         roots = outgoing(root, sys.stdin.buffer.read())
-    blobs: dict[str, list[tuple[str, str]]] = {}
-    for revision in roots:
+    blobs: dict[str, tuple[str, str, bool]] = {}
+    previous = None
+    for number, revision in enumerate(roots):
         kind = staged_format.git(root, "cat-file", "-t", revision).stdout.strip()
         if kind == b"blob":
-            blobs.setdefault(revision, []).append((revision, "<blob tag>"))
+            blobs[revision] = (revision, "<blob tag>", True)
             continue
-        for record in staged_format.git(
-            root, "ls-tree", "-r", "-z", revision
-        ).stdout.split(b"\0"):
-            if not record:
-                continue
-            header, path_bytes = record.split(b"\t", 1)
-            mode, object_type, blob = header.decode().split()
-            path = os.fsdecode(path_bytes)
+        for mode, blob, path in tree_changes(root, previous, revision):
+            source = formatters.matches(path, patterns)
             if (
                 mode not in {"100644", "100755"}
-                or object_type != "blob"
-                or not (
-                    formatters.matches(path, patterns)
-                    or ("paths" not in spec and mode == "100755")
-                )
+                or not (source or ("paths" not in spec and mode == "100755"))
                 or (path, blob) in allowed
             ):
                 continue
-            blobs.setdefault(blob, []).append((revision, path))
+            if blob not in blobs or (source and not blobs[blob][2]):
+                blobs[blob] = (revision, path, source)
+        previous = revision
+        if number and number % 500 == 0:
+            print(
+                f"Trojan Source: inspected {number + 1} outgoing trees", file=sys.stderr
+            )
     # Cache only clean results, scoped to scanner, classification and exact policy.
     policy = hashlib.sha256(
         (SCANNER + json.dumps(spec, sort_keys=True)).encode()
@@ -134,9 +193,25 @@ def run(root: Path, arguments: list[str]) -> int:
         bodies = [
             staged_format.git(root, "cat-file", "blob", blob).stdout for blob in batch
         ]
-        # Binary data has no source text; malformed UTF-8 in classified source
-        # fails instead of silently changing the scanner's input.
-        texts = [body.decode("utf-8") if b"\0" not in body else "" for body in bodies]
+        texts = []
+        scanned = []
+        for blob, body in zip(batch, bodies, strict=True):
+            revision, path, source = blobs[blob]
+            if not source and binary_executable(body):
+                print(
+                    f"Trojan Source: native executable not scanned: {revision} {path!r}",
+                    file=sys.stderr,
+                )
+                continue
+            try:
+                texts.append(body.decode("utf-8"))
+            except UnicodeDecodeError:
+                raise ValueError(
+                    f"Trojan Source: unsupported source encoding: {revision} {path!r}; expected UTF-8"
+                ) from None
+            scanned.append(blob)
+        if not scanned:
+            continue
         result = chainman.execute(
             root,
             "hooks",
@@ -145,20 +220,20 @@ def run(root: Path, arguments: list[str]) -> int:
             capture_output=True,
         )
         findings = json.loads(result.stdout)
-        if not isinstance(findings, list) or len(findings) != len(batch):
+        if not isinstance(findings, list) or len(findings) != len(scanned):
             raise ValueError("Invalid Trojan Source scanner response")
-        for blob, issues in zip(batch, findings, strict=True):
+        for blob, issues in zip(scanned, findings, strict=True):
             if not isinstance(issues, list):
                 raise ValueError("Invalid Trojan Source findings")
             if issues:
                 failures += 1
-                for revision, path in blobs[blob]:
-                    for raw in issues:
-                        issue = table(raw, "Scanner finding")
-                        print(
-                            f"Trojan Source: {revision} {path!r}:{issue['line']}:{issue['column']} {issue['codePoint']} {issue['name']}",
-                            file=sys.stderr,
-                        )
+                revision, path, _ = blobs[blob]
+                for raw in issues:
+                    issue = table(raw, "Scanner finding")
+                    print(
+                        f"Trojan Source: {revision} {path!r}:{issue['line']}:{issue['column']} {issue['codePoint']} {issue['name']}",
+                        file=sys.stderr,
+                    )
             else:
                 tc.atomic_bytes(cache / blob, b"clean\n")
     if failures:

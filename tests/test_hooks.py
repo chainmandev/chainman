@@ -270,7 +270,7 @@ setup=["extension"]
         for name in paths:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("# harmless Unicode fixture \u202e\n")
+            path.write_text(f"# harmless Unicode fixture {name} \u202e\n")
         (self.root / "shell/bin/entry").chmod(0o755)
         self.git("add", ".")
         self.git("commit", "-qm", "Language coverage fixture")
@@ -318,6 +318,171 @@ setup=["extension"]
                 + f'\n[[hooks.trojan_source.exceptions]]\npath="source.ts"\nblob="{blob}"\nreason="Harmless scanner fixture"\n'
             )
             self.assertEqual(trojan_source.run(self.root, [revision]), 0)
+
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TROJAN_SOURCE"), "requires pinned hooks profile"
+    )
+    def test_nul_source_fails_cold_and_warm_and_old_cache_is_ignored(self):
+        source = "// harmless fixture \u202e\0\nconst example = 1;\n"
+        (self.root / "source.js").write_text(source)
+        subprocess.run(["node", "--check"], input=source.encode(), check=True)
+        self.git("add", ".")
+        self.git("commit", "-qm", "NUL source")
+        revision = self.git("rev-parse", "HEAD")
+        import hashlib
+
+        old = hashlib.sha256(b"anti-trojan-source@1.12.1:high:v1{}").hexdigest()
+        old_cache = self.root / ".cache/toolchain/trojan-source" / old
+        old_cache.mkdir(parents=True)
+        (old_cache / self.git("rev-parse", "HEAD:source.js")).write_text("clean\n")
+
+        def execute(root, profile, argv, **kwargs):
+            return subprocess.run(
+                argv, input=kwargs.get("input"), capture_output=True, check=True
+            )
+
+        with patch.object(chainman, "execute", execute):
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, "suspicious"):
+                    trojan_source.run(self.root, [revision])
+
+
+    def test_tree_deltas_keep_intermediate_coverage_and_bound_warm_traversal(self):
+        base = self.git("rev-parse", "HEAD")
+        trees = []
+        for number in range(5):
+            (self.root / "source.ts").write_text(f"const value = {number};\n")
+            self.git("add", ".")
+            self.git("commit", "-qm", str(number))
+            trees.append(self.git("rev-parse", "HEAD"))
+        real = staged_format.git
+        walks = []
+
+        def counted(root, *args, **kwargs):
+            if args[0] in {"ls-tree", "diff-tree"}:
+                walks.append(args[0])
+            return real(root, *args, **kwargs)
+
+        seen = []
+
+        def execute(root, profile, argv, **kwargs):
+            texts = json.loads(kwargs["input"])
+            seen.extend(texts)
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps([[] for _ in texts]).encode(), b""
+            )
+
+        records = f"x {trees[-1]} x {base}\n".encode()
+        with (
+            patch.object(staged_format, "git", counted),
+            patch.object(chainman, "execute", execute),
+        ):
+            for _ in range(2):
+                with patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(records))):
+                    trojan_source.run(self.root, [])
+        self.assertEqual(walks.count("ls-tree"), 2)
+        self.assertEqual(walks.count("diff-tree"), 8)
+        for number in range(5):
+            self.assertIn(f"const value = {number};\n", seen)
+        self.assertEqual(len(seen), len(set(seen)))
+
+
+    def test_delta_inventory_matches_full_trees_across_merges_and_renames(self):
+        base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-qb", "side")
+        (self.root / "side.ts").write_text("side")
+        self.git("add", "side.ts")
+        self.git("commit", "-qm", "Side")
+        side = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-qb", "trunk", base)
+        (self.root / "trunk.ts").write_text("trunk")
+        self.git("add", "trunk.ts")
+        self.git("commit", "-qm", "Trunk")
+        trunk = self.git("rev-parse", "HEAD")
+        self.git("merge", "--no-edit", "--no-gpg-sign", "side")
+        merge = self.git("rev-parse", "HEAD")
+        self.git("mv", "side.ts", "renamed.ts")
+        self.git("commit", "-qm", "Rename")
+        revisions = [base, side, trunk, merge, self.git("rev-parse", "HEAD")]
+        expected = set()
+        actual = set()
+        previous = None
+        for revision in revisions:
+            expected.update(trojan_source.tree_changes(self.root, None, revision))
+            actual.update(
+                entry
+                for entry in trojan_source.tree_changes(self.root, previous, revision)
+                if entry[0] in {"100644", "100755"}
+            )
+            previous = revision
+        self.assertEqual(actual, expected)
+
+
+    def test_exception_does_not_hide_same_blob_at_new_path(self):
+        body = "const exception_fixture = 1;\n"
+        (self.root / "allowed.ts").write_text(body)
+        self.git("add", "allowed.ts")
+        blob = self.git("rev-parse", ":allowed.ts")
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text()
+            + f'\n[[hooks.trojan_source.exceptions]]\npath="allowed.ts"\nblob="{blob}"\nreason="fixture"\n'
+        )
+        self.git("add", "chainman.toml")
+        self.git("commit", "-qm", "Excepted")
+        self.git("mv", "allowed.ts", "new.ts")
+        self.git("commit", "-qm", "New path")
+        seen = []
+
+        def execute(root, profile, argv, **kwargs):
+            texts = json.loads(kwargs["input"])
+            seen.extend(texts)
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps([[] for _ in texts]).encode(), b""
+            )
+
+        records = f"x {self.git('rev-parse', 'HEAD')} x {'0' * 40}\n".encode()
+        with (
+            patch.object(chainman, "execute", execute),
+            patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(records))),
+        ):
+            trojan_source.run(self.root, [])
+        self.assertIn(body, seen)
+
+
+    def test_invalid_source_encoding_names_path_and_binary_is_not_cached(self):
+        (self.root / "source.ts").write_bytes(b"\xff")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Invalid encoding")
+
+        def execute(root, profile, argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                json.dumps([[] for _ in json.loads(kwargs["input"])]).encode(),
+                b"",
+            )
+
+        with patch.object(chainman, "execute", execute):
+            with self.assertRaisesRegex(ValueError, "source.ts"):
+                trojan_source.run(self.root, [self.git("rev-parse", "HEAD")])
+            self.git("rm", "source.ts")
+            binary = self.root / "binary"
+            binary.write_bytes(b"\x7fELF\0\xff")
+            binary.chmod(0o755)
+            self.git("add", "binary")
+            self.git("commit", "-qm", "Executable")
+            trojan_source.run(self.root, [self.git("rev-parse", "HEAD")])
+            blob = self.git("rev-parse", "HEAD:binary")
+            self.assertFalse(
+                list((self.root / ".cache/toolchain/trojan-source").glob("*/" + blob))
+            )
+            self.git("mv", "binary", "binary.ts")
+            self.git("commit", "-qm", "Explicit source")
+            with self.assertRaisesRegex(ValueError, "binary.ts"):
+                trojan_source.run(self.root, [self.git("rev-parse", "HEAD")])
+
 
 
 if __name__ == "__main__":
