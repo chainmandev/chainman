@@ -71,24 +71,39 @@ check *args:
 Do not configure the `check` task to call this same `just check` recipe: that would
 recurse. Chainman never generates or rewrites these forwarding recipes.
 
-For a project-wide shell wrapper that also runs inside `just chainman shell` or
-`exec`, an active environment is not proof of setup readiness. Dispatch its named
-task through the verified runtime's reentry helper:
+For public shell/exec entry, declare each profile's `entry_setup` groups rather
+than creating an arbitrary-command task for every profile. Use
+`just chainman script --profile NAME FILE [ARGS...]` for Just temporary Bash scripts;
+it preserves their body, arguments and stdin across execution modes. Profiles
+without entry setup remain useful for explicit inspection.
+
+For a project wrapper that also runs inside an active shell or task, use the
+verified runtime's reentry helper:
 
 ```sh
 # root is this wrapper's absolute project root; task is a declared ordinary task.
-if [ "${CHAINMAN_ROOT:-}" = "$root" ] && [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ]; then
+if [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ]; then
     exec "$CHAINMAN_RUNTIME/bootstrap/reenter.sh" "$root" "$task" -- "$@"
 fi
 exec just --justfile "$root/justfile" chainman run "$task" -- "$@"
 ```
 
+For command entry, the helper accepts `ROOT --entry exec --profile NAME -- COMMAND...`,
+`ROOT --entry shell --profile NAME`, and `ROOT --entry script --profile NAME FILE...`.
+Always pass this wrapper's own project root; a different active root is an error.
+The public runtime also routes nested exec/shell/script/run through this boundary.
+
 Reentry preserves operation authority, task admission and setup leases. It reuses
 an unchanged selected profile, refreshes changed profile inputs, and refuses a
 changed runtime pin until the caller leaves the shell. Select tasks explicitly;
 do not infer that all tasks need the largest profile or all setup groups. Service
-graphs still start through host entrypoints. These `CHAINMAN_*` bindings are
-runtime-provided context, never user configuration.
+graphs still start through host entrypoints. Nested service tasks can borrow an
+already-admitted graph only with live runtime-issued context, matching project
+identity and configuration, and a compatible subset of services. Workflows that
+need fresh ownership, changed context or additional serialization are refused
+before executing commands. Leave the shell and start those tasks from the host.
+Environment markers alone never establish service ownership. These `CHAINMAN_*`
+bindings are runtime-provided context, never user configuration.
 
 ## 3. Add setup ownership
 

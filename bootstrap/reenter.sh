@@ -1,7 +1,7 @@
 #!/bin/sh
 # Reuse a verified execution environment while retaining ordinary task admission.
 set -eu
-root=$1
+root=$(CDPATH='' cd -P -- "$1" && pwd)
 shift
 if [ "${CHAINMAN_ROOT:-}" != "$root" ] || [ -z "${CHAINMAN_RUNTIME_PYTHON:-}" ] || [ -z "${CHAINMAN_ACTIVE_PROFILE:-}" ]; then
     echo 'Chainman reentry requires an active environment for this project.' >&2
@@ -16,4 +16,4 @@ if [ ! -f "$authority/chainman.lock" ] || [ -L "$authority/chainman.lock" ] \
     exit 2
 fi
 runtime=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
-exec "$CHAINMAN_RUNTIME_PYTHON" -E -s -B "$runtime/scripts/chainman.py" --root "$root" run "$@"
+exec "$CHAINMAN_RUNTIME_PYTHON" -E -s -B "$runtime/scripts/reentry.py" "$root" "$@"

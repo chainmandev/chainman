@@ -52,6 +52,17 @@ fi
 source_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd)
 helper=$script_dir/fetch.nix
 export CHAINMAN_SOURCE_ROOT="$source_root"
+if [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ] && [ -n "${CHAINMAN_ROOT:-}" ]; then
+    case "${1:-}" in
+        exec | shell | script | run | preflight)
+            exec "$script_dir/reenter.sh" "$root" --entry "$@"
+            ;;
+    esac
+fi
+if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
+    CHAINMAN_HOST_PLATFORM=$(uname -s)
+    export CHAINMAN_HOST_PLATFORM
+fi
 if [ "${1:-}" = script ]; then
     shift
     script_profile=
@@ -78,6 +89,8 @@ fi
 CHAINMAN_REQUEST_ACTION=${1:-doctor}
 CHAINMAN_REQUEST_TASK=${2:-}
 export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK
+# Do not let a validation container drain the following command's input.
+if [ "$CHAINMAN_REQUEST_ACTION" = preflight ]; then exec < /dev/null; fi
 control_dispatch() {
     if [ "$1" = services-logs ]; then
         [ "$#" = 1 ] || { [ "$#" = 2 ] && [ "$2" = --follow ]; } || fail 'usage: services-logs [--follow]'
@@ -891,7 +904,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
-    --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION \
+    --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION --env CHAINMAN_HOST_PLATFORM \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \

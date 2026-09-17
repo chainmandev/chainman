@@ -59,6 +59,7 @@ implementations; project doctor and clean tasks supplement those defaults.
 | `deps-audit` | Run pinned vulnerability scanners and report unsupported ecosystems explicitly |
 | `config validate` / `config show --json` | Validate or inspect effective configuration |
 | `explain TASK --json` / `setup-status` | Inspect task requirements or setup readiness |
+| `preflight TASK ...` | Check the complete selected workflows' mode/platform requirements before any project work |
 | `doctor` | Shared runtime diagnostics followed by declared project diagnostics |
 | `stop` / `services-status` | Stop or inspect saved service ownership |
 | `logs [--follow]` | Read recent saved service output; optionally follow without acquiring services |

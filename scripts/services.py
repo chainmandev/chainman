@@ -1006,6 +1006,9 @@ def prepare_requested(root: Path, arguments: list[str]) -> int:
         raise ValueError("Service preparation requires one task")
     cfg = workflows.configuration(root)
     entries = declarations(root, cfg)
+    import admission
+
+    admission.graph(root, cfg, arguments)
     env = workflows.context_environment(
         root, cfg, arguments[0], tc.environment(root, create=False)
     )
@@ -1024,6 +1027,9 @@ def prepare_setup(
     *,
     context_task: str | None = None,
 ) -> int:
+    import admission
+
+    admission.graph(root, cfg, [name])
     task_entries = workflows.declarations(cfg, "tasks")
     tasks = workflows.order(task_entries, [name])
     requested = [

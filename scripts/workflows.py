@@ -115,6 +115,9 @@ def configuration(root: Path) -> Table:
                     f"Unknown fields in {section}.{key}: {', '.join(sorted(set(spec) - allowed))}"
                 )
             if section == "tasks":
+                import admission
+
+                admission.declaration(spec)
                 context_values = spec.get("context_environment", {})
                 if not isinstance(context_values, dict):
                     raise ValueError("Task context_environment must be a table")
@@ -697,6 +700,14 @@ def run(
     cfg = configuration(root)
     tasks = declarations(cfg, "tasks")
     task_names = order(tasks, [action]) if action != "setup" else []
+    import admission
+
+    admission.graph(
+        root,
+        cfg,
+        task_names,
+        groups=(extra or list(declarations(cfg, "setup"))) if action == "setup" else [],
+    )
     if tc.host_mode():
         import host_execution
 
@@ -744,7 +755,16 @@ def run(
                 for group in names(tasks[task].get("setup", []))
             )
         )
-        with setup_use(root, cfg, groups, env) as descriptors:
+        import reentry
+
+        with (
+            reentry.service_context(root, cfg, action, env, service_context) as (
+                env,
+                service_descriptors,
+            ),
+            setup_use(root, cfg, groups, env) as setup_descriptors,
+        ):
+            descriptors = (*service_descriptors, *setup_descriptors)
             for key in task_names:
                 spec = dict(tasks[key])
                 if "timeout_env" in spec:

@@ -15,6 +15,7 @@ def validate_action(root: Path, action: str) -> None:
         "version",
         "config",
         "explain",
+        "preflight",
         "doctor",
         "setup",
         "setup-status",

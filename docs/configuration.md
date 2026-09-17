@@ -64,6 +64,38 @@ to core. The special `host` profile runs directly in the already bootstrapped co
 context; it is useful for an adapter that subsequently selects the project shell.
 It does not provision host language tools.
 
+### Public entry readiness and execution requirements
+
+Profiles may declare `entry_setup = ["javascript"]`, naming existing setup groups.
+`exec`, `shell`, and `script` check that closure using `CHAINMAN_SETUP` and retain
+its setup-use locks until the command exits. Ordinary tasks use their own explicit
+`setup` lists; installers do not recursively require their profile's entry setup.
+Omitting `entry_setup` (or declaring `[]`) provides setup-free environment entry,
+useful for a deliberately named inspection profile. Explicit `setup` remains exhaustive.
+
+Profiles and tasks may declare `allowed_modes = ["host-nix", "container-nix"]`
+and `allowed_platforms = ["Linux", "Darwin"]`. Each supplied list must be nonempty
+and contain unique supported values. Mode choices are `host`, `host-nix`, and
+`container-nix`; platform choices describe the initiating host, including when its
+commands run inside a Linux container. Both task and profile restrictions apply.
+Omitting a restriction adds no constraint; bare-host limitations still apply.
+
+Use `just chainman preflight TASK [TASK ...]` before a multiphase wrapper's first
+command. It checks all selected task dependencies, service/watch dependencies,
+and required setup profiles without installing dependencies or running project
+commands. It does not reserve services or guarantee future readiness; execution
+checks again. Preflight leaves command stdin untouched. A sequential standard
+recipe also checks all its phases before starting its first phase.
+
+```sh
+just chainman preflight build check
+just chainman run build
+just chainman run check
+```
+
+These declarations prevent accidental incompatible execution; they are not a
+security sandbox for project-owned commands.
+
 Declare imported Nix modules and toolchain pins as profile `inputs`. These are
 project-relative file/glob patterns, inherited through profile templates:
 

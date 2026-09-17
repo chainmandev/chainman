@@ -29,6 +29,7 @@ INTERNAL = {
     "doctor",
     "config",
     "explain",
+    "preflight",
     "setup-status",
     "setup",
     "deps-query",
@@ -118,6 +119,10 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     tasks = table(cfg.get("tasks", {}), "Tasks")
     services = table(cfg.get("services", {}), "Services")
     task = name if request == "run" else request
+    if task in tasks and (request == "run" or request not in INTERNAL):
+        import admission
+
+        admission.graph(root, cfg, [task])
     controller = request in CONTROLLER or (
         request not in INTERNAL
         and not request.startswith("_")

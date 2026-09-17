@@ -722,6 +722,7 @@ readiness={command=["python3","probe.py"]}
         self.assertEqual(self.run_cli("run", "build").returncode, 0)
 
     def test_serial_group_released_before_wait_for_services(self):
+        self.body += '\n[services.database]\ncommand=["true"]\n'
         self.body = self.body.replace(
             "[tasks.build]",
             '[tasks.build]\nserial_group="data"\nservices=["database"]\nwait_for_services=true',

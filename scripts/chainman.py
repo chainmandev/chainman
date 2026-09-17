@@ -72,8 +72,8 @@ def profile(
         raise ValueError("Invalid profile name")
     cfg = configuration(root) if cfg is None else cfg
     raw = table(cfg.get("profiles", {}), "Profiles").get(name)
-    if name == "host":
-        return None, {}
+    if name == "host" and raw is None:
+        raw = {}
     if raw is None:
         # Built-in modules remain available without loading them by default.
         if name not in {
@@ -91,9 +91,15 @@ def profile(
             raise ValueError(f"Profile {name!r} is not declared")
         raw = {"runtime_profile": "core" if name == "default" else name}
     spec = table(raw, "Profile")
+    import admission
+
+    admission.declaration(spec)
+    groups = strings(spec.get("entry_setup", []), "Profile entry_setup")
+    if any(group not in table(cfg.get("setup", {}), "Setup") for group in groups):
+        raise ValueError(f"Profile {name} entry_setup requires declared setup groups")
     for pattern in strings(spec.get("inputs", []), "Profile inputs"):
         tc.contained(root, pattern)
-    if tc.host_mode():
+    if name == "host" or tc.host_mode():
         return None, spec
     if "flake" in spec:
         path, sep, attribute = field_text(spec["flake"], "Profile flake").partition("#")
@@ -295,6 +301,9 @@ def execute(
     if not argv or any(not isinstance(a, str) or "\0" in a for a in argv):
         raise ValueError("Commands must be nonempty argument arrays")
     cfg = configuration(root)
+    import admission
+
+    admission.profile(cfg, name, env=env)
     ref, spec = profile(root, name, cfg=cfg)
     selected = dict(os.environ if env is None else env)
     # Library callers can enter without the shell launcher. Capture their selected
@@ -482,7 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description=__doc__,
         epilog=(
             "Commands: exec [--profile NAME] -- COMMAND ..., shell [--profile NAME], "
-            "run TASK ..., setup [GROUP ...], setup-status, config validate, "
+            "run TASK ..., preflight TASK ..., setup [GROUP ...], setup-status, config validate, "
             "config show --json, explain TASK, version, doctor. "
             "Use just chainman recipe NAME for project recipe bindings. "
             "Services and verified updates require a Nix execution mode."
@@ -497,7 +506,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     import timing
 
     timing.bootstrap()
-    root = args.root.absolute()
+    root = args.root.resolve()
     try:
         if tc.host_mode():
             import host_execution
@@ -579,10 +588,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             return services.prepare_requested(root, rest)
         elif args.action == "_recipe-plan":
+            import admission
             import recipes
 
             if len(rest) != 1:
                 raise ValueError("recipe requires one standard recipe name")
+            actions = recipes.actions(cfg).get(rest[0], [])
+            admission.graph(
+                root,
+                cfg,
+                [action[1] for action in actions if action[0] == "run"],
+                groups=list(table(cfg.get("setup", {}), "Setup"))
+                if any(action[0] == "setup" for action in actions)
+                else [],
+            )
             if tc.host_mode():
                 host_execution.validate_recipe(root, rest[0])
             print(recipes.plan(cfg, rest[0]))
@@ -623,7 +642,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             import workflows
 
             return workflows.setup_status(root, rest)
+        elif args.action == "preflight":
+            import admission
+            import workflows
+
+            if not rest:
+                raise ValueError("preflight requires at least one declared task")
+            admission.graph(root, workflows.configuration(root), rest)
         elif args.action in {"exec", "shell"}:
+            import admission
+            import workflows
+
             reuse = rest[:1] == ["--reuse-operation"]
             if reuse:
                 rest = rest[1:]
@@ -643,6 +672,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.action != "shell":
                     raise ValueError("exec requires a command")
                 rest = ["bash"]
+            groups = admission.entry(root, cfg, name)
             with tc.operation(
                 root,
                 exclusive=False,
@@ -655,8 +685,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 env = tc.environment(root)
                 if env.get("CHAINMAN_COMPILER_OWNER") == str(root):
                     env["RUSTC_WRAPPER"] = os.environ.get("RUSTC_WRAPPER", "")
-                with tc.compiler_cache(name, env, root) as owned:
-                    return execute(root, name, rest, env=owned, check=False).returncode
+                with workflows.setup_use(root, cfg, groups, env) as descriptors:
+                    with tc.compiler_cache(name, env, root) as owned:
+                        return execute(
+                            root,
+                            name,
+                            rest,
+                            env=owned,
+                            pass_fds=descriptors,
+                            check=False,
+                        ).returncode
         elif args.action in {"deps-update", "chainman-update"}:
             raise ValueError(
                 "Start updates through just chainman on the host; direct Python entry cannot orchestrate candidate services"
