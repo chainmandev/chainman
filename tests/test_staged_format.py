@@ -90,6 +90,24 @@ check=["unused"]
         self.assertTrue(self.git("show", ":a.txt").startswith(b"GOOD"))
         self.assertIn(b"100755", self.git("ls-files", "-s", "a.txt"))
 
+    def test_candidate_formatter_setup_is_authorized_without_root_setup(self):
+        config = self.root / "chainman.toml"
+        spec = config.read_text().replace(
+            'write=["unused"]',
+            'setup=["formatter"]\nwrite='
+            + json.dumps(
+                ["sh", "-c", 'test -f ready; sed -i s/BAD/GOOD/g "$@"', "format"]
+            ),
+        )
+        spec += '\n[setup.formatter]\nprofile="host"\ninputs=["chainman.lock"]\nartifacts=["ready"]\ncommands=[["touch","ready"]]\n'
+        config.write_text(spec)
+        self.git("add", "chainman.toml")
+        self.stage()
+        with patch.dict(os.environ, CHAINMAN_SETUP="error"):
+            subject.run(self.root)
+        self.assertTrue(self.git("show", ":a.txt").startswith(b"GOOD"))
+        self.assertFalse((self.root / "ready").exists())
+
     def test_conflict_changes_neither_index_nor_working_tree(self):
         self.stage()
         (self.root / "a.txt").write_text("DIFFERENT\nkeep\nkeep\nlast\n")

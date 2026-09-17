@@ -21,8 +21,10 @@ Use a project-owned formatter profile when you need a particular formatter
 version or plugins. `format-text` supplies the runtime's pinned Prettier, Ruff,
 Taplo, shfmt and nixfmt. `format-rust` supplies rustfmt without preparing Cargo
 dependencies. Keep formatter environments small. A formatter's optional `setup`
-array names only its own required installation groups. Commands receive batches
-of literal `./path` arguments; include the tool's `--` separator where supported.
+array names only its own required installation groups. A staged-format transaction
+authorizes those groups inside its disposable snapshot, even in a noninteractive
+hook; it never prepares the original project or unrelated application groups.
+Commands receive batches of literal `./path` arguments; include the tool's `--` separator where supported.
 `paths` and optional `exclude` use shell-style patterns; `**/` also matches files
 at the repository root. For a formatter that accepts one file on stdin and emits
 only formatted bytes on stdout, set `stdin = true`. No filenames are appended in

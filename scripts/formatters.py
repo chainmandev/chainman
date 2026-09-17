@@ -105,7 +105,9 @@ def execute(
                 for group in workflows.names(spec.get("setup", []))
             )
         )
-        with workflows.setup_use(root, cfg, groups, env) as descriptors:
+        # Formatting owns this isolated candidate and authorizes only its declared
+        # formatter groups, just as an isolated update/format transaction does.
+        with workflows.setup_use(root, cfg, groups, env, explicit=True) as descriptors:
             if prepared is not None:
                 prepared()
             for spec, files in plan:
