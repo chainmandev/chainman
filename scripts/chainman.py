@@ -672,7 +672,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.action != "shell":
                     raise ValueError("exec requires a command")
                 rest = ["bash"]
-            groups = admission.entry(root, cfg, name)
+            if reuse:
+                # Runtime-owned installers and compiler servers inherit the
+                # parent's admission. They must not request public entry setup
+                # while that parent holds a setup-use lease.
+                descriptor, _, identity, compat, _ = tc.inherited_operation()
+                lease = (
+                    root / f".cache/toolchain/operations/{identity}"
+                    if identity
+                    else root / ".cache/toolchain/operation.lock"
+                )
+                if (
+                    descriptor is None
+                    or compat is None
+                    or not tc.descriptor_matches(descriptor, lease)
+                    or not tc.descriptor_matches(
+                        compat, root / ".cache/toolchain/operation.lock"
+                    )
+                ):
+                    raise ValueError(
+                        "Internal entry requires this project's live operation"
+                    )
+                admission.profile(cfg, name)
+                groups = []
+            else:
+                groups = admission.entry(root, cfg, name)
             with tc.operation(
                 root,
                 exclusive=False,

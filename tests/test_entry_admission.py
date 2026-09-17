@@ -82,6 +82,31 @@ class EntryAdmissionTests(unittest.TestCase):
             os.killpg(child.pid, signal.SIGTERM)
             child.communicate(timeout=5)
 
+    def test_internal_entry_borrows_admission_only_from_live_same_root_operation(self):
+        self.configure()
+        argv = [*tc.entry_command(self.root, "host"), "true"]
+        rejected = subprocess.run(argv, capture_output=True, text=True)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("live operation", rejected.stderr)
+        cfg = workflows.configuration(self.root)
+        with tc.operation(self.root, exclusive=False):
+            # Simulate a task with no dependency requirement holding its lease;
+            # an internal server must not install the public profile's groups.
+            with workflows.setup_use(self.root, cfg, [], tc.environment(self.root)):
+                result = tc.managed_run(argv, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.root / "installed").exists())
+                sibling = self.root / "sibling"
+                sibling.mkdir()
+                (sibling / "chainman.toml").write_text(self.body)
+                result = tc.managed_run(
+                    [*tc.entry_command(sibling, "host"), "true"],
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("live operation", result.stderr)
+
     def test_preflight_checks_later_tasks_services_watch_and_setup_profiles(self):
         self.configure()
         self.body += (
