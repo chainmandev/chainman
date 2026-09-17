@@ -221,6 +221,12 @@ def execute(root: Path, arguments: list[str]) -> int:
         if arguments[0] == "run" and arguments[1] == "pre-push":
             # Git's ref stream is immutable and replayed independently to every
             # check. Lefthook and setup consent must not consume it.
+            if len(arguments) != 4:
+                raise ValueError(
+                    "pre-push requires the Git remote name and destination URL"
+                )
+            env["CHAINMAN_HOOK_REMOTE_NAME"] = arguments[2]
+            env["CHAINMAN_HOOK_REMOTE_URL"] = arguments[3]
             path = work / "pre-push-input"
             path.write_bytes(sys.stdin.buffer.read())
             env["CHAINMAN_HOOK_INPUT"] = str(path)

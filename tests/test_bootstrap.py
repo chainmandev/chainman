@@ -598,7 +598,7 @@ enabled=true
 config="lefthook.yml"
 [tasks.capture-input]
 profile="host"
-commands=[["python3","-c","import sys,pathlib; pathlib.Path('received-input').write_bytes(sys.stdin.buffer.read())"]]
+commands=[["python3","-c","import sys,pathlib,os; assert os.environ['CHAINMAN_HOOK_REMOTE_NAME']=='origin'; assert os.environ['CHAINMAN_HOOK_REMOTE_URL']=='unused'; pathlib.Path('received-input').write_bytes(sys.stdin.buffer.read())"]]
 [formatters.text]
 paths=["*.txt"]
 profile="host"

@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -65,6 +66,29 @@ check=["unused"]
         self.assertEqual(
             (self.root / "a.txt").read_bytes(), b"GOOD\nkeep\nkeep\nunstaged\n"
         )
+
+    def test_stdin_formatter_writes_only_selected_blob_and_preserves_mode(self):
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                'write=["unused"]',
+                "stdin=true\nwrite="
+                + json.dumps(
+                    [
+                        "python3",
+                        "-c",
+                        "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read().replace(b'BAD', b'GOOD'))",
+                    ]
+                ),
+            )
+        )
+        self.git("add", "chainman.toml")
+        self.stage()
+        (self.root / "a.txt").chmod(0o755)
+        self.git("add", "a.txt")
+        subject.run(self.root)
+        self.assertTrue(self.git("show", ":a.txt").startswith(b"GOOD"))
+        self.assertIn(b"100755", self.git("ls-files", "-s", "a.txt"))
 
     def test_conflict_changes_neither_index_nor_working_tree(self):
         self.stage()

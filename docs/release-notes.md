@@ -7,10 +7,10 @@ Consumers commit a small justfile recipe, a full Git SHA in `chainman.lock`, and
 their own configuration. The selected Git revision supplies all implementation.
 Ordinary launches stay pinned; no global installation or GitHub release is required.
 
-Start with manual adoption in the README. For a new or empty directory, use
+For a new or empty directory, use
 `just init DEST` from a disposable checkout to select the public default branch.
 Pass an explicit full SHA to reproduce a particular runtime. Initialization makes
-an initial Git commit unless `--no-git` is selected; setup and verification follow.
+an initial Git commit unless `--no-git` is selected; setup and verification follow. Existing repositories use the manual adoption guide.
 
 Runtime updates select the current default-branch SHA without a maturity delay,
 then run reconciliation and the complete project gate in an isolated candidate.
@@ -37,3 +37,14 @@ review candidate changes and preserve each project's acceptance criteria.
   saved logs with `just chainman services-logs --follow`; detaching does not stop services.
 - Standalone preview tasks can publish loopback ports selected by declared
   environment variables. See [services](services.md) for the complete example.
+
+## Shared Git hooks and package-manager setup
+
+Complete `just setup` installs the optional worktree-owned lefthook preset.
+Pre-commit formats only staged content, preserving unstaged edits; pre-push scans
+all outgoing source history using pinned upstream Trojan Source detection.
+Projects declare small formatter environments and compose their own checks.
+`just setup --no-hooks` prepares disposable/CI workspaces without Git hooks.
+The `pnpm = true` setup declaration validates the profile's exact manager version,
+installs frozen dependencies and checks readiness without downloading another pnpm.
+See [Git hooks](hooks.md) and [configuration](configuration.md).

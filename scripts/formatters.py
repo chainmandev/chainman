@@ -17,7 +17,15 @@ def declarations(cfg: Mapping[str, object]) -> dict[str, Table]:
     for name, raw in table(cfg.get("formatters", {}), "Formatters").items():
         workflows.name(name)
         spec = table(raw, f"Formatter {name}")
-        if set(spec) - {"paths", "exclude", "profile", "setup", "write", "check"}:
+        if set(spec) - {
+            "paths",
+            "exclude",
+            "profile",
+            "setup",
+            "write",
+            "check",
+            "stdin",
+        }:
             raise ValueError(f"Unknown field in formatter {name}")
         if not strings(spec.get("paths"), "Formatter paths"):
             raise ValueError(f"Formatter {name} needs paths")
@@ -26,6 +34,8 @@ def declarations(cfg: Mapping[str, object]) -> dict[str, Table]:
             argv = strings(spec.get(action), f"Formatter {action}")
             if not argv or not argv[0] or any("\0" in value for value in argv):
                 raise ValueError(f"Formatter {name} needs {action} arguments")
+        if type(spec.get("stdin", False)) is not bool:
+            raise ValueError("Formatter stdin must be boolean")
         text(spec.get("profile", "core"), "Formatter profile")
         groups = workflows.names(spec.get("setup", []))
         workflows.order(workflows.declarations(cfg, "setup"), groups)
@@ -100,6 +110,22 @@ def execute(
                 prepared()
             for spec, files in plan:
                 argv = strings(spec["check" if check else "write"], "Formatter command")
+                if spec.get("stdin", False):
+                    for path in files:
+                        result = chainman.execute(
+                            root,
+                            text(spec.get("profile", "core"), "Formatter profile"),
+                            argv,
+                            env=env,
+                            pass_fds=descriptors,
+                            input=tc.regular_input(root, path),
+                            stdout=subprocess.PIPE,
+                        )
+                        if not check:
+                            # Keep the staged executable mode; isolation/inventory
+                            # validation remains the transaction caller's job.
+                            tc.contained(root, path).write_bytes(result.stdout)
+                    continue
                 for start in range(0, len(files), 64):
                     chainman.execute(
                         root,

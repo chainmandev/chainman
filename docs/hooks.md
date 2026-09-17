@@ -24,7 +24,12 @@ dependencies. Keep formatter environments small. A formatter's optional `setup`
 array names only its own required installation groups. Commands receive batches
 of literal `./path` arguments; include the tool's `--` separator where supported.
 `paths` and optional `exclude` use shell-style patterns; `**/` also matches files
-at the repository root. Symlinks and submodule contents are never formatted.
+at the repository root. For a formatter that accepts one file on stdin and emits
+only formatted bytes on stdout, set `stdin = true`. No filenames are appended in
+this mode. For example, `rustfmt --edition 2024 --emit stdout` formats a single
+Rust source without traversing sibling modules; add `--check` to its check command.
+Supply an explicit config path if the project keeps settings outside its root.
+Symlinks and submodule contents are never formatted.
 
 Add short project-owned recipes alongside the complete bootstrap:
 
@@ -162,3 +167,8 @@ bridge available to hook commands, not a global installation. It replays saved
 pre-push input and dispatches ordinary finite project tasks. Project-specific
 malware rules, credentials, services and policy remain project-owned. In
 particular, ATHL's DPRK scanner is not part of this preset.
+
+A composed pre-push check can use `CHAINMAN_HOOK_REMOTE_NAME` and
+`CHAINMAN_HOOK_REMOTE_URL` for Git's literal remote name and destination. Quote
+these variables in shell commands. This supports project publication/privacy
+gates that need both the destination and the independently replayed ref stream.
