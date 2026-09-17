@@ -32,6 +32,7 @@ def check(
     env: Mapping[str, str],
     *,
     pass_fds: tuple[int, ...] = (),
+    resolved_defaults: Mapping[str, str] | None = None,
 ) -> str | None:
     if "readiness" not in spec:
         return None
@@ -48,6 +49,7 @@ def check(
                 *strings(probe["command"], "Setup readiness command"),
             ],
             env=dict(env, CHAINMAN_SETUP="error"),
+            resolved_defaults=resolved_defaults,
             cwd=root / text(spec["directory"], "Setup directory"),
             stdin=subprocess.DEVNULL,
             pass_fds=pass_fds,

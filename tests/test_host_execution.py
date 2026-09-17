@@ -182,6 +182,61 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
                     (self.project / ".cache/toolchain/setup-groups").exists()
                 )
 
+    def test_python_install_and_probes_resolve_environment_once(self):
+        self.python_setup()
+        self.env.update(BASE="/caller", AUTH_MODE="caller")
+        config = self.project / "chainman.toml"
+        keys = ["APP_ROOT", "BASE", "CONDITIONAL_VALUE"]
+        expression = "{k: os.environ.get(k) for k in " + repr(keys) + "}"
+        capture = "import os,json; print(json.dumps(" + expression + "))"
+        probe = (
+            "import os,json; from pathlib import Path; "
+            "Path('probe-env').write_text(json.dumps(" + expression + "))"
+        )
+        config.write_text(
+            config.read_text()
+            .replace(
+                "[profiles.default.environment]",
+                '[profiles.default.environment]\nBASE="/profile"\nAUTH_MODE="profile"',
+            )
+            .replace(
+                "[environment.values]",
+                '[environment.values]\nAPP_ROOT="{env:BASE}/app"',
+            )
+            .replace(
+                "[setup.prepare]",
+                '[setup.prepare]\nreadiness={command=["python3","-c",'
+                + json.dumps(probe)
+                + "]}",
+            )
+            .replace(
+                "p=Path('prepared');",
+                "import json; Path('installer-env').write_text(json.dumps("
+                + expression
+                + ")); p=Path('prepared');",
+            )
+            + '\n[environment]\nfiles=[{path="conditional.env",required=true,when={AUTH_MODE="profile"}}]\n'
+        )
+        (self.project / "conditional.env").write_text(
+            "CONDITIONAL_VALUE=must-not-load\n"
+        )
+        direct = self.run_entry("exec", "--", "python3", "-c", capture)
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        expected = json.loads(direct.stdout)
+        self.assertEqual(
+            expected,
+            {"APP_ROOT": "/caller/app", "BASE": "/profile", "CONDITIONAL_VALUE": None},
+        )
+        installed = self.run_entry("setup")
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        for name in ("installer-env", "probe-env"):
+            self.assertEqual(json.loads((self.project / name).read_text()), expected)
+        (self.project / "probe-env").unlink()
+        status = self.run_entry("setup-status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads((self.project / "probe-env").read_text()), expected)
+        self.assertEqual((self.project / "prepared").read_text(), "x")
+
     def test_host_python_profile_selection_and_failed_install_leave_no_stamp(self):
         self.python_setup()
         config = self.project / "chainman.toml"

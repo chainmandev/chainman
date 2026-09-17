@@ -379,6 +379,18 @@ def artifact_digests(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
     return result
 
 
+def interpreter_defaults(
+    spec: Mapping[str, object], env: dict[str, str]
+) -> dict[str, str]:
+    """Carry only the validated interpreter, never a resolved profile environment."""
+    if any(
+        isinstance(item, dict) and item.get("interpreter") == "python"
+        for item in array(spec["artifacts"], "Setup artifacts")
+    ):
+        return {"UV_PYTHON": env["UV_PYTHON"]}
+    return {}
+
+
 @contextmanager
 def setup_use(
     root: Path,
@@ -439,7 +451,8 @@ def setup_use(
                         root,
                         text(spec["profile"], "Setup profile"),
                         argv,
-                        env=group_env,
+                        env=env,
+                        resolved_defaults=interpreter_defaults(spec, group_env),
                         cwd=tc.contained(
                             root, text(spec["directory"], "Setup directory")
                         ),
@@ -453,7 +466,11 @@ def setup_use(
                         f"Setup group {key} did not create its declared artifacts"
                     )
                 diagnostic = setup_readiness.check(
-                    root, spec, group_env, pass_fds=(lease.fileno(),)
+                    root,
+                    spec,
+                    env,
+                    pass_fds=(lease.fileno(),),
+                    resolved_defaults=interpreter_defaults(spec, group_env),
                 )
                 if diagnostic:
                     raise ValueError(
@@ -560,7 +577,11 @@ def setup_detail(
             reason = "artifact-content-changed"
         else:
             diagnostic = setup_readiness.check(
-                root, spec, artifact_env, pass_fds=pass_fds
+                root,
+                spec,
+                env,
+                pass_fds=pass_fds,
+                resolved_defaults=interpreter_defaults(spec, artifact_env),
             )
             if diagnostic:
                 return {

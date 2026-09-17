@@ -118,6 +118,10 @@ def input_digests(
     paths: set[Path] = set()
     for pattern in patterns:
         tc.contained(root, pattern)
+        # Before Python 3.13, a terminal ** yields directories only. Inventory
+        # files recursively on every supported interpreter, including 3.12.
+        if pattern.endswith("**"):
+            pattern += "/*"
         paths.update(root.glob(pattern))
     result = {}
     for path in sorted(paths):
@@ -220,6 +224,7 @@ def execute(
     text: Literal[True],
     input: str | None = None,
     env: Mapping[str, str] | None = None,
+    resolved_defaults: Mapping[str, str] | None = None,
     overrides: object = None,
     check: bool = True,
     cwd: Path | None = None,
@@ -237,6 +242,7 @@ def execute(
     text: Literal[False] = False,
     input: bytes | None = None,
     env: Mapping[str, str] | None = None,
+    resolved_defaults: Mapping[str, str] | None = None,
     overrides: object = None,
     check: bool = True,
     cwd: Path | None = None,
@@ -254,6 +260,7 @@ def execute(
     text: bool,
     input: str | bytes | None = None,
     env: Mapping[str, str] | None = None,
+    resolved_defaults: Mapping[str, str] | None = None,
     overrides: object = None,
     check: bool = True,
     cwd: Path | None = None,
@@ -270,6 +277,7 @@ def execute(
     text: bool = False,
     input: str | bytes | None = None,
     env: Mapping[str, str] | None = None,
+    resolved_defaults: Mapping[str, str] | None = None,
     overrides: object = None,
     check: bool = True,
     cwd: Path | None = None,
@@ -304,6 +312,10 @@ def execute(
         TOOLCHAIN_MODE=selected.get("CHAINMAN_MODE", "host-nix"),
     )
     selected = profile_environment(root, spec, selected, overrides, cfg=cfg)
+    # Internal literal defaults (e.g. a validated Python executable) apply after
+    # project/profile expansion, without feeding effective values back into it.
+    for key, value in (resolved_defaults or {}).items():
+        selected.setdefault(key, value)
     if not tc.host_mode():
         tc.runtime_nix_environment(selected)
     resource_policy = {}

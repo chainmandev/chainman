@@ -259,6 +259,9 @@ The pnpm check above asks pnpm itself to validate the installation before an emp
 Node command. Chainman keeps `verifyDepsBeforeRun=error`: unchanged patch bytes
 with a newer timestamp can require a frozen reinstall. Do not disable that check.
 Include every workspace manifest and patch file in the group's inputs.
+Input patterns ending in `/**` include files directly inside that directory and
+all nested directories, on every supported Python version. Exclusions apply to
+the resulting file paths; changes, additions, and removals invalidate readiness.
 
 Ordinary commands ask once before repairing their required setup groups, using the
 controlling terminal independently of piped stdin. Interactive containers use their
@@ -351,6 +354,11 @@ Missing outputs or changed fingerprints require setup again;
 failed installation or inputs changed during installation never receive a fresh
 stamp. Setup commands should install from frozen inputs, with generation declared
 separately as project tasks.
+If generation changes another setup group's inputs, put the next phase in a
+separate task entry in `recipes.generate`. The recipe runs each entry with its
+own setup lease, allowing the next phase to repair derived artifacts. A single
+task graph holds its setup leases throughout, including nested commands; it
+cannot reinstall its own artifacts midway through execution.
 
 An optional project or profile `resources` table controls build-job hints:
 
