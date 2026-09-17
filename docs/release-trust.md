@@ -35,7 +35,7 @@ to project dependencies. Ordinary launches make no update query and need neither
 `gh` nor GitHub authentication. An available verified cache supports offline launches;
 initialization and updates need public Git access to discover the current tip.
 
-Git is the sole Chainman installation identity. Hashes for Nix inputs, container
+Git is the sole chainman installation identity. Hashes for Nix inputs, container
 images, native backends, and external dependency artifacts remain necessary and
-are verified by their existing owners. The Git pin identifies Chainman; these
+are verified by their existing owners. The Git pin identifies chainman; these
 additional hashes identify the separate tools and dependencies it operates.

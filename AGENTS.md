@@ -1,8 +1,8 @@
-# Chainman development
+# chainman development
 
 Use host Nix and just for development; language tools come from the pinned shell.
 Keep public commands behind just and the checked-in bootstrap. Consumers should
-not need a global Chainman installation. Treat the consumer root and immutable
+not need a global chainman installation. Treat the consumer root and immutable
 runtime root as separate inputs; never update an installed runtime in place.
 
 Keep changes in logical commits with their tests and documentation. Only the lead

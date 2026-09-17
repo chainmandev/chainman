@@ -16,14 +16,14 @@ disposable checkout. The host launcher sequences preparation, resolution,
 inspection, verification and finalization; it needs neither host Python nor a
 container-engine socket inside project containers. `mode=dry-run` stops before applying
 the verified changes. `commit=off` applies them without committing, for a coordinated
-checkpoint. Untargeted updates and `targets=all` include the Chainman runtime pin,
+checkpoint. Untargeted updates and `targets=all` include the chainman runtime pin,
 and its explicitly declared generated copies. The bootstrap recipe is unchanged. Explicit application targets
 retain the runtime pin; `--skip-chainman` also selects project-only updates.
 `just chainman chainman-update` updates only the runtime pin and its declared copies.
 Runtime selection happens before project resolution. Resolution, reconciliation
 and verification use the selected candidate runtime; the original checkout keeps
 its previous runtime until the combined candidate has passed verification.
-The Chainman source repository has no self-pin and updates only its declared tools.
+The chainman source repository has no self-pin and updates only its declared tools.
 Runtime selection resolves the public repository's advertised default branch to one
 exact SHA, without a version or age filter. A different SHA is a candidate even if
 `VERSION` is unchanged; an identical SHA retains normal no-change handling.
@@ -74,7 +74,7 @@ the verified runtime for host execution; it never executes the candidate's mutab
 justfile on the host. Finalization checks the original HEAD, index and raw source
 snapshot again before applying anything. A resolver failure, verification failure,
 out-of-scope change or concurrent original edit leaves the original unchanged and
-preserves the candidate under the host's Chainman update cache for inspection.
+preserves the candidate under the host's chainman update cache for inspection.
 Candidate source changes during verification are failures. Failures while applying
 or committing already verified files preserve the resulting files/index for review.
 Each destination's raw contents and full mode are checked again immediately before
@@ -105,7 +105,7 @@ stderr. The result includes `changed` (an array of project-relative paths), `com
 (an identity or null), and `verification`; previews additionally include `preview`.
 
 Tracked submodules remain frozen, read-only inputs. Uninitialized submodules stay
-empty; Chainman never fetches them. Initialized inputs must match their recorded
+empty; chainman never fetches them. Initialized inputs must match their recorded
 commit, index, raw source bytes and executable modes, without hidden index flags
 or untracked files. A preview copies only each current commit and source tree into
 an independent shallow repository, without old objects, remotes, configuration or
@@ -126,7 +126,7 @@ legacy tag cannot block a newer eligible image; a selected tag without a digest 
 instead of falling back. Missing dates and malformed nonempty digests remain errors.
 Public Docker queries require a digest for the exact selected or requested record.
 Toolchain changes force fresh environment entry before resolution and verification.
-The runtime image is updated together with Chainman; consumer Nix inputs and workflow
+The runtime image is updated together with chainman; consumer Nix inputs and workflow
 revision pins remain project-owned update targets.
 
 Projects declare shared adapters and ordered application hooks:
@@ -270,7 +270,7 @@ An npm tool may instead declare `source_pin = { file = "nix/sources.json",
 pointer = ["packageManager"] }`. That pointer holds exactly `version`, `url` and
 `hash` strings. JSON, TOML and YAML are supported; the URL must be that release's
 canonical npm tarball and the hash its registry SHA-256, SHA-384 or SHA-512 SRI.
-The project's Nix derivation must consume these fields. Chainman selects the latest
+The project's Nix derivation must consume these fields. chainman selects the latest
 eligible stable source, writes the complete record, refreshes Nix, and only then
 probes the binary and renders its normal `pins`. The default permits major updates;
 the selected Nix derivation must support the release or verification fails.
@@ -298,7 +298,7 @@ over existing checksum identities.
 
 For the ordinary Rust `cargo update` command, selected direct dependency fields
 are temporarily narrowed to their exact planned releases. Cargo still enforces
-all parent ranges, features and target constraints. Chainman then repairs newly
+all parent ranges, features and target constraints. chainman then repairs newly
 ineligible registry artifacts through conservative, source-qualified Cargo
 `update --precise` attempts, trying eligible releases in descending order with a
 default maximum of 64 repair attempts. A Rust adapter can explicitly set
@@ -312,7 +312,7 @@ Recorded lockfile dependency edges prioritize ineligible
 parents before the ineligible children they constrain, including paths through
 eligible intermediates. Cyclic groups retain deterministic ordering and the same
 bound; graph ordering never changes the eligible release set or native constraints.
-If one precise attempt encounters a native version conflict, Chainman can retry
+If one precise attempt encounters a native version conflict, chainman can retry
 that same version while also unlocking registry packages that share an exact
 direct dependency with it in the same workspace. Eligible peers are included;
 exact versions already chosen by earlier repairs in that workspace stay locked.
@@ -321,7 +321,7 @@ Unrelated packages, local paths and other registries are excluded. Cargo receive
 the requested target first, followed by the peers in deterministic order. This
 uses Cargo's current same-registry precise-hint behavior; the resulting target
 must match exactly. Cargo can also consolidate duplicate versions without
-materializing the requested version. Chainman accepts that outcome only when the
+materializing the requested version. chainman accepts that outcome only when the
 old target disappears and the remaining identities for that package form a
 nonempty subset of those already present in the same workspace, with identical
 versions, sources and checksums. Complete package disappearance and new substitute
@@ -356,7 +356,7 @@ Cargo update, and verification cannot repair or regenerate the frozen lock graph
 
 During Flutter resolution, selected direct dependencies are temporarily bound to
 their exact eligible releases across all declared workspaces. If Pub selects a
-newly ineligible transitive artifact, Chainman tries eligible releases through
+newly ineligible transitive artifact, chainman tries eligible releases through
 ordinary temporary root dependency constraints, with at most 64 native solver
 states. Parent ranges and declared overrides remain authoritative; the repair
 never adds a dependency override. Conflicts without an eligible native graph fail.
@@ -468,7 +468,7 @@ change; every selected identity, artifact and dependency edge must stay unchange
 Normalization failure or input drift aborts the update. The subsequent frozen
 lock check and full audits never regenerate files or retry verification.
 pnpm's frozen check alone does not prove that transitive versions satisfy their
-parents. Chainman also compares registry dependency edges with published ranges
+parents. chainman also compares registry dependency edges with published ranges
 and declared overrides, and rejects missing required children. Optional omissions
 and explicit dependency removal overrides remain valid. Bundled children belong
 to the parent's hashed archive and do not require separate registry lock entries.
@@ -532,7 +532,7 @@ outputs = ["package.json", "pnpm-lock.yaml", "nix/flake.lock"]
 ```
 
 The explicit `eligibility="resolver"` declaration delegates selection, constraints,
-release dates, lock audits and security exceptions to that hook. Chainman passes
+release dates, lock audits and security exceptions to that hook. chainman passes
 `CHAINMAN_MINIMUM_RELEASE_AGE_DAYS`; it cannot prove an arbitrary hook obeys it. The
 hook must fail when evidence is unavailable, refresh its environment after changing
 inputs, and only resolve/generate files. Git operations belong to the surrounding
@@ -605,11 +605,11 @@ If interruption happened after branch publication, the verified commit may alrea
 exist even though no success response was printed. Inspect HEAD and its diff before
 starting another update.
 
-Runtime revisions are qualified in the Chainman source project. Consumer runtime
+Runtime revisions are qualified in the chainman source project. Consumer runtime
 upgrades validate the candidate configuration and run the declared project verifier
-using the candidate runtime; they do not run Chainman's development test suite.
+using the candidate runtime; they do not run chainman's development test suite.
 Git supplies the complete revision, but project acceptance does not invoke the
-Chainman development suite.
+chainman development suite.
 
 ## Temporary security exceptions
 
@@ -692,7 +692,7 @@ are retained rather than inferred safe. Opaque project resolvers own their own
 eligibility and cleanup; automatic cleanup requires the declared adapters.
 
 Inline `[[updates.exceptions]]`, external policy files, and the source repository's
-legacy `dependencies.toml` are supported. Chainman may leave `exceptions = []` to
+legacy `dependencies.toml` are supported. chainman may leave `exceptions = []` to
 preserve an explicit empty override without reviving an inherited list. Unrelated
 policy, formatting and file permissions are preserved. Policy files containing
 exceptions are automatically admitted to the update's output inventory for this
@@ -717,7 +717,7 @@ may differ without changing that identity. Other mode flags must still match.
 Transaction snapshots retain each file's full mode: changes during preparation,
 verification, application or rollback are still detected and preserved.
 
-Updates that include Chainman prepare every declared copy from the verified runtime in the
+Updates that include chainman prepare every declared copy from the verified runtime in the
 same candidate transaction. The normal project gate verifies the complete change
 before any original files are applied. The original declaration fixes the output
 boundary, and ordinary dependency resolvers cannot change these runtime files.

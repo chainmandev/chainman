@@ -16,7 +16,7 @@ its new tip immediately.
    unavailable platforms, and consumer blockers against that exact source commit.
 3. Push the commit to a temporary **staging branch**, keeping the default branch at
    its current qualified revision. Use a new staging branch name for each candidate.
-4. Dispatch **Publish rolling Chainman** (`release.yml`) at that staging ref, with
+4. Dispatch the [rolling-publication workflow](../.github/workflows/release.yml) at that staging ref, with
    `candidate_sha` set to its full SHA and `expected_default_sha` set to the observed
    public default-branch SHA. Both are required; the workflow code and checked-out
    candidate must agree exactly.
@@ -49,7 +49,7 @@ publication as the maintainer. Do not weaken required gates to bypass a failure.
 
 After publication, use a fresh download cache to confirm that public Git advertises
 the expected SHA. Qualify fresh host-Nix and container-only installs in paths with
-spaces, without a permanent Chainman checkout. Record `VERSION` descriptively and
+spaces, without a permanent chainman checkout. Record `VERSION` descriptively and
 verify every root/generated consumer pin against the exact Git identity.
 
 Promote each rewritten consumer candidate only after public readback and its full

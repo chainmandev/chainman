@@ -1,15 +1,15 @@
-# Chainman
+# chainman
 
-Chainman runs a repository's development commands in pinned Nix environments and
+chainman runs a repository's development commands in pinned Nix environments and
 coordinates setup, services, and verified dependency updates. The project owns its
-toolchains and workflows; Chainman supplies the execution machinery.
+toolchains and workflows; chainman supplies the execution machinery.
 
-Each repository records **one Chainman Git commit** in `chainman.lock` and a small
+Each repository records **one chainman Git commit** in `chainman.lock` and a small
 bootstrap recipe in its justfile. Running `just chainman …` obtains that exact
-revision and uses it for the command. No global Chainman installation or permanent
-Chainman checkout is needed. See [chainman.dev](https://chainman.dev) for the introduction.
+revision and uses it for the command. No global chainman installation or permanent
+chainman checkout is needed. See [chainman.dev](https://chainman.dev) for the introduction.
 
-**Chainman is alpha software.** Expect configuration and command changes as the
+**chainman is alpha software.** Expect configuration and command changes as the
 interfaces mature. A project's pin changes only through an explicit edit or a
 verified update; launching a command never silently upgrades it.
 
@@ -72,7 +72,7 @@ Initialization does **not** run project setup or certify the application. The la
 
 Adoption is a deliberate integration. Start with one existing command, then add
 setup, service ownership, and updates as needed. Existing root or nested flakes
-need no Chainman import. Preserve your justfile and acceptance gates.
+need no chainman import. Preserve your justfile and acceptance gates.
 
 ### 1. Record the revision
 

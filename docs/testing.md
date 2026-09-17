@@ -67,14 +67,14 @@ remain synchronized and must not reintroduce copied runtime implementation.
 
 ## Release evidence
 
-Record the exact Chainman SHA, consumer candidate tips, test commands/results,
+Record the exact chainman SHA, consumer candidate tips, test commands/results,
 platform omissions, and unrelated application failures. After publication, read the
 public default-branch identity, then prove fresh public Git installation
 with host Nix and container-only prerequisites. Run the documented quickstarts and
 validate links/configuration examples.
 
 Do not promote consumers before public readback and their required gates pass.
-Separate an unavailable platform lane or application blocker from a Chainman failure;
+Separate an unavailable platform lane or application blocker from a chainman failure;
 do not weaken acceptance or dependency policy to turn either into a passing result.
 
 ### Scoped transport checks

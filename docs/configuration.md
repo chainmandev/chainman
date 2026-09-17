@@ -105,14 +105,14 @@ flake = "nix/devshell#default"
 inputs = ["nix/devshell/*.nix", "nix/devshell/*.toml"]
 ```
 
-The flake, its lock, project configuration, and Chainman pin are included
+The flake, its lock, project configuration, and chainman pin are included
 automatically. File names and contents determine identity, so additions and
 removals also invalidate setup and active-profile reuse. Symlinks and paths
 outside the project are rejected. Avoid broad globs that include application
 source or build outputs. Bare-host mode does not depend on Nix input files.
 
 For `deps-query` with `provider="swift"` and `operation="metadata"`, supply an exact
-stable version such as `1.0.0`. Chainman reads the bounded release inventory, then
+stable version such as `1.0.0`. chainman reads the bounded release inventory, then
 resolves tag and commit-time evidence only for that version, including a matching
 `v1.0.0` tag. The response retains the raw tag identity and the later release or
 commit publication time; metadata does not claim eligibility. Full version
@@ -121,7 +121,7 @@ selection and final artifact audits still require their complete evidence.
 GitHub registry metadata can use an explicitly supplied `GITHUB_TOKEN` environment
 variable. Absent or empty keeps anonymous requests. Supply it through the caller's
 secret environment, never a token literal in project configuration, URLs or command
-arguments. Chainman does not discover credentials from `gh`, `.netrc`, Git helpers
+arguments. chainman does not discover credentials from `gh`, `.netrc`, Git helpers
 or credential files. Tokens must be at most 4096 ASCII bearer-token characters
 (letters, digits, `-._~+/`, with optional trailing `=`); malformed values fail
 without being echoed.
@@ -136,7 +136,7 @@ authentication errors never fall back to anonymous requests. Existing request,
 retry, maturity and immutable-source audit bounds remain in force. Authentication
 does not guarantee quota availability.
 
-Public Chainman asset bytes are requested anonymously from the outset, including
+Public chainman asset bytes are requested anonymously from the outset, including
 when metadata uses a token. GitHub can redirect those downloads to its asset host;
 no credential accompanies either request. Asset IDs, sizes and digests still bind
 the downloaded bytes to the validated release. Authenticated metadata requests
@@ -144,7 +144,7 @@ retain their no-redirect rule; an authentication failure is never retried anonym
 
 Host mode inherits the explicitly supplied variable. Container callers can select
 `environment.pass = ["GITHUB_TOKEN"]`; the existing forwarding passes its name,
-without putting its value in arguments. This option covers Chainman's Python
+without putting its value in arguments. This option covers chainman's Python
 registry metadata requests. Native Git, Swift and Nix downloads keep their own
 credential behavior; this does not qualify general private-repository support.
 
@@ -189,7 +189,7 @@ still refuses to run while independent operations are active. Such a wrapper can
 borrow its parent's exclusive admission through environment variables alone.
 
 An explicit `TMPDIR` remains the temporary base across bootstrap and profile
-refreshes, including project/profile overrides. Without one, Chainman retains
+refreshes, including project/profile overrides. Without one, chainman retains
 Nix's first scoped temporary directory. This prevents repeated shell entries from
 exceeding browser socket path limits. `CHAINMAN_TEMP_BASE` is internal routing;
 configure `TMPDIR` instead. Container mode selects its base inside the container;
@@ -226,7 +226,7 @@ network (`host` or `bridge`), and platform (`linux/amd64` or `linux/arm64`). Use
 platforms only with a working engine/emulation/native builder for that architecture.
 Options never authorize privileged mode, Docker socket access or another container's
 network namespace. The project adapter owns optional credential/native mounts and
-must obtain the same trust/authorization it needed before adopting Chainman.
+must obtain the same trust/authorization it needed before adopting chainman.
 Whole container HOME replacement requires a project-contained directory. Explicit
 HOME subdirectory mounts remain available for those credential/SDK adapters; mounts
 over HOME or project ancestors are rejected.
@@ -278,7 +278,7 @@ fail before execution. Tasks request setup explicitly; inspection tasks can omit
 Readiness commands run in the group's profile and working directory, with no stdin.
 They must not install dependencies or edit tracked files. A check may refresh its
 package manager's validation metadata. `setup-status` uses the same checks but
-never installs or records a Chainman success stamp. The default timeout is 30
+never installs or records a chainman success stamp. The default timeout is 30
 seconds after entering the profile; `timeout_seconds` accepts integers from 1
 through 300. Initial Nix profile provisioning can take additional time. Failure diagnostics
 name the group and include bounded command output. A failed post-install check
@@ -291,7 +291,7 @@ dependency groups, environment inputs, or runtime identity can still receive a
 general diagnostic; older stamps gain detailed inventories after the next repair.
 
 The pnpm check above asks pnpm itself to validate the installation before an empty
-Node command. Chainman keeps `verifyDepsBeforeRun=error`: unchanged patch bytes
+Node command. chainman keeps `verifyDepsBeforeRun=error`: unchanged patch bytes
 with a newer timestamp can require a frozen reinstall. Do not disable that check.
 Include every workspace manifest and patch file in the group's inputs.
 Input patterns ending in `/**` include files directly inside that directory and
@@ -371,16 +371,16 @@ symlink, while all parent directories remain confined to the project. Readiness
 requires it to resolve to the selected pinned `UV_PYTHON` in Nix modes; an
 interpreter from a different environment is stale. In bare-host mode, select an
 absolute executable path with `UV_PYTHON`, or use the caller's `python3` on PATH.
-Chainman passes that selection to the group's installer and checks it afterward.
+chainman passes that selection to the group's installer and checks it afterward.
 Project/profile environment values apply to this selection. Invalid selections
 fail before any requested setup group installs. No Python is downloaded or
-provisioned by Chainman; supply a version compatible with the project's own
+provisioned by chainman; supply a version compatible with the project's own
 requirements. Ordinary and digest artifacts still reject links.
 
 Installed artifacts have shared use leases for task lifetimes. Reinstallation takes
 exclusive access and fails visibly while another task uses them. Child commands
 inherit those leases. A setup group may list explicit `environment_inputs`, such
-as `["DEV_SEED_SUFFIX"]`, when its outputs depend on environment values. Chainman
+as `["DEV_SEED_SUFFIX"]`, when its outputs depend on environment values. chainman
 hashes their effective project/profile values (distinguishing unset from empty),
 propagates changes through dependent setup groups, and stores only the digest.
 Declare host-provided variables in `environment.pass` for container parity. Inputs
@@ -437,7 +437,7 @@ body checks or endpoints that are only accessible inside a container.
 Commands must stay in the foreground so the backend can own their lifetime.
 
 The launcher routes service-bearing tasks through an upstream Process Compose
-binary and a native Chainman ownership adapter. Both are built/materialized from
+binary and a native chainman ownership adapter. Both are built/materialized from
 the verified runtime only when services are used. The adapter owns compatible
 reuse, per-client leases, and identity-checked crash recovery. Process Compose
 owns readiness, process supervision, dependency ordering, and restart policy.
@@ -565,7 +565,7 @@ inputs = ["server/migrations", "fixtures/seed.json"]
 policy = "preserve"
 ```
 
-The engine volume carries scope and compatibility labels. Chainman creates only
+The engine volume carries scope and compatibility labels. chainman creates only
 volumes needed by the selected service set. It refuses an existing volume owned by
 another scope, missing ownership labels, changed compatibility while users are
 active, or missing volumes during active use. Compatibility hashes relative file
@@ -583,7 +583,7 @@ continue to skip project setup and configuration.
 
 `preserve` is the default and refuses incompatible data. `disposable` explicitly
 permits recreation after users stop. Removal is unforced, so references from other
-containers still prevent it. Ordinary service stop preserves volumes. Chainman
+containers still prevent it. Ordinary service stop preserves volumes. chainman
 never adopts or deletes older project volumes merely because their names look
 similar. Image-specific UIDs remain declarations: for example, the qualified
 Postgres 18 image runs as `999:999` with all capabilities dropped, using the engine's
@@ -698,7 +698,7 @@ application outputs they own; the exclusive gate supplies concurrency protection
 
 ### Scoped execution transport
 
-Profiles, tasks and command services accept `transport`. Chainman combines the
+Profiles, tasks and command services accept `transport`. chainman combines the
 project-wide `container` table, selected profile transport and execution transport.
 Identical mounts are deduplicated; conflicting targets or host port bindings fail.
 Explicit nested mounts are allowed, for example writable state below read-only
@@ -720,7 +720,7 @@ The same profile access applies to `exec --profile operations`,
 `shell --profile operations`, and tasks selecting that profile. `source_env`
 uses the named host input as a path, without forwarding its value into the
 workload. Optional mounts skip an unset variable or absent path; empty values,
-invalid declarations and unsafe existing sources still fail. Chainman does not
+invalid declarations and unsafe existing sources still fail. chainman does not
 create these directories. Projects own credential selection and state preparation.
 
 Setup for an entry with transport runs separately without profile/task mounts.
@@ -746,7 +746,7 @@ selects an authority file, defaulting to `~/.Xauthority`. The file must be regul
 and not a symlink. Remote/TCP display selectors and native Wayland transport are
 unsupported. Host modes use the caller's graphical environment without adaptation.
 
-Chainman validates display availability before setup or services. A verified
+chainman validates display availability before setup or services. A verified
 helper reads at most 1 MiB of authority data, selecting the local display's
 MIT-MAGIC-COOKIE-1 authentication. The workload receives only the selected socket
 and a private, mode-0600 authority file, removed on exit or interruption. The

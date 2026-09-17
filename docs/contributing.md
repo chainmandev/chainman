@@ -4,7 +4,7 @@
 
 Source development uses Git, just, and host Nix. The source justfile enters its
 pinned development shell directly; it does not depend on an already published
-Chainman release.
+chainman release.
 
 ```sh
 just setup
@@ -42,11 +42,15 @@ adapters when migrating consumers.
 
 ## Implementation boundaries
 
+Use the lowercase wordmark **chainman** in prose and headings, including at the
+start of a sentence. Preserve the spelling of executable identifiers and verbatim
+code examples, including `CHAINMAN_*` variables and the stable bootstrap recipe.
+
 - `bootstrap/chainman.just` is the small consumer contract. Keep it readable and at
   most 25 nonblank shell lines. It only handles pinning, Git objects, and dispatch.
 - `bootstrap/git-entry.sh` comes from the verified commit and materializes source.
 - Runtime-owned execution, environment selection, services, and update staging
-  belong in Chainman's selected revision, never copied into consumer repositories.
+  belong in chainman's selected revision, never copied into consumer repositories.
 - `scripts/git_runtime.py` provides verified Git source handling inside the runtime.
 - The project owns configuration, flakes, task commands, adapters, and verification.
 

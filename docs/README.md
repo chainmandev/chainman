@@ -1,4 +1,4 @@
-# Chainman documentation
+# chainman documentation
 
 ## Consumer walkthroughs
 

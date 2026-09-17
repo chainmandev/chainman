@@ -11,4 +11,4 @@ then follow [progressive adoption](adoption.md). Keep your existing flake and ju
 workflows; route one underlying command before integrating setup and updates.
 
 Both paths use the same small recipe and Git commit pin. Neither requires a global
-Chainman installation or a persistent checkout at any particular path.
+chainman installation or a persistent checkout at any particular path.

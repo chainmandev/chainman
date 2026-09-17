@@ -11,7 +11,7 @@ cached checkout. The runtime handles configuration, Nix, containers, services, a
 update transactions. See [release trust](release-trust.md) for the integrity boundary.
 
 The source checkout used during initialization is disposable. Project flakes and
-locks remain independently owned; they do not import Chainman.
+locks remain independently owned; they do not import chainman.
 
 ## Container Nix is the default
 
@@ -45,7 +45,7 @@ CHAINMAN_MODE=host-nix just chainman run check
 ```
 
 Host-Nix mode requires Nix 2.24 or newer and uses the selected host installation. An
-explicit `CHAINMAN_NIX_BIN` must be an absolute executable path. Chainman does not
+explicit `CHAINMAN_NIX_BIN` must be an absolute executable path. chainman does not
 replace the host's Nix. The same project flake supplies its language tools.
 
 A profile named `host` means the already bootstrapped execution context. In
@@ -61,7 +61,7 @@ CHAINMAN_MODE=host just chainman run check
 ```
 
 This mode requires your own Python 3.12+, Bash when requested by the workflow,
-and every project tool. Chainman installs none of them. Use it only if you intend
+and every project tool. chainman installs none of them. Use it only if you intend
 to maintain and diagnose that environment yourself; it does not establish a
 reproducible toolchain or qualify the project for managed updates.
 
@@ -79,14 +79,14 @@ from either Nix mode; switching modes requires setup to be checked again.
 For Python virtual-environment readiness, host setup uses `python3` on your PATH
 unless you select an absolute executable with `UV_PYTHON`. The installer receives
 that same selection. Supply the project's required Python version yourself;
-Chainman's Python 3.12 minimum does not establish compatibility with the project.
+chainman's Python 3.12 minimum does not establish compatibility with the project.
 
 Managed services, dependency/runtime updates, transactional formatting,
 initialization, and tasks requiring native timeouts or child-process containment
 require `host-nix` or `container-nix`. An unsupported task anywhere in a requested
 graph rejects the graph before setup or task commands run. Standard recipes also
 check every bound task and its dependencies before their first step, while keeping
-the declared sequential execution order. Chainman does not
+the declared sequential execution order. chainman does not
 silently disable those task contracts. Host mode does not prune managed caches.
 
 ## Three separate caches
@@ -108,7 +108,7 @@ requested Nix environment, package manager command, or network-dependent test ca
 still need downloads. Keep the relevant environments and project dependencies
 available if offline operation is required.
 
-Nix source roots live under the host Chainman runtime-roots cache or the owned
+Nix source roots live under the host chainman runtime-roots cache or the owned
 container store. Temporary environment roots remain while their managed operations
 need them. Runtime generations coexist across projects and updates. Cache cleanup
 must respect active operations and service ownership.

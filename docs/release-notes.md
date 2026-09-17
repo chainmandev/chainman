@@ -1,6 +1,6 @@
-# Chainman alpha: rolling Git snapshots
+# chainman alpha: rolling Git snapshots
 
-Chainman coordinates project-owned environments, setup, services, caches, and
+chainman coordinates project-owned environments, setup, services, caches, and
 verified updates. Container Nix is the default; host Nix is supported explicitly.
 
 Consumers commit a small justfile recipe, a full Git SHA in `chainman.lock`, and

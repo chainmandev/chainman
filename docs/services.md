@@ -2,10 +2,10 @@
 
 [Guide index](README.md) · [Configuration reference](configuration.md#services) · [Composition](composition.md)
 
-Chainman starts only the services requested by a task, waits for readiness, and
+chainman starts only the services requested by a task, waits for readiness, and
 releases that task's ownership when it finishes. Shared services can remain alive
 while another task owns them. Process Compose handles readiness, supervision, and
-restart behavior; Chainman's native controller tracks clients, leases, and crash
+restart behavior; chainman's native controller tracks clients, leases, and crash
 recovery. Neither requires host Python or Go.
 
 ## A small local server

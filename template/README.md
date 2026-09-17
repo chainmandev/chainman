@@ -1,7 +1,7 @@
 # Your project
 
-This starter pins Chainman in `chainman.lock`. The small `chainman` recipe in the
-justfile fetches and verifies that Git revision. Chainman is not installed globally;
+This starter pins chainman in `chainman.lock`. The small `chainman` recipe in the
+justfile fetches and verifies that Git revision. chainman is not installed globally;
 any checkout used to generate this project can be deleted.
 
 Install **Git + just + Docker or Podman**. Container Nix is the default. Alternatively,

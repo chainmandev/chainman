@@ -64,7 +64,7 @@ If a project reconciliation hook changes a module, declare that module in
 
 `config show --json` and `explain NAME --json` report `files` and `field_sources`
 alongside the expanded declarations and template origins. Inspect those fields to
-find the physical source of a setting. Consumers should use Chainman's loader or
+find the physical source of a setting. Consumers should use chainman's loader or
 inspection interface instead of parsing only the root TOML file. Small projects
 can keep a single file; splitting is optional and does not change task names.
 
@@ -145,7 +145,7 @@ runtime before a consumer adopts it.
 
 ## Consumer qualification
 
-From Chainman's source checkout, run:
+From chainman's source checkout, run:
 
 ```sh
 just consumer-check --revision FULL_COMMIT_SHA /path/to/consumer
