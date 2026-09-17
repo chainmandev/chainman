@@ -31,7 +31,10 @@ verify_task = "check"
 Use [manual adoption](adoption.md) to add the pin and bootstrap recipe.
 Run `just chainman config validate`, `just chainman config show --json`, or
 `just chainman explain check --json` to inspect declarations before executing them.
-Schema 3 also supports reusable [templates and composition](composition.md).
+Schema 3 also supports [configuration modules and reusable templates](composition.md).
+Use an explicit root-level `include = ["chainman/tasks.toml", "chainman/setup.toml"]`
+to split a growing configuration. Paths remain project-relative; duplicate settings
+are errors, and included files participate in readiness and update protection.
 
 ## Reference map
 

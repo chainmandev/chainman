@@ -347,13 +347,13 @@ class CachePolicy:
 
 
 def config(root: Path = ROOT) -> ad.Table:
+    import configuration_files
+
     selected = configuration_root(root)
     name = (
         "chainman.toml" if (selected / "chainman.toml").exists() else "toolchain.toml"
     )
-    data = ad.table(
-        tomllib.loads(regular_input(selected, name).decode()), "Project configuration"
-    )
+    data = configuration_files.read(selected, name).data
     if name == "chainman.toml":
         data.setdefault("modules", ["project"])
     schemas = (1, 2, 3) if name == "chainman.toml" else (1,)

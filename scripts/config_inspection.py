@@ -2,11 +2,11 @@
 
 from copy import deepcopy
 import json
-import tomllib
 from pathlib import Path
 
 import chainman
 import configuration
+import configuration_files
 import services
 import toolchain as tc
 import workflows
@@ -64,16 +64,24 @@ def document(root: Path, action: str, arguments: list[str]) -> Table:
     filename = (
         "chainman.toml" if (root / "chainman.toml").exists() else "toolchain.toml"
     )
-    _, origins = configuration.compile(
-        tomllib.loads(tc.regular_input(tc.configuration_root(root), filename).decode())
-    )
-    result: Table = {"schema": 1, "configuration_schema": cfg["schema"]}
+    source = configuration_files.read(tc.configuration_root(root), filename)
+    _, origins = configuration.compile(source.data)
+    result: Table = {
+        "schema": 1,
+        "configuration_schema": cfg["schema"],
+        "files": list(source.documents),
+    }
     if action == "config":
         if arguments == ["validate"]:
             return dict(result, valid=True)
         if arguments != ["show", "--json"]:
             raise ValueError("Use config validate or config show --json")
-        return dict(result, configuration=redacted(cfg), origins=origins)
+        return dict(
+            result,
+            configuration=redacted(cfg),
+            origins=origins,
+            field_sources=source.origins,
+        )
     if len(arguments) not in (1, 2) or (
         len(arguments) == 2 and arguments[1] != "--json"
     ):
@@ -165,6 +173,7 @@ def document(root: Path, action: str, arguments: list[str]) -> Table:
         )
     return dict(
         result,
+        field_sources=source.origins,
         task=selected,
         order={
             "tasks": tasks,

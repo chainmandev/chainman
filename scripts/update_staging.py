@@ -85,7 +85,10 @@ def export_authority(
             "Candidate Git directory paths must be single-line mount paths"
         )
     tc.atomic_bytes(target / "authority-root", (str(candidate) + "\n").encode())
-    tc.atomic_bytes(target / "chainman.toml", tc.regular_input(root, "chainman.toml"))
+    import configuration_files
+
+    for path, body in configuration_files.read(root).documents.items():
+        tc.atomic_bytes(tc.contained(target, path), body)
     policy_file = table(tc.config(root).get("updates", {}), "Updates").get(
         "policy_file"
     )

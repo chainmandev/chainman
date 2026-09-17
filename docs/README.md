@@ -17,7 +17,7 @@
 ## Reference
 
 - [Schema-3 configuration](configuration.md)
-- [Templates and composition](composition.md)
+- [Configuration modules and templates](composition.md)
 - [Legacy configuration compatibility](legacy-configuration.md)
 
 ## Maintainer material

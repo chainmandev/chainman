@@ -137,11 +137,19 @@ def input_digests(
 
 
 def profile_inputs(root: Path, name: str, ref: str | None) -> dict[str, str]:
+    import configuration_files
+
     spec = table(
         table(configuration(root).get("profiles", {}), "Profiles").get(name, {}),
         "Profile",
     )
-    result = input_digests(root, ["chainman.toml", "chainman.lock"])
+    result = input_digests(root, ["chainman.lock"])
+    result.update(
+        {
+            path: hashlib.sha256(body).hexdigest()
+            for path, body in configuration_files.read(root).documents.items()
+        }
+    )
     # Bare host mode does not evaluate or depend on the declared Nix toolchain.
     if ref:
         result.update(

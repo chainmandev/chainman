@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from pathlib import Path
 import re
 import shlex
-import tomllib
 
 import toolchain as tc
 from adapter_data import Table, strings, table
@@ -147,9 +146,10 @@ def config(root: Path) -> Table:
     # Templates keep recipe declarations valid TOML; quoted placeholders may
     # appear in unrelated fields such as the project name.
     import configuration
+    import configuration_files
 
     return configuration.compile(
-        tomllib.loads(tc.regular_input(root, "chainman.toml.j2").decode())
+        configuration_files.read(root, "chainman.toml.j2").data
     )[0]
 
 

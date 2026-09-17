@@ -213,6 +213,7 @@ Start with the [documentation index](docs/README.md):
 
 - [Adoption walkthrough](docs/adoption.md)
 - [Schema-3 configuration](docs/configuration.md) and [recipes](docs/recipes.md)
+- [Split configuration into modules and reuse templates](docs/composition.md)
 - [Setup and services](docs/services.md)
 - [Dependency updates and recovery](docs/updates.md)
 - [Execution modes, caches, and native tools](docs/runtime.md)

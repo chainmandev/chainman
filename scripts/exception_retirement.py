@@ -22,6 +22,7 @@ from dependency_identity import Identity, inventory
 import lock_adapters
 import registry
 import toolchain as tc
+import configuration_files
 
 
 @dataclass(frozen=True)
@@ -45,9 +46,11 @@ def documents(root: Path) -> list[Document]:
     filename = (
         "chainman.toml" if (root / "chainman.toml").is_file() else "toolchain.toml"
     )
-    body = tc.regular_input(root, filename)
-    policy = ad.table(tomllib.loads(body.decode()).get("updates", {}), "Updates")
-    result = [Document(filename, body, ("updates",))]
+    source = configuration_files.read(root, filename)
+    policy = ad.table(source.data.get("updates", {}), "Updates")
+    result = [
+        Document(path, body, ("updates",)) for path, body in source.documents.items()
+    ]
     extra = policy.get("policy_file")
     if filename == "toolchain.toml":
         extra = "dependencies.toml"

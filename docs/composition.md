@@ -1,10 +1,74 @@
-# Explicit configuration composition
+# Configuration modules and templates
 
 [Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
 
-Schema 3 adds reusable declarations while retaining explicit task and service
+Schema 3 supports multiple TOML files and reusable declarations while retaining explicit task and service
 names. Schema 1 and 2 consumers keep their existing behavior. They must opt into
-schema 3 before using `templates` or `extends`.
+schema 3 before using `include`, `templates` or `extends`.
+
+## Split configuration by responsibility
+
+Keep a small `chainman.toml` as the entrypoint. List the files it owns explicitly:
+
+```toml
+schema = 3
+include = [
+  "chainman/environment.toml",
+  "chainman/setup.toml",
+  "chainman/services.toml",
+  "chainman/tasks.toml",
+  "chainman/updates.toml",
+]
+
+[project]
+default_profile = "default"
+```
+
+Each module contains ordinary tables with their full names. For example,
+`chainman/environment.toml` can contain:
+
+```toml
+[profiles.default]
+flake = ".#default"
+```
+
+And `chainman/tasks.toml` can contain:
+
+```toml
+[tasks.check]
+commands = [["python3", "-m", "unittest", "discover", "-s", "tests"]]
+
+[recipes]
+verify = ["check"]
+```
+
+Modules may include more modules. **Every path remains relative to the project
+root**, including nested include paths, task directories, setup inputs and flake
+paths. Only the root declares `schema`. There are no remote includes, globs or
+environment expansion in include paths. Files must be regular contained TOML
+files, without symlinks. Repeated includes, cycles, more than 16 nesting levels,
+128 files or 4 MiB of total configuration fail explicitly.
+
+Disjoint tables combine recursively. A scalar or array must be declared in
+exactly one file: duplicate settings fail with the setting and both source paths,
+even when their values are equal. Include order never silently overrides a
+setting or concatenates arrays. Use the templates below for intentional
+inheritance. Keep each array of tables, such as `[[updates.steps]]`, in one file.
+
+All included bytes participate in setup/profile fingerprints and frozen update
+authority. An edit requires the same readiness checks as editing the root file.
+Verified updates retain the original module set and declarations as their
+orchestration authority. Exception retirement edits the file owning the exception.
+If a project reconciliation hook changes a module, declare that module in
+`updates.outputs`, just as for any other reconciliation output.
+
+`config show --json` and `explain NAME --json` report `files` and `field_sources`
+alongside the expanded declarations and template origins. Inspect those fields to
+find the physical source of a setting. Consumers should use Chainman's loader or
+inspection interface instead of parsing only the root TOML file. Small projects
+can keep a single file; splitting is optional and does not change task names.
+
+## Reuse declarations with templates
 
 ```toml
 schema = 3
@@ -34,7 +98,7 @@ Tables merge recursively. Scalars and arrays replace their inherited value;
 arrays never concatenate implicitly. An empty array clears an inherited array.
 An empty table does not delete inherited keys. Choose a narrower base template
 when consumers need different mutually exclusive fields, such as command and
-container services. There are no matrices, remote includes, executable templates,
+container services. There are no matrices, executable templates,
 multiple parents or new interpolation rules.
 
 The configuration loader expands templates before task execution, setup

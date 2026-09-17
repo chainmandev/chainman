@@ -134,6 +134,10 @@ def leaves(
 
 def compile(data: Mapping[str, object]) -> tuple[Table, dict[str, Origins]]:
     """Return independent effective declarations and per-field source origins."""
+    if "include" in data:
+        raise ValueError(
+            "Load configuration includes through configuration_files.read before compilation"
+        )
     result = deepcopy(dict(data))
     templates = result.pop("templates", {})
     if data.get("schema") != 3:
