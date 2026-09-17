@@ -2,11 +2,14 @@
 
 from collections.abc import Mapping
 import contextlib
+from collections.abc import Iterator
+import fcntl
 import json
 import os
 from pathlib import Path
 import subprocess
 import sys
+import stat
 import tempfile
 
 import chainman
@@ -84,7 +87,9 @@ def status(root: Path) -> dict[str, object]:
     )
     return {
         "applicable": True,
-        "installed": selected == str(target) and intact,
+        "installed": bool(selected)
+        and (root / selected).resolve() == target
+        and intact,
         "path": str(target),
         "selected_path": selected,
     }
@@ -95,9 +100,20 @@ def check_installation(root: Path) -> None:
         return
     target = directory(root)
     selected = current_path(root)
-    if selected and selected != str(target):
+    recorded = None
+    record = target / "ownership.json"
+    if record.exists():
+        original = staged_format.identity(record)
+        assert original is not None
+        recorded = table(json.loads(original[0]), "Hook ownership").get("setting")
+    relocated = selected == recorded and all(
+        staged_format.identity(target / event) is not None
+        and (target / event).read_bytes() == bridge(event)
+        for event in EVENTS
+    )
+    if selected and (root / selected).resolve() != target and not relocated:
         raise ValueError(
-            f"Git hooks are managed at {selected!r}. Review and remove that core.hooksPath setting before `just hooks install`; existing hooks were preserved. For disposable CI use `just setup --no-hooks`."
+            f"Git hooks are managed at {selected!r}. Review and remove that core.hooksPath setting before `just hooks install`; existing hooks were preserved. For a legacy relocated chainman installation, inspect `git config --show-origin --get core.hooksPath`, then remove only its owned worktree setting with `git config --worktree --unset core.hooksPath`. For disposable CI use `just setup --no-hooks`."
         )
     default = (
         Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
@@ -124,7 +140,34 @@ def check_installation(root: Path) -> None:
                 raise ValueError(f"Refusing to replace modified hook: {path}")
 
 
+@contextlib.contextmanager
+def administration(root: Path) -> Iterator[None]:
+    common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    path = common / "chainman-hooks.lock"
+    if any(part.is_symlink() for part in (path, *path.parents)):
+        raise ValueError("Hook administration must not contain symlinks")
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "a") as lock:
+        if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+            raise ValueError("Hook administration lock must be a regular file")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError(
+                "Git hook installation or removal is active; retry when it finishes"
+            ) from None
+        yield
+
+
 def install(root: Path) -> None:
+    if not repository(root):
+        print("Git hooks: not applicable outside a Git project root")
+        return
+    with administration(root):
+        install_locked(root)
+
+
+def install_locked(root: Path) -> None:
     check_installation(root)
     if not repository(root):
         print("Git hooks: not applicable outside a Git project root")
@@ -135,7 +178,8 @@ def install(root: Path) -> None:
     shared = common / "config"
     primary = common / "config.worktree"
     selected = target.parent / "config.worktree"
-    configs = list(dict.fromkeys([primary, selected, shared]))
+    siblings = sorted((common / "worktrees").glob("*/config.worktree"))
+    configs = list(dict.fromkeys([primary, selected, *siblings, shared]))
     # Honor Git's configuration locks across siblings. Prepare complete copies
     # first: enabling the extension is the LAST write, so common core.bare and
     # core.worktree never temporarily change the meaning of a linked checkout.
@@ -174,6 +218,23 @@ def install(root: Path) -> None:
             check=False,
         )
         if enabled != "true":
+            for path in configs:
+                if path == shared or originals[path] is None:
+                    continue
+                dormant = staged_format.git(
+                    root,
+                    "config",
+                    "--file",
+                    str(path),
+                    "--includes",
+                    "--get-regexp",
+                    r"^(core\.(bare|worktree|hookspath)|include.*\.path)$",
+                    check=False,
+                )
+                if dormant.returncode != 1:
+                    raise ValueError(
+                        f"Dormant worktree configuration may change Git identity or hooks: {path}; review it before enabling worktree configuration"
+                    )
             for key in ("core.bare", "core.worktree"):
                 value = staged_format.git(
                     root,
@@ -240,6 +301,11 @@ def install(root: Path) -> None:
                 "extensions.worktreeConfig",
                 "true",
             )
+        setting = (
+            os.path.relpath(target, root)
+            if target.parent == root / ".git"
+            else str(target)
+        )
         git(
             root,
             "config",
@@ -247,13 +313,16 @@ def install(root: Path) -> None:
             str(copies[selected]),
             "--replace-all",
             "core.hooksPath",
-            str(target),
+            setting,
         )
         replacements = {target / event: bridge(event) for event in EVENTS}
+        ownership = target / "ownership.json"
+        replacements[ownership] = (json.dumps({"setting": setting}) + "\n").encode()
         replacements.update({path: copies[path].read_bytes() for path in configs})
         originals.update(
             {target / event: staged_format.identity(target / event) for event in EVENTS}
         )
+        originals[ownership] = staged_format.identity(ownership)
         published = []
         try:
             for path, body in replacements.items():
@@ -262,7 +331,7 @@ def install(root: Path) -> None:
                     continue
                 mode = (
                     (original[1] if original is not None else 0o600)
-                    if path in copies
+                    if path in copies or path == ownership
                     else 0o755
                 )
                 if original == (body, mode):
@@ -288,8 +357,14 @@ def install(root: Path) -> None:
 def uninstall(root: Path) -> None:
     if not repository(root):
         return
+    with administration(root):
+        uninstall_locked(root)
+
+
+def uninstall_locked(root: Path) -> None:
     target = directory(root)
-    if current_path(root) != str(target):
+    selected = current_path(root)
+    if not selected or (root / selected).resolve() != target:
         raise ValueError(
             "The selected hook path is not owned by chainman; nothing removed"
         )
@@ -301,9 +376,44 @@ def uninstall(root: Path) -> None:
             or path.read_bytes() != bridge(event)
         ):
             raise ValueError(f"Modified hook preserved: {path}")
-    git(root, "config", "--worktree", "--unset", "core.hooksPath")
-    for event in EVENTS:
-        (target / event).unlink()
+    config = target.parent / "config.worktree"
+    lock = config.with_name(config.name + ".lock")
+    descriptor = os.open(
+        lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+    )
+    os.close(descriptor)
+    try:
+        paths = [
+            config,
+            *(target / event for event in EVENTS),
+            target / "ownership.json",
+        ]
+        originals = {path: staged_format.identity(path) for path in paths}
+        original = originals[config]
+        if original is None:
+            raise ValueError("Owned worktree hook configuration is missing")
+        with tempfile.TemporaryDirectory(dir=target) as temporary:
+            copy = Path(temporary) / "config"
+            copy.write_bytes(original[0])
+            git(root, "config", "--file", str(copy), "--unset", "core.hooksPath")
+            published = []
+            try:
+                published.append(config)
+                tc.atomic_bytes(config, copy.read_bytes(), original[1])
+                for path in paths[1:]:
+                    if originals[path] is not None:
+                        if staged_format.identity(path) != originals[path]:
+                            raise ValueError(f"Hook changed during removal: {path}")
+                        published.append(path)
+                        path.unlink()
+            except BaseException:
+                for path in reversed(published):
+                    saved = originals[path]
+                    if saved is not None:
+                        tc.atomic_bytes(path, saved[0], saved[1])
+                raise
+    finally:
+        lock.unlink()
     print("Owned hook bridges removed; other Git configuration preserved")
 
 

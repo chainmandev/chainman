@@ -83,6 +83,98 @@ setup=["extension"]
             hooks.uninstall(self.root)
         self.assertEqual(path.read_text(), "custom")
 
+    def test_portable_hook_runs_after_checkout_move(self):
+        root = self.root / "portable"
+        root.mkdir()
+        staged_format.git(root, "init", "-q", "--template=")
+        staged_format.git(root, "config", "user.name", "Fixture")
+        staged_format.git(root, "config", "user.email", "fixture@example.invalid")
+        hooks.install(root)
+        self.assertEqual(hooks.current_path(root), ".git/chainman-hooks")
+        binary = self.root / "fake-bin"
+        binary.mkdir()
+        marker = self.root / "hook-ran"
+        (binary / "just").write_text('#!/bin/sh\nprintf ran > "$TEST_HOOK_MARKER"\n')
+        (binary / "just").chmod(0o755)
+        env = dict(
+            os.environ,
+            PATH=str(binary) + os.pathsep + os.environ["PATH"],
+            TEST_HOOK_MARKER=str(marker),
+        )
+        for location in (root, self.root / "moved"):
+            if location != root:
+                root.rename(location)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(location),
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--allow-empty",
+                    "-qm",
+                    "Fixture",
+                ],
+                env=env,
+                check=True,
+            )
+            self.assertTrue(marker.exists())
+            marker.unlink()
+            self.assertTrue(hooks.status(location)["installed"])
+            hooks.install(location)
+
+    def test_recorded_relocation_repair_and_external_manager_refusal(self):
+        hooks.install(self.root)
+        stale = "/old/checkout/.git/chainman-hooks"
+        self.git("config", "--worktree", "core.hooksPath", stale)
+        record = hooks.directory(self.root) / "ownership.json"
+        record.write_text(json.dumps({"setting": stale}))
+        hooks.install(self.root)
+        self.assertTrue(hooks.status(self.root)["installed"])
+        self.git("config", "--worktree", "core.hooksPath", "external-manager")
+        with self.assertRaisesRegex(ValueError, "managed at"):
+            hooks.install(self.root)
+
+    def test_dormant_sibling_settings_rejected_without_activation(self):
+        sibling = self.root / "sibling"
+        self.git("worktree", "add", "-qb", "sibling", str(sibling))
+        config = hooks.directory(sibling).parent / "config.worktree"
+        self.git("config", "--file", str(config), "core.bare", "true")
+        before = (self.root / ".git/config").read_bytes()
+        with self.assertRaisesRegex(ValueError, "Dormant"):
+            hooks.install(self.root)
+        self.assertEqual((self.root / ".git/config").read_bytes(), before)
+        self.assertEqual(
+            staged_format.git(
+                sibling, "rev-parse", "--is-bare-repository"
+            ).stdout.strip(),
+            b"false",
+        )
+
+    def test_install_and_remove_share_administration_lock_and_restore_failure(self):
+        hooks.install(self.root)
+        with hooks.administration(self.root):
+            for operation in (hooks.install, hooks.uninstall):
+                with self.assertRaisesRegex(ValueError, "removal is active"):
+                    operation(self.root)
+        target = hooks.directory(self.root)
+        original = (target.parent / "config.worktree").read_bytes()
+        unlink = Path.unlink
+
+        def fail(path, *args, **kwargs):
+            if path == target / "pre-push":
+                raise OSError("injected removal failure")
+            return unlink(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "unlink", fail),
+            self.assertRaisesRegex(OSError, "injected"),
+        ):
+            hooks.uninstall(self.root)
+        self.assertTrue(hooks.status(self.root)["installed"])
+        self.assertEqual((target.parent / "config.worktree").read_bytes(), original)
+
     def test_linked_worktree_install_does_not_reconfigure_other_checkout(self):
         other = self.root / "linked"
         self.git("worktree", "add", "-qb", "other", str(other))
@@ -319,7 +411,6 @@ setup=["extension"]
             )
             self.assertEqual(trojan_source.run(self.root, [revision]), 0)
 
-
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TROJAN_SOURCE"), "requires pinned hooks profile"
     )
@@ -346,7 +437,6 @@ setup=["extension"]
             for _ in range(2):
                 with self.assertRaisesRegex(ValueError, "suspicious"):
                     trojan_source.run(self.root, [revision])
-
 
     def test_tree_deltas_keep_intermediate_coverage_and_bound_warm_traversal(self):
         base = self.git("rev-parse", "HEAD")
@@ -387,7 +477,6 @@ setup=["extension"]
             self.assertIn(f"const value = {number};\n", seen)
         self.assertEqual(len(seen), len(set(seen)))
 
-
     def test_delta_inventory_matches_full_trees_across_merges_and_renames(self):
         base = self.git("rev-parse", "HEAD")
         self.git("checkout", "-qb", "side")
@@ -417,7 +506,6 @@ setup=["extension"]
             )
             previous = revision
         self.assertEqual(actual, expected)
-
 
     def test_exception_does_not_hide_same_blob_at_new_path(self):
         body = "const exception_fixture = 1;\n"
@@ -450,7 +538,6 @@ setup=["extension"]
             trojan_source.run(self.root, [])
         self.assertIn(body, seen)
 
-
     def test_invalid_source_encoding_names_path_and_binary_is_not_cached(self):
         (self.root / "source.ts").write_bytes(b"\xff")
         self.git("add", ".")
@@ -482,7 +569,6 @@ setup=["extension"]
             self.git("commit", "-qm", "Explicit source")
             with self.assertRaisesRegex(ValueError, "binary.ts"):
                 trojan_source.run(self.root, [self.git("rev-parse", "HEAD")])
-
 
 
 if __name__ == "__main__":

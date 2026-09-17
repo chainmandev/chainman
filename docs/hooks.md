@@ -77,6 +77,15 @@ owned bridges and their worktree setting. An unrelated common hook setting is
 preserved. Git, just and the chosen Nix/container engine must be on the Git
 client's PATH, including for graphical clients.
 
+Ordinary checkouts use a relative hook path, so moving the checkout preserves its
+hooks. Linked worktrees use their Git administration directory; repair Git's
+worktree links after relocating the owning repository, then run `just hooks install`.
+Installation records its selected setting there and can repair a relocated owned
+setting when that record and the intact bridges agree. Legacy moved installations
+without an ownership record require the explicit recovery steps in the diagnostic.
+Installation and removal share an administrative lock and preserve configuration
+and bridges on catchable failure. A competing operation asks you to retry.
+
 Linked worktrees, including those backed by a bare repository, keep separate
 hook settings. When first enabling Git's worktree configuration, installation
 moves shared `core.bare` and `core.worktree` values to the primary repository's
@@ -85,6 +94,10 @@ and hook settings. Configuration contention stops installation; a failed
 installation restores the previous configuration and bridges. If those shared
 values come from included Git configuration, configure the worktree settings
 explicitly first; chainman reports this before changing them.
+
+First activation also refuses dormant worktree identity, hook-path or include
+settings: enabling them could silently change another checkout. Review those
+files before retrying; chainman does not overwrite them to force installation.
 
 ## What pre-commit does
 
