@@ -438,6 +438,36 @@ setup=["extension"]
                 with self.assertRaisesRegex(ValueError, "suspicious"):
                     trojan_source.run(self.root, [revision])
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TROJAN_SOURCE"), "requires pinned hooks profile"
+    )
+    def test_binary_like_utf8_executable_is_scanned_cold_and_warm(self):
+        source = self.root / "executable"
+        source.write_text("MZ = 0; // harmless fixture \u202e\n")
+        source.chmod(0o755)
+        self.git("add", ".")
+        self.git("commit", "-qm", "Text executable")
+        revision = self.git("rev-parse", "HEAD")
+
+        def execute(root, profile, argv, **kwargs):
+            return subprocess.run(
+                argv, input=kwargs.get("input"), capture_output=True, check=True
+            )
+
+        with patch.object(chainman, "execute", execute):
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, "suspicious"):
+                    trojan_source.run(self.root, [revision])
+
+    def test_dos_prefix_requires_a_pe_header(self):
+        self.assertFalse(trojan_source.binary_executable(b"MZ\xff"))
+        body = bytearray(68)
+        body[:2] = b"MZ"
+        body[60:64] = (64).to_bytes(4, "little")
+        self.assertFalse(trojan_source.binary_executable(body))
+        body[64:68] = b"PE\0\0"
+        self.assertTrue(trojan_source.binary_executable(body))
+
     def test_tree_deltas_keep_intermediate_coverage_and_bound_warm_traversal(self):
         base = self.git("rev-parse", "HEAD")
         trees = []

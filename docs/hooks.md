@@ -163,7 +163,8 @@ terminal, leaving that stream untouched.
 
 Source-classified files are scanned as UTF-8, including embedded NULs; unsupported
 encodings fail with a commit/path diagnostic. Only the implicit executable-file
-fallback skips recognized native binaries, reporting the skip without caching a
+fallback skips recognized native binaries that cannot decode as UTF-8; valid UTF-8
+executable text is always scanned. Skips are reported without caching a
 clean-source result. The classification identity invalidates older clean caches.
 Traversal inventories the first outgoing tree, then its successive differences;
 it retains one diagnostic location per distinct source blob, not every unchanged

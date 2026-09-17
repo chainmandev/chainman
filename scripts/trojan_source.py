@@ -110,10 +110,12 @@ def tree_changes(
 def binary_executable(body: bytes) -> bool:
     # Only the implicit executable fallback permits recognized native binaries.
     # An explicit source pattern must never be bypassed by a NUL or magic bytes.
+    if body.startswith(b"MZ") and len(body) >= 64:
+        offset = int.from_bytes(body[60:64], "little")
+        return offset >= 64 and body[offset : offset + 4] == b"PE\0\0"
     return body.startswith(
         (
             b"\x7fELF",
-            b"MZ",
             b"\xfe\xed\xfa\xce",
             b"\xce\xfa\xed\xfe",
             b"\xfe\xed\xfa\xcf",
@@ -197,15 +199,15 @@ def run(root: Path, arguments: list[str]) -> int:
         scanned = []
         for blob, body in zip(batch, bodies, strict=True):
             revision, path, source = blobs[blob]
-            if not source and binary_executable(body):
-                print(
-                    f"Trojan Source: native executable not scanned: {revision} {path!r}",
-                    file=sys.stderr,
-                )
-                continue
             try:
                 texts.append(body.decode("utf-8"))
             except UnicodeDecodeError:
+                if not source and binary_executable(body):
+                    print(
+                        f"Trojan Source: native executable not scanned: {revision} {path!r}",
+                        file=sys.stderr,
+                    )
+                    continue
                 raise ValueError(
                     f"Trojan Source: unsupported source encoding: {revision} {path!r}; expected UTF-8"
                 ) from None
