@@ -265,6 +265,8 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
             import json
 
             options += ["--transport-declaration", json.dumps(value, sort_keys=True)]
+            if executable:
+                options += ["--transport-readiness", "error"]
             if request in {"exec", "shell", "run"} or request in tasks:
                 options += [
                     "--transport-prepare",

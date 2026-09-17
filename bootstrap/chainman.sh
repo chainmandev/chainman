@@ -751,6 +751,7 @@ fi
 prepare_action=$CHAINMAN_REQUEST_ACTION
 prepare_task=$CHAINMAN_REQUEST_TASK
 prepare_profile=
+transport_readiness=
 set -- "$image" sh -eu -c "$container_init" sh "$self" "$@"
 while IFS= read -r option; do
     [ -n "$option" ] || continue
@@ -764,6 +765,10 @@ while IFS= read -r option; do
             ;;
         --transport-declaration)
             set -- --env "CHAINMAN_ACTIVE_TRANSPORT=$value" "$@"
+            continue
+            ;;
+        --transport-readiness)
+            transport_readiness=error
             continue
             ;;
         --transport-prepare)
@@ -1029,6 +1034,8 @@ if [ -n "$prepare_profile" ]; then
     # Setup gets no execution mounts. The final readiness check may fail on a
     # concurrent change, but cannot install with workload credentials present.
     "$self" _transport-prepare "$prepare_action" "$prepare_task" "$prepare_profile" < /dev/null >&2
+fi
+if [ "$transport_readiness" = error ]; then
     CHAINMAN_SETUP=error
     export CHAINMAN_SETUP
 fi

@@ -77,8 +77,10 @@ commands=[["true"]]
                     ("exec", "--profile"),
                     ("shell", "--profile"),
                     ("run", "work"),
+                    ("_workflow-task", "work"),
                 ):
                     _, options = bootstrap_plan.plan(root, action, name)
+                    self.assertIn("--transport-readiness", options)
                     self.assertIn("--mount-env-optional", options)
                     self.assertIn("FIXTURE_KEY:/key:ro", options)
                 for action, name in (
