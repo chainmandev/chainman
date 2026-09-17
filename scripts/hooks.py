@@ -1,6 +1,7 @@
 """Worktree-owned Git bridges and a pinned, composable lefthook preset."""
 
 from collections.abc import Mapping
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -130,13 +131,157 @@ def install(root: Path) -> None:
         return
     target = directory(root)
     target.mkdir(mode=0o700, exist_ok=True)
-    # Worktree config is additive; never erase common core.hooksPath policy.
-    git(root, "config", "--local", "extensions.worktreeConfig", "true")
-    for event in EVENTS:
-        tc.atomic_bytes(target / event, bridge(event), 0o755)
-    git(root, "config", "--worktree", "core.hooksPath", str(target))
-    if not status(root).get("installed"):
-        raise ValueError("Git did not select the installed hook bridges")
+    common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    shared = common / "config"
+    primary = common / "config.worktree"
+    selected = target.parent / "config.worktree"
+    configs = list(dict.fromkeys([primary, selected, shared]))
+    # Honor Git's configuration locks across siblings. Prepare complete copies
+    # first: enabling the extension is the LAST write, so common core.bare and
+    # core.worktree never temporarily change the meaning of a linked checkout.
+    with contextlib.ExitStack() as cleanup:
+        for path in sorted(configs):
+            if any(part.is_symlink() for part in (path, *path.parents)):
+                raise ValueError("Git hook configuration must not contain symlinks")
+            lock = path.with_name(path.name + ".lock")
+            try:
+                descriptor = os.open(
+                    lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+                )
+            except FileExistsError:
+                raise ValueError(
+                    f"Git configuration is in use: {lock}; retry hook installation"
+                ) from None
+            os.close(descriptor)
+            cleanup.callback(lock.unlink)
+        check_installation(root)
+        originals = {path: staged_format.identity(path) for path in configs}
+        temporary = Path(cleanup.enter_context(tempfile.TemporaryDirectory(dir=target)))
+        copies = {}
+        for number, path in enumerate(configs):
+            copy = temporary / str(number)
+            original = originals[path]
+            copy.write_bytes(original[0] if original is not None else b"")
+            copies[path] = copy
+        enabled = git(
+            root,
+            "config",
+            "--local",
+            "--includes",
+            "--type=bool",
+            "--get",
+            "extensions.worktreeConfig",
+            check=False,
+        )
+        if enabled != "true":
+            for key in ("core.bare", "core.worktree"):
+                value = staged_format.git(
+                    root,
+                    "config",
+                    "--file",
+                    str(copies[shared]),
+                    "--get",
+                    key,
+                    check=False,
+                )
+                effective = staged_format.git(
+                    root, "config", "--local", "--includes", "--get", key, check=False
+                )
+                origins = staged_format.git(
+                    root,
+                    "config",
+                    "--local",
+                    "--includes",
+                    "--show-origin",
+                    "--null",
+                    "--get-all",
+                    key,
+                    check=False,
+                )
+                if value.returncode not in (0, 1) or effective.returncode not in (0, 1):
+                    raise ValueError(f"Cannot read shared Git setting {key}")
+                sources = (
+                    origins.stdout.removesuffix(b"\0").split(b"\0")[::2]
+                    if origins.stdout
+                    else []
+                )
+                if value.stdout != effective.stdout or any(
+                    not source.startswith(b"file:")
+                    or (root / os.fsdecode(source[5:])).resolve() != shared.resolve()
+                    for source in sources
+                ):
+                    raise ValueError(
+                        f"Shared {key} comes from included configuration; configure Git worktree settings explicitly before installing hooks"
+                    )
+                if value.returncode == 0:
+                    git(
+                        root,
+                        "config",
+                        "--file",
+                        str(copies[primary]),
+                        "--replace-all",
+                        key,
+                        os.fsdecode(value.stdout.removesuffix(b"\n")),
+                    )
+                    git(
+                        root,
+                        "config",
+                        "--file",
+                        str(copies[shared]),
+                        "--unset-all",
+                        key,
+                    )
+            git(
+                root,
+                "config",
+                "--file",
+                str(copies[shared]),
+                "--replace-all",
+                "extensions.worktreeConfig",
+                "true",
+            )
+        git(
+            root,
+            "config",
+            "--file",
+            str(copies[selected]),
+            "--replace-all",
+            "core.hooksPath",
+            str(target),
+        )
+        replacements = {target / event: bridge(event) for event in EVENTS}
+        replacements.update({path: copies[path].read_bytes() for path in configs})
+        originals.update(
+            {target / event: staged_format.identity(target / event) for event in EVENTS}
+        )
+        published = []
+        try:
+            for path, body in replacements.items():
+                original = originals[path]
+                if original is None and not body:
+                    continue
+                mode = (
+                    (original[1] if original is not None else 0o600)
+                    if path in copies
+                    else 0o755
+                )
+                if original == (body, mode):
+                    continue
+                published.append(path)
+                tc.atomic_bytes(path, body, mode)
+            if not status(root).get("installed"):
+                raise ValueError("Git did not select the installed hook bridges")
+        except BaseException:
+            # Undo activation first, then restore the previously inactive files.
+            # SIGKILL before activation also leaves the old config usable; all
+            # activated configurations already have both complete hook bridges.
+            for path in reversed(published):
+                original = originals[path]
+                if original is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    tc.atomic_bytes(path, original[0], original[1])
+            raise
     print("Git hooks installed (format staged content; scan outgoing commits)")
 
 

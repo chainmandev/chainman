@@ -90,6 +90,123 @@ setup=["extension"]
         self.assertTrue(hooks.status(other)["installed"])
         self.assertFalse(hooks.status(self.root)["installed"])
 
+    def bare_worktrees(self):
+        bare = self.root / "bare.git"
+        self.git("clone", "--bare", str(self.root), str(bare))
+        linked = self.root / "linked"
+        sibling = self.root / "sibling"
+        for path in (linked, sibling):
+            self.git(
+                "--git-dir=" + str(bare), "worktree", "add", "-b", path.name, str(path)
+            )
+        return bare, linked, sibling
+
+    def test_bare_repository_and_all_linked_worktrees_keep_their_identity(self):
+        bare, linked, sibling = self.bare_worktrees()
+        hooks.install(linked)
+        hooks.install(linked)
+        self.assertTrue(hooks.status(linked)["installed"])
+        self.assertFalse(hooks.status(sibling)["installed"])
+        self.assertEqual(
+            self.git("--git-dir=" + str(bare), "rev-parse", "--is-bare-repository"),
+            "true",
+        )
+        for path in (linked, sibling):
+            self.assertEqual(
+                staged_format.git(
+                    path, "rev-parse", "--is-bare-repository"
+                ).stdout.strip(),
+                b"false",
+            )
+            staged_format.git(path, "status", "--porcelain")
+        later = self.root / "later"
+        self.git("--git-dir=" + str(bare), "worktree", "add", "-b", "later", str(later))
+        staged_format.git(later, "status", "--porcelain")
+        hooks.uninstall(linked)
+        staged_format.git(linked, "status", "--porcelain")
+
+    def test_shared_worktree_location_stays_with_primary_checkout(self):
+        self.git("config", "core.worktree", str(self.root))
+        primary = self.root / ".git/config.worktree"
+        primary.write_text("# preserved settings\n[custom]\n\tvalue = kept\n")
+        other = self.root / "linked"
+        self.git("worktree", "add", "-qb", "other", str(other))
+        hooks.install(other)
+        self.assertEqual(self.git("rev-parse", "--show-toplevel"), str(self.root))
+        self.assertEqual(
+            staged_format.git(other, "rev-parse", "--show-toplevel")
+            .stdout.decode()
+            .strip(),
+            str(other),
+        )
+        self.assertEqual(
+            self.git("config", "--worktree", "--get", "custom.value"), "kept"
+        )
+        self.assertIn("# preserved settings", primary.read_text())
+        self.assertFalse(hooks.status(self.root)["installed"])
+
+    def test_failed_or_interrupted_install_restores_configuration_and_bridges(self):
+        bare, linked, sibling = self.bare_worktrees()
+        target = hooks.directory(linked)
+        paths = [
+            bare / "config",
+            bare / "config.worktree",
+            target.parent / "config.worktree",
+            *(target / event for event in hooks.EVENTS),
+        ]
+        before = {path: staged_format.identity(path) for path in paths}
+        with patch.object(hooks, "status", return_value={"installed": False}):
+            with self.assertRaisesRegex(ValueError, "did not select"):
+                hooks.install(linked)
+        self.assertEqual({path: staged_format.identity(path) for path in paths}, before)
+        atomic = hooks.tc.atomic_bytes
+
+        def interrupt(path, *args):
+            if path == bare / "config" and not getattr(interrupt, "raised", False):
+                interrupt.raised = True
+                raise KeyboardInterrupt()
+            return atomic(path, *args)
+
+        with patch.object(hooks.tc, "atomic_bytes", interrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                hooks.install(linked)
+        self.assertEqual({path: staged_format.identity(path) for path in paths}, before)
+        for path in (linked, sibling):
+            staged_format.git(path, "status", "--porcelain")
+        self.assertFalse(list(bare.glob("config*.lock")))
+        self.assertFalse(list(target.parent.glob("config*.lock")))
+
+    def test_configuration_contention_preserves_other_writers_lock(self):
+        config = self.root / ".git/config"
+        before = config.read_bytes()
+        lock = config.with_name("config.lock")
+        lock.write_bytes(b"another Git process")
+        with self.assertRaisesRegex(ValueError, "configuration is in use"):
+            hooks.install(self.root)
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(lock.read_bytes(), b"another Git process")
+        self.assertFalse((hooks.directory(self.root) / "pre-commit").exists())
+
+    def test_install_repairs_executable_permission_on_owned_bridge(self):
+        hooks.install(self.root)
+        (hooks.directory(self.root) / "pre-commit").chmod(0o600)
+        self.assertFalse(hooks.status(self.root)["installed"])
+        hooks.install(self.root)
+        self.assertTrue(hooks.status(self.root)["installed"])
+
+    def test_included_worktree_settings_are_rejected_before_mutation(self):
+        included = self.root / ".git/included"
+        self.git("config", "--file", str(included), "core.worktree", str(self.root))
+        self.git("config", "core.worktree", str(self.root))
+        self.git("config", "include.path", str(included))
+        config = self.root / ".git/config"
+        before = config.read_bytes()
+        with self.assertRaisesRegex(ValueError, "included configuration"):
+            hooks.install(self.root)
+        self.assertEqual(config.read_bytes(), before)
+        self.assertFalse((self.root / ".git/config.worktree").exists())
+        self.assertFalse((hooks.directory(self.root) / "pre-commit").exists())
+
     def test_setup_is_complete_raw_and_recipe_no_hooks_is_explicit(self):
         calls = []
 

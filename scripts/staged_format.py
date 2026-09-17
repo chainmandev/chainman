@@ -6,6 +6,7 @@ We lock that index with its own .lock suffix and never remove Git's lock.
 """
 
 from collections.abc import Mapping
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -236,6 +237,21 @@ def merge(
 
 
 def run(root: Path, *, check: bool = False) -> int:
+    # Formatting may coexist with dev/shell readers. Its shared operation still
+    # excludes cleanup and updates; a separate lock serializes all active indexes
+    # of this worktree (including Git's temporary commit -a/--only indexes).
+    with tc.operation(root, exclusive=False, new_execution=True):
+        with tc.operation_file(root, "staged-format.lock") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise ValueError(
+                    "Staged formatting is already running in this worktree; retry when it finishes"
+                ) from None
+            return format_index(root, check=check)
+
+
+def format_index(root: Path, *, check: bool = False) -> int:
     cfg = tc.config(root)
     declared = formatters.declarations(cfg)
     if not declared:
@@ -451,8 +467,7 @@ if __name__ == "__main__":
     import sys
 
     try:
-        with tc.operation(Path.cwd(), exclusive=True, new_execution=True):
-            raise SystemExit(run(Path.cwd()))
+        raise SystemExit(run(Path.cwd()))
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"chainman formatting: {error}", file=sys.stderr)
         raise SystemExit(1) from error

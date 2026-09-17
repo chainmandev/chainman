@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import sys
 import tempfile
@@ -57,6 +58,75 @@ check=["unused"]
             contextlib.redirect_stdout(io.StringIO()),
         ):
             return subject.run(self.root)
+
+    @contextlib.contextmanager
+    def background_operation(self, *, formatting=False):
+        code = f"""
+import sys
+from pathlib import Path
+sys.path.insert(0, {str(Path(subject.__file__).parent)!r})
+import staged_format
+root = Path({str(self.root)!r})
+def wait(*args, **kwargs):
+    print('ready', flush=True)
+    sys.stdin.buffer.read(1)
+if {formatting!r}:
+    staged_format.formatters.execute = wait
+    staged_format.run(root)
+else:
+    with staged_format.tc.operation(root, exclusive=False, new_execution=True):
+        wait()
+"""
+        with subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ) as child:
+            try:
+                self.assertTrue(select.select([child.stdout], [], [], 10)[0])
+                self.assertEqual(child.stdout.readline(), b"ready\n")
+                yield
+            finally:
+                try:
+                    _, errors = child.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.communicate()
+                    raise
+                self.assertEqual(child.returncode, 0, errors.decode())
+
+    def test_real_commit_coexists_with_independent_managed_reader(self):
+        self.install_fixture_hook()
+        self.stage()
+        with self.background_operation():
+            self.real_commit("-m", "Commit during development")
+        self.assertTrue(self.git("show", "HEAD:a.txt").startswith(b"GOOD"))
+
+    def test_two_formatters_and_destructive_operations_are_excluded(self):
+        self.stage()
+        before = subject.active_index(self.root).read_bytes()
+        with self.background_operation(formatting=True):
+            with self.assertRaisesRegex(ValueError, "already running"):
+                self.run_format()
+            with self.assertRaisesRegex(ValueError, "managed operation"):
+                with subject.tc.operation(self.root, exclusive=True):
+                    self.fail("Cleanup/update entered during formatting")
+            self.assertEqual(subject.active_index(self.root).read_bytes(), before)
+
+    def test_concurrent_index_edit_is_preserved(self):
+        self.stage()
+        saved = []
+
+        def formatter(root, cfg, paths, **kwargs):
+            self.formatter(root, cfg, paths)
+            self.stage("another.txt", "user staged this\n")
+            saved.append(subject.active_index(self.root).read_bytes())
+
+        with self.assertRaisesRegex(ValueError, "changed during"):
+            self.run_format(formatter)
+        self.assertEqual(subject.active_index(self.root).read_bytes(), saved[0])
+        self.assertTrue((self.root / "a.txt").read_text().startswith("BAD"))
 
     def test_fully_staged_and_partial_changes(self):
         self.stage()
@@ -250,12 +320,13 @@ import sys
 from pathlib import Path
 sys.path.insert(0, {str(Path(subject.__file__).parent)!r})
 import staged_format
+import chainman
 def formatter(root, cfg, paths, **kwargs):
     for path in paths:
         p = root / path
         p.write_bytes(p.read_bytes().replace(b"BAD", b"GOOD"))
 staged_format.formatters.execute = formatter
-raise SystemExit(staged_format.run(Path.cwd()))
+raise SystemExit(chainman.main(["--root", str(Path.cwd()), "format-staged"]))
 """)
         script.chmod(0o755)
 

@@ -77,6 +77,15 @@ owned bridges and their worktree setting. An unrelated common hook setting is
 preserved. Git, just and the chosen Nix/container engine must be on the Git
 client's PATH, including for graphical clients.
 
+Linked worktrees, including those backed by a bare repository, keep separate
+hook settings. When first enabling Git's worktree configuration, installation
+moves shared `core.bare` and `core.worktree` values to the primary repository's
+worktree configuration before activation. Other checkouts keep their identity
+and hook settings. Configuration contention stops installation; a failed
+installation restores the previous configuration and bridges. If those shared
+values come from included Git configuration, configure the worktree settings
+explicitly first; chainman reports this before changing them.
+
 ## What pre-commit does
 
 Pre-commit formats staged content. It runs **no lint fixes, type checking,
@@ -95,6 +104,12 @@ enters the index. A genuine merge conflict, concurrent edit, formatter failure o
 out-of-scope output stops the transaction. It does not stash, reset, run clean
 filters, or delete Git-owned lockfiles. Resolve a reported conflict by staging a
 coherent version or formatting that file manually, then retry.
+
+You can commit while an independent managed development command or shell is
+running. Only one staged-format transaction runs per worktree; a second attempt
+asks you to retry. Cleanup and verified updates remain excluded while formatting
+is active, and concurrent changes to the index or selected files still stop
+application of the formatted result.
 
 Before applying anything, the transaction computes every merge and acquires the
 active index's own lock. If interrupted while applying, recovery material remains

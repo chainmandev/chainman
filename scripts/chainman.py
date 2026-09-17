@@ -703,10 +703,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             if rest:
                 raise ValueError("format-staged accepts no arguments")
-            with tc.operation(
-                root, exclusive=True, new_execution=True, automatic_prune=False
-            ):
-                return staged_format.run(root)
+            return staged_format.run(root)
         elif args.action == "setup-status":
             import workflows
 
