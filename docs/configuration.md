@@ -750,7 +750,11 @@ Chainman validates display availability before setup or services. A verified
 helper reads at most 1 MiB of authority data, selecting the local display's
 MIT-MAGIC-COOKIE-1 authentication. The workload receives only the selected socket
 and a private, mode-0600 authority file, removed on exit or interruption. The
-original file is never mounted into the workload or modified. No `xhost` changes
+original file is never mounted into the workload or modified. Cancellation forwards
+the signal and allows the container client three seconds to exit, then forces
+client exit and removes private files. If the engine is unresponsive, inspect its
+container status; forcing a client to exit does not guarantee the engine stopped
+its workload. Abrupt host termination cannot guarantee cleanup. No `xhost` changes
 or host-language installation are needed. A graphical application still has the
 access granted by the selected X server; this does not isolate applications from
 one another on that desktop.
@@ -764,9 +768,15 @@ just chainman explain --profile operations --json
 
 Task inspection reports transport separately for tasks and command services.
 Profile inspection describes direct shell/exec access. Reports include declaration
-origins, field-source files, optional omissions, unresolved host inputs and explicit
+origins, field-source files and explicit
 container-option contributions. Source environment values and authentication
 contents are not printed. Inspection does not prepare credentials, install project
-dependencies or start services. Port placeholders remain declarative in inspection;
-execution resolves and validates them against the selected environment. Host Nix
+dependencies or start services. Host inspection reports path presence, optional
+omissions and unresolved inputs; container inspection labels mounts **not checked
+on host**, rather than inferring host presence from its own filesystem. Presence
+is not a guarantee that execution will admit a mount. Port placeholders remain
+declarative in inspection; execution resolves and validates them against the
+selected environment. Both literal and resolved ports must be integers from 1
+through 65535, with a loopback binding and optional `/tcp` or `/udp` suffix. This
+also applies to explicit container-option port mappings. Host Nix
 ignores container transport, and ordinary launches remain headless by default.

@@ -845,6 +845,12 @@ while IFS= read -r option; do
             continue
             ;;
         --publish | -p)
+            printf '%s\n' "$value" | grep -Eq '^127[.]0[.]0[.]1:[0-9]{1,5}:[0-9]{1,5}(/tcp|/udp)?$' || fail 'Published ports require loopback 127.0.0.1:HOST:CONTAINER[/tcp|/udp].'
+            numbers=${value#127.0.0.1:}
+            numbers=${numbers%/*}
+            host_port=${numbers%%:*}
+            container_port=${numbers#*:}
+            [ "$host_port" -ge 1 ] && [ "$host_port" -le 65535 ] && [ "$container_port" -ge 1 ] && [ "$container_port" -le 65535 ] || fail 'Published ports must be integers between 1 and 65535.'
             binding=${value%:*}
             protocol=${value##*/}
             [ "$protocol" != "$value" ] || protocol=tcp

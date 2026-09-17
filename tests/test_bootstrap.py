@@ -1026,6 +1026,21 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
         )
         code = "import pathlib,sys; assert pathlib.Path('/fixture-key').read_text() == 'neutral credential'; assert not pathlib.Path('/absent').exists(); print(repr(sys.argv[1:])); print(sys.stdin.read()); sys.exit(23)"
         self.prepare_cache(env)
+        # Invalid explicit options fail before the profile's installer runs.
+        options = Path(outside.name) / "options"
+        for mapping in ("127.0.0.1:99999:80", "127.0.0.1:80:not-a-port"):
+            options.write_text("--publish\n" + mapping + "\n")
+            rejected = self.run_bootstrap(
+                "exec",
+                "--profile",
+                "private",
+                "true",
+                check=False,
+                env=dict(env, CHAINMAN_CONTAINER_OPTIONS_FILE=str(options)),
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("Published ports", rejected.stderr)
+            self.assertFalse((self.root / "ready").exists())
         result = subprocess.run(
             [
                 str(self.launcher),
@@ -1058,6 +1073,18 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
             env=env,
         )
         self.assertEqual(plain.returncode, 0)
+        inspection = self.run_bootstrap(
+            "explain", "--profile", "private", "--json", env=env
+        )
+        access = json.loads(inspection.stdout)["transport"]
+        self.assertEqual(access["mount_status_context"], "host filesystem unavailable")
+        self.assertTrue(
+            all(
+                mount["status"] == "not checked on host"
+                for layer in access["layers"]
+                for mount in layer["mounts"]
+            )
+        )
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"

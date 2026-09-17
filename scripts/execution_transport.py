@@ -156,6 +156,10 @@ def inspect(
     # Values selected by environment names may be credentials themselves. Report
     # names and resolution state, never their values or the contents of paths.
     records: list[object] = []
+    on_host = (
+        os.environ.get("CHAINMAN_ACTIVE_MODE") != "container-nix"
+        and os.environ.get("CHAINMAN_BOOTSTRAP_CONTAINER") != "1"
+    )
     for origin, declaration in declarations:
         if not declaration:
             continue
@@ -175,7 +179,9 @@ def inspect(
             if path is not None and not path.is_absolute():
                 path = root / path
             state = (
-                "unresolved"
+                "not checked on host"
+                if not on_host
+                else "unresolved"
                 if path is None
                 else "present"
                 if path.exists()
@@ -188,6 +194,9 @@ def inspect(
         records.append(record)
     return {
         "applies_in": "container-nix",
+        "mount_status_context": "host filesystem"
+        if on_host
+        else "host filesystem unavailable",
         "effective": combined,
         "layers": records,
         "display": {"kind": combined.get("display"), "authentication": "not inspected"},

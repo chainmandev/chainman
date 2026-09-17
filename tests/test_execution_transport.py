@@ -186,6 +186,70 @@ commands=[["true"]]
             with self.assertRaises(ValueError):
                 project_environment.transport(value)
 
+    def test_ports_validate_literal_and_interpolated_fields_before_execution(self):
+        invalid = [
+            "127.0.0.1:99999:80",
+            "127.0.0.1:not-a-port:80",
+            "127.0.0.1:80:0",
+            "127.0.0.1:80:65536",
+            "127.0.0.1:{env:PORT}:99999",
+            "127.0.0.1:0:{env:PORT}",
+            "127.0.0.1:80:80/sctp",
+            "0.0.0.0:80:80",
+            "127.0.0.1:80-90:80",
+            "127.0.0.1:{PORT}:80",
+            "127.0.0.1:80:80\n",
+        ]
+        for port in invalid:
+            with (
+                self.subTest(port=port),
+                self.assertRaisesRegex(ValueError, "Transport"),
+            ):
+                bootstrap_plan.transport(
+                    Path("/fixture"), {"ports": [port]}, {"PORT": "80"}
+                )
+        for value in ("", "99999", "0", "-1", "80;false"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "PORT"):
+                bootstrap_plan.transport(
+                    Path("/fixture"),
+                    {"ports": ["127.0.0.1:{env:PORT}:80"]},
+                    {"PORT": value},
+                )
+        self.assertEqual(
+            bootstrap_plan.transport(
+                Path("/fixture"),
+                {"ports": ["127.0.0.1:00080:{env:PORT}/udp"]},
+                {"PORT": "65535"},
+            ),
+            ["--publish", "127.0.0.1:80:65535/udp"],
+        )
+
+    def test_container_inspection_never_reports_host_presence(self):
+        cfg = {
+            "container": {
+                "mounts": [
+                    {"source": "/missing", "target": "/required"},
+                    {
+                        "source_env": "FIXTURE_ABSENT",
+                        "target": "/optional",
+                        "optional": True,
+                    },
+                ]
+            }
+        }
+        with (
+            patch.dict(os.environ, CHAINMAN_ACTIVE_MODE="container-nix"),
+            patch.object(
+                Path, "exists", side_effect=AssertionError("host lookup in container")
+            ),
+        ):
+            doc = transport.inspect(Path("/fixture"), cfg, {})
+        self.assertEqual(doc["mount_status_context"], "host filesystem unavailable")
+        self.assertEqual(
+            [m["status"] for m in doc["layers"][0]["mounts"]],
+            ["not checked on host"] * 2,
+        )
+
     def test_private_authority_is_scoped_and_original_unchanged(self):
         original = (
             record(256, b"fixture-desktop", b"9")
@@ -280,3 +344,49 @@ commands=[["true"]]
                 if child.poll() is None:
                     child.kill()
                     child.wait()
+
+    def test_supervisor_bounds_uncooperative_clients_for_terminal_signals(self):
+        for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                private = root / "private"
+                private.mkdir()
+                ready = root / "ready"
+                received = root / "received"
+                code = "import os,pathlib,signal,sys,time; [signal.signal(s,lambda n,f:pathlib.Path(sys.argv[2]).write_text(str(n))) for s in (signal.SIGHUP,signal.SIGINT,signal.SIGTERM)]; pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+                process = subprocess.Popen(
+                    [
+                        "sh",
+                        str(SOURCE / "bootstrap/transport-run.sh"),
+                        str(private),
+                        sys.executable,
+                        "-c",
+                        code,
+                        str(ready),
+                        str(received),
+                    ],
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    process.send_signal(sig)
+                    _, error = process.communicate(timeout=6)
+                    self.assertEqual(process.returncode, 128 + sig)
+                    self.assertEqual(received.read_text(), str(int(sig)))
+                    self.assertIn("forcing client exit", error)
+                    self.assertFalse(private.exists())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(ready.read_text()), 0)
+                finally:
+                    if ready.exists():
+                        try:
+                            os.kill(int(ready.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if process.poll() is None:
+                        process.kill()
+                    process.communicate()

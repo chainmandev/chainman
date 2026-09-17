@@ -85,28 +85,7 @@ def transport(
                 f"type=bind,src={absolute},dst={target}{',readonly' if readonly else ''}",
             ]
     for port in strings(spec.get("ports", []), "Container ports"):
-        if "{" in port:
-
-            def replace(match: re.Match[str]) -> str:
-                name = match.group(1)
-                value = (env or {}).get(name, "")
-                if (
-                    not re.fullmatch(r"[0-9]{1,5}", value)
-                    or not 1 <= int(value) <= 65535
-                ):
-                    raise ValueError(
-                        f"Transport port {name} must be an integer between 1 and 65535"
-                    )
-                return value
-
-            port = re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", replace, port)
-            if not re.fullmatch(
-                r"127\.0\.0\.1:[0-9]{1,5}:[0-9]{1,5}(/tcp|/udp)?", port
-            ):
-                raise ValueError(
-                    "Dynamic transport ports require loopback host:container ports"
-                )
-        result += ["--publish", line(port)]
+        result += ["--publish", project_environment.transport_port(port, env or {})]
     if spec.get("host_access", False):
         result += ["--add-host", "host.docker.internal:host-gateway"]
     if spec.get("display"):

@@ -40,6 +40,37 @@ def variable(name: object) -> str:
     return name
 
 
+def transport_port(port: object, env: Mapping[str, str] | None = None) -> str:
+    """Validate declarations, then resolve both numeric ports before execution."""
+    field = r"([0-9]{1,5}|\{env:[A-Za-z_][A-Za-z0-9_]*\})"
+    match = (
+        re.fullmatch(r"127\.0\.0\.1:" + field + ":" + field + r"(/tcp|/udp)?", port)
+        if isinstance(port, str)
+        else None
+    )
+    if match is None:
+        raise ValueError(
+            "Transport ports require loopback 127.0.0.1:HOST:CONTAINER[/tcp|/udp]"
+        )
+    resolved = []
+    for value in match.group(1, 2):
+        label = "port"
+        if value.startswith("{env:"):
+            name = value[5:-1]
+            variable(name)
+            if env is None:
+                resolved.append(value)
+                continue
+            value = env.get(name, "")
+            label = name
+        if not re.fullmatch(r"[0-9]{1,5}", value) or not 1 <= int(value) <= 65535:
+            raise ValueError(
+                f"Transport {label} must be an integer between 1 and 65535"
+            )
+        resolved.append(str(int(value)))
+    return "127.0.0.1:" + ":".join(resolved) + (match.group(3) or "")
+
+
 def transport(spec: object) -> None:
     if not isinstance(spec, dict) or set(spec) - {
         "ports",
@@ -55,14 +86,10 @@ def transport(spec: object) -> None:
     if "display" in spec and spec["display"] != "x11":
         raise ValueError("Transport display supports only x11")
     ports = spec.get("ports", [])
-    if not isinstance(ports, list) or any(
-        not isinstance(port, str)
-        or not port.startswith("127.0.0.1:")
-        or "\n" in port
-        or "\r" in port
-        for port in ports
-    ):
+    if not isinstance(ports, list):
         raise ValueError("Transport ports must explicitly bind loopback")
+    for port in ports:
+        transport_port(port)
     mounts = spec.get("mounts", [])
     if not isinstance(mounts, list):
         raise ValueError("Transport mounts must be an array")
