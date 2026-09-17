@@ -26,3 +26,14 @@ See the [exception lifecycle](updates.md#temporary-security-exceptions).
 
 `VERSION` is descriptive package metadata. Expect interface changes during alpha;
 review candidate changes and preserve each project's acceptance criteria.
+
+## Development workflow improvements
+
+- Nested task wrappers can reuse a verified environment through
+  `bootstrap/reenter.sh` while retaining setup admission and leases.
+- Profile `inputs` cover imported Nix modules and toolchain pins. `setup-status`
+  names changed, added, and missing files after a readiness record is refreshed.
+- Foreground service workflows stream logs and watched-build status. Inspect
+  saved logs with `just chainman services-logs --follow`; detaching does not stop services.
+- Standalone preview tasks can publish loopback ports selected by declared
+  environment variables. See [services](services.md) for the complete example.

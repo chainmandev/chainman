@@ -6,10 +6,12 @@ import os
 import shutil
 import shlex
 import signal
+import socket
 import subprocess
 import tempfile
 import time
 import unittest
+import urllib.request
 from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -763,6 +765,8 @@ format-check=["format-check"]
             )
             status = json.loads(self.run_bootstrap("services-status", env=env).stdout)
             self.assertTrue(status["running"])
+            config.write_text("not valid TOML [")
+            self.run_bootstrap("services-logs", env=env)
             self.run_bootstrap("services-stop", env=env)
             status = json.loads(self.run_bootstrap("services-status", env=env).stdout)
             self.assertFalse(status["running"])
@@ -836,6 +840,135 @@ commands=[["cat","ready"]]
     )
     def test_container_setup_readiness_smoke(self):
         self.setup_readiness_smoke(container=True)
+
+    def nested_readiness_smoke(self, *, container=False):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="default"
+[profiles.default]
+runtime_profile="core"
+[setup.fixture]
+inputs=["input.txt"]
+artifacts=["ready"]
+commands=[["sh","-c","cp input.txt ready"]]
+[tasks.check]
+setup=["fixture"]
+commands=[["cat","ready"]]
+""")
+        (self.root / "input.txt").write_text("ready\n")
+        env = dict(self.env, CHAINMAN_SETUP="error")
+        if container:
+            env.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+                CHAINMAN_NIX_VOLUME=os.environ.get(
+                    "CHAINMAN_TEST_WARM_VOLUME", self.test_volume
+                ),
+            )
+        entry = 'exec "$CHAINMAN_RUNTIME/bootstrap/reenter.sh" "$CHAINMAN_ROOT" check'
+        denied = self.run_bootstrap(
+            "exec", "--", "sh", "-c", entry, env=env, check=False
+        )
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("just chainman setup fixture", denied.stderr)
+        self.assertFalse((self.root / "ready").exists())
+        self.run_bootstrap("setup", env=env)
+        result = self.run_bootstrap("exec", "--", "sh", "-c", entry, env=env)
+        self.assertEqual(result.stdout, "ready\n")
+        (self.root / "input.txt").write_text("changed\n")
+        denied = self.run_bootstrap(
+            "exec", "--", "sh", "-c", entry, env=env, check=False
+        )
+        self.assertNotEqual(denied.returncode, 0)
+        self.assertIn("setup:input.txt", denied.stderr)
+
+    def test_host_nested_readiness_smoke(self):
+        self.nested_readiness_smoke()
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_nested_readiness_smoke(self):
+        self.nested_readiness_smoke(container=True)
+
+    def preview_port_smoke(self, *, container=False):
+        self.use_real_runtime()
+        with socket.socket() as reserve:
+            reserve.bind(("127.0.0.1", 0))
+            port = reserve.getsockname()[1]
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="core"
+[environment]
+pass=["PREVIEW_PORT"]
+[environment.defaults]
+PREVIEW_PORT="4321"
+[tasks.preview]
+commands=[["sh","-c","exec python3 -m http.server \\"$PREVIEW_PORT\\" --bind 0.0.0.0"]]
+cleanup_children=true
+shutdown_seconds=2
+transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
+""")
+        env = dict(self.env, PREVIEW_PORT=str(port))
+        if container:
+            # This lane qualifies publication and engine interruption, which do
+            # not require compiling a native controller in a cold container store.
+            # Native child containment is exercised by the host lane and native tests.
+            config = self.root / "chainman.toml"
+            config.write_text(
+                config.read_text().replace(
+                    "cleanup_children=true", "cleanup_children=false"
+                )
+            )
+            env.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+                CHAINMAN_NIX_VOLUME=os.environ.get(
+                    "CHAINMAN_TEST_WARM_VOLUME", self.test_volume
+                ),
+            )
+        self.prepare_cache(env)
+        log = self.root / "preview-output"
+        with log.open("w") as output:
+            child = subprocess.Popen(
+                [str(self.launcher), "run", "preview"],
+                env=env,
+                stdout=output,
+                stderr=output,
+                start_new_session=True,
+            )
+        try:
+            deadline = time.monotonic() + 60
+            while True:
+                self.assertIsNone(child.poll(), log.read_text())
+                try:
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}", timeout=1
+                    ) as response:
+                        self.assertEqual(response.status, 200)
+                    break
+                except OSError:
+                    self.assertLess(time.monotonic(), deadline, log.read_text())
+                    time.sleep(0.1)
+            os.killpg(child.pid, signal.SIGINT)
+            child.wait(timeout=15)
+            with socket.socket() as released:
+                released.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                released.bind(("127.0.0.1", port))
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGTERM)
+                child.wait(timeout=15)
+
+    def test_host_preview_port_and_interruption(self):
+        self.preview_port_smoke()
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_preview_port_and_interruption(self):
+        self.preview_port_smoke(container=True)
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),

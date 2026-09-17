@@ -214,7 +214,7 @@ extends="base"
             (root / "chainman.toml").write_text(
                 'schema=3\n[templates.tasks.broken]\nextends="missing"\n'
             )
-            for action in ("services-status", "services-stop"):
+            for action in ("services-status", "services-stop", "services-logs"):
                 self.assertEqual(
                     bootstrap_plan.plan(root, action, ""), (True, ["--controller", "1"])
                 )

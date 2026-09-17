@@ -40,6 +40,7 @@ From another terminal in the project:
 
 ```sh
 just chainman services-status
+just chainman services-logs --follow
 just chainman services-stop
 ```
 
@@ -60,6 +61,36 @@ the commands succeed and required services remain available. A development task
 uses `wait_for_services = true` to retain ownership until stop or interruption.
 Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
+
+Foreground tasks with `wait_for_services = true` stream service output, including
+watched build, failure, and restart messages. `services-logs` shows the latest
+64 KiB per log; `--follow` continues across log rotation and truncation. It uses
+saved worktree/mode state and its associated repository resources, even when the
+current configuration is broken. A log viewer acquires no service lease: Ctrl-C
+detaches the viewer without stopping services. Logs can contain application output
+and secrets; treat them as local development data.
+
+For a standalone development task that owns its server and child watchers, declare
+`cleanup_children = true` and publish its port explicitly:
+
+```toml
+[environment]
+pass = ["PREVIEW_PORT"]
+
+[environment.defaults]
+PREVIEW_PORT = "4321"
+
+[tasks.preview]
+profile = "core"
+commands = [["sh", "-c", "exec python3 -m http.server \"$PREVIEW_PORT\" --bind 0.0.0.0"]]
+cleanup_children = true
+transport = { ports = ["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"] }
+```
+
+Port references use effective project/profile/task environment values. Each must
+be a decimal port from 1 through 65535. Container publication always binds host
+loopback; caller overrides must appear in `environment.pass`. Stop a standalone task with Ctrl-C; `services-stop` addresses declared
+service graphs.
 
 Graceful stop sends one initial termination signal to the service, allowing its
 shutdown handler to close resources within `shutdown_seconds`. Remaining

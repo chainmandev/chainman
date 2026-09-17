@@ -10,6 +10,7 @@ import re
 import sys
 
 import config_inspection
+import chainman
 import project_environment
 import workflows
 from adapter_data import array, strings, table, text
@@ -40,6 +41,7 @@ INTERNAL = {
     "cache-status",
 }
 CONTROLLER = {
+    "services-logs",
     "services-status",
     "services-stop",
     "services-run",
@@ -54,7 +56,9 @@ def line(value: object) -> str:
     return value
 
 
-def transport(root: Path, value: object) -> list[str]:
+def transport(
+    root: Path, value: object, env: dict[str, str] | None = None
+) -> list[str]:
     project_environment.transport(value)
     spec = table(value, "Container transport")
     result: list[str] = []
@@ -76,6 +80,27 @@ def transport(root: Path, value: object) -> list[str]:
                 f"type=bind,src={absolute},dst={target}{',readonly' if readonly else ''}",
             ]
     for port in strings(spec.get("ports", []), "Container ports"):
+        if "{" in port:
+
+            def replace(match: re.Match[str]) -> str:
+                name = match.group(1)
+                value = (env or {}).get(name, "")
+                if (
+                    not re.fullmatch(r"[0-9]{1,5}", value)
+                    or not 1 <= int(value) <= 65535
+                ):
+                    raise ValueError(
+                        f"Transport port {name} must be an integer between 1 and 65535"
+                    )
+                return value
+
+            port = re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", replace, port)
+            if not re.fullmatch(
+                r"127\.0\.0\.1:[0-9]{1,5}:[0-9]{1,5}(/tcp|/udp)?", port
+            ):
+                raise ValueError(
+                    "Dynamic transport ports require loopback host:container ports"
+                )
         result += ["--publish", line(port)]
     if spec.get("host_access", False):
         result += ["--add-host", "host.docker.internal:host-gateway"]
@@ -85,7 +110,7 @@ def transport(root: Path, value: object) -> list[str]:
 def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     # Recovery consumes saved ownership state, never current declarations. Keep
     # nested native-tool export available through the same read-only transport.
-    if request in {"services-status", "services-stop"}:
+    if request in {"services-status", "services-stop", "services-logs"}:
         return True, ["--controller", "1"]
     if request == "_control-export":
         return False, []
@@ -120,8 +145,41 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         selected = table(tasks.get(name, {}), "Task")
     else:
         selected = table(tasks.get(request, {}), "Task")
-    options += transport(root, cfg.get("container", {}))
-    options += transport(root, selected.get("transport", {}))
+    transports = [cfg.get("container", {}), selected.get("transport", {})]
+    env = None
+    if any(
+        "{" in port
+        for value in transports
+        for port in strings(table(value, "Transport").get("ports", []), "Ports")
+    ):
+        inherited = dict(os.environ)
+        if os.environ.get("CHAINMAN_BOOTSTRAP_INPUTS"):
+            forwarded = project_environment.host_inputs(
+                Path(os.environ["CHAINMAN_BOOTSTRAP_INPUTS"]),
+                table(cfg.get("environment", {}), "Environment"),
+            )
+            inherited.update(
+                {
+                    key: value
+                    for key, value in forwarded.items()
+                    if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+                }
+            )
+        env = (
+            workflows.context_environment(root, cfg, task, inherited)
+            if task in tasks
+            else inherited
+        )
+        _, profile = chainman.profile(
+            root,
+            text(selected.get("profile", workflows.default_profile(cfg)), "Profile"),
+            cfg=cfg,
+        )
+        env = chainman.profile_environment(
+            root, profile, env, selected.get("environment", {}), cfg=cfg
+        )
+    for value in transports:
+        options += transport(root, value, env)
     return controller, options
 
 

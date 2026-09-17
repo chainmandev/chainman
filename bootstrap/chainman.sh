@@ -79,11 +79,14 @@ CHAINMAN_REQUEST_ACTION=${1:-doctor}
 CHAINMAN_REQUEST_TASK=${2:-}
 export CHAINMAN_REQUEST_ACTION CHAINMAN_REQUEST_TASK
 control_dispatch() {
+    if [ "$1" = services-logs ]; then
+        [ "$#" = 1 ] || { [ "$#" = 2 ] && [ "$2" = --follow ]; } || fail 'usage: services-logs [--follow]'
+    fi
     if [ "$1" = services-reset ]; then
         [ "$#" = 3 ] && [ "$3" = --discard-data ] || fail 'usage: services-reset TASK --discard-data'
     fi
     case "$1" in
-        services-status | services-stop) ;;
+        services-status | services-stop | services-logs) ;;
         *)
             if [ "$mode" = container-nix ] && [ "${CHAINMAN_CONTAINER_NETWORK_MODE:-bridge}" = host ]; then
                 fail 'Service workflows use owned network namespaces; the host-network override is for standalone tasks.'
@@ -91,7 +94,7 @@ control_dispatch() {
             ;;
     esac
     case "$1" in
-        services-status | services-stop) ;;
+        services-status | services-stop | services-logs) ;;
         *)
             # Setup may produce application data identities used by volume
             # compatibility. Run it before planning, in the ordinary project
@@ -134,9 +137,11 @@ control_dispatch() {
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts "$self" _control-export "$control_output" "$control_target" \
         "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" "$control_engine" "$self" "$@"
     case "$1" in
-        services-status | services-stop)
+        services-status | services-stop | services-logs)
             IFS= read -r control_state < "$control_output/state"
-            "$control_output/chainman-control" "${1#services-}" "$control_state"
+            control_action=${1#services-}
+            shift
+            "$control_output/chainman-control" "$control_action" "$control_state" "$@"
             ;;
         services-up) "$control_output/chainman-control" up "$control_output/plan.json" ;;
         services-reset) "$control_output/chainman-control" reset "$control_output/plan.json" --discard-data ;;
@@ -606,6 +611,12 @@ fi
 validate_daemon
 "$engine" container start "$daemon_name" > /dev/null
 plan_options() {
+    # The verified planner reads declared host inputs as data, never as its own
+    # execution environment. Do not expose this snapshot to project commands.
+    (
+        umask 077
+        env -0 > "$temporary/host-environment"
+    )
     set --
     if [ "$authority" != "$root" ]; then
         set -- --mount "type=bind,src=$authority,dst=$authority,readonly" --env "CHAINMAN_ENTRY_AUTHORITY=$authority" "$@"
@@ -613,6 +624,7 @@ plan_options() {
     run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
         --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
         --mount "type=bind,src=$source_root,dst=$source_root,readonly" --env HOME=/tmp/chainman-home \
+        --mount "type=bind,src=$temporary/host-environment,dst=$temporary/host-environment,readonly" --env "CHAINMAN_BOOTSTRAP_INPUTS=$temporary" \
         --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
         --env "CHAINMAN_BOOTSTRAP_HELPER=$helper" --env "CHAINMAN_SOURCE_ROOT=$source_root" --env CHAINMAN_SOURCE_REVISION \

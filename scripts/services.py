@@ -583,7 +583,7 @@ def export(root: Path, arguments: list[str]) -> int:
     key = scope_key(host_state, root, mode)
     state = str(Path(host_state) / key)
     tc.atomic_bytes(destination / "state", (state + "\n").encode())
-    if action in {"services-status", "services-stop"}:
+    if action in {"services-status", "services-stop", "services-logs"}:
         return 0
     cfg = workflows.configuration(root)
     task = (

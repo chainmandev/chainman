@@ -882,6 +882,21 @@ if text=='bad': raise SystemExit(3)
             "startup_seconds": 10,
         }
         self.run_control("up", check=0)
+        log_path = self.base / "viewer.log"
+        with log_path.open("w") as output:
+            viewer = subprocess.Popen(
+                [CONTROL, "logs", str(self.state), "--follow"],
+                stdout=output,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        def close_viewer():
+            if viewer.poll() is None:
+                viewer.kill()
+            viewer.communicate(timeout=5)
+
+        self.addCleanup(close_viewer)
         pid = self.pid()
         current.write_text("bad")
         self.wait_until(
@@ -889,6 +904,22 @@ if text=='bad': raise SystemExit(3)
         )
         time.sleep(0.2)
         self.assertTrue(self.alive(pid))
+        try:
+            self.wait_until(
+                lambda: (
+                    "build failed; retaining the last successful service"
+                    in log_path.read_text()
+                )
+            )
+        except AssertionError as error:
+            error.add_note(
+                f"viewer status={viewer.poll()}; logs={log_path.read_text()!r}"
+            )
+            raise
+        viewer.send_signal(signal.SIGINT)
+        _, error = viewer.communicate(timeout=5)
+        self.assertEqual(viewer.returncode, 0, error)
+        self.assertTrue(self.alive(pid), "detaching logs stopped a persistent service")
         current.write_text("slow-good")
         self.wait_until(
             lambda: (self.root / "started").read_text().splitlines()[-1] == "slow-good"
@@ -900,6 +931,15 @@ if text=='bad': raise SystemExit(3)
             lambda: (self.root / "finished").read_text().splitlines()[-1] == "queued-4"
         )
         self.wait_until(lambda: self.pid() != pid)
+        logs = subprocess.run(
+            [CONTROL, "logs", str(self.state)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        self.assertEqual(logs.returncode, 0, logs.stderr)
+        self.assertIn("Building: worker", logs.stdout)
+        self.assertIn("Rebuilt and restarted: worker", logs.stdout)
         self.assertEqual(
             (self.root / "finished").read_text().splitlines(),
             ["good", "bad", "slow-good", "queued-4"],
@@ -908,6 +948,39 @@ if text=='bad': raise SystemExit(3)
         self.assertTrue(self.alive(self.pid()))
         self.run_control("stop", check=0)
         self.assertFalse(self.alive(self.pid()))
+
+    def test_foreground_waiting_task_displays_service_output(self):
+        worker = self.root / "worker.py"
+        worker.write_text(
+            "print('fixture service output', flush=True)\n" + worker.read_text()
+        )
+        self.plan["wait_for_services"] = True
+        self.plan["task"] = self.command(
+            [sys.executable, "-c", "import time; time.sleep(.3)"]
+        )
+        result = self.run_control("run", check=0)
+        self.assertIn("fixture service output", result.stderr)
+        self.assertIn("following logs", result.stderr)
+        self.assertFalse(self.alive(self.pid()))
+
+    def test_log_viewer_interrupts_with_a_full_output_pipe(self):
+        self.run_control("up", check=0)
+        (self.state / "services.log").write_text("fixture output\n" * 10000)
+        viewer = subprocess.Popen(
+            [CONTROL, "logs", str(self.state), "--follow"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            time.sleep(0.3)
+            self.assertIsNone(viewer.poll())
+            viewer.send_signal(signal.SIGINT)
+            self.assertEqual(viewer.wait(timeout=3), 0)
+            self.assertTrue(self.alive(self.pid()))
+        finally:
+            if viewer.poll() is None:
+                viewer.kill()
+            viewer.communicate(timeout=5)
 
     @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
     def test_watch_restart_preserves_active_client_but_real_exit_cancels_it(self):

@@ -125,6 +125,7 @@ let
       b.elem request [
         "services-status"
         "services-stop"
+        "services-logs"
         "services-run"
         "services-up"
         "services-reset"
@@ -158,10 +159,11 @@ let
     "_control-export"
     "services-status"
     "services-stop"
+    "services-logs"
   ];
 in
 if action == "schema" then
-  toString (config.schema or 1)
+  if controlOnly then "3" else toString (config.schema or 1)
 else if action == "route" then
   (if controller then "1" else "0")
 else if action == "options" then

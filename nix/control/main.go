@@ -467,7 +467,7 @@ func configuration(p Plan, self string) error {
 	}
 	return atomic(filepath.Join(p.State, "compose.json"), map[string]any{
 		"version": "0.5", "processes": processes, "log_location": "services.log", "log_length": 500,
-		"log_configuration": map[string]any{"rotation": map[string]any{"max_size_mb": 10, "max_backups": 3, "max_age_days": 7}},
+		"log_configuration": map[string]any{"flush_each_line": true, "disable_json": true, "no_color": true, "add_timestamp": true, "rotation": map[string]any{"max_size_mb": 10, "max_backups": 3, "max_age_days": 7}},
 	})
 }
 func start(p Plan, self string) error {
@@ -1432,6 +1432,12 @@ func mainAction(args []string) (result int) {
 		fmt.Fprintln(os.Stderr, "usage: chainman-control run|up PLAN; status|stop STATE")
 		return 2
 	}
+	if args[0] == "logs" {
+		if len(args) != 2 && (len(args) != 3 || args[2] != "--follow") {
+			return 2
+		}
+		return serviceLogs(args[1], len(args) == 3)
+	}
 	if args[0] == "command" || args[0] == "sequence" {
 		if len(args) != 2 {
 			return 2
@@ -1559,6 +1565,17 @@ func mainAction(args []string) (result int) {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	startup := &startupGuard{signals: signals, stops: map[string]string{}}
+	if p.WaitForServices && args[0] == "run" {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			if err := streamLogs(ctx, p, os.Stderr, true); err != nil {
+				fmt.Fprintln(os.Stderr, "Service log viewer:", err)
+			}
+		}()
+		// A full caller pipe must not prevent task cancellation or service cleanup.
+		// main exits after releasing ownership; it need not join a blocked viewer.
+		defer cancel()
+	}
 	lease, _, e := acquire(p, args[0] == "up", nil, startup)
 	if e != nil {
 		return exitCode(e)
@@ -1657,7 +1674,7 @@ func mainAction(args []string) (result int) {
 		return exitCode(e)
 	}
 	if p.WaitForServices {
-		fmt.Fprintln(os.Stderr, "Services ready; logs:", filepath.Join(p.State, "services.log"))
+		fmt.Fprintln(os.Stderr, "Services ready; following logs. Inspect separately with just chainman services-logs --follow")
 	}
 	// A foreground Nix/shell entry may close inherited descriptors. Its kernel
 	// identity is a second lease witness until the complete task returns.

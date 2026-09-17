@@ -105,6 +105,7 @@ func watchAction(action, state, name string) int {
 	if e != nil {
 		return exitCode(e)
 	}
+	fmt.Fprintln(os.Stderr, "Building:", name)
 	e = cmd.Run()
 	if cleanup := stopContainer(w.Container, s.Shutdown); cleanup != nil {
 		return exitCode(cleanup)
@@ -135,6 +136,7 @@ func watchAction(action, state, name string) int {
 	// Publishing first-build readiness may immediately admit the dependent process.
 	// That newly started process must not be restarted by this same first build.
 	if !hadSuccess {
+		fmt.Fprintln(os.Stderr, "Build ready:", name)
 		return 0
 	}
 	ps, e := states(p)
@@ -144,6 +146,9 @@ func watchAction(action, state, name string) int {
 	for _, process := range ps {
 		if process.Name == name && process.Running {
 			_, e = backend(p, "process", "restart", name)
+			if e == nil {
+				fmt.Fprintln(os.Stderr, "Rebuilt and restarted:", name)
+			}
 			return exitCode(e)
 		}
 	}

@@ -61,6 +61,7 @@ implementations; project doctor and clean tasks supplement those defaults.
 | `explain TASK --json` / `setup-status` | Inspect task requirements or setup readiness |
 | `doctor` | Shared runtime diagnostics followed by declared project diagnostics |
 | `stop` / `services-status` | Stop or inspect saved service ownership |
+| `logs [--follow]` | Read recent saved service output; optionally follow without acquiring services |
 | `clean` | Stop services, clean project artifacts and prune managed build contexts |
 | `cache-status` / `cache-prune` | Inspect or prune managed caches |
 

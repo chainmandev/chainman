@@ -32,6 +32,7 @@ BUILTINS = {
     "cache-status": ["cache-status"],
     "cache-prune": ["cache-prune"],
     "services-status": ["services-status"],
+    "logs": ["services-logs"],
     "stop": ["services-stop"],
     "setup-status": ["setup-status"],
     "config": ["config"],
