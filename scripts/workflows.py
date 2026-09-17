@@ -5,7 +5,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from collections.abc import Iterable, Iterator, Mapping
 import fcntl
-import fnmatch
 import hashlib
 import json
 import os
@@ -28,6 +27,7 @@ class SetupDetail(TypedDict):
     reason: str
     recovery: NotRequired[list[str]]
     diagnostic: NotRequired[str]
+    changed_inputs: NotRequired[dict[str, list[str]]]
 
 
 def declarations(cfg: Mapping[str, object], section: str) -> dict[str, Table]:
@@ -273,7 +273,11 @@ def group_specs(
 
 
 def fingerprint(
-    root: Path, spec: Mapping[str, object], env: Mapping[str, str] | None = None
+    root: Path,
+    spec: Mapping[str, object],
+    env: Mapping[str, str] | None = None,
+    *,
+    inputs: dict[str, str] | None = None,
 ) -> str:
     digest = hashlib.sha256(
         json.dumps([1, tc.context_id(), spec], sort_keys=True).encode()
@@ -296,20 +300,31 @@ def fingerprint(
             ).encode()
         )
     digest.update(chainman.profile_fingerprint(root, profile_name, ref).encode())
-    paths: set[Path] = set()
-    for pattern in strings(spec["inputs"], "Setup inputs"):
-        paths.update(root.glob(pattern))
-    for path in sorted(paths):
-        relative = path.relative_to(root).as_posix()
-        if any(
-            fnmatch.fnmatchcase(relative, pattern)
-            for pattern in strings(spec.get("exclude_inputs", []), "Setup exclusions")
-        ):
-            continue
-        tc.contained(root, relative)
-        if path.is_file():
-            digest.update(relative.encode() + b"\0" + path.read_bytes() + b"\0")
+    digest.update(
+        json.dumps(
+            setup_inputs(root, spec) if inputs is None else inputs, sort_keys=True
+        ).encode()
+    )
     return digest.hexdigest()
+
+
+def setup_inputs(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
+    selected = text(spec["profile"], "Setup profile")
+    ref, _ = chainman.profile(root, selected)
+    return {
+        **{
+            "profile:" + path: digest
+            for path, digest in chainman.profile_inputs(root, selected, ref).items()
+        },
+        **{
+            "setup:" + path: digest
+            for path, digest in chainman.input_digests(
+                root,
+                strings(spec["inputs"], "Setup inputs"),
+                strings(spec.get("exclude_inputs", []), "Setup exclusions"),
+            ).items()
+        },
+    }
 
 
 def stamp_path(root: Path, key: str) -> Path:
@@ -393,7 +408,8 @@ def setup_use(
             for key, spec in specs.items():
                 if current(root, key, spec, env, pass_fds=(lease.fileno(),)):
                     continue
-                expected = fingerprint(root, spec, env)
+                inputs = setup_inputs(root, spec)
+                expected = fingerprint(root, spec, env, inputs=inputs)
                 # An interrupted repair must not leave an earlier success stamp.
                 stamp_path(root, key).unlink(missing_ok=True)
                 for argv in commands(spec["commands"]):
@@ -436,6 +452,7 @@ def setup_use(
                     stamp_path(root, key),
                     {
                         "fingerprint": expected,
+                        "input_digests": inputs,
                         "artifact_digests": artifact_digests(root, spec),
                     },
                 )
@@ -483,6 +500,34 @@ def setup_detail(
             reason = "invalid-record"
         elif recorded.get("fingerprint") != fingerprint(root, spec, env):
             reason = "inputs-changed"
+            previous = recorded.get("input_digests")
+            if isinstance(previous, dict) and all(
+                isinstance(k, str) and isinstance(v, str) for k, v in previous.items()
+            ):
+                inputs = setup_inputs(root, spec)
+                changed = {
+                    "added": sorted(set(inputs) - set(previous)),
+                    "missing": sorted(set(previous) - set(inputs)),
+                    "changed": sorted(
+                        k
+                        for k in inputs.keys() & previous.keys()
+                        if inputs[k] != previous[k]
+                    ),
+                }
+                labels = [
+                    f"{kind}: {', '.join(paths)}"
+                    for kind, paths in changed.items()
+                    if paths
+                ]
+                return {
+                    "current": False,
+                    "reason": reason,
+                    "changed_inputs": changed,
+                    "diagnostic": "; ".join(labels)
+                    if labels
+                    else "Setup declaration, dependency, environment or runtime identity changed",
+                    "recovery": ["setup", key],
+                }
         elif not all(
             artifact_ready(root, item, env)
             for item in array(spec["artifacts"], "Setup artifacts")

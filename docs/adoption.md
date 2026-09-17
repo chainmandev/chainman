@@ -71,6 +71,25 @@ check *args:
 Do not configure the `check` task to call this same `just check` recipe: that would
 recurse. Chainman never generates or rewrites these forwarding recipes.
 
+For a project-wide shell wrapper that also runs inside `just chainman shell` or
+`exec`, an active environment is not proof of setup readiness. Dispatch its named
+task through the verified runtime's reentry helper:
+
+```sh
+# root is this wrapper's absolute project root; task is a declared ordinary task.
+if [ "${CHAINMAN_ROOT:-}" = "$root" ] && [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ]; then
+    exec "$CHAINMAN_RUNTIME/bootstrap/reenter.sh" "$root" "$task" -- "$@"
+fi
+exec just --justfile "$root/justfile" chainman run "$task" -- "$@"
+```
+
+Reentry preserves operation authority, task admission and setup leases. It reuses
+an unchanged selected profile, refreshes changed profile inputs, and refuses a
+changed runtime pin until the caller leaves the shell. Select tasks explicitly;
+do not infer that all tasks need the largest profile or all setup groups. Service
+graphs still start through host entrypoints. These `CHAINMAN_*` bindings are
+runtime-provided context, never user configuration.
+
 ## 3. Add setup ownership
 
 Define installation inputs and readiness artifacts so tasks can check setup

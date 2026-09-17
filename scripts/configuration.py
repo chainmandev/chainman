@@ -31,7 +31,7 @@ FIELDS = {
         "command profile directory environment depends_on readiness restart shutdown_seconds container setup watch scope transport network_service".split()
     ),
     "profiles": set(
-        "flake runtime_profile compiler_cache environment resources".split()
+        "flake runtime_profile compiler_cache environment resources inputs".split()
     ),
 }
 TABLES = {

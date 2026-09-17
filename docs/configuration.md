@@ -61,6 +61,21 @@ to core. The special `host` profile runs directly in the already bootstrapped co
 context; it is useful for an adapter that subsequently selects the project shell.
 It does not provision host language tools.
 
+Declare imported Nix modules and toolchain pins as profile `inputs`. These are
+project-relative file/glob patterns, inherited through profile templates:
+
+```toml
+[profiles.default]
+flake = "nix/devshell#default"
+inputs = ["nix/devshell/*.nix", "nix/devshell/*.toml"]
+```
+
+The flake, its lock, project configuration, and Chainman pin are included
+automatically. File names and contents determine identity, so additions and
+removals also invalidate setup and active-profile reuse. Symlinks and paths
+outside the project are rejected. Avoid broad globs that include application
+source or build outputs. Bare-host mode does not depend on Nix input files.
+
 For `deps-query` with `provider="swift"` and `operation="metadata"`, supply an exact
 stable version such as `1.0.0`. Chainman reads the bounded release inventory, then
 resolves tag and commit-time evidence only for that version, including a matching
@@ -233,6 +248,12 @@ seconds after entering the profile; `timeout_seconds` accepts integers from 1
 through 300. Initial Nix profile provisioning can take additional time. Failure diagnostics
 name the group and include bounded command output. A failed post-install check
 invalidates the old stamp and prevents tasks or services from starting.
+
+`setup-status` reports `changed_inputs` with `added`, `missing`, and `changed`
+paths, labelled `setup:` or `profile:`, and the targeted recovery arguments.
+The stamp contains file digests, never environment values. Changes to declarations,
+dependency groups, environment inputs, or runtime identity can still receive a
+general diagnostic; older stamps gain detailed inventories after the next repair.
 
 The pnpm check above asks pnpm itself to validate the installation before an empty
 Node command. Chainman keeps `verifyDepsBeforeRun=error`: unchanged patch bytes

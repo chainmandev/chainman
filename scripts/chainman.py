@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 from collections.abc import Mapping, Sequence
 import hashlib
 import importlib.util
@@ -90,6 +91,8 @@ def profile(
             raise ValueError(f"Profile {name!r} is not declared")
         raw = {"runtime_profile": "core" if name == "default" else name}
     spec = table(raw, "Profile")
+    for pattern in strings(spec.get("inputs", []), "Profile inputs"):
+        tc.contained(root, pattern)
     if tc.host_mode():
         return None, spec
     if "flake" in spec:
@@ -108,17 +111,38 @@ def profile(
     return flake_reference(root, location, attribute), spec
 
 
-def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
-    # Host exports have a fresh temporary path on every verified launch. Their
-    # identity is the pin below, not that disposable materialization path.
-    digest = hashlib.sha256(
-        ("host:" + name if tc.host_mode() else str(RUNTIME)).encode()
+def input_digests(
+    root: Path, patterns: Sequence[str], exclusions: Sequence[str] = ()
+) -> dict[str, str]:
+    """Content inventory of declared regular files; additions/removals change it."""
+    paths: set[Path] = set()
+    for pattern in patterns:
+        tc.contained(root, pattern)
+        paths.update(root.glob(pattern))
+    result = {}
+    for path in sorted(paths):
+        relative = path.relative_to(root).as_posix()
+        if any(fnmatch.fnmatchcase(relative, pattern) for pattern in exclusions):
+            continue
+        tc.contained(root, relative)
+        if not path.is_dir():
+            result[relative] = hashlib.sha256(
+                tc.regular_input(root, relative)
+            ).hexdigest()
+    return result
+
+
+def profile_inputs(root: Path, name: str, ref: str | None) -> dict[str, str]:
+    spec = table(
+        table(configuration(root).get("profiles", {}), "Profiles").get(name, {}),
+        "Profile",
     )
-    digest.update((ref or "host").encode())
-    for path in (root / "chainman.toml", root / "chainman.lock"):
-        if path.exists():
-            digest.update(tc.regular_input(root, path.name))
+    result = input_digests(root, ["chainman.toml", "chainman.lock"])
+    # Bare host mode does not evaluate or depend on the declared Nix toolchain.
     if ref:
+        result.update(
+            input_digests(root, strings(spec.get("inputs", []), "Profile inputs"))
+        )
         if ref.startswith("git+file:"):
             parsed = urlsplit(ref)
             directory = (
@@ -126,9 +150,26 @@ def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
             )
         else:
             directory = Path(unquote(ref[5:].partition("#")[0]))
-        for name in ("flake.nix", "flake.lock"):
-            if (directory / name).exists():
-                digest.update(tc.regular_input(directory, name))
+        for path, digest in input_digests(
+            directory, ["flake.nix", "flake.lock"]
+        ).items():
+            label = (
+                str((directory / path).relative_to(root))
+                if directory.is_relative_to(root)
+                else str(directory / path)
+            )
+            result[label] = digest
+    return result
+
+
+def profile_fingerprint(root: Path, name: str, ref: str | None) -> str:
+    # Host exports have a fresh temporary path on every verified launch. Their
+    # identity is the pin below, not that disposable materialization path.
+    digest = hashlib.sha256(
+        ("host:" + name if tc.host_mode() else str(RUNTIME)).encode()
+    )
+    digest.update((ref or "host").encode())
+    digest.update(json.dumps(profile_inputs(root, name, ref), sort_keys=True).encode())
     return digest.hexdigest()
 
 
@@ -252,6 +293,14 @@ def execute(
         CHAINMAN_ROOT=str(root),
         CHAINMAN_PROJECT_ROOT=str(root),
         CHAINMAN_RUNTIME=str(RUNTIME),
+        CHAINMAN_RUNTIME_PYTHON=sys.executable,
+        CHAINMAN_ACTIVE_PIN=(
+            tc.regular_input(tc.configuration_root(root), "chainman.lock")
+            .decode()
+            .strip()
+            if (tc.configuration_root(root) / "chainman.lock").exists()
+            else ""
+        ),
         TOOLCHAIN_MODE=selected.get("CHAINMAN_MODE", "host-nix"),
     )
     selected = profile_environment(root, spec, selected, overrides, cfg=cfg)
