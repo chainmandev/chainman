@@ -26,18 +26,22 @@ def git(
     index: Path | None = None,
     input: bytes | None = None,
     check: bool = True,
+    configuration: bool = False,
 ) -> subprocess.CompletedProcess[bytes]:
     # Preserve repository discovery for linked worktrees, but never inherited
     # alternate object stores, replacement refs, command-config or work trees.
     env = {
-        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_")
+        or (configuration and key.startswith("GIT_CONFIG_"))
     }
     env.update(
         GIT_NO_REPLACE_OBJECTS="1",
         GIT_OPTIONAL_LOCKS="0",
-        GIT_CONFIG_GLOBAL="/dev/null",
-        GIT_CONFIG_NOSYSTEM="1",
     )
+    if not configuration:
+        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
     if index is not None:
         env["GIT_INDEX_FILE"] = str(index)
     return subprocess.run(
@@ -236,6 +240,82 @@ def merge(
     return result.stdout
 
 
+def eol_policy(
+    root: Path, index: Path, paths: list[str]
+) -> tuple[dict[str, tuple[bool, bool]], bytes]:
+    """Read only built-in Git text policy; never invoke clean/smudge programs."""
+    argv = (
+        "check-attr",
+        "-z",
+        "--stdin",
+        "text",
+        "eol",
+        "filter",
+        "ident",
+        "working-tree-encoding",
+    )
+    names = b"\0".join(os.fsencode(path) for path in paths) + b"\0"
+    staged = git(
+        root, *argv, "--cached", index=index, input=names, configuration=True
+    ).stdout
+    working = git(root, *argv, index=index, input=names, configuration=True).stdout
+    if staged != working:
+        raise ValueError(
+            "Staged and working Git attributes differ; stage a coherent attribute policy before formatting"
+        )
+    settings = []
+    for key in ("core.autocrlf", "core.eol"):
+        result = git(root, "config", "--get", key, check=False, configuration=True)
+        if result.returncode not in (0, 1):
+            raise ValueError(f"Cannot read Git {key}")
+        settings.append(result.stdout.strip().lower())
+    autocrlf, eol = settings
+    autocrlf = {
+        b"yes": b"true",
+        b"on": b"true",
+        b"1": b"true",
+        b"no": b"false",
+        b"off": b"false",
+        b"0": b"false",
+    }.get(autocrlf, autocrlf)
+    if autocrlf not in {b"", b"true", b"false", b"input"} or eol not in {
+        b"",
+        b"native",
+        b"lf",
+        b"crlf",
+    }:
+        raise ValueError("Unsupported Git EOL configuration")
+    attrs: dict[str, dict[str, str]] = {}
+    fields = staged.rstrip(b"\0").split(b"\0")
+    for offset in range(0, len(fields), 3):
+        raw_path, raw_key, raw_value = fields[offset : offset + 3]
+        attrs.setdefault(os.fsdecode(raw_path), {})[raw_key.decode()] = os.fsdecode(
+            raw_value
+        )
+    policy = {}
+    for path, values in attrs.items():
+        if any(
+            values[key] not in {"unspecified", "unset"}
+            for key in ("filter", "ident", "working-tree-encoding")
+        ):
+            raise ValueError(
+                f"Unsupported Git content transformation for {path!r}; staged formatting never executes clean/smudge filters"
+            )
+        text = values["text"]
+        ending = values["eol"]
+        enabled = text != "unset" and (
+            text in {"set", "auto"}
+            or ending in {"lf", "crlf"}
+            or autocrlf in {b"true", b"input"}
+        )
+        crlf = ending == "crlf" or (
+            ending != "lf"
+            and (autocrlf == b"true" or (autocrlf != b"input" and eol == b"crlf"))
+        )
+        policy[path] = (enabled, crlf)
+    return policy, staged + b"\0" + b"\0".join(settings)
+
+
 def run(root: Path, *, check: bool = False) -> int:
     # Formatting may coexist with dev/shell readers. Its shared operation still
     # excludes cleanup and updates; a separate lock serializes all active indexes
@@ -274,7 +354,7 @@ def format_index(root: Path, *, check: bool = False) -> int:
             "--cached",
             "--no-renames",
             "--name-only",
-            "--diff-filter=ACM",
+            "--diff-filter=ACMT",
             "-z",
             index=index,
         ).stdout.split(b"\0")
@@ -310,6 +390,7 @@ def format_index(root: Path, *, check: bool = False) -> int:
         raise ValueError(
             "A staged formatting input is missing from the working tree; restore it before formatting"
         )
+    endings, before_attributes = eol_policy(root, index, paths)
     config_name = (
         "chainman.toml" if (root / "chainman.toml").is_file() else "toolchain.toml"
     )
@@ -381,7 +462,24 @@ def format_index(root: Path, *, check: bool = False) -> int:
             formatted = tc.regular_input(candidate, path)
             working = before_files[path]
             assert working is not None
-            merged[path] = merge(root, directory, base, formatted, working[0], path)
+            normalize, crlf = endings[path]
+            if normalize:
+                if b"\0" in base or b"\0" in working[0] or b"\r\n" in base:
+                    raise ValueError(
+                        f"Cannot safely normalize {path!r}; use a normalized text index before staged formatting"
+                    )
+                formatted = formatted.replace(b"\r\n", b"\n")
+                result = merge(
+                    root,
+                    directory,
+                    base,
+                    formatted,
+                    working[0].replace(b"\r\n", b"\n"),
+                    path,
+                )
+                merged[path] = result.replace(b"\n", b"\r\n") if crlf else result
+            else:
+                merged[path] = merge(root, directory, base, formatted, working[0], path)
             blob = git(
                 root, "hash-object", "-w", "--stdin", input=formatted
             ).stdout.strip()
@@ -422,6 +520,7 @@ def format_index(root: Path, *, check: bool = False) -> int:
                     identity(tc.contained(root, p)) != before_files[p] for p in paths
                 )
                 or configuration_files.read(root, config_name).documents != authority
+                or eol_policy(root, index, paths)[1] != before_attributes
             ):
                 raise ValueError(
                     "HEAD, index, working files or configuration changed during formatting; nothing applied"

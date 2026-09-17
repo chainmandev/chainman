@@ -253,10 +253,71 @@ else:
         self.git("add", ".gitattributes", "link")
         self.stage()
         (self.root / "leaked").unlink(missing_ok=True)
-        self.run_format()
+        with self.assertRaisesRegex(ValueError, "content transformation"):
+            self.run_format()
         self.assertFalse((self.root / "leaked").exists())
         self.assertTrue((self.root / "link").is_symlink())
-        self.assertTrue(self.git("show", ":a.txt").startswith(b"GOOD"))
+        self.assertTrue(self.git("show", ":a.txt").startswith(b"BAD"))
+
+    def test_regular_destination_of_type_change_is_formatted(self):
+        link = self.root / "source.txt"
+        link.symlink_to("a.txt")
+        self.git("add", "source.txt")
+        self.git("commit", "-qm", "Link")
+        link.unlink()
+        link.write_text("BAD\n")
+        self.git("add", "source.txt")
+        self.run_format()
+        self.assertEqual(self.git("show", ":source.txt"), b"GOOD\n")
+        self.git("commit", "-qm", "Regular file")
+        link.unlink()
+        link.symlink_to("a.txt")
+        self.git("add", "source.txt")
+        with patch.object(subject.formatters, "execute") as execute:
+            subject.run(self.root)
+            execute.assert_not_called()
+        self.assertTrue(link.is_symlink())
+
+    def test_crlf_fully_and_partially_staged_files_and_conflict(self):
+        (self.root / ".gitattributes").write_text("*.txt text eol=crlf\n")
+        self.git("add", ".gitattributes")
+        self.git("commit", "-qm", "CRLF policy")
+        for partial in (False, True):
+            (self.root / "a.txt").write_bytes(b"BAD\r\nkeep\r\nkeep\r\nlast\r\n")
+            self.git("add", "a.txt")
+            if partial:
+                (self.root / "a.txt").write_bytes(
+                    b"BAD\r\nkeep\r\nkeep\r\nunstaged\r\n"
+                )
+            self.run_format()
+            self.assertEqual(self.git("show", ":a.txt"), b"GOOD\nkeep\nkeep\nlast\n")
+            expected = b"GOOD\r\nkeep\r\nkeep\r\n" + (
+                b"unstaged\r\n" if partial else b"last\r\n"
+            )
+            self.assertEqual((self.root / "a.txt").read_bytes(), expected)
+        (self.root / "a.txt").write_bytes(b"BAD\r\n")
+        self.git("add", "a.txt")
+        (self.root / "a.txt").write_bytes(b"OTHER\r\n")
+        index = subject.active_index(self.root).read_bytes()
+        with self.assertRaisesRegex(ValueError, "conflicts"):
+            self.run_format()
+        self.assertEqual(subject.active_index(self.root).read_bytes(), index)
+        self.assertEqual((self.root / "a.txt").read_bytes(), b"OTHER\r\n")
+
+    def test_eol_policy_is_frozen_and_unstaged_attributes_fail_early(self):
+        self.stage()
+
+        def formatter(root, cfg, paths, **kwargs):
+            self.formatter(root, cfg, paths)
+            self.git("config", "core.autocrlf", "true")
+
+        before = subject.active_index(self.root).read_bytes()
+        with self.assertRaisesRegex(ValueError, "changed during"):
+            self.run_format(formatter)
+        self.assertEqual(subject.active_index(self.root).read_bytes(), before)
+        (self.root / ".gitattributes").write_text("*.txt -text\n")
+        with self.assertRaisesRegex(ValueError, "attributes differ"):
+            self.run_format()
 
     def test_interrupted_application_has_original_index_and_files(self):
         self.stage()

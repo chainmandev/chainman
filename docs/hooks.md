@@ -94,7 +94,6 @@ and hook settings. Configuration contention stops installation; a failed
 installation restores the previous configuration and bridges. If those shared
 values come from included Git configuration, configure the worktree settings
 explicitly first; chainman reports this before changing them.
-
 First activation also refuses dormant worktree identity, hook-path or include
 settings: enabling them could silently change another checkout. Review those
 files before retrying; chainman does not overwrite them to force installation.
@@ -117,6 +116,14 @@ enters the index. A genuine merge conflict, concurrent edit, formatter failure o
 out-of-scope output stops the transaction. It does not stash, reset, run clean
 filters, or delete Git-owned lockfiles. Resolve a reported conflict by staging a
 coherent version or formatting that file manually, then retry.
+
+Git's built-in LF/CRLF normalization is respected: a fully staged CRLF working
+file is not an unstaged edit merely because the index contains LF. Formatting
+merges use normalized text and preserve the selected working-tree EOL convention.
+Staged and working attributes must agree and remain unchanged during the operation.
+Custom clean/smudge filters, ident expansion and working-tree encodings are not
+executed; they receive an explicit unsupported-transformation diagnostic.
+Replacing a symlink with a regular source file is formatted; the reverse is not.
 
 You can commit while an independent managed development command or shell is
 running. Only one staged-format transaction runs per worktree; a second attempt
