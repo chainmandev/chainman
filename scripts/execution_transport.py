@@ -60,6 +60,7 @@ def compose(declarations: list[tuple[str, Table]]) -> Table:
                 targets[target] = mount
                 mounts.append(mount)
         for port in strings(spec.get("ports", []), "Ports"):
+            port = canonical_port(port)
             host, _, protocol = port.partition("/")
             binding = ":".join(host.split(":")[:2]) + "/" + (protocol or "tcp")
             if binding in bindings and bindings[binding] != port:
@@ -74,6 +75,43 @@ def compose(declarations: list[tuple[str, Table]]) -> Table:
         if spec.get("display"):
             result["display"] = spec["display"]
     return result
+
+
+def canonical_port(port: str) -> str:
+    value = project_environment.transport_port(port)
+    return value if "/" in value else value + "/tcp"
+
+
+def equivalent(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
+    """Ignore independent ordering; preserve ordering where mounts overlap."""
+
+    def signature(value: Mapping[str, object]) -> tuple[object, ...]:
+        normalized = compose([("comparison", dict(value))])
+        mounts = [table(m, "Mount") for m in array(normalized["mounts"], "Mounts")]
+        identities = [tuple(sorted(m.items())) for m in mounts]
+        targets = [
+            str(m.get("target", "env:" + str(m.get("source_env", "")))) for m in mounts
+        ]
+        overlaps = []
+        for index, target in enumerate(targets):
+            for other in range(index + 1, len(targets)):
+                # An implicit target is not resolved by credential inspection.
+                if (
+                    target.startswith("env:")
+                    or targets[other].startswith("env:")
+                    or target.startswith(targets[other].rstrip("/") + "/")
+                    or targets[other].startswith(target.rstrip("/") + "/")
+                ):
+                    overlaps.append((identities[index], identities[other]))
+        return (
+            frozenset(identities),
+            frozenset(overlaps),
+            frozenset(strings(normalized["ports"], "Ports")),
+            bool(normalized.get("host_access")),
+            normalized.get("display"),
+        )
+
+    return signature(left) == signature(right)
 
 
 def effective(

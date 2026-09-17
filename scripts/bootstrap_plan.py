@@ -199,9 +199,8 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     ):
         for dependency in workflows.order(tasks, [task]):
             entry = table(tasks[dependency], "Task")
-            if (
-                entry.get("commands")
-                and execution_transport.effective(cfg, entry) != transports[0]
+            if entry.get("commands") and not execution_transport.equivalent(
+                execution_transport.effective(cfg, entry), transports[0]
             ):
                 raise ValueError(
                     "Tasks in one container execution require identical transport; start differently scoped tasks separately from the host"

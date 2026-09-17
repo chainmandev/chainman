@@ -1006,6 +1006,9 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
     )
     def test_scoped_profile_transport_real_container(self):
         self.use_real_runtime()
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
         outside = tempfile.TemporaryDirectory(prefix="chainman private scope ")
         self.addCleanup(outside.cleanup)
         key = Path(outside.name).resolve() / "key with spaces"
@@ -1013,7 +1016,7 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
         installer = "from pathlib import Path; assert not Path('/fixture-key').exists(); Path('ready').touch()"
         (self.root / "chainman.toml").write_text(
             'schema=3\n[project]\ndefault_profile="host"\n[profiles.private]\nruntime_profile="bootstrap"\nentry_setup=["prepare"]\n'
-            'transport={mounts=[{source_env="DEMO_KEY",target="/fixture-key"},{source_env="DEMO_ABSENT",target="/absent",optional=true}]}\n'
+            f'transport={{ports=["127.0.0.1:{port}:80"],mounts=[{{source_env="DEMO_KEY",target="/fixture-key"}},{{source_env="DEMO_ABSENT",target="/absent",optional=true}}]}}\n'
             '[setup.prepare]\nprofile="host"\ncommands=[["python3","-c",'
             + json.dumps(installer)
             + ']]\ninputs=["chainman.toml"]\nartifacts=["ready"]\n'
@@ -1041,6 +1044,9 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
             self.assertNotEqual(rejected.returncode, 0)
             self.assertIn("Published ports", rejected.stderr)
             self.assertFalse((self.root / "ready").exists())
+        options.write_text(
+            f"--publish\n127.0.0.1:{port}:00080/tcp\n--publish\n127.0.0.1:{port}:80\n"
+        )
         result = subprocess.run(
             [
                 str(self.launcher),
@@ -1055,7 +1061,7 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
                 "",
             ],
             input="literal input",
-            env=env,
+            env=dict(env, CHAINMAN_CONTAINER_OPTIONS_FILE=str(options)),
             cwd=self.root,
             capture_output=True,
             text=True,

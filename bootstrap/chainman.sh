@@ -24,9 +24,11 @@ develop_runtime() {
     if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
         set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' shell "path:$store/nix#bash" --no-write-lock-file --command "$@"
     fi
-    if [ "$develop_action" = exec ]; then exec "$@"; else "$@"; fi
+    if [ "$develop_action" = exec ]; then exec "$@"; else lifetime_run "$@"; fi
 }
 script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
+# shellcheck source=bootstrap/lifetime.sh
+. "$script_dir/lifetime.sh"
 self=$script_dir/$(basename -- "$0")
 root=$(CDPATH='' cd -P -- "${CHAINMAN_PROJECT_ROOT:-$script_dir/..}" && pwd)
 single_line "$root"
@@ -136,13 +138,13 @@ control_dispatch() {
                 run | services-run | services-up | services-reset) control_task=${2:-} ;;
                 *) control_task=$1 ;;
             esac
-            "$self" _service-prepare "$control_task" >&2
+            lifetime_helper "$self" _service-prepare "$control_task" >&2
             ;;
     esac
     # Only the internal export operation mounts this private output directory.
     # It builds verified tooling and emits JSON; no consumer code executes there.
     control_output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-control.XXXXXXXX")
-    trap 'rm -rf -- "$control_output"' EXIT HUP INT TERM
+    lifetime_directory=$control_output
     # Serialized data, never installed in the planner process environment. The
     # trusted planner selects only declared environment.pass names from it.
     (
@@ -167,7 +169,7 @@ control_dispatch() {
         fi
     done
     printf '%s\n%s\n' --mount "type=bind,src=$control_output,dst=$control_output" > "$control_output/mounts"
-    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts "$self" _control-export "$control_output" "$control_target" \
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts lifetime_helper "$self" _control-export "$control_output" "$control_target" \
         "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" "$control_engine" "$self" "$@"
     case "$1" in
         services-status | services-stop | services-logs)
@@ -374,8 +376,10 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     fi
     case "$nix_bin" in /*) ;; *) nix_bin=$(command -v "$nix_bin") ;; esac
     case "$nix_bin" in /*) ;; *) nix_bin=$(CDPATH='' cd -- "$(dirname -- "$nix_bin")" && pwd)/$(basename -- "$nix_bin") ;; esac
+    host_temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-host-bootstrap.XXXXXXXX")
+    lifetime_directory=$host_temporary
     # Probe the evaluator, not a vendor-specific --version display string.
-    "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --raw --expr '
+    lifetime_run "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --raw --expr '
       if builtins.compareVersions builtins.nixVersion "2.24" >= 0
       then "compatible" else throw "Chainman requires Nix >= 2.24"
     ' > /dev/null || fail 'Nix compatibility check failed; update the selected host/image Nix. Chainman does not replace it.'
@@ -390,7 +394,7 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     export CHAINMAN_RUNTIME_NIX_BIN
     nix_eval() {
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=$1 \
-            "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression"
+            lifetime_run "$nix_bin" --extra-experimental-features 'nix-command flakes' eval --impure --raw --expr "$expression"
     }
     IFS= read -r revision < "$authority/chainman.lock"
     case "$revision" in '' | *[!0-9a-f]*) fail 'Invalid Git revision pin.' ;; esac
@@ -419,20 +423,24 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     [ ! -e "$runtime_root" ] || [ -L "$runtime_root" ] || fail 'Runtime GC root must be a symlink.'
     fetch_runtime() {
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=fetch \
-            "$nix_bin" --extra-experimental-features 'nix-command flakes' build --impure --expr "$expression" \
+            lifetime_run "$nix_bin" --extra-experimental-features 'nix-command flakes' build --impure --expr "$expression" \
             "$@" --print-out-paths
     }
     # A content-keyed root is immutable. Replacing it on every entry makes Nix's
     # PID-based temporary symlink names collide across container PID namespaces.
     # Still evaluate the verified Git export on every entry, including warm starts.
     if [ -L "$runtime_root" ]; then
-        store=$(fetch_runtime --no-link)
-    elif ! store=$(fetch_runtime --out-link "$runtime_root"); then
+        fetch_runtime --no-link > "$host_temporary/store"
+        store=$(cat "$host_temporary/store")
+    elif fetch_runtime --out-link "$runtime_root" > "$host_temporary/store"; then
+        store=$(cat "$host_temporary/store")
+    else
         # Another first writer may have installed the same root. Re-evaluate the
         # source and require the exact link below; never accept a failed fetch
         # merely because some old source is cached.
         [ -L "$runtime_root" ] || fail 'Runtime GC root registration failed.'
-        store=$(fetch_runtime --no-link)
+        fetch_runtime --no-link > "$host_temporary/store"
+        store=$(cat "$host_temporary/store")
     fi
     [ "$(readlink "$runtime_root")" = "$store" ] || fail 'Runtime GC root does not match the verified source.'
     # A process killed between creating the link and registering its indirect
@@ -440,21 +448,30 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     # Concurrent Nix root inventories can race while marking stale temporary
     # roots. An unavailable inventory leaves registration unconfirmed, just like
     # a missing entry. Re-fetch and register successfully before dispatching.
-    if ! registered_roots=$("$CHAINMAN_RUNTIME_NIX_BIN/nix-store" --query --roots "$store") \
-        || ! printf '%s\n' "$registered_roots" | grep -F -x -q -- "$runtime_root -> $store"; then
-        store=$(fetch_runtime --out-link "$runtime_root")
+    if ! lifetime_run "$CHAINMAN_RUNTIME_NIX_BIN/nix-store" --query --roots "$store" > "$host_temporary/roots" \
+        || ! grep -F -x -q -- "$runtime_root -> $store" "$host_temporary/roots"; then
+        fetch_runtime --out-link "$runtime_root" > "$host_temporary/store"
+        store=$(cat "$host_temporary/store")
     fi
-    expected=$("$nix_bin" --extra-experimental-features nix-command hash path "$source_root")
-    actual=$("$nix_bin" --extra-experimental-features nix-command hash path "$store")
+    lifetime_run "$nix_bin" --extra-experimental-features nix-command hash path "$source_root" > "$host_temporary/hash"
+    expected=$(cat "$host_temporary/hash")
+    lifetime_run "$nix_bin" --extra-experimental-features nix-command hash path "$store" > "$host_temporary/hash"
+    actual=$(cat "$host_temporary/hash")
     [ "$actual" = "$expected" ] || fail 'Runtime store differs from the verified Git source.'
     if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
-        if [ "$(nix_eval schema)" = 3 ]; then
-            route=$(develop_runtime run python3 -B "$store/scripts/bootstrap_plan.py" "$root" route)
+        nix_eval schema > "$host_temporary/schema"
+        if [ "$(cat "$host_temporary/schema")" = 3 ]; then
+            develop_runtime run python3 -B "$store/scripts/bootstrap_plan.py" "$root" route > "$host_temporary/route"
         else
-            route=$(nix_eval route)
+            nix_eval route > "$host_temporary/route"
         fi
+        route=$(cat "$host_temporary/route")
+        rm -rf -- "$host_temporary"
+        lifetime_directory=
         if [ "$route" = 1 ]; then control_dispatch "$@"; fi
     fi
+    rm -rf -- "$host_temporary"
+    lifetime_directory=
     export CHAINMAN_MODE="$mode" CHAINMAN_ACTIVE_MODE="$mode"
     # Bootstrap entry replaces an external project shell. Its old profile token no
     # longer describes PATH, even when the project inputs themselves are unchanged.
@@ -480,13 +497,16 @@ if [ -z "$engine" ]; then
     done
 fi
 case "$engine" in docker | podman) ;; *) fail 'Container mode requires Docker or Podman.' ;; esac
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
+lifetime_directory=$temporary
 image=docker.io/nixos/nix:2.33.3@sha256:c2f7db70a432d00c6759af108ff4fbc74a4c00e2d4517162e72338e7b9449c1f
 uid=$(id -u)
 gid=$(id -g)
 container_uid=$uid
 container_gid=$gid
 if [ "$engine" = docker ]; then
-    security_options=$("$engine" info --format '{{range .SecurityOptions}}{{println .}}{{end}}') || fail 'Cannot determine Docker daemon identity mapping.'
+    lifetime_run "$engine" info --format '{{range .SecurityOptions}}{{println .}}{{end}}' > "$temporary/identity" || fail 'Cannot determine Docker daemon identity mapping.'
+    security_options=$(cat "$temporary/identity")
     while IFS= read -r option; do
         if [ "$option" = name=rootless ]; then
             container_uid=0
@@ -500,8 +520,6 @@ volume=${CHAINMAN_NIX_VOLUME:-chainman-nix-$uid}
 case "$volume" in '' | *[!A-Za-z0-9_.-]*) fail 'CHAINMAN_NIX_VOLUME must be a container volume name.' ;; esac
 case "$volume" in [A-Za-z0-9]*) ;; *) fail 'CHAINMAN_NIX_VOLUME must start with a letter or number.' ;; esac
 export CHAINMAN_NIX_VOLUME="$volume"
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
-trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
 # Select an explicit architecture before initializing or evaluating in the image.
 # Its Nix store volume must not inherit the default architecture's profile links.
 platform=${CHAINMAN_CONTAINER_PLATFORM:-}
@@ -536,7 +554,7 @@ if [ -n "$platform" ]; then volume=$volume-${platform#linux/}; fi
 downloads_volume=${volume}-downloads
 run() {
     if [ -n "$platform" ]; then set -- --platform "$platform" "$@"; fi
-    if [ "$engine" = podman ]; then "$engine" run --userns=keep-id "$@"; else "$engine" run "$@"; fi
+    if [ "$engine" = podman ]; then lifetime_run "$engine" run --userns=keep-id "$@"; else lifetime_run "$engine" run "$@"; fi
 }
 # Capability-free UID 0 still owns /. Keep Nix's nonexistent build HOME from
 # being created accidentally, without changing writable mounts or disk-backed /tmp.
@@ -562,7 +580,7 @@ validate_daemon() {
         capability_fields='{{.EffectiveCaps}} {{.BoundingCaps}}'
         expected_capabilities='[] []'
     fi
-    daemon_identity=$("$engine" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
+    lifetime_run "$engine" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
 {{index .Config.Labels "dev.chainman.store.gc"}}
 {{index .Config.Labels "dev.chainman.store.volume"}}
 {{.Config.Image}}
@@ -574,7 +592,8 @@ validate_daemon() {
 {{range .Mounts}}{{.Type}}:{{.Name}}:{{.Destination}}:{{.RW}};{{end}}
 {{len .HostConfig.PortBindings}}
 {{.HostConfig.NetworkMode}}
-pid={{.HostConfig.PidMode}}' "$daemon_name")
+pid={{.HostConfig.PidMode}}' "$daemon_name" > "$temporary/identity"
+    daemon_identity=$(cat "$temporary/identity")
     expected_identity="1
 1
 $volume
@@ -590,14 +609,15 @@ bridge
 pid=$expected_pid"
     [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation (including its GC policy). Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
 }
-if "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
+if lifetime_run "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
 if [ "$engine" = podman ]; then
     # Podman 4.x has no Docker-compatible .Label template accessor. Its negative
     # label filter selects the same incompatible clients in one engine snapshot.
-    volume_clients=$("$engine" ps --filter "volume=$volume" --filter 'label!=dev.chainman.store.schema=1' --format '{{.ID}}')
+    lifetime_run "$engine" ps --filter "volume=$volume" --filter 'label!=dev.chainman.store.schema=1' --format '{{.ID}}' > "$temporary/clients"
 else
-    volume_clients=$("$engine" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}')
+    lifetime_run "$engine" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}' > "$temporary/clients"
 fi
+volume_clients=$(cat "$temporary/clients")
 while IFS= read -r client; do
     case "$client" in '' | *' 1') ;; *) fail 'Stop existing containers using this Nix volume before migrating from independent local-store writers to the shared daemon.' ;; esac
 done << EOF
@@ -621,7 +641,7 @@ run --rm --user 0:0 --label dev.chainman.store.schema=1 --mount "type=volume,src
 # Local-store writers assume one PID namespace. A single upstream Nix daemon
 # owns this volume's store state; isolated project containers are daemon clients.
 # Its Unix socket and managed temporary roots are visible through the Nix volume.
-if ! "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then
+if ! lifetime_run "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then
     run --detach --name "$daemon_name" --init --read-only --network bridge \
         --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
         --label dev.chainman.store.schema=1 --label "dev.chainman.store.volume=$volume" \
@@ -635,14 +655,14 @@ max-free = 17179869184' \
         "$image" sh -eu -c 'mkdir -p "$HOME" "$TMPDIR"; exec nix-daemon --daemon' \
         > /dev/null 2> "$temporary/daemon-create" || {
         # Container creation is atomic; a concurrent bootstrap can win the name.
-        "$engine" container inspect "$daemon_name" > /dev/null 2>&1 || {
+        lifetime_run "$engine" container inspect "$daemon_name" > /dev/null 2>&1 || {
             cat "$temporary/daemon-create" >&2
             fail 'Could not create the shared Nix store daemon.'
         }
     }
 fi
 validate_daemon
-"$engine" container start "$daemon_name" > /dev/null
+lifetime_run "$engine" container start "$daemon_name" > /dev/null
 plan_options() {
     # The verified planner reads declared host inputs as data, never as its own
     # execution environment. Do not expose this snapshot to project commands.
@@ -709,7 +729,7 @@ if grep -q -e '^--display$' -e '^--display-check$' "$temporary/options"; then
 fi
 if grep -q -- '^--controller$' "$temporary/options"; then
     rm -rf -- "$temporary"
-    trap - EXIT HUP INT TERM
+    lifetime_directory=
     control_dispatch "$@"
 fi
 
@@ -851,15 +871,20 @@ while IFS= read -r option; do
             host_port=${numbers%%:*}
             container_port=${numbers#*:}
             [ "$host_port" -ge 1 ] && [ "$host_port" -le 65535 ] && [ "$container_port" -ge 1 ] && [ "$container_port" -le 65535 ] || fail 'Published ports must be integers between 1 and 65535.'
-            binding=${value%:*}
             protocol=${value##*/}
             [ "$protocol" != "$value" ] || protocol=tcp
-            binding=$binding/$protocol
+            host_port=$(printf '%s' "$host_port" | sed 's/^0*//')
+            container_port=$(printf '%s' "$container_port" | sed 's/^0*//')
+            value=127.0.0.1:$host_port:$container_port/$protocol
+            binding=127.0.0.1:$host_port/$protocol
+            existing=
             if [ -f "$temporary/ports" ]; then
                 while IFS= read -r old_binding && IFS= read -r old_port; do
                     [ "$old_binding" != "$binding" ] || [ "$old_port" = "$value" ] || fail "Conflicting port binding: $binding"
+                    if [ "$old_port" = "$value" ]; then existing=yes; fi
                 done < "$temporary/ports"
             fi
+            [ -z "$existing" ] || continue
             printf '%s\n%s\n' "$binding" "$value" >> "$temporary/ports"
             if [ "$network_mode" != host ]; then set -- "$option" "$value" "$@"; fi
             continue
@@ -1039,7 +1064,7 @@ fi
 if [ -n "$prepare_profile" ]; then
     # Setup gets no execution mounts. The final readiness check may fail on a
     # concurrent change, but cannot install with workload credentials present.
-    "$self" _transport-prepare "$prepare_action" "$prepare_task" "$prepare_profile" < /dev/null >&2
+    lifetime_helper "$self" _transport-prepare "$prepare_action" "$prepare_task" "$prepare_profile" < /dev/null >&2
 fi
 if [ "$transport_readiness" = error ]; then
     CHAINMAN_SETUP=error
@@ -1048,7 +1073,7 @@ fi
 if [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
     # The supervisor owns cleanup through interruption and normal exit.
     trap - EXIT HUP INT TERM
-    exec sh "$script_dir/transport-run.sh" "$temporary" sh "$script_dir/setup-prompt.sh" "$engine" "$@"
+    exec sh "$script_dir/setup-prompt.sh" --cleanup-directory "$temporary" "$engine" "$@"
 fi
 rm -rf -- "$temporary"
 trap - EXIT HUP INT TERM

@@ -80,7 +80,10 @@ do not weaken acceptance or dependency policy to turn either into a passing resu
 ### Scoped transport checks
 
 `test_execution_transport.py` uses neutral declarations and synthetic X11 records
-to check composition, optional inputs, inspection, credential scoping and cleanup.
+to check semantic composition, optional inputs, inspection, credential scoping and cleanup.
+`test_setup_terminal.py` checks prompt consent without consuming command stdin,
+plus bounded HUP/INT/TERM shutdown before a prompt request and removal of private
+transport and relay files.
 `test_bootstrap.py` includes opt-in real-container profile and display-helper
 checks. The display-helper fixture uses a local Unix socket and synthetic cookie;
 it proves transport behavior, not browser rendering or a real desktop login.

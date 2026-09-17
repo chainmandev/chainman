@@ -43,8 +43,16 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                 os.setsid()
                 fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
 
+            private = root / "private transport"
+            private.mkdir()
             command = (
-                ["sh", str(ROOT / "bootstrap/setup-prompt.sh"), str(engine)]
+                [
+                    "sh",
+                    str(ROOT / "bootstrap/setup-prompt.sh"),
+                    "--cleanup-directory",
+                    str(private),
+                    str(engine),
+                ]
                 if mode == "container"
                 else [str(engine)]
             )
@@ -80,6 +88,8 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                 _, error = child.communicate(
                     b"refs/heads/master 123 remote 456\n", timeout=5
                 )
+                if mode == "container":
+                    self.assertFalse(private.exists())
                 if answer in (b"y\n", b"\n"):
                     self.assertEqual(child.returncode, 0, error)
                     self.assertEqual(
@@ -157,3 +167,65 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.readline())
 
     def test_container_interruption(self):
         self.run_prompt("container", None)
+
+    def test_unresponsive_engine_before_prompt_is_bounded_and_reaped(self):
+        for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                private = root / "private"
+                private.mkdir()
+                engine = root / "engine"
+                ready = root / "ready"
+                engine.write_text(f"""#!{sys.executable}
+import os, signal, time
+from pathlib import Path
+for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, signal.SIG_IGN)
+Path({str(ready)!r}).write_text(str(os.getpid()))
+time.sleep(30)
+""")
+                engine.chmod(0o755)
+                master, slave = pty.openpty()
+
+                def terminal():
+                    os.setsid()
+                    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+                child = subprocess.Popen(
+                    [
+                        "sh",
+                        str(ROOT / "bootstrap/setup-prompt.sh"),
+                        "--cleanup-directory",
+                        str(private),
+                        str(engine),
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    pass_fds=(slave,),
+                    preexec_fn=terminal,
+                    env=dict(os.environ, CHAINMAN_SETUP="prompt", TMPDIR=str(root)),
+                )
+                os.close(slave)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    child.send_signal(sig)
+                    _, error = child.communicate(timeout=6)
+                    self.assertEqual(child.returncode, 128 + sig, error)
+                    self.assertFalse(private.exists())
+                    self.assertEqual(list(root.glob("chainman-setup-prompt.*")), [])
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(ready.read_text()), 0)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate()
+                    if ready.exists():
+                        try:
+                            os.kill(int(ready.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    os.close(master)

@@ -57,6 +57,67 @@ class TransportTests(unittest.TestCase):
                     ]
                 )
 
+    def test_equivalence_preserves_only_meaningful_transport_differences(self):
+        first = {"source": "/source-a", "target": "/a"}
+        second = {"source": "/source-b", "target": "/b"}
+        left = {"mounts": [first, second], "ports": ["127.0.0.1:08080:00080"]}
+        right = {"mounts": [second, first], "ports": ["127.0.0.1:8080:80/tcp"]}
+        self.assertTrue(transport.equivalent(left, right))
+        self.assertEqual(
+            transport.compose([("one", left), ("two", right)])["ports"],
+            ["127.0.0.1:8080:80/tcp"],
+        )
+        for changed in (
+            {**first, "source": "/elsewhere"},
+            {**first, "read_only": False},
+            {**first, "optional": True},
+        ):
+            self.assertFalse(
+                transport.equivalent(left, {**left, "mounts": [changed, second]})
+            )
+        self.assertFalse(
+            transport.equivalent(left, {**left, "ports": ["127.0.0.1:8080:80/udp"]})
+        )
+        child = {**second, "target": "/a/child"}
+        self.assertFalse(
+            transport.equivalent({"mounts": [first, child]}, {"mounts": [child, first]})
+        )
+        with self.assertRaisesRegex(ValueError, "Conflicting"):
+            transport.compose(
+                [
+                    (
+                        "conflict",
+                        {"ports": ["127.0.0.1:08080:80", "127.0.0.1:8080:81/tcp"]},
+                    )
+                ]
+            )
+
+    def test_nested_entry_accepts_equivalent_transport(self):
+        first = {"source": "/one", "target": "/one"}
+        second = {"source": "/two", "target": "/two"}
+        selected = {"mounts": [first, second], "ports": ["127.0.0.1:08080:80"]}
+        active = {"mounts": [second, first], "ports": ["127.0.0.1:8080:80/tcp"]}
+        with (
+            patch.object(reentry, "validate"),
+            patch.object(
+                reentry.workflows,
+                "configuration",
+                return_value={"profiles": {"private": {"transport": selected}}},
+            ),
+            patch.object(reentry.chainman, "main", return_value=0),
+            patch.dict(
+                os.environ,
+                CHAINMAN_ACTIVE_MODE="container-nix",
+                CHAINMAN_ACTIVE_TRANSPORT=json.dumps(active),
+            ),
+        ):
+            self.assertEqual(
+                reentry.main(
+                    ["/fixture", "--entry", "exec", "--profile", "private", "true"]
+                ),
+                0,
+            )
+
     def test_profile_entry_and_task_projection_exclude_installers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -390,3 +451,133 @@ commands=[["true"]]
                     if process.poll() is None:
                         process.kill()
                     process.communicate()
+
+    def test_bootstrap_cancellation_stops_before_later_work(self):
+        for mode, executable in (("host-nix", "nix"), ("container-nix", "docker")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                ready = root / "ready"
+                calls = root / "calls"
+                binary = root / executable
+                binary.write_text(f"""#!{sys.executable}
+import os, signal, time
+from pathlib import Path
+with Path({str(calls)!r}).open('a') as stream: stream.write('called\\n')
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(ready)!r}).write_text(str(os.getpid()))
+time.sleep(30)
+""")
+                binary.chmod(0o755)
+                (root / "chainman.lock").write_text("a" * 40 + "\n")
+                env = dict(
+                    os.environ,
+                    CHAINMAN_MODE=mode,
+                    CHAINMAN_PROJECT_ROOT=str(root),
+                    CHAINMAN_SOURCE_REVISION="a" * 40,
+                    CHAINMAN_CONTAINER_ENGINE="docker",
+                    CHAINMAN_NIX_BIN=str(binary),
+                    PATH=str(root) + os.pathsep + os.environ["PATH"],
+                    TMPDIR=str(root),
+                )
+                for key in (
+                    "CHAINMAN_ACTIVE_PROFILE",
+                    "CHAINMAN_ENTRY_AUTHORITY",
+                    "CHAINMAN_BOOTSTRAP_CONTAINER",
+                ):
+                    env.pop(key, None)
+                child = subprocess.Popen(
+                    [
+                        "sh",
+                        str(SOURCE / "bootstrap/chainman.sh"),
+                        "preflight",
+                        "fixture",
+                    ],
+                    env=env,
+                    stderr=subprocess.PIPE,
+                )
+                try:
+                    deadline = time.monotonic() + 5
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    child.send_signal(signal.SIGTERM)
+                    _, error = child.communicate(timeout=6)
+                    self.assertEqual(child.returncode, 143, error)
+                    self.assertEqual(calls.read_text().splitlines(), ["called"])
+                    self.assertEqual(list(root.glob("chainman-*-bootstrap.*")), [])
+                    self.assertEqual(list(root.glob("chainman-bootstrap.*")), [])
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(ready.read_text()), 0)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.communicate()
+                    if ready.exists():
+                        try:
+                            os.kill(int(ready.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+    def test_helper_failure_does_not_continue_to_dispatch(self):
+        result = subprocess.run(
+            [
+                "sh",
+                "-eu",
+                "-c",
+                '. "$1"; lifetime_helper sh -c "exit 23"; echo unexpected',
+                "fixture",
+                str(SOURCE / "bootstrap/lifetime.sh"),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 23)
+        self.assertNotIn("unexpected", result.stdout)
+
+    def test_nested_helper_interrupt_allows_inner_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            private = root / "private"
+            private.mkdir()
+            ready = root / "ready"
+            program = "import os,pathlib,signal,sys,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)"
+            process = subprocess.Popen(
+                [
+                    "sh",
+                    "-eu",
+                    "-c",
+                    '. "$1"; shift; lifetime_helper "$@"; echo unexpected',
+                    "fixture",
+                    str(SOURCE / "bootstrap/lifetime.sh"),
+                    "sh",
+                    str(SOURCE / "bootstrap/transport-run.sh"),
+                    str(private),
+                    sys.executable,
+                    "-c",
+                    program,
+                    str(ready),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                process.send_signal(signal.SIGINT)
+                output, error = process.communicate(timeout=7)
+                self.assertEqual(process.returncode, 130, error)
+                self.assertNotIn(b"unexpected", output)
+                self.assertFalse(private.exists())
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(ready.read_text()), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
+                if ready.exists():
+                    try:
+                        os.kill(int(ready.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass

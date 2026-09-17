@@ -726,7 +726,10 @@ create these directories. Projects own credential selection and state preparatio
 Setup for an entry with transport runs separately without profile/task mounts.
 The workload rechecks readiness with installation disabled; a concurrent change
 fails with setup recovery guidance. Task graphs share one execution container,
-so tasks with commands must declare identical effective transport. Split commands
+so tasks with commands must declare equivalent effective transport.
+Numeric port spelling and an omitted TCP suffix are normalized. Independent
+mount ordering does not matter; overlapping mount ordering, source paths, and
+access permissions remain significant. Split commands
 requiring different access into separate host entries. Nested entry cannot change
 container transport; leave the active shell and enter the selected profile from
 the host. Containers isolate access paths, not mutually distrustful project code.
@@ -754,7 +757,11 @@ original file is never mounted into the workload or modified. Cancellation forwa
 the signal and allows the container client three seconds to exit, then forces
 client exit and removes private files. If the engine is unresponsive, inspect its
 container status; forcing a client to exit does not guarantee the engine stopped
-its workload. Abrupt host termination cannot guarantee cleanup. No `xhost` changes
+its workload. Bootstrap and preflight clients use the same bounded shutdown.
+Nested verified preparation helpers receive five seconds so their own client
+shutdown can finish; cancellation aborts entry before subsequent setup or tasks.
+The final entry owns both its setup-prompt relay and private files, avoiding
+competing cleanup wrappers. Abrupt host termination cannot guarantee cleanup. No `xhost` changes
 or host-language installation are needed. A graphical application still has the
 access granted by the selected X server; this does not isolate applications from
 one another on that desktop.

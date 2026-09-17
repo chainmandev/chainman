@@ -174,7 +174,7 @@ def main(arguments: list[str]) -> int:
         active_transport = json.loads(
             os.environ.get("CHAINMAN_ACTIVE_TRANSPORT", '{"mounts": [], "ports": []}')
         )
-        if selected_transport != active_transport:
+        if not execution_transport.equivalent(selected_transport, active_transport):
             raise ValueError(
                 "Nested entry requires different container transport; start it from the host"
             )
