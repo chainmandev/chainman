@@ -290,7 +290,7 @@ else:
             tools.mkdir()
             locator = tools / "git"
             locator.write_text(
-                '#!/bin/sh\ncase "$2" in GIT_ATTR_SYSTEM) printf "%s\\n" "$TEST_SYSTEM";; GIT_ATTR_GLOBAL) printf "%s\\n" "$TEST_GLOBAL";; *) exit 2;; esac\n'
+                '#!/bin/sh\ncase "$2" in GIT_ATTR_SYSTEM) [ "${GIT_ATTR_NOSYSTEM:-0}" != 1 ] || exit 1; printf "%s\\n" "$TEST_SYSTEM";; GIT_ATTR_GLOBAL) printf "%s\\n" "$TEST_GLOBAL";; *) exit 2;; esac\n'
             )
             locator.chmod(0o755)
             helper = (

@@ -120,13 +120,17 @@ coherent version or formatting that file manually, then retry.
 Git's built-in LF/CRLF normalization is respected: a fully staged CRLF working
 file is not an unstaged edit merely because the index contains LF. Formatting
 merges use normalized text and preserve the selected working-tree EOL convention.
-Staged and working repository attributes must agree and remain unchanged during the
-operation. Container entry captures effective `core.autocrlf`/`core.eol` and a
-read-only snapshot of system/global attribute data; global rules retain priority
-and repository attributes still override them. Changes to external policy take
-effect on the next operation. No host Git configuration or filter program is
-mounted. Git must support `git var GIT_ATTR_SYSTEM` and `GIT_ATTR_GLOBAL`; an older
-Git that cannot report attribute locations stops with update guidance.
+Staged and working repository attributes must agree and remain unchanged during
+the operation. Container entry captures text defaults and external attribute data
+in a read-only snapshot. Effective overrides for the active repository apply only to its Git
+directory. Nested repositories retain their own local settings and share the
+captured defaults; explicit command-scope settings retain command precedence.
+External attribute paths belonging to a nested repository must be available in its
+execution environment; enter that project directly to capture its external policy.
+An empty attributes path or `/dev/null` disables that source as it does in Git.
+Changes to external policy take effect on the next operation. No host Git configuration or filter program is
+mounted. Container mode requires Git 2.42+ and checks attribute-query support before
+contacting the container engine. Older Git stops with update guidance.
 Custom clean/smudge filters, ident expansion and working-tree encodings are not
 executed; they receive an explicit unsupported-transformation diagnostic.
 Replacing a symlink with a regular source file is formatted; the reverse is not.

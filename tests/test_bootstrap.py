@@ -730,6 +730,57 @@ check=["true"]
                 if policy != "local-override":
                     expected = expected.replace(b"\n", b"\r\n")
                 self.assertEqual((self.root / "sample.txt").read_bytes(), expected)
+        # A nested independent repo must keep local policy, then inherit shared
+        # defaults if its local settings are removed. Outer local settings must
+        # not become command-wide overrides.
+        nested = self.root / "nested repository"
+        nested.mkdir()
+        subprocess.run(["git", "init", "-q", str(nested)], env=self.env, check=True)
+        (nested / "attributes").write_text("*.txt text eol=lf\n")
+        for key, value in (
+            ("core.attributesFile", str(nested / "attributes")),
+            ("core.autocrlf", "input"),
+            ("core.eol", "lf"),
+        ):
+            subprocess.run(
+                ["git", "-C", str(nested), "config", key, value],
+                env=self.env,
+                check=True,
+            )
+        self.lifecycle_git("config", "core.attributesFile", "/dev/null")
+        self.lifecycle_git("config", "core.autocrlf", "true")
+        self.lifecycle_git("config", "core.eol", "crlf")
+        (self.root / "probe.py").write_text(
+            "import subprocess\n"
+            "for root in ['.', 'nested repository']:\n"
+            " for args in [['check-attr','text','eol','--','probe.txt'],['config','--get','core.autocrlf'],['config','--get','core.eol']]:\n"
+            "  subprocess.run(['git','-C',root,*args],check=True)\n"
+        )
+        config.write_text(config.read_text() + " eol = native\n")
+        result = self.run_bootstrap(
+            "exec", "--profile", "core", "--", "python3", "probe.py"
+        )
+        self.assertIn(
+            "probe.txt: text: set\nprobe.txt: eol: lf\ntrue\ncrlf",
+            result.stdout,
+        )
+        self.assertIn(
+            "probe.txt: text: set\nprobe.txt: eol: lf\ninput\nlf", result.stdout
+        )
+        for key in ("core.attributesFile", "core.autocrlf", "core.eol"):
+            subprocess.run(
+                ["git", "-C", str(nested), "config", "--unset", key],
+                env=self.env,
+                check=True,
+            )
+        result = self.run_bootstrap(
+            "exec", "--profile", "core", "--", "python3", "probe.py"
+        )
+        self.assertIn(
+            "probe.txt: text: set\nprobe.txt: eol: crlf\nfalse\nnative", result.stdout
+        )
+        for key in ("core.attributesFile", "core.autocrlf", "core.eol"):
+            self.lifecycle_git("config", "--unset", key)
         attributes.write_text("*.txt filter=host-filter\n")
         config.write_text(
             config.read_text()
@@ -741,6 +792,31 @@ check=["true"]
         self.assertIn("Unsupported Git content transformation", result.stderr)
         self.assertEqual((self.root / "sample.txt").read_bytes(), before)
         self.assertFalse((self.root / "must-not-exist").exists())
+
+    def test_container_rejects_old_git_before_contacting_engine(self):
+        tools = self.root / "old-tools"
+        tools.mkdir()
+        git = shutil.which("git")
+        (tools / "git").write_text(
+            '#!/bin/sh\ncase "$*" in *"var GIT_ATTR_"*) exit 1;; esac\nexec '
+            + shlex.quote(git)
+            + ' "$@"\n'
+        )
+        marker = self.root / "engine-contacted"
+        (tools / "docker").write_text(
+            "#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\nexit 1\n"
+        )
+        for path in tools.iterdir():
+            path.chmod(0o755)
+        self.env.update(
+            PATH=str(tools) + os.pathsep + self.env["PATH"],
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE="docker",
+        )
+        result = self.run_bootstrap("config", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Git 2.42+", result.stderr)
+        self.assertFalse(marker.exists())
 
     def test_public_full_update_resolves_and_verifies_with_the_new_runtime(self):
         self.runtime_update_lifecycle("deps-update")

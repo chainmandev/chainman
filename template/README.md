@@ -4,7 +4,7 @@ This starter pins chainman in `chainman.lock`. The small `chainman` recipe in th
 justfile fetches and verifies that Git revision. chainman is not installed globally;
 any checkout used to generate this project can be deleted.
 
-Install **Git + just + Docker or Podman**. Container Nix is the default. Alternatively,
+Install **Git 2.42+ + just + Docker or Podman**. Container Nix is the default. Alternatively,
 install Nix 2.24 or newer and select host-Nix mode:
 
 ```sh

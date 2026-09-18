@@ -494,6 +494,8 @@ os.execv(sys.executable, [sys.executable,
 ' "$root" "$store" "$@"
 fi
 
+sh "$script_dir/git-attributes.sh" --check
+
 engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
 if [ -z "$engine" ]; then
     for candidate in docker podman; do
@@ -915,7 +917,7 @@ while IFS= read -r option; do
     case "${HOME:-/}/" in "$source/"*) fail 'Blanket host or socket mounts are not supported.' ;; esac
     case "$target" in /*) ;; *) fail 'Mount target must be absolute.' ;; esac
     case "$target/" in *'/../'* | *'/./'* | *'//'*) fail 'Mount target must be normalized.' ;; esac
-    case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-x11-authority | /chainman-x11-source | /chainman-x11-output | /chainman-inspection-options | /chainman-git-attributes | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
+    case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-x11-authority | /chainman-x11-source | /chainman-x11-output | /chainman-inspection-options | /chainman-git-policy | /chainman-git-policy/* | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
     case "$root/" in "$target/"*) fail 'Mount shadows the project through an ancestor.' ;; esac
     if [ "$authority" != "$root" ]; then
         case "$target/" in "$authority/"*) fail 'Mount shadows update entry authority.' ;; esac
@@ -1032,7 +1034,7 @@ elif command -v git > /dev/null 2>&1; then
             fi
             ;;
     esac
-    for key in core.hooksPath core.autocrlf core.eol user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
+    for key in core.hooksPath user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
         status=0
         if [ "$git_owner" = "$root" ]; then
             value=$(git -C "$root" config --get "$key" 2> /dev/null) || status=$?
@@ -1049,15 +1051,20 @@ elif command -v git > /dev/null 2>&1; then
             *) policy_unavailable=1 ;;
         esac
     done
+    text_scope=global
+    if [ "$git_owner" = "$root" ]; then text_scope=repository; fi
+    sh "$script_dir/git-text-policy.sh" "$root" "$temporary/git-policy" "$text_scope"
+    set -- --mount "type=bind,src=$temporary/git-policy,dst=/chainman-git-policy,readonly" \
+        --env GIT_ATTR_NOSYSTEM=1 --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 \
+        --env GIT_CONFIG_GLOBAL=/chainman-git-policy/global "$@"
     if [ "$git_owner" = "$root" ]; then
-        # Nested Git commits must see the same text policy as direct hooks.
-        # Carry attribute data, never host config/includes or filter programs.
-        sh "$script_dir/git-attributes.sh" "$root" "$temporary/git-attributes"
-        set -- --mount "type=bind,src=$temporary/git-attributes,dst=/chainman-git-attributes,readonly" \
-            --env GIT_ATTR_NOSYSTEM=1 \
-            --env "GIT_CONFIG_KEY_$count=core.attributesFile" --env "GIT_CONFIG_VALUE_$count=/chainman-git-attributes" "$@"
+        # Escape Git's includeIf wildmatch metacharacters in literal Git paths.
+        git_pattern=$(printf '%s' "$gitdir" | sed 's/[][?*\\]/\\&/g')
+        set -- --env "GIT_CONFIG_KEY_$count=includeIf.gitdir:$git_pattern.path" --env "GIT_CONFIG_VALUE_$count=/chainman-git-policy/repository" "$@"
         count=$((count + 1))
     fi
+    set -- --env "GIT_CONFIG_KEY_$count=include.path" --env "GIT_CONFIG_VALUE_$count=/chainman-git-policy/command" "$@"
+    count=$((count + 1))
 elif [ -f "${GIT_CONFIG_GLOBAL:-${HOME:-/}/.gitconfig}" ]; then
     policy_unavailable=1
 fi
@@ -1105,7 +1112,7 @@ if [ "$transport_readiness" = error ]; then
     CHAINMAN_SETUP=error
     export CHAINMAN_SETUP
 fi
-if [ -f "$temporary/git-attributes" ] || [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
+if [ -d "$temporary/git-policy" ] || [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
     # The supervisor owns cleanup through interruption and normal exit.
     trap - EXIT HUP INT TERM
     exec sh "$script_dir/setup-prompt.sh" --cleanup-directory "$temporary" "$engine" "$@"
