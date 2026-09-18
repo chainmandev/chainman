@@ -268,19 +268,14 @@ def eol_policy(
         )
     settings = []
     for key in ("core.autocrlf", "core.eol"):
-        result = git(root, "config", "--get", key, check=False, configuration=True)
+        kind = ["--type=bool-or-str"] if key == "core.autocrlf" else []
+        result = git(
+            root, "config", *kind, "--get", key, check=False, configuration=True
+        )
         if result.returncode not in (0, 1):
             raise ValueError(f"Cannot read Git {key}")
         settings.append(result.stdout.strip().lower())
     autocrlf, eol = settings
-    autocrlf = {
-        b"yes": b"true",
-        b"on": b"true",
-        b"1": b"true",
-        b"no": b"false",
-        b"off": b"false",
-        b"0": b"false",
-    }.get(autocrlf, autocrlf)
     if autocrlf not in {b"", b"true", b"false", b"input"} or eol not in {
         b"",
         b"native",

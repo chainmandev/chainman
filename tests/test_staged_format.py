@@ -278,58 +278,36 @@ else:
             execute.assert_not_called()
         self.assertTrue(link.is_symlink())
 
-    def test_external_attribute_snapshot_priority_and_disabled_system_rules(self):
-        with tempfile.TemporaryDirectory(prefix="external attributes ") as directory:
-            external = Path(directory)
-            system = external / "system"
-            global_file = external / "global"
-            output = external / "snapshot"
-            system.write_text("[attr]fixture text eol=lf\n*.txt fixture")
-            global_file.write_text("[attr]fixture text eol=crlf\n*.txt fixture")
-            tools = external / "bin"
-            tools.mkdir()
-            locator = tools / "git"
-            locator.write_text(
-                '#!/bin/sh\ncase "$2" in GIT_ATTR_SYSTEM) [ "${GIT_ATTR_NOSYSTEM:-0}" != 1 ] || exit 1; printf "%s\\n" "$TEST_SYSTEM";; GIT_ATTR_GLOBAL) printf "%s\\n" "$TEST_GLOBAL";; *) exit 2;; esac\n'
-            )
-            locator.chmod(0o755)
-            helper = (
-                Path(subject.__file__).parent.parent / "bootstrap/git-attributes.sh"
-            )
-            env = dict(
-                os.environ,
-                PATH=str(tools) + os.pathsep + os.environ["PATH"],
-                TEST_SYSTEM=str(system),
-                TEST_GLOBAL=str(global_file),
-                GIT_ATTR_NOSYSTEM="0",
-            )
-            subprocess.run(
-                ["sh", str(helper), str(self.root), str(output)], env=env, check=True
-            )
-            self.assertEqual(
-                output.read_bytes(),
-                system.read_bytes() + b"\n" + global_file.read_bytes() + b"\n",
-            )
-            config = external / "config"
-            config.write_text('[core]\n attributesFile = "' + str(output) + '"\n')
-            with patch.dict(
-                os.environ, GIT_CONFIG_GLOBAL=str(config), GIT_ATTR_NOSYSTEM="1"
-            ):
+    def test_autocrlf_uses_git_boolean_semantics(self):
+        config = self.root / ".git/config"
+        original = config.read_text()
+        for value, expected in [
+            (None, True),
+            ("", False),
+            ("42", True),
+            ("-1", True),
+            ("0", False),
+            ("input", False),
+        ]:
+            with self.subTest(value=value):
+                suffix = "" if value is None else " = " + value
+                config.write_text(original + "\n[core]\n autocrlf" + suffix + "\n")
                 policy, _ = subject.eol_policy(
                     self.root, subject.active_index(self.root), ["a.txt"]
                 )
-                self.assertEqual(policy["a.txt"], (True, True))
-                (self.root / ".gitattributes").write_text("*.txt eol=lf\n")
-                self.git("add", ".gitattributes")
-                policy, _ = subject.eol_policy(
-                    self.root, subject.active_index(self.root), ["a.txt"]
+                self.assertEqual(
+                    policy["a.txt"], (expected or value == "input", expected)
                 )
-                self.assertEqual(policy["a.txt"], (True, False))
-            env["GIT_ATTR_NOSYSTEM"] = "1"
-            subprocess.run(
-                ["sh", str(helper), str(self.root), str(output)], env=env, check=True
-            )
-            self.assertEqual(output.read_bytes(), global_file.read_bytes() + b"\n")
+                if expected:
+                    self.stage(body="BAD\r\nkeep\r\nkeep\r\nlast\r\n")
+                    self.run_format()
+                    self.assertEqual(
+                        self.git("show", ":a.txt"), b"GOOD\nkeep\nkeep\nlast\n"
+                    )
+                    self.assertEqual(
+                        (self.root / "a.txt").read_bytes(),
+                        b"GOOD\r\nkeep\r\nkeep\r\nlast\r\n",
+                    )
 
     def test_crlf_fully_and_partially_staged_files_and_conflict(self):
         (self.root / ".gitattributes").write_text("*.txt text eol=crlf\n")

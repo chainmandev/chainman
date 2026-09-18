@@ -677,7 +677,7 @@ check=["true"]
         attributes = external / "attributes"
         config = external / "config"
         config.write_text(
-            '[core]\n autocrlf = true\n attributesFile = "' + str(attributes) + '"\n'
+            '[core]\n autocrlf\n attributesFile = "' + str(attributes) + '"\n'
         )
         attributes.write_text("")
         self.env.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM="1")
@@ -792,6 +792,59 @@ check=["true"]
         self.assertIn("Unsupported Git content transformation", result.stderr)
         self.assertEqual((self.root / "sample.txt").read_bytes(), before)
         self.assertFalse((self.root / "must-not-exist").exists())
+
+        # Root Git policy must not become command-wide policy for children.
+        parent_hooks = self.root / ".parent-hooks"
+        parent_hooks.mkdir()
+        self.lifecycle_git("config", "core.hooksPath", ".parent-hooks")
+        for key, value in [
+            ("user.name", "Child"),
+            ("user.email", "child@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", ".child-hooks"),
+        ]:
+            self.lifecycle_git("-C", str(nested), "config", key, value)
+        child_hook = nested / ".child-hooks/pre-commit"
+        child_hook.parent.mkdir()
+        child_hook.write_text("#!/bin/sh\nprintf rejected > hook-ran\nexit 1\n")
+        child_hook.chmod(0o755)
+        (self.root / "probe.py").write_text(
+            "from pathlib import Path\nimport subprocess\n"
+            "git=['git','-C','nested repository']\n"
+            "result=subprocess.run([*git,'commit','--allow-empty','-qm','Rejected'])\n"
+            "assert result.returncode != 0\n"
+            "assert Path('nested repository/hook-ran').exists()\n"
+            "Path('nested repository/.child-hooks/pre-commit').unlink()\n"
+            "subprocess.run([*git,'commit','--allow-empty','-qm','Accepted'],check=True)\n"
+            "assert subprocess.check_output([*git,'log','-1','--format=%an'],text=True).strip()=='Child'\n"
+        )
+        self.run_bootstrap("exec", "--profile", "core", "--", "python3", "probe.py")
+
+        external_hooks = external / "hooks"
+        external_hooks.mkdir(exist_ok=True)
+        hook = external_hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\nprintf rejected > external-hook-ran\nexit 1\n")
+        hook.chmod(0o755)
+        self.lifecycle_git("config", "core.hooksPath", str(external_hooks))
+        result = self.run_bootstrap(
+            "exec",
+            "--profile",
+            "core",
+            "--",
+            "git",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Rejected",
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        if container:
+            self.assertIn("Git hooks path", result.stderr)
+            self.assertIn("CHAINMAN_MODE=host-nix", result.stderr)
+            self.assertFalse((self.root / "external-hook-ran").exists())
+        else:
+            self.assertTrue((self.root / "external-hook-ran").exists())
 
     def test_container_rejects_old_git_before_contacting_engine(self):
         tools = self.root / "old-tools"

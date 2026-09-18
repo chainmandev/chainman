@@ -974,7 +974,7 @@ if grep -q '^--display$' "$temporary/options"; then
 fi
 
 # A linked worktree needs only its Git administrative directory, not its other
-# checkout. Identity and signing policy cross the boundary as effective settings.
+# checkout. Retained Git settings keep their repository/command scope.
 count=0
 policy_unavailable=0
 if [ "$authority" != "$root" ]; then
@@ -1034,26 +1034,14 @@ elif command -v git > /dev/null 2>&1; then
             fi
             ;;
     esac
-    for key in core.hooksPath user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
-        status=0
-        if [ "$git_owner" = "$root" ]; then
-            value=$(git -C "$root" config --get "$key" 2> /dev/null) || status=$?
-        else
-            # Preserve system/global policy without borrowing enclosing repo config.
-            value=$(git -C "$root" --git-dir=/dev/null config --get "$key" 2> /dev/null) || status=$?
-        fi
-        case "$status" in
-            0)
-                set -- --env "GIT_CONFIG_KEY_$count=$key" --env "GIT_CONFIG_VALUE_$count=$value" "$@"
-                count=$((count + 1))
-                ;;
-            1) ;;
-            *) policy_unavailable=1 ;;
-        esac
-    done
     text_scope=global
     if [ "$git_owner" = "$root" ]; then text_scope=repository; fi
     sh "$script_dir/git-text-policy.sh" "$root" "$temporary/git-policy" "$text_scope"
+    printf '%s\n%s\n' "$root" "$root" >> "$temporary/mounts"
+    if [ "$git_owner" = "$root" ]; then
+        printf '%s\n%s\n%s\n%s\n' "$admin" "$admin" "$gitdir" "$gitdir" >> "$temporary/mounts"
+    fi
+    sh "$script_dir/git-hooks-path.sh" "$root" "$temporary/git-policy" "$temporary/mounts"
     set -- --mount "type=bind,src=$temporary/git-policy,dst=/chainman-git-policy,readonly" \
         --env GIT_ATTR_NOSYSTEM=1 --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 \
         --env GIT_CONFIG_GLOBAL=/chainman-git-policy/global "$@"

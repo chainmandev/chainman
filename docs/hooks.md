@@ -122,14 +122,29 @@ file is not an unstaged edit merely because the index contains LF. Formatting
 merges use normalized text and preserve the selected working-tree EOL convention.
 Staged and working repository attributes must agree and remain unchanged during
 the operation. Container entry captures text defaults and external attribute data
-in a read-only snapshot. Effective overrides for the active repository apply only to its Git
-directory. Nested repositories retain their own local settings and share the
-captured defaults; explicit command-scope settings retain command precedence.
+in a read-only snapshot. Hook paths, author identity, signing settings and text
+overrides for the active repository apply only to its Git directory. Nested
+repositories retain their own local settings and share the captured defaults;
+explicit command-scope settings retain command precedence. Valueless, empty and
+numeric boolean settings use Git's own interpretation.
 External attribute paths belonging to a nested repository must be available in its
 execution environment; enter that project directly to capture its external policy.
 An empty attributes path or `/dev/null` disables that source as it does in Git.
-Changes to external policy take effect on the next operation. No host Git configuration or filter program is
-mounted. Container mode requires Git 2.42+ and checks attribute-query support before
+Container entry rejects a nonempty host system attributes file: Git cannot redirect
+that source independently, and folding it into global attributes would lose its
+precedence in nested repositories. Use `CHAINMAN_MODE=host-nix` for that policy, or
+keep the relevant rules in repository `.gitattributes`.
+
+Captured hook directories must be reachable through the project, its Git
+administrative directory, or an explicitly declared mount at the same host path.
+Unavailable paths (including external symlink destinations) stop entry with guidance;
+chainman never mounts arbitrary hook directories automatically. `/dev/null` explicitly
+disables hooks. Nested repositories' own hook paths and hook dependencies must be
+available in their execution environment; enter a nested project directly to check
+its captured paths. Signing executables and credentials likewise remain profile-owned.
+Missing directories within these mounts remain repairable by `just setup`.
+Changes to external policy take effect on the next operation. No host Git configuration
+or filter program is mounted. Container mode requires Git 2.42+ and checks attribute-query support before
 contacting the container engine. Older Git stops with update guidance.
 Custom clean/smudge filters, ident expansion and working-tree encodings are not
 executed; they receive an explicit unsupported-transformation diagnostic.

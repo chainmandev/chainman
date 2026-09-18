@@ -31,6 +31,12 @@ for location in GIT_ATTR_SYSTEM GIT_ATTR_GLOBAL; do
             echo 'chainman: external Git attributes must be a readable regular file.' >&2
             exit 2
         }
+        # Git has no system-attributes path override. Combining it with the
+        # global file loses system rules when a nested repo replaces that file.
+        if [ "$location" = GIT_ATTR_SYSTEM ] && [ -s "$path" ]; then
+            echo 'chainman: container mode cannot preserve a nonempty system Git attributes file; use CHAINMAN_MODE=host-nix or move that policy into repository .gitattributes.' >&2
+            exit 2
+        fi
         cat -- "$path" >> "$output"
         printf '\n' >> "$output"
     fi
