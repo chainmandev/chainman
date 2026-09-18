@@ -34,7 +34,10 @@ def git(
         key: value
         for key, value in os.environ.items()
         if not key.startswith("GIT_")
-        or (configuration and key.startswith("GIT_CONFIG_"))
+        or (
+            configuration
+            and (key.startswith("GIT_CONFIG_") or key == "GIT_ATTR_NOSYSTEM")
+        )
     }
     env.update(
         GIT_NO_REPLACE_OBJECTS="1",

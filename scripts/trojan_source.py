@@ -15,7 +15,7 @@ from adapter_data import array, strings, table, text
 
 DEFAULT_PATHS = [
     "*." + suffix
-    for suffix in "astro bash c cc cpp cs css cts dart go gql graphql h hpp html j2 java js json jsx just kt kts less lua m mdx mjs mts nix php pl py r rb rs scss sh sql svelte swift toml ts tsx vue xml yaml yml".split()
+    for suffix in "astro bash c cc cjs cpp cs css cts dart go gql graphql h hpp html j2 java js json jsx just kt kts less lua m mdx mjs mts nix php pl py r rb rs scss sh sql svelte swift toml ts tsx vue xml yaml yml".split()
 ] + ["[Jj]ustfile", "**/[Jj]ustfile", "Dockerfile", "**/Dockerfile"]
 SCANNER = "anti-trojan-source@1.12.1:high:v2"
 

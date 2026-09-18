@@ -120,7 +120,13 @@ coherent version or formatting that file manually, then retry.
 Git's built-in LF/CRLF normalization is respected: a fully staged CRLF working
 file is not an unstaged edit merely because the index contains LF. Formatting
 merges use normalized text and preserve the selected working-tree EOL convention.
-Staged and working attributes must agree and remain unchanged during the operation.
+Staged and working repository attributes must agree and remain unchanged during the
+operation. Container entry captures effective `core.autocrlf`/`core.eol` and a
+read-only snapshot of system/global attribute data; global rules retain priority
+and repository attributes still override them. Changes to external policy take
+effect on the next operation. No host Git configuration or filter program is
+mounted. Git must support `git var GIT_ATTR_SYSTEM` and `GIT_ATTR_GLOBAL`; an older
+Git that cannot report attribute locations stops with update guidance.
 Custom clean/smudge filters, ident expansion and working-tree encodings are not
 executed; they receive an explicit unsupported-transformation diagnostic.
 Replacing a symlink with a regular source file is formatted; the reverse is not.
@@ -178,7 +184,7 @@ revision=$(git rev-parse HEAD)
 just chainman trojan-source "$revision"
 ```
 
-Defaults include common source formats (including Dart, Astro, Nix and Just),
+Defaults include common source formats (including CommonJS `.cjs`, Dart, Astro, Nix and Just),
 Justfiles, Dockerfiles and executable regular files regardless of extension.
 The exact patterns are in the runtime's `scripts/trojan_source.py`. Override `hooks.trojan_source.paths` to select project source formats. A narrow
 exception names the **exact path and blob**, plus a reason; editing that file

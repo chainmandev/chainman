@@ -58,6 +58,28 @@ class InitializationTests(unittest.TestCase):
         self.assertNotIn(
             "chainman", (self.destination / "flake.nix").read_text().lower()
         )
+        git = ["git", "-C", str(self.destination)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run(
+            [
+                *git,
+                "-c",
+                "core.autocrlf=true",
+                "add",
+                ".gitattributes",
+                "chainman.lock",
+            ],
+            check=True,
+        )
+        (self.destination / "chainman.lock").unlink()
+        subprocess.run(
+            [*git, "-c", "core.autocrlf=true", "checkout-index", "chainman.lock"],
+            check=True,
+        )
+        self.assertEqual(
+            (self.destination / "chainman.lock").read_bytes(),
+            (self.revision + "\n").encode(),
+        )
         self.mocks[1].assert_called_once_with()
         subprocess.run(
             [sys.executable, str(self.destination / "scripts/demo.py"), "--check"],

@@ -459,6 +459,30 @@ setup=["extension"]
                 with self.assertRaisesRegex(ValueError, "suspicious"):
                     trojan_source.run(self.root, [revision])
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TROJAN_SOURCE"), "requires pinned hooks profile"
+    )
+    def test_commonjs_source_is_scanned_cold_and_warm(self):
+        (self.root / "fixture.cjs").write_text("// harmless fixture \u202e\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "CommonJS source")
+        revision = self.git("rev-parse", "HEAD")
+
+        def execute(root, profile, argv, **kwargs):
+            return subprocess.run(
+                argv, input=kwargs.get("input"), capture_output=True, check=True
+            )
+
+        with patch.object(chainman, "execute", execute):
+            for _ in range(2):
+                with self.assertRaisesRegex(ValueError, "suspicious"):
+                    trojan_source.run(self.root, [revision])
+            config = self.root / "chainman.toml"
+            config.write_text(
+                config.read_text() + '\n[hooks.trojan_source]\npaths=["*.ts"]\n'
+            )
+            self.assertEqual(trojan_source.run(self.root, [revision]), 0)
+
     def test_dos_prefix_requires_a_pe_header(self):
         self.assertFalse(trojan_source.binary_executable(b"MZ\xff"))
         body = bytearray(68)

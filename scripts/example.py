@@ -25,6 +25,7 @@ def create(destination: Path, revision: str) -> dict[str, str | int]:
     for path in destination.rglob("*"):
         path.chmod(0o755 if path.is_dir() or path.stat().st_mode & 0o100 else 0o644)
     (destination / "chainman.lock").write_text(revision + "\n")
+    (destination / ".gitattributes").write_text("chainman.lock text eol=lf\n")
     (destination / "justfile").write_bytes(
         (ROOT / "bootstrap/chainman.just").read_bytes()
         + b"\n"

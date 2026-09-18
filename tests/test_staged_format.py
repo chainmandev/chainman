@@ -278,6 +278,59 @@ else:
             execute.assert_not_called()
         self.assertTrue(link.is_symlink())
 
+    def test_external_attribute_snapshot_priority_and_disabled_system_rules(self):
+        with tempfile.TemporaryDirectory(prefix="external attributes ") as directory:
+            external = Path(directory)
+            system = external / "system"
+            global_file = external / "global"
+            output = external / "snapshot"
+            system.write_text("[attr]fixture text eol=lf\n*.txt fixture")
+            global_file.write_text("[attr]fixture text eol=crlf\n*.txt fixture")
+            tools = external / "bin"
+            tools.mkdir()
+            locator = tools / "git"
+            locator.write_text(
+                '#!/bin/sh\ncase "$2" in GIT_ATTR_SYSTEM) printf "%s\\n" "$TEST_SYSTEM";; GIT_ATTR_GLOBAL) printf "%s\\n" "$TEST_GLOBAL";; *) exit 2;; esac\n'
+            )
+            locator.chmod(0o755)
+            helper = (
+                Path(subject.__file__).parent.parent / "bootstrap/git-attributes.sh"
+            )
+            env = dict(
+                os.environ,
+                PATH=str(tools) + os.pathsep + os.environ["PATH"],
+                TEST_SYSTEM=str(system),
+                TEST_GLOBAL=str(global_file),
+                GIT_ATTR_NOSYSTEM="0",
+            )
+            subprocess.run(
+                ["sh", str(helper), str(self.root), str(output)], env=env, check=True
+            )
+            self.assertEqual(
+                output.read_bytes(),
+                system.read_bytes() + b"\n" + global_file.read_bytes() + b"\n",
+            )
+            config = external / "config"
+            config.write_text('[core]\n attributesFile = "' + str(output) + '"\n')
+            with patch.dict(
+                os.environ, GIT_CONFIG_GLOBAL=str(config), GIT_ATTR_NOSYSTEM="1"
+            ):
+                policy, _ = subject.eol_policy(
+                    self.root, subject.active_index(self.root), ["a.txt"]
+                )
+                self.assertEqual(policy["a.txt"], (True, True))
+                (self.root / ".gitattributes").write_text("*.txt eol=lf\n")
+                self.git("add", ".gitattributes")
+                policy, _ = subject.eol_policy(
+                    self.root, subject.active_index(self.root), ["a.txt"]
+                )
+                self.assertEqual(policy["a.txt"], (True, False))
+            env["GIT_ATTR_NOSYSTEM"] = "1"
+            subprocess.run(
+                ["sh", str(helper), str(self.root), str(output)], env=env, check=True
+            )
+            self.assertEqual(output.read_bytes(), global_file.read_bytes() + b"\n")
+
     def test_crlf_fully_and_partially_staged_files_and_conflict(self):
         (self.root / ".gitattributes").write_text("*.txt text eol=crlf\n")
         self.git("add", ".gitattributes")

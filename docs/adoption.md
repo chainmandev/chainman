@@ -23,7 +23,7 @@ Use `.#default` for a root flake or select your actual shell name. For multiple
 independent environments, add profiles and assign tasks explicitly.
 
 Record the full Git pin and paste the complete bootstrap from the README. Review
-those additions before committing. A disposable checkout used to inspect chainman
+those additions, including the `chainman.lock text eol=lf` attribute rule, before committing. A disposable checkout used to inspect chainman
 or inspect a revision has no ongoing relationship with your repository.
 
 ## 2. Route one command

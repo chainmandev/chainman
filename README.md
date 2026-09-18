@@ -91,6 +91,7 @@ revision=$(printf '%s\n' "$remote" | cut -f1)
 case "$revision" in ''|*[!0-9a-f]*) echo 'Invalid public Git identity' >&2; exit 1 ;; esac
 test "${#revision}" -eq 40
 printf '%s\n' "$revision" > chainman.lock
+printf '\n%s\n' 'chainman.lock text eol=lf' >> .gitattributes
 SH
 ```
 

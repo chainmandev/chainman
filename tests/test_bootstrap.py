@@ -649,6 +649,99 @@ check=["true"]
         self.assertEqual((self.root / "received-input").read_text(), records)
         self.assertIn("Trojan Source: checked", result.stdout + result.stderr)
 
+    def test_public_global_text_policy(self):
+        self.global_text_policy(container=False)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_global_text_policy(self):
+        self.global_text_policy(container=True)
+
+    def global_text_policy(self, *, container):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="core"
+[formatters.text]
+paths=["*.txt"]
+profile="core"
+write=["python3","formatter.py"]
+check=["true"]
+""")
+        (self.root / "formatter.py").write_text(
+            "from pathlib import Path\nimport sys\nfor name in sys.argv[1:]:\n p=Path(name); p.write_bytes(p.read_bytes().replace(b'BAD',b'GOOD'))\n"
+        )
+        external = Path(self.shared.name) / "external Git text policy"
+        external.mkdir(exist_ok=True)
+        attributes = external / "attributes"
+        config = external / "config"
+        config.write_text(
+            '[core]\n autocrlf = true\n attributesFile = "' + str(attributes) + '"\n'
+        )
+        attributes.write_text("")
+        self.env.update(GIT_CONFIG_GLOBAL=str(config), GIT_CONFIG_NOSYSTEM="1")
+        if container:
+            self.env.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            )
+        self.lifecycle_git("init", "-q")
+        self.lifecycle_git("config", "user.name", "Fixture")
+        self.lifecycle_git("config", "user.email", "fixture@example.invalid")
+        self.lifecycle_git("config", "commit.gpgsign", "false")
+        (self.root / "sample.txt").write_bytes(b"initial\nkeep\nkeep\nlast\n")
+        self.lifecycle_git(
+            "add",
+            "sample.txt",
+            "formatter.py",
+            "chainman.toml",
+            "chainman.lock",
+            "justfile",
+        )
+        self.lifecycle_git("commit", "-qm", "Initial")
+        for policy in ("autocrlf", "global-attributes", "local-override"):
+            with self.subTest(policy=policy):
+                if policy != "autocrlf":
+                    config.write_text(
+                        '[core]\n autocrlf = false\n attributesFile = "'
+                        + str(attributes)
+                        + '"\n'
+                    )
+                    attributes.write_text(
+                        "[attr]fixture text eol=crlf\n*.txt fixture\n"
+                    )
+                if policy == "local-override":
+                    (self.root / ".gitattributes").write_text("*.txt text eol=lf\n")
+                    self.lifecycle_git("add", ".gitattributes")
+                (self.root / "sample.txt").write_bytes(
+                    b"BAD\r\nkeep\r\nkeep\r\nlast\r\n"
+                )
+                self.lifecycle_git("add", "sample.txt")
+                # Unstaged content must survive policy-aware normalization too.
+                (self.root / "sample.txt").write_bytes(
+                    b"BAD\r\nkeep\r\nkeep\r\nunstaged\r\n"
+                )
+                self.run_bootstrap("format-staged")
+                self.assertEqual(
+                    self.lifecycle_git("show", ":sample.txt"), "GOOD\nkeep\nkeep\nlast"
+                )
+                expected = b"GOOD\nkeep\nkeep\nunstaged\n"
+                if policy != "local-override":
+                    expected = expected.replace(b"\n", b"\r\n")
+                self.assertEqual((self.root / "sample.txt").read_bytes(), expected)
+        attributes.write_text("*.txt filter=host-filter\n")
+        config.write_text(
+            config.read_text()
+            + '[filter "host-filter"]\n clean = "touch must-not-exist"\n'
+        )
+        before = (self.root / "sample.txt").read_bytes()
+        result = self.run_bootstrap("format-staged", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Unsupported Git content transformation", result.stderr)
+        self.assertEqual((self.root / "sample.txt").read_bytes(), before)
+        self.assertFalse((self.root / "must-not-exist").exists())
+
     def test_public_full_update_resolves_and_verifies_with_the_new_runtime(self):
         self.runtime_update_lifecycle("deps-update")
 
