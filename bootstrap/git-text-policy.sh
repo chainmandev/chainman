@@ -1,49 +1,46 @@
 #!/bin/sh
-# Project Git policy is scoped to its Git directory, not every child Git process.
+# Keep external policy in its native scope. Repository configuration stays live.
 set -eu
 root=$1
 output=$2
 scope=${3:-repository}
+cd -- "$root"
 g() {
-    if [ "$scope" = global ]; then git -C "$root" --git-dir=/dev/null "$@"; else git -C "$root" "$@"; fi
+    if [ "$scope" = global ]; then git --git-dir=/dev/null "$@"; else git "$@"; fi
 }
 scripts=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 mkdir -m 700 "$output"
+# Retain the explicit rejection of system attributes, and Git's implicit default
+# attributes when no config file specifies an attributesFile.
 sh "$scripts/git-attributes.sh" "$root" "$output/default-attributes" global
-sh "$scripts/git-attributes.sh" "$root" "$output/repository-attributes" "$scope"
-git config --file "$output/global" core.attributesFile /chainman-git-policy/default-attributes
-git config --file "$output/repository" core.attributesFile /chainman-git-policy/repository-attributes
+: > "$output/system"
+: > "$output/global"
 : > "$output/command"
-read_setting() {
-    # Keep Git's valueless/empty/numeric boolean semantics. "input" is the
-    # additional autocrlf value; --path expands host ~ before HOME changes.
+git config --file "$output/system" core.attributesFile /chainman-git-policy/default-attributes
+for scope_file in SYSTEM GLOBAL; do
+    status=0
+    git var "GIT_CONFIG_$scope_file" > "$output/locations" || status=$?
+    case "$status" in 0 | 1) ;; *) exit "$status" ;; esac
+    case "$scope_file" in SYSTEM) destination=system ;; GLOBAL) destination=global ;; esac
+    while IFS= read -r source; do
+        sh "$scripts/git-policy-config.sh" file "$source" "$output" "$output/$destination" 0
+    done < "$output/locations"
+done
+rm -- "$output/locations"
+# Deliberate command-scope overrides still apply to every child Git invocation.
+for key in core.autocrlf core.eol core.hooksPath core.attributesFile user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
+    origin=$(g config --show-scope --get "$key" | cut -f1)
+    [ "$origin" = command ] || continue
     kind=
     case "$key" in
         core.autocrlf) kind=--type=bool-or-str ;;
         commit.gpgsign) kind=--bool ;;
-        core.hooksPath) kind=--path ;;
+        core.hooksPath | core.attributesFile) kind=--path ;;
     esac
-    if [ -n "$kind" ]; then "$@" config "$kind" --get "$key"; else "$@" config --get "$key"; fi
-}
-for key in core.autocrlf core.eol core.hooksPath user.name user.email user.signingkey commit.gpgsign gpg.format gpg.program gpg.openpgp.program gpg.ssh.program gpg.ssh.defaultKeyCommand gpg.x509.program; do
-    status=0
-    value=$(read_setting git -C "$root" --git-dir=/dev/null) || status=$?
-    case "$status" in
-        0) git config --file "$output/global" "$key" "$value" ;;
-        1) ;;
-        *) exit "$status" ;;
-    esac
-    status=0
-    value=$(read_setting g) || status=$?
-    case "$status" in
-        0) git config --file "$output/repository" "$key" "$value" ;;
-        1) ;;
-        *) exit "$status" ;;
-    esac
-    origin=$(g config --show-scope --get "$key" | cut -f1)
-    if [ "$origin" = command ]; then git config --file "$output/command" "$key" "$value"; fi
+    if [ -n "$kind" ]; then value=$(g config "$kind" --get "$key"); else value=$(g config --get "$key"); fi
+    if [ "$key" = core.attributesFile ]; then
+        sh "$scripts/git-attributes.sh" "$root" "$output/command-attributes" "$scope"
+        value=/chainman-git-policy/command-attributes
+    fi
+    git config --file "$output/command" "$key" "$value"
 done
-origin=$(g config --show-scope --get core.attributesFile | cut -f1)
-if [ "$origin" = command ]; then
-    git config --file "$output/command" core.attributesFile /chainman-git-policy/repository-attributes
-fi

@@ -655,6 +655,113 @@ check=["true"]
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
     )
+    def test_container_live_git_policy_and_owned_relocation(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="core"\n[hooks]\nenabled=true\n[setup.check]\ninputs=["chainman.toml"]\nartifacts=["setup-marker"]\ncommands=[["sh","-c","printf ready > setup-marker"]]\n'
+        )
+        self.env.update(
+            GIT_CONFIG_GLOBAL="/dev/null",
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_ATTR_NOSYSTEM="1",
+        )
+        self.lifecycle_git("init", "-q")
+        self.lifecycle_git("config", "user.name", "Original")
+        self.lifecycle_git("config", "user.email", "fixture@example.invalid")
+        self.lifecycle_git("config", "commit.gpgsign", "false")
+        self.lifecycle_git(
+            "add", "justfile", "chainman.lock", "chainman.toml", "scripts/chainman.sh"
+        )
+        self.lifecycle_git("commit", "-qm", "Fixture")
+        primary = self.root
+        linked = Path(self.shared.name) / "linked policy project"
+        self.lifecycle_git("worktree", "add", "-qb", "linked", str(linked))
+        self.root = linked
+        self.launcher = linked / "scripts/chainman.sh"
+        self.run_bootstrap("hooks", "install")
+        moved = primary.with_name(primary.name + " moved")
+        primary.rename(moved)
+        subprocess.run(
+            ["git", "-C", str(moved), "worktree", "repair", str(linked)],
+            env=self.env,
+            check=True,
+            capture_output=True,
+        )
+        self.env.update(
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        rejected = self.run_bootstrap(
+            "exec", "--profile", "core", "--", "true", check=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("Git hooks path", rejected.stderr)
+        self.run_bootstrap("hooks", "install")
+        self.assertTrue(
+            json.loads(self.run_bootstrap("hooks", "status").stdout)["installed"]
+        )
+        global_config = Path(self.shared.name) / "global policy"
+        work_config = Path(self.shared.name) / "work policy"
+        global_config.write_text(
+            "[user]\n email = personal@example.invalid\n[core]\n hooksPath = /unmounted-global-hooks\n"
+        )
+        work_config.write_text(
+            "[user]\n email = work@example.invalid\n[core]\n autocrlf = input\n"
+        )
+        nested = linked / "nested"
+        subprocess.run(["git", "init", "-q", str(nested)], env=self.env, check=True)
+        subprocess.run(
+            [
+                "git",
+                "config",
+                "--file",
+                str(global_config),
+                f"includeIf.gitdir:{nested}/.path",
+                str(work_config),
+            ],
+            env=self.env,
+            check=True,
+        )
+        self.env["GIT_CONFIG_GLOBAL"] = str(global_config)
+        attributes = Path(self.shared.name) / "local attributes"
+        attributes.write_text("*.txt text eol=crlf\n")
+        self.lifecycle_git(
+            "config", "core.attributesFile", os.path.relpath(attributes, linked)
+        )
+        result = self.run_bootstrap(
+            "exec",
+            "--profile",
+            "core",
+            "--",
+            "sh",
+            "-eu",
+            "-c",
+            'git config --local user.name Updated; test "$(git config --get user.name)" = Updated; test "$(git -C nested config --get user.email)" = work@example.invalid; test "$(git -C nested config --get core.autocrlf)" = input; test "$(git check-attr eol -- sample.txt)" = "sample.txt: eol: crlf"; printf "*.txt text eol=lf\\n" > local-attributes; git config --local core.attributesFile local-attributes; test "$(git check-attr eol -- sample.txt)" = "sample.txt: eol: lf"; echo live-policy-ok',
+        )
+        self.assertIn("live-policy-ok", result.stdout)
+        self.assertEqual(self.lifecycle_git("config", "--get", "user.name"), "Updated")
+        # Complete setup reaches the same ownership check before installation.
+        target = (
+            Path(self.lifecycle_git("rev-parse", "--absolute-git-dir"))
+            / "chainman-hooks"
+        )
+        stale = str(primary / ".git/chainman-hooks")
+        self.lifecycle_git("config", "--worktree", "core.hooksPath", stale)
+        (target / "ownership.json").write_text(json.dumps({"setting": stale}))
+        self.run_bootstrap("setup")
+        self.assertTrue((linked / "setup-marker").exists())
+        (linked / "setup-marker").unlink()
+        self.lifecycle_git(
+            "config", "--worktree", "core.hooksPath", "/unmounted-foreign-manager"
+        )
+        rejected = self.run_bootstrap("setup", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("managed at", rejected.stderr)
+        self.assertFalse((linked / "setup-marker").exists())
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
     def test_container_global_text_policy(self):
         self.global_text_policy(container=True)
 

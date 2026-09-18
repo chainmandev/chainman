@@ -140,6 +140,17 @@ def check_installation(root: Path) -> None:
                 raise ValueError(f"Refusing to replace modified hook: {path}")
 
 
+def check_container_repair(root: Path) -> None:
+    """Admit only an intact, recorded relocation past container visibility checks."""
+    target = directory(root)
+    selected = current_path(root)
+    if not selected or (root / selected).resolve() == target:
+        raise ValueError("Unavailable Git hooks require host-nix or an explicit mount")
+    # A different selected path is accepted here only with the ownership record
+    # and intact bridges. No project command has run before this decision.
+    check_installation(root)
+
+
 @contextlib.contextmanager
 def administration(root: Path) -> Iterator[None]:
     common = Path(git(root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
@@ -236,17 +247,26 @@ def install_locked(root: Path) -> None:
                         f"Dormant worktree configuration may change Git identity or hooks: {path}; review it before enabling worktree configuration"
                     )
             for key in ("core.bare", "core.worktree"):
+                kind = ["--type=bool"] if key == "core.bare" else []
                 value = staged_format.git(
                     root,
                     "config",
                     "--file",
                     str(copies[shared]),
+                    *kind,
                     "--get",
                     key,
                     check=False,
                 )
                 effective = staged_format.git(
-                    root, "config", "--local", "--includes", "--get", key, check=False
+                    root,
+                    "config",
+                    "--local",
+                    "--includes",
+                    *kind,
+                    "--get",
+                    key,
+                    check=False,
                 )
                 origins = staged_format.git(
                     root,

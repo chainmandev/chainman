@@ -45,24 +45,21 @@ class GitTextPolicyTests(unittest.TestCase):
             check=True,
         )
         # Substitute only the container's bind-mount destination for this host test.
-        for name in ("global", "repository", "command"):
-            path = output / name
-            path.write_text(
-                path.read_text().replace("/chainman-git-policy", str(output))
-            )
-        gitdir = self.git("rev-parse", "--absolute-git-dir")
-        pattern = subprocess.check_output(
-            ["sed", r"s/[][?*\\]/\\&/g"], input=gitdir, text=True
-        )
+        for path in output.iterdir():
+            if path.name in {"system", "global", "command"} or path.name.startswith(
+                "config."
+            ):
+                path.write_text(
+                    path.read_text().replace("/chainman-git-policy", str(output))
+                )
         env = {k: v for k, v in self.env.items() if not k.startswith("GIT_CONFIG_")}
         env.update(
             GIT_CONFIG_GLOBAL=str(output / "global"),
-            GIT_CONFIG_NOSYSTEM="1",
-            GIT_CONFIG_COUNT="2",
-            GIT_CONFIG_KEY_0=f"includeIf.gitdir:{pattern}.path",
-            GIT_CONFIG_VALUE_0=str(output / "repository"),
-            GIT_CONFIG_KEY_1="include.path",
-            GIT_CONFIG_VALUE_1=str(output / "command"),
+            GIT_CONFIG_SYSTEM=str(output / "system"),
+            GIT_CONFIG_NOSYSTEM="0",
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="include.path",
+            GIT_CONFIG_VALUE_0=str(output / "command"),
         )
         return env
 
@@ -90,15 +87,13 @@ class GitTextPolicyTests(unittest.TestCase):
         self.git("config", "--global", "core.autocrlf", "input")
         self.git("config", "--global", "core.eol", "lf")
         env = self.snapshot()
-        # Remove the original local values and file: the scoped snapshot must be
-        # doing the work, including when the Git dir lives outside the worktree.
-        attrs.unlink()
-        for key in ("core.attributesFile", "core.autocrlf", "core.eol"):
-            self.git("config", "--unset", key)
+        # Local policy remains live, including in linked worktrees.
         self.assertEqual(self.git("config", "--get", "core.autocrlf", env=env), "true")
         self.assertIn(
             "eol: crlf", self.git("check-attr", "eol", "--", "a.txt", env=env)
         )
+        self.git("config", "user.name", "Updated", env=env)
+        self.assertEqual(self.git("config", "--get", "user.name", env=env), "Updated")
         nested = self.root / "nested"
         nested.mkdir()
         self.git("init", "-q", root=nested)
@@ -150,7 +145,7 @@ class GitTextPolicyTests(unittest.TestCase):
         nested.mkdir()
         self.root = nested
         self.snapshot(scope="global")
-        for name in ("global", "repository"):
+        for name in ("global",):
             value = self.git(
                 "config",
                 "--file",
@@ -284,7 +279,14 @@ class GitTextPolicyTests(unittest.TestCase):
                 )
                 env = self.snapshot()
                 self.assertEqual(
-                    self.git("config", "--get", "core.autocrlf", env=env), expected
+                    self.git(
+                        "config",
+                        "--type=bool-or-str",
+                        "--get",
+                        "core.autocrlf",
+                        env=env,
+                    ),
+                    expected,
                 )
                 import shutil
 
@@ -305,15 +307,12 @@ class GitTextPolicyTests(unittest.TestCase):
         alias.symlink_to(external, target_is_directory=True)
 
         def check(value):
-            self.git(
-                "config", "--file", str(policy / "repository"), "core.hooksPath", value
-            )
+            self.git("config", "core.hooksPath", value)
             return subprocess.run(
                 [
                     "sh",
                     str(SOURCE / "bootstrap/git-hooks-path.sh"),
                     str(self.root),
-                    str(policy),
                     str(mounts),
                 ],
                 env=self.env,
@@ -336,6 +335,152 @@ class GitTextPolicyTests(unittest.TestCase):
         with mounts.open("a") as file:
             file.write(f"{local}\n{external},readonly\n")
         self.assertNotEqual(check(".hooks").returncode, 0)
+
+    def test_conditional_includes_preserve_order_and_nested_repository_selection(self):
+        # Do not flatten includeIf at the parent repository or elevate it above
+        # local configuration. Relative patterns refer to the original file.
+        included = self.base / "work policy"
+        included.write_text(
+            '[user]\n name = Work\n email = work@example.invalid\n[core]\n autocrlf = input\n[filter "private"]\n clean = never-copy-me\n'
+        )
+        condition = "gitdir:./work/"
+        self.git("config", "--global", "user.name", "Personal")
+        self.git("config", "--global", "user.email", "personal@example.invalid")
+        self.git("config", "--global", f"includeIf.{condition}.path", str(included))
+        self.git(
+            "config",
+            "--global",
+            "user.name",
+            "Last",
+        )
+        work = self.base / "work" / "child"
+        work.mkdir(parents=True)
+        self.git("init", "-q", root=work)
+        env = self.snapshot()
+        included.unlink()
+        self.assertEqual(
+            self.git("config", "--get", "user.email", root=work, env=env),
+            "work@example.invalid",
+        )
+        self.assertEqual(
+            self.git("config", "--get", "core.autocrlf", root=work, env=env), "input"
+        )
+        self.assertEqual(
+            self.git("config", "--get", "user.email", env=env),
+            "personal@example.invalid",
+        )
+        self.git("config", "user.email", "Updated@example.invalid", root=work, env=env)
+        self.assertEqual(
+            self.git("config", "--get", "user.email", root=work, env=env),
+            "Updated@example.invalid",
+        )
+        self.assertNotIn(
+            "never-copy-me",
+            "".join(p.read_text() for p in (self.base / "snapshot").iterdir()),
+        )
+
+    def test_include_order_valueless_boolean_and_branch_changes(self):
+        included = self.base / "branch policy"
+        included.write_text("[user]\n name = Branch\n[core]\n autocrlf\n")
+        self.git("config", "--global", "user.name", "Before")
+        self.git("config", "--global", "includeIf.onbranch:topic.path", str(included))
+        self.git("config", "--global", "--add", "user.email", "after@example.invalid")
+        env = self.snapshot()
+        self.assertEqual(self.git("config", "--get", "user.name", env=env), "Before")
+        self.git("symbolic-ref", "HEAD", "refs/heads/topic")
+        self.assertEqual(self.git("config", "--get", "user.name", env=env), "Branch")
+        self.assertEqual(
+            self.git("config", "--bool", "--get", "core.autocrlf", env=env), "true"
+        )
+
+    def test_effective_hooks_shadow_global_and_validate_default_symlink_targets(self):
+        mounts = self.base / "mounts"
+        mounts.write_text(f"{self.root}\n{self.root}\n")
+        external = self.base / "external-hook"
+        external.write_text("#!/bin/sh\nexit 1\n")
+        external.chmod(0o755)
+        self.git("config", "--global", "core.hooksPath", str(self.base / "unmounted"))
+        self.git("config", "core.hooksPath", ".hooks")
+        local = self.root / ".hooks"
+        local.mkdir()
+        command = [
+            "sh",
+            str(SOURCE / "bootstrap/git-hooks-path.sh"),
+            str(self.root),
+            str(mounts),
+        ]
+
+        def check(expected):
+            result = subprocess.run(
+                command, env=self.env, capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, expected, result.stderr)
+
+        check(0)
+
+        hook = local / "pre-commit"
+        hook.symlink_to(external)
+        check(2)
+        self.git("config", "--unset", "core.hooksPath")
+        self.git("config", "--global", "--unset", "core.hooksPath")
+        (self.root / ".git/hooks/pre-push").symlink_to(external)
+        check(2)
+        with mounts.open("a") as stream:
+            stream.write(f"{external}\n{external},readonly\n")
+        # Only the hook file needs to be mounted, not its parent directory.
+        # Conservative parent-path validation asks for a containing mount.
+        with mounts.open("a") as stream:
+            stream.write(f"{self.base}\n{self.base},readonly\n")
+        check(0)
+        self.env.update(
+            GIT_CONFIG_COUNT="1",
+            GIT_CONFIG_KEY_0="core.hooksPath",
+            GIT_CONFIG_VALUE_0="/dev/null",
+        )
+        check(0)
+
+    def test_local_include_requires_an_existing_mount(self):
+        external = self.base / "local config"
+        external.write_text("[user]\n name = Included\n")
+        self.git("config", "include.path", str(external))
+        mounts = self.base / "mounts"
+        mounts.write_text(f"{self.root}\n{self.root}\n")
+        command = [
+            "sh",
+            str(SOURCE / "bootstrap/git-local-includes.sh"),
+            str(self.root),
+            str(mounts),
+        ]
+        result = subprocess.run(command, env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local Git configuration", result.stderr)
+        with mounts.open("a") as stream:
+            stream.write(f"{external}\n{external},readonly\n")
+        subprocess.run(command, env=self.env, check=True)
+
+    def test_remote_dependent_external_include_fails_explicitly(self):
+        included = self.base / "remote policy"
+        included.write_text("[user]\n name = Remote\n")
+        self.git(
+            "config",
+            "--global",
+            "includeIf.hasconfig:remote.*.url:https://example.invalid/**.path",
+            str(included),
+        )
+        result = subprocess.run(
+            [
+                "sh",
+                str(SOURCE / "bootstrap/git-text-policy.sh"),
+                str(self.root),
+                str(self.base / "snapshot"),
+            ],
+            env=self.env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("hasconfig", result.stderr)
+        self.assertIn("CHAINMAN_MODE=host-nix", result.stderr)
 
 
 if __name__ == "__main__":

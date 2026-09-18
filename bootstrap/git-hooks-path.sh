@@ -1,10 +1,12 @@
 #!/bin/sh
-# Validate captured hook directories against existing, explicit container mounts.
-# Do not grant a configured Git path new access to the host filesystem.
+# Validate the effective hook directory and entrypoints against declared mounts.
 set -eu
 root=$1
-policy=$2
-mounts=$3
+mounts=$2
+scope=${3:-repository}
+g() {
+    if [ "$scope" = global ]; then git -C "$root" --git-dir=/dev/null "$@"; else git -C "$root" "$@"; fi
+}
 fail() {
     printf 'chainman: Git hooks path %s is unavailable in the container; use CHAINMAN_MODE=host-nix, keep hooks in the repository, or declare a mount at the same path. Use core.hooksPath=/dev/null only to deliberately disable hooks.\n' "$hooks" >&2
     exit 2
@@ -26,19 +28,10 @@ visible() {
     done < "$mounts"
     [ -n "$best" ] && [ "$mapped" = "$candidate" ]
 }
-for config in global repository command; do
-    status=0
-    hooks=$(git config --file "$policy/$config" --get core.hooksPath) || status=$?
-    case "$status" in 0) ;; 1) continue ;; *) exit "$status" ;; esac
-    case "$hooks" in /dev/null) continue ;; /*) path=$hooks ;; *) path=$root/$hooks ;; esac
-    # Check both the literal route and symlink destination. Either can cross
-    # the boundary; a directory alias outside a mount is not made visible by
-    # its destination being inside one.
-    ancestor=$path
+check_path() {
+    ancestor=$1
     suffix=
     while [ ! -d "$ancestor" ]; do
-        # A missing in-repository directory must remain repairable by setup.
-        # Existing files and dangling symlinks are not ordinary directories.
         [ ! -e "$ancestor" ] && [ ! -L "$ancestor" ] || fail
         component=$(basename -- "$ancestor")
         case "$component" in . | ..) fail ;; esac
@@ -50,4 +43,39 @@ for config in global repository command; do
     logical=$logical$suffix
     physical=$physical$suffix
     if ! visible "$logical" || ! visible "$physical"; then fail; fi
+}
+status=0
+hooks=$(g config --path --get core.hooksPath) || status=$?
+case "$status" in
+    0)
+        origin=$(g config --show-scope --get core.hooksPath | cut -f1)
+        raw=$(g config --get core.hooksPath)
+        case "$origin:$raw" in local:~* | worktree:~*) fail ;; esac
+        ;;
+    1)
+        [ "$scope" != global ] || exit 0
+        hooks=$(g rev-parse --path-format=absolute --git-path hooks 2> /dev/null) || exit 0
+        ;;
+    *) exit "$status" ;;
+esac
+case "$hooks" in /dev/null) exit 0 ;; /*) path=$hooks ;; *) path=$root/$hooks ;; esac
+check_path "$path"
+directory=$physical
+# Git ignores sample files. Check active hook names, including broken links that
+# would otherwise be silently skipped when their destination is not mounted.
+for event in applypatch-msg pre-applypatch post-applypatch pre-commit pre-merge-commit prepare-commit-msg commit-msg post-commit pre-rebase post-checkout post-merge pre-push pre-receive update proc-receive post-receive post-update reference-transaction push-to-checkout pre-auto-gc post-rewrite sendemail-validate fsmonitor-watchman p4-changelist p4-prepare-changelist p4-post-changelist p4-pre-submit post-index-change; do
+    file=$directory/$event
+    if [ ! -L "$file" ] && [ ! -x "$file" ]; then continue; fi
+    links=0
+    while :; do
+        check_path "$(dirname -- "$file")"
+        file=$physical/$(basename -- "$file")
+        visible "$file" || fail
+        [ -L "$file" ] || break
+        links=$((links + 1))
+        [ "$links" -le 40 ] || fail
+        link=$(readlink -- "$file") || fail
+        case "$link" in /*) file=$link ;; *) file=$(dirname -- "$file")/$link ;; esac
+    done
+    [ -f "$file" ] || fail
 done

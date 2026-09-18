@@ -121,31 +121,51 @@ Git's built-in LF/CRLF normalization is respected: a fully staged CRLF working
 file is not an unstaged edit merely because the index contains LF. Formatting
 merges use normalized text and preserve the selected working-tree EOL convention.
 Staged and working repository attributes must agree and remain unchanged during
-the operation. Container entry captures text defaults and external attribute data
-in a read-only snapshot. Hook paths, author identity, signing settings and text
-overrides for the active repository apply only to its Git directory. Nested
-repositories retain their own local settings and share the captured defaults;
-explicit command-scope settings retain command precedence. Valueless, empty and
-numeric boolean settings use Git's own interpretation.
-External attribute paths belonging to a nested repository must be available in its
-execution environment; enter that project directly to capture its external policy.
+the operation. Container entry captures supported external system/global settings
+(identity, signing, hook paths and text policy) and attribute data in read-only
+snapshots. Includes retain their order and conditions: Git evaluates `gitdir` and
+`onbranch` conditions for each repository, including nested ones. Remote-dependent
+`hasconfig` conditions and other unsupported conditions require host-Nix: copying
+remote configuration to evaluate them could expose credentials.
+Relative `gitdir` patterns retain their original configuration-file location.
+External include graphs are bounded to ten levels; cycles or deeper graphs stop
+entry. Unsupported external settings such as filter commands are not copied.
+
+Repository and worktree settings stay live at their normal Git precedence. A
+`git config --local` write is visible to the next Git command in the same shell.
+Explicit command-scope settings still override local settings, as they do in Git.
+Valueless, empty and numeric boolean settings retain Git's interpretation.
+Local/worktree include files must already be reachable through the project, Git
+administration or declared mounts; an unavailable active include stops entry.
+Use absolute or repository-relative local hook and attribute paths, since the
+container has its own HOME. Select regular local attribute files; symlinked local
+attribute files require host-Nix. Root-local external attribute files are copied as
+read-only data at their original paths; changing to another external path requires
+another chainman invocation or an explicit mount. Nested repositories' external
+local files likewise need explicit mounts, or direct entry into that project.
 An empty attributes path or `/dev/null` disables that source as it does in Git.
 Container entry rejects a nonempty host system attributes file: Git cannot redirect
-that source independently, and folding it into global attributes would lose its
-precedence in nested repositories. Use `CHAINMAN_MODE=host-nix` for that policy, or
-keep the relevant rules in repository `.gitattributes`.
+that source independently. Use `CHAINMAN_MODE=host-nix` for that policy, or keep
+the relevant rules in repository `.gitattributes`.
 
-Captured hook directories must be reachable through the project, its Git
-administrative directory, or an explicitly declared mount at the same host path.
-Unavailable paths (including external symlink destinations) stop entry with guidance;
-chainman never mounts arbitrary hook directories automatically. `/dev/null` explicitly
-disables hooks. Nested repositories' own hook paths and hook dependencies must be
-available in their execution environment; enter a nested project directly to check
-its captured paths. Signing executables and credentials likewise remain profile-owned.
-Missing directories within these mounts remain repairable by `just setup`.
-Changes to external policy take effect on the next operation. No host Git configuration
-or filter program is mounted. Container mode requires Git 2.42+ and checks attribute-query support before
-contacting the container engine. Older Git stops with update guidance.
+The effective hook directory, including Git's default hooks directory, and active
+hook symlink targets must be reachable through the project, Git administration or
+an explicitly declared mount at the same host path. An overridden global hook
+path does not block entry. Unavailable effective paths stop entry with guidance;
+chainman never mounts arbitrary hook directories automatically. `/dev/null`
+explicitly disables hooks. `just hooks install` and complete `just setup` can
+repair an unavailable relocated path only after the runtime validates the recorded
+ownership and intact bridges, before project setup runs. Foreign managers and
+modified bridges still stop repair.
+Nested repositories' hook paths and hook dependencies must be available in their
+execution environment; enter a nested project directly to check its paths.
+Signing executables and credentials remain profile-owned. Missing directories
+within declared mounts remain repairable by setup.
+Changes to external policy take effect on the next invocation; changes to ordinary
+local settings take effect immediately. Original external config files and filter
+programs are not automatically mounted. Container mode requires Git 2.42+ and
+checks attribute-query support before contacting the container engine. Older Git
+stops with update guidance.
 Custom clean/smudge filters, ident expansion and working-tree encodings are not
 executed; they receive an explicit unsupported-transformation diagnostic.
 Replacing a symlink with a regular source file is formatted; the reverse is not.

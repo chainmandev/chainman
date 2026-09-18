@@ -18,7 +18,11 @@ g() {
 : > "$output"
 for location in GIT_ATTR_SYSTEM GIT_ATTR_GLOBAL; do
     status=0
-    path=$(g var "$location") || status=$?
+    if [ "$location" = GIT_ATTR_SYSTEM ]; then
+        path=$(git var "$location") || status=$?
+    else
+        path=$(g var "$location") || status=$?
+    fi
     # A supported query returns no value when that attribute source is disabled.
     if [ "$status" = 1 ] && [ -z "$path" ]; then continue; fi
     [ "$status" = 0 ] || {

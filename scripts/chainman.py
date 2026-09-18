@@ -601,6 +601,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
+        if os.environ.pop("TOOLCHAIN_GIT_HOOKS_REPAIR", ""):
+            import hooks
+
+            if not (
+                (args.action == "hooks" and rest == ["install"])
+                or (
+                    args.action == "setup"
+                    and not rest
+                    and hooks.declaration(cfg).get("enabled", False)
+                    and not os.environ.get("CHAINMAN_UPDATE_ACTIVE")
+                )
+            ):
+                raise ValueError(
+                    "Unavailable Git hooks require `just hooks install` or host-nix"
+                )
+            hooks.check_container_repair(root)
         if args.action == "_service-prepare":
             import services
 

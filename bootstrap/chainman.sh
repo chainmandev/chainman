@@ -1040,17 +1040,52 @@ elif command -v git > /dev/null 2>&1; then
     printf '%s\n%s\n' "$root" "$root" >> "$temporary/mounts"
     if [ "$git_owner" = "$root" ]; then
         printf '%s\n%s\n%s\n%s\n' "$admin" "$admin" "$gitdir" "$gitdir" >> "$temporary/mounts"
+        sh "$script_dir/git-local-includes.sh" "$root" "$temporary/mounts"
     fi
-    sh "$script_dir/git-hooks-path.sh" "$root" "$temporary/git-policy" "$temporary/mounts"
-    set -- --mount "type=bind,src=$temporary/git-policy,dst=/chainman-git-policy,readonly" \
-        --env GIT_ATTR_NOSYSTEM=1 --env GIT_CONFIG_SYSTEM=/dev/null --env GIT_CONFIG_NOSYSTEM=1 \
-        --env GIT_CONFIG_GLOBAL=/chainman-git-policy/global "$@"
+    # Only the ownership-aware installer may repair an unavailable path. The
+    # runtime must confirm a recorded relocation before setup or any other work.
+    if ! sh "$script_dir/git-hooks-path.sh" "$root" "$temporary/mounts" "$text_scope" 2> "$temporary/hooks-diagnostic"; then
+        case "$CHAINMAN_REQUEST_ACTION:$CHAINMAN_REQUEST_TASK" in
+            hooks:install | setup:)
+                set -- --env TOOLCHAIN_GIT_HOOKS_REPAIR=1 "$@"
+                ;;
+            *)
+                cat "$temporary/hooks-diagnostic" >&2
+                exit 2
+                ;;
+        esac
+    fi
     if [ "$git_owner" = "$root" ]; then
-        # Escape Git's includeIf wildmatch metacharacters in literal Git paths.
-        git_pattern=$(printf '%s' "$gitdir" | sed 's/[][?*\\]/\\&/g')
-        set -- --env "GIT_CONFIG_KEY_$count=includeIf.gitdir:$git_pattern.path" --env "GIT_CONFIG_VALUE_$count=/chainman-git-policy/repository" "$@"
-        count=$((count + 1))
+        attribute_origin=$(git -C "$root" config --show-scope --get core.attributesFile | cut -f1)
+        case "$attribute_origin" in
+            local | worktree)
+                attribute_raw=$(git -C "$root" config --get core.attributesFile)
+                case "$attribute_raw" in '~'*) fail 'Use an absolute or repository-relative local core.attributesFile in container mode; host HOME is not mounted.' ;; esac
+                attribute_path=$(git -C "$root" var GIT_ATTR_GLOBAL) || attribute_path=
+                case "$attribute_path" in '' | /*) ;; *) attribute_path=$root/$attribute_path ;; esac
+                if [ -e "$attribute_path" ]; then
+                    attribute_parent=$(CDPATH='' cd -P -- "$(dirname -- "$attribute_path")" && pwd -P)
+                    attribute_path=$attribute_parent/$(basename -- "$attribute_path")
+                    [ ! -L "$attribute_path" ] || fail 'Local core.attributesFile symlinks require host-nix; select a regular attribute file or repository .gitattributes.'
+                fi
+                case "$attribute_path" in
+                    '' | /dev/null | "$root"/*) ;;
+                    /*)
+                        single_line "$attribute_path"
+                        case "$attribute_path" in /nix/* | /proc/* | /sys/* | /dev/* | /chainman-* | *,*) fail 'Unsafe external Git attributes destination; use host-nix.' ;; esac
+                        if [ -e "$attribute_path" ]; then
+                            [ -f "$attribute_path" ] && [ -r "$attribute_path" ] || fail 'External Git attributes must be a readable regular file.'
+                            cat -- "$attribute_path" > "$temporary/git-policy/local-attributes"
+                            set -- --mount "type=bind,src=$temporary/git-policy/local-attributes,dst=$attribute_path,readonly" "$@"
+                        fi
+                        ;;
+                esac
+                ;;
+        esac
     fi
+    set -- --mount "type=bind,src=$temporary/git-policy,dst=/chainman-git-policy,readonly" \
+        --env GIT_ATTR_NOSYSTEM=1 --env GIT_CONFIG_SYSTEM=/chainman-git-policy/system --env GIT_CONFIG_NOSYSTEM=0 \
+        --env GIT_CONFIG_GLOBAL=/chainman-git-policy/global "$@"
     set -- --env "GIT_CONFIG_KEY_$count=include.path" --env "GIT_CONFIG_VALUE_$count=/chainman-git-policy/command" "$@"
     count=$((count + 1))
 elif [ -f "${GIT_CONFIG_GLOBAL:-${HOME:-/}/.gitconfig}" ]; then

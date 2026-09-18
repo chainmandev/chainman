@@ -130,9 +130,14 @@ setup=["extension"]
         self.git("config", "--worktree", "core.hooksPath", stale)
         record = hooks.directory(self.root) / "ownership.json"
         record.write_text(json.dumps({"setting": stale}))
+        hooks.check_container_repair(self.root)
         hooks.install(self.root)
         self.assertTrue(hooks.status(self.root)["installed"])
+        with self.assertRaisesRegex(ValueError, "Unavailable Git hooks"):
+            hooks.check_container_repair(self.root)
         self.git("config", "--worktree", "core.hooksPath", "external-manager")
+        with self.assertRaisesRegex(ValueError, "managed at"):
+            hooks.check_container_repair(self.root)
         with self.assertRaisesRegex(ValueError, "managed at"):
             hooks.install(self.root)
 
@@ -192,6 +197,28 @@ setup=["extension"]
                 "--git-dir=" + str(bare), "worktree", "add", "-b", path.name, str(path)
             )
         return bare, linked, sibling
+
+    def test_valueless_bare_boolean_keeps_primary_and_sibling_identity(self):
+        bare, linked, sibling = self.bare_worktrees()
+        config = bare / "config"
+        config.write_text(config.read_text().replace("bare = true", "bare"))
+        self.assertEqual(
+            self.git("--git-dir=" + str(bare), "rev-parse", "--is-bare-repository"),
+            "true",
+        )
+        hooks.install(linked)
+        self.assertTrue(hooks.status(linked)["installed"])
+        self.assertEqual(
+            self.git("--git-dir=" + str(bare), "rev-parse", "--is-bare-repository"),
+            "true",
+        )
+        for path in (linked, sibling):
+            self.assertEqual(
+                staged_format.git(
+                    path, "rev-parse", "--is-bare-repository"
+                ).stdout.strip(),
+                b"false",
+            )
 
     def test_bare_repository_and_all_linked_worktrees_keep_their_identity(self):
         bare, linked, sibling = self.bare_worktrees()
