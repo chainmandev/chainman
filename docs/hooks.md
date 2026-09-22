@@ -143,6 +143,13 @@ The verified runtime provisions native lefthook and its small host helper throug
 Nix, using host Nix or Docker/Podman. No host Python, Go, Node or lefthook installation
 is needed. The helper is operation-scoped; there is no daemon or global installation.
 Formatters and scanners run in their declared managed environments.
+Private hook directories resolve filesystem aliases in `TMPDIR` before use.
+Finite hook commands clean up remaining foreground process-group children on
+completion or cancellation, including children whose immediate parent exits first.
+Lefthook cancellation uses its SIGINT cleanup path while preserving the caller's
+signal exit status. Direct lefthook shell commands must wait for their own
+background work; lefthook owns their job/PTY groups. Hooks must not daemonize or
+detach background work into a separate session.
 
 Run `git commit`, `git push`, `just format-staged`, and hook administration from the
 host. Container-only development still supports hooks invoked by **host Git**.

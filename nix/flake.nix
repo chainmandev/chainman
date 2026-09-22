@@ -172,7 +172,7 @@
           ] "";
           python = shell "python" [ pkgs.uv pkgs.ruff ] "";
           go = shell "go" [ pkgs.go_latest pkgs.stdenv.cc ] "";
-          control = shell "control" [ pkgs.go_latest pkgs.stdenv.cc ] "";
+          control = shell "control" [ pkgs.go_latest pkgs.stdenv.cc pkgs.lefthook ] "";
           flutter = shell "flutter" [ flutterPkgs.flutter ] "";
           swift =
             shellWith (if pkgs.stdenv.hostPlatform.isDarwin then pkgs.mkShellNoCC else pkgs.mkShell) base

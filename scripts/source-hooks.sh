@@ -1,7 +1,7 @@
 #!/bin/sh
 # Source-development entry; consumers always enter through their verified pin.
 set -eu
-source=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+source=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." && pwd)
 if [ "${1:-}" = _hook-worker ]; then
     shift
     exec "$source/scripts/enter.sh" bootstrap python3 "$source/scripts/hook_worker.py" "$CHAINMAN_PROJECT_ROOT" "$@"
@@ -21,6 +21,8 @@ esac
 # shellcheck source=bootstrap/lifetime.sh
 . "$source/bootstrap/lifetime.sh"
 output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-source-hooks.XXXXXXXX")
+lifetime_directory=$output
+output=$(CDPATH='' cd -P -- "$output" && pwd)
 lifetime_directory=$output
 lifetime_helper "$source/scripts/enter.sh" bootstrap python3 "$source/scripts/hook_worker.py" "$source" export "$output" "$target" "$git" "$source/scripts/source-hooks.sh" format-staged
 lifetime_grace=10

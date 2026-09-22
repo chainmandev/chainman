@@ -1355,28 +1355,10 @@ func owned(state, name string, probe bool, generation string) int {
 			e = <-done
 		}
 	}
-	killMembers(id.PID, syscall.SIGTERM)
-	deadline := time.Now().Add(time.Duration(s.Shutdown) * time.Second)
-	for time.Now().Before(deadline) {
-		members, err := groupMembers(id.PID)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return 1
-		}
-		live := false
-		for _, pid := range members {
-			if pid != id.PID {
-				if _, err := birth(pid); err == nil {
-					live = true
-				}
-			}
-		}
-		if !live {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
+	if e := finishGroup(id.PID, time.Now().Add(time.Duration(s.Shutdown)*time.Second)); e != nil {
+		fmt.Fprintln(os.Stderr, e)
+		return 1
 	}
-	killMembers(id.PID, syscall.SIGKILL)
 	if s.Container != nil {
 		if err := stopContainer(s.Container, s.Shutdown); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -1388,6 +1370,31 @@ func owned(state, name string, probe bool, generation string) int {
 		return 124
 	}
 	return exitCode(e)
+}
+
+// The calling process remains alive as the group's identity anchor throughout.
+func finishGroup(group int, deadline time.Time) error {
+	killMembers(group, syscall.SIGTERM)
+	for time.Now().Before(deadline) {
+		members, err := groupMembers(group)
+		if err != nil {
+			return err
+		}
+		live := false
+		for _, pid := range members {
+			if pid != group {
+				if _, err := birth(pid); err == nil {
+					live = true
+				}
+			}
+		}
+		if !live {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	killMembers(group, syscall.SIGKILL)
+	return nil
 }
 func killMembers(group int, sig syscall.Signal) {
 	members, e := groupMembers(group)
@@ -1428,6 +1435,9 @@ func exitCode(e error) int {
 	return 1
 }
 func mainAction(args []string) (result int) {
+	if len(args) > 0 && args[0] == "hook-exec" {
+		return exitCode(hookExec(args[1:]))
+	}
 	if len(args) > 0 && args[0] == "hook" {
 		return hookAction(args[1:])
 	}

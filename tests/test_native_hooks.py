@@ -6,9 +6,11 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SOURCE = Path(__file__).resolve().parents[1]
@@ -424,6 +426,158 @@ check=["true"]
         self.assertNotEqual(self.hook("install", check=False).returncode, 0)
         self.assertEqual(locked.read_text(), "other writer")
         self.assertEqual((self.root / ".git/config").read_bytes(), before)
+
+    def test_host_hook_entry_resolves_symlinked_temporary_directory(self):
+        physical = self.base / "physical temporary files"
+        physical.mkdir()
+        alias = self.base / "temporary alias"
+        alias.symlink_to(physical, target_is_directory=True)
+        shutil.copyfile(SOURCE / "bootstrap/lifetime.sh", self.control / "lifetime.sh")
+        export = self.control / "export.py"
+        export.write_text(
+            "import json,shutil,sys\nfrom pathlib import Path\n"
+            "output=Path(sys.argv[2])\n"
+            f"plan=json.loads(Path({str(self.control / 'plan.json')!r}).read_text())\n"
+            f"shutil.copyfile({CONTROL!r},output/'chainman-control')\n"
+            "(output/'chainman-control').chmod(0o700)\n"
+            "plan['directory']=str(output)\n"
+            "(output/'plan.json').write_text(json.dumps(plan))\n"
+        )
+        self.launcher.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(export))} "$@"\n'
+        )
+        Path(self.plan["lefthook"]).write_text(
+            '#!/bin/sh\ncat "$CHAINMAN_HOOK_INPUT"\n'
+        )
+        records = b"literal hook input stays intact\n"
+        result = subprocess.run(
+            [
+                "sh",
+                str(SOURCE / "bootstrap/hooks.sh"),
+                str(self.launcher),
+                str(self.root),
+                "hooks",
+                "run",
+                "pre-push",
+                "origin",
+                "unused",
+            ],
+            env=dict(self.env, TMPDIR=str(alias)),
+            input=records,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.stdout, records)
+        self.assertEqual(list(physical.iterdir()), [])
+
+    def test_hook_children_stop_before_normal_and_cancelled_exit(self):
+        self.check_hook_child_lifetimes(
+            ("exit", "TERM", "INT", "KILL"), real_lefthook=False
+        )
+
+    def test_real_lefthook_cancellation_cleans_its_separate_job_groups(self):
+        self.check_hook_child_lifetimes(("TERM", "HUP"), real_lefthook=True)
+
+    def test_real_lefthook_cancellation_stops_nested_managed_callback(self):
+        self.check_hook_child_lifetimes(("TERM",), real_lefthook=True, nested=True)
+
+    def check_hook_child_lifetimes(self, actions, *, real_lefthook, nested=False):
+        for action in actions:
+            with self.subTest(action=action, real_lefthook=real_lefthook):
+                marker = self.base / (action + "-pid")
+                trigger = self.base / (action + "-trigger")
+                late = self.base / (action + "-late-write")
+                child = self.control / "lingering.py"
+                child.write_text(
+                    "import os,signal,time\nfrom pathlib import Path\n"
+                    "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+                    "signal.signal(signal.SIGINT,signal.SIG_IGN)\n"
+                    f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                    f"while not Path({str(trigger)!r}).exists(): time.sleep(.01)\n"
+                    f"Path({str(late)!r}).write_text('late write')\n"
+                )
+                launcher = self.control / "parent.py"
+                launcher.write_text(
+                    "import subprocess,sys,time\nfrom pathlib import Path\n"
+                    f"child=subprocess.Popen([sys.executable,{str(child)!r}],"
+                    "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\n"
+                    f"while not Path({str(marker)!r}).exists(): time.sleep(.01)\n"
+                    + ("sys.exit(23)\n" if action == "exit" else "child.wait()\n")
+                )
+                runner = self.control / "lefthook"
+                runner.write_text(
+                    f"#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(launcher))}\n"
+                )
+                if real_lefthook:
+                    self.stage()
+                    actual = shutil.which("lefthook")
+                    self.assertIsNotNone(actual, "hooks-test requires pinned lefthook")
+                    config = self.control / "lefthook.json"
+                    command = shlex.quote(str(runner))
+                    if nested:
+                        self.launcher.write_bytes(runner.read_bytes())
+                        command = '"$CHAINMAN_HOOK_HELPER" hook "$CHAINMAN_HOOK_PLAN" task fixture'
+                    config.write_text(
+                        json.dumps(
+                            {
+                                "pre-commit": {
+                                    "commands": {"lifetime-fixture": {"run": command}}
+                                }
+                            }
+                        )
+                    )
+                    self.plan.update(lefthook=actual, config=str(config))
+                    self.save_plan()
+                helper = subprocess.Popen(
+                    [
+                        CONTROL,
+                        "hook",
+                        str(self.control / "plan.json"),
+                        "run",
+                        "pre-commit",
+                    ],
+                    env=self.env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                pid = None
+                try:
+                    deadline = time.monotonic() + 10
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue(marker.exists())
+                    pid = int(marker.read_text())
+                    if action != "exit":
+                        helper.send_signal(getattr(signal, "SIG" + action))
+                    _, errors = helper.communicate(timeout=12)
+                    self.assertEqual(
+                        helper.returncode,
+                        23
+                        if action == "exit"
+                        else -9
+                        if action == "KILL"
+                        else 128 + getattr(signal, "SIG" + action),
+                        errors.decode(),
+                    )
+                    trigger.touch()
+                    time.sleep(0.1)
+                    self.assertFalse(late.exists(), "child wrote after hook completion")
+                    status = subprocess.run(
+                        ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                        capture_output=True,
+                        text=True,
+                    ).stdout.strip()
+                    self.assertTrue(not status or status.startswith("Z"), status)
+                finally:
+                    if pid is not None:
+                        try:
+                            os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if helper.poll() is None:
+                        helper.kill()
+                        helper.communicate()
 
     def test_bare_backed_worktree_preserves_primary_identity(self):
         bare = self.base / "bare.git"

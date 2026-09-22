@@ -26,6 +26,8 @@ case "$git" in /*) ;; *) git=$(CDPATH='' cd -- "$(dirname -- "$git")" && pwd)/$(
 output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-hooks.XXXXXXXX")
 # The runtime's lifetime supervisor owns signal forwarding and private cleanup.
 lifetime_directory=$output
+output=$(CDPATH='' cd -P -- "$output" && pwd)
+lifetime_directory=$output
 printf '%s\n%s\n' --mount "type=bind,src=$output,dst=$output" > "$output/mounts"
 CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$output/mounts \
     lifetime_helper sh "$self" _hook-export "$output" "$target" "$git" "$self" "$1" < /dev/null >&2

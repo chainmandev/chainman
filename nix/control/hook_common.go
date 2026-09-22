@@ -228,7 +228,7 @@ func (p HookPlan) worker(phase, dir string, args ...string) error {
 	c.Stdin = os.Stdin
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
-	return hookRun(c)
+	return hookRun(c, 0)
 }
 func hookOperation(root string) (func(), error) {
 	base, e := hookPath(root, ".cache/toolchain")
@@ -340,10 +340,9 @@ func hookAction(args []string) int {
 		c.Env = append(c.Env, "CHAINMAN_PROJECT_ROOT="+p.Root)
 		c.Dir = p.Root
 		c.Stdin = os.Stdin
-		c.Stdin = os.Stdin
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
-		e = hookRun(c)
+		e = hookRun(c, 0)
 	case "run":
 		if len(args) < 3 || (args[2] != "pre-commit" && args[2] != "pre-push") || (args[2] == "pre-commit" && len(args) != 3) {
 			fmt.Fprintln(os.Stderr, "Use hooks run pre-commit or hooks run pre-push REMOTE URL")
@@ -387,16 +386,33 @@ func hookAction(args []string) int {
 		c.Stdin = os.Stdin
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
-		e = hookRun(c)
+		// Lefthook cancels its own job/PTY groups through its SIGINT context.
+		// TERM/HUP would otherwise kill it before it can stop those groups.
+		e = hookRun(c, syscall.SIGINT)
 	default:
 		return 2
 	}
 	return exitCode(e)
 }
 
-// Each finite child owns a process group, while this parent retains repository
-// leases until that child has stopped. No background hook supervisor remains.
-func hookRun(c *exec.Cmd) error {
+// Keep the direct child as a live group owner until descendants have stopped.
+// The calling helper stays in its caller's group so nested callbacks still
+// receive cancellation. No persistent state or background supervisor is needed.
+func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
+	self, e := os.Executable()
+	if e != nil {
+		return e
+	}
+	reader, writer, e := os.Pipe()
+	if e != nil {
+		return e
+	}
+	defer reader.Close()
+	defer writer.Close()
+	fd := 3 + len(c.ExtraFiles)
+	c.ExtraFiles = append(c.ExtraFiles, reader)
+	c.Args = append([]string{self, "hook-exec", strconv.Itoa(fd), strconv.Itoa(int(cancelSignal)), c.Path}, c.Args[1:]...)
+	c.Path = self
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -404,13 +420,18 @@ func hookRun(c *exec.Cmd) error {
 	if e := c.Start(); e != nil {
 		return e
 	}
+	reader.Close()
 	done := make(chan error, 1)
 	go func() { done <- c.Wait() }()
 	select {
 	case e := <-done:
 		return e
 	case sig := <-signals:
-		_ = syscall.Kill(-c.Process.Pid, sig.(syscall.Signal))
+		forward := sig.(syscall.Signal)
+		if cancelSignal != 0 {
+			forward = cancelSignal
+		}
+		_ = syscall.Kill(-c.Process.Pid, forward)
 		select {
 		case <-done:
 			return &startupInterrupted{sig.(syscall.Signal)}
@@ -422,13 +443,77 @@ func hookRun(c *exec.Cmd) error {
 	}
 }
 
+// Internal finite-command entry. This process pins the group identity even
+// after the command exits, preventing both orphaned children and PID reuse.
+func hookExec(args []string) error {
+	if len(args) < 3 || syscall.Getpgrp() != os.Getpid() {
+		return fmt.Errorf("hook command requires its own process group")
+	}
+	fd, e := strconv.Atoi(args[0])
+	cancel, x := strconv.Atoi(args[1])
+	if e != nil || x != nil || fd < 3 || (cancel != 0 && cancel != int(syscall.SIGINT)) {
+		return fmt.Errorf("invalid hook command lifetime")
+	}
+	owner := os.NewFile(uintptr(fd), "hook-owner")
+	defer owner.Close()
+	syscall.CloseOnExec(fd)
+	ownerGone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, owner)
+		close(ownerGone)
+	}()
+	c := exec.Command(args[2], args[3:]...)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	signals := make(chan os.Signal, 8)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	if e := c.Start(); e != nil {
+		return e
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	var interrupted os.Signal
+	// Leave time inside hookRun's eight-second deadline for forced cleanup.
+	deadline := time.Time{}
+	select {
+	case e = <-done:
+		deadline = time.Now().Add(7 * time.Second)
+	case interrupted = <-signals:
+	case <-ownerGone:
+		// Lefthook may kill a callback's client group during cancellation.
+		// Its finite command must stop even when that client cannot forward it.
+		interrupted = syscall.SIGTERM
+	}
+	if interrupted != nil {
+		deadline = time.Now().Add(7 * time.Second)
+		forward := interrupted.(syscall.Signal)
+		if cancel != 0 {
+			forward = syscall.Signal(cancel)
+		}
+		_ = syscall.Kill(-os.Getpid(), forward)
+		select {
+		case e = <-done:
+		case <-time.After(time.Until(deadline)):
+			killMembers(os.Getpid(), syscall.SIGKILL)
+			e = <-done
+		}
+	}
+	if cleanup := finishGroup(os.Getpid(), deadline); cleanup != nil {
+		return cleanup
+	}
+	if interrupted != nil {
+		return &startupInterrupted{interrupted.(syscall.Signal)}
+	}
+	return e
+}
+
 func (p HookPlan) hookValidate() error {
 	c := exec.Command(p.Lefthook, "validate")
 	c.Dir = p.Root
 	c.Env = append(os.Environ(), "LEFTHOOK_CONFIG="+p.Config)
 	c.Stdout = os.Stderr
 	c.Stderr = os.Stderr
-	return hookRun(c)
+	return hookRun(c, syscall.SIGINT)
 }
 
 func hookWorkerEnv() []string {
