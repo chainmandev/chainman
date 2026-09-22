@@ -2,14 +2,15 @@
 
 import argparse
 import json
-from pathlib import Path
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TypedDict
 
-import git_runtime
 import chainman_updates
 import config_inspection
 import configuration
+import git_runtime
+import pnpm_setup
 import toolchain as tc
 from adapter_data import table
 
@@ -45,6 +46,13 @@ def check(
     if baseline is not None:
         before, _ = configuration.compile(baseline)
         before.setdefault("modules", ["project"])
+        setups = table(before.get("setup", {}), "Baseline setup")
+        for name, raw in setups.items():
+            spec = table(raw, f"Baseline setup.{name}")
+            if spec.get("pnpm"):
+                setups[name] = {**spec, **pnpm_setup.expand(spec)}
+        if "setup" in before:
+            before["setup"] = setups
         after = dict(cfg)
         after["schema"] = before["schema"]
         if before != after:

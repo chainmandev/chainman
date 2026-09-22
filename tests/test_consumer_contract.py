@@ -1,12 +1,14 @@
 """Pin and configuration checks are static and do not execute project hooks."""
 
-from pathlib import Path
 import shutil
 import sys
 import tempfile
 import unittest
+from copy import deepcopy
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import configuration_files
 import consumer_contract
 
 
@@ -44,6 +46,26 @@ class ConsumerContractTests(unittest.TestCase):
         (self.root / "chainman.lock").write_text("b" * 40 + "\n")
         with self.assertRaisesRegex(ValueError, "revision differs"):
             consumer_contract.check(self.root, self.release)
+
+    def test_pnpm_baseline_expansion_preserves_input_and_detects_changes(self):
+        with (self.root / "chainman.toml").open("a") as stream:
+            stream.write(
+                '\n[setup.javascript]\npnpm=true\ninputs=["package.json"]\nartifacts=["node_modules/.modules.yaml"]\n'
+            )
+        baseline = configuration_files.read(self.root).data
+        original = deepcopy(baseline)
+        result = consumer_contract.check(self.root, self.release, baseline)
+        self.assertTrue(result["baseline_equal"])
+        self.assertEqual(baseline, original)
+        baseline["setup"]["javascript"]["inputs"].append("pnpm-lock.yaml")
+        with self.assertRaisesRegex(ValueError, "baseline"):
+            consumer_contract.check(self.root, self.release, baseline)
+
+    def test_pnpm_baseline_does_not_hide_conflicting_installer(self):
+        baseline = configuration_files.read(self.root).data
+        baseline["setup"] = {"javascript": {"pnpm": True, "commands": [["unexpected"]]}}
+        with self.assertRaisesRegex(ValueError, "supplies commands and readiness"):
+            consumer_contract.check(self.root, self.release, baseline)
 
     def test_copy_permissions_and_symlink_boundary(self):
         (self.root / "chainman.lock").chmod(0o664)
