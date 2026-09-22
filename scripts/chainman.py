@@ -573,6 +573,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             import update_staging
 
             return update_staging.run(root, args.action, args.arguments)
+        if args.action in {"_hook-export", "_hook-worker"}:
+            import hook_worker
+
+            if args.action == "_hook-export":
+                return hook_worker.export(root, args.arguments)
+            return hook_worker.run(root, args.arguments)
         if args.action == "_control-export":
             import services
 
@@ -601,22 +607,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
-        if os.environ.pop("TOOLCHAIN_GIT_HOOKS_REPAIR", ""):
-            import hooks
-
-            if not (
-                (args.action == "hooks" and rest == ["install"])
-                or (
-                    args.action == "setup"
-                    and not rest
-                    and hooks.declaration(cfg).get("enabled", False)
-                    and not os.environ.get("CHAINMAN_UPDATE_ACTIVE")
-                )
-            ):
-                raise ValueError(
-                    "Unavailable Git hooks require `just hooks install` or host-nix"
-                )
-            hooks.check_container_repair(root)
         if args.action == "_service-prepare":
             import services
 
@@ -672,14 +662,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             import config_inspection
 
             config_inspection.run(root, args.action, rest)
-        elif args.action == "hooks":
-            import hooks
-
-            return hooks.execute(root, rest)
-        elif args.action == "trojan-source":
-            import trojan_source
-
-            return trojan_source.run(root, rest)
+        elif args.action in {"hooks", "trojan-source", "format-staged"}:
+            raise ValueError(
+                "Start hooks through the host bootstrap; run Git on the host or use host Nix"
+            )
         elif args.action == "setup":
             import hooks
             import recipes
@@ -708,18 +694,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "Complete setup with managed hooks requires a Nix mode; use setup --no-hooks for limited bare-host preparation"
                 )
             if install_hooks:
-                hooks.check_installation(root)
+                raise ValueError(
+                    "Start complete setup through the host bootstrap for hook installation"
+                )
             run_project(root, "setup", groups)
             for task in extensions:
                 run_project(root, task, [])
-            if install_hooks:
-                return hooks.execute(root, ["install"])
-        elif args.action == "format-staged":
-            import staged_format
-
-            if rest:
-                raise ValueError("format-staged accepts no arguments")
-            return staged_format.run(root)
         elif args.action == "setup-status":
             import workflows
 

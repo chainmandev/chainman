@@ -4,7 +4,7 @@ This starter pins chainman in `chainman.lock`. The small `chainman` recipe in th
 justfile fetches and verifies that Git revision. chainman is not installed globally;
 any checkout used to generate this project can be deleted.
 
-Install **Git 2.42+ + just + Docker or Podman**. Container Nix is the default. Alternatively,
+Install **Git + just + Docker or Podman**. Container Nix is the default. Alternatively,
 install Nix 2.24 or newer and select host-Nix mode:
 
 ```sh
@@ -51,6 +51,6 @@ automatic repair requires `CHAINMAN_SETUP=auto`.
 `just setup --no-hooks` in disposable CI. `just hooks status` checks installation;
 `just hooks config` shows the effective lefthook configuration. Pre-commit formats
 staged Python files without linting; pre-push scans outgoing source for suspicious
-Unicode. Partial staging is preserved through a three-way merge. See
+Unicode. Partially staged files that need formatting stop the commit before changes are applied. See
 [the hook guide](https://github.com/chainmandev/chainman/blob/HEAD/docs/hooks.md)
 for overrides, formatter declarations and conflict recovery.

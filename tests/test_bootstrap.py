@@ -46,12 +46,14 @@ class BootstrapTests(unittest.TestCase):
     def setUpClass(cls):
         cls.shared = tempfile.TemporaryDirectory(prefix="chainman bootstrap assets ")
         cls.addClassCleanup(cls.shared.cleanup)
-        cls.test_volume = (
+        cls.test_volume = os.environ.get("CHAINMAN_TEST_NIX_VOLUME") or (
             "chainman-bootstrap-test-"
             + hashlib.sha256(cls.shared.name.encode()).hexdigest()[:16]
         )
         cls.test_engine = os.environ.get("CHAINMAN_TEST_CONTAINER")
-        if cls.test_engine in ("docker", "podman"):
+        if cls.test_engine in ("docker", "podman") and not os.environ.get(
+            "CHAINMAN_TEST_NIX_VOLUME"
+        ):
             cls.addClassCleanup(cls.cleanup_store)
         cls.tree = Path(cls.shared.name).resolve() / "runtime"
         (cls.tree / "scripts").mkdir(parents=True)
@@ -572,8 +574,15 @@ format-check=["format-check"]
         self.lifecycle_git("add", "selected.txt", "partial.txt")
         (self.root / "partial.txt").write_text("staged  \nkeep\nkeep\nunstaged\n")
         (self.root / "excluded.txt").write_text("excluded  \n")
+        rejected = self.run_bootstrap("format-staged", check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("partially staged", rejected.stderr)
+        self.assertEqual(self.lifecycle_git("show", ":selected.txt"), "selected  ")
+        (self.root / "partial.txt").write_text("staged\nkeep\nkeep\nlast\n")
+        self.lifecycle_git("add", "partial.txt")
+        (self.root / "partial.txt").write_text("staged\nkeep\nkeep\nunstaged\n")
         result = self.run_bootstrap("format-staged")
-        self.assertIn("Formatted 2", result.stdout)
+        self.assertIn("Formatted 1", result.stdout)
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
         self.assertEqual((self.root / "selected.txt").read_text(), "selected\n")
         self.assertEqual(
@@ -649,6 +658,40 @@ check=["true"]
         self.assertEqual((self.root / "received-input").read_text(), records)
         self.assertIn("Trojan Source: checked", result.stdout + result.stderr)
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_native_hook_setup_and_commit_a(self):
+        self.env.update(
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        self.env.pop("CHAINMAN_NIX_BIN", None)
+        tools = Path(self.shared.name) / "hook host tools"
+        tools.mkdir()
+        allowed = "sh git just wc mkdir mktemp ln rm dirname basename date id uname tr grep sed awk cat readlink find sleep cksum cut chmod realpath sort head tail stat xargs touch env df rmdir ps".split()
+        for name in [*allowed, self.test_engine]:
+            path = shutil.which(name) or shutil.which(name, path=os.defpath)
+            self.assertIsNotNone(path, name)
+            (tools / name).symlink_to(path)
+        self.env["PATH"] = str(tools)
+        for name in ("nix", "python3", "node", "go", "lefthook"):
+            self.assertIsNone(shutil.which(name, path=str(tools)))
+        self.test_public_hook_setup_and_commit_a()
+        rejected = self.run_bootstrap(
+            "exec",
+            "--profile",
+            "core",
+            "--",
+            "sh",
+            "-eu",
+            "-c",
+            'exec sh "$CHAINMAN_RUNTIME/bootstrap/chainman.sh" hooks status',
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("run Git/hooks on the host", rejected.stderr)
+
     def test_public_global_text_policy(self):
         self.global_text_policy(container=False)
 
@@ -694,8 +737,7 @@ check=["true"]
         rejected = self.run_bootstrap(
             "exec", "--profile", "core", "--", "true", check=False
         )
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("Git hooks path", rejected.stderr)
+        self.assertEqual(rejected.returncode, 0, rejected.stderr)
         self.run_bootstrap("hooks", "install")
         self.assertTrue(
             json.loads(self.run_bootstrap("hooks", "status").stdout)["installed"]
@@ -736,7 +778,7 @@ check=["true"]
             "sh",
             "-eu",
             "-c",
-            'git config --local user.name Updated; test "$(git config --get user.name)" = Updated; test "$(git -C nested config --get user.email)" = work@example.invalid; test "$(git -C nested config --get core.autocrlf)" = input; test "$(git check-attr eol -- sample.txt)" = "sample.txt: eol: crlf"; printf "*.txt text eol=lf\\n" > local-attributes; git config --local core.attributesFile local-attributes; test "$(git check-attr eol -- sample.txt)" = "sample.txt: eol: lf"; echo live-policy-ok',
+            'git config --local user.name Updated; test "$(git config --get user.name)" = Updated; test -z "$(git -C nested config --get user.email)"; test -z "$(git -C nested config --get core.autocrlf)"; test "$(git check-attr eol -- sample.txt)" = "sample.txt: eol: unspecified"; printf "*.txt text eol=lf\\n" > local-attributes; git config --local core.attributesFile local-attributes; test "$(git check-attr eol -- sample.txt)" = "sample.txt: eol: lf"; echo live-policy-ok',
         )
         self.assertIn("live-policy-ok", result.stdout)
         self.assertEqual(self.lifecycle_git("config", "--get", "user.name"), "Updated")
@@ -829,9 +871,14 @@ check=["true"]
                 (self.root / "sample.txt").write_bytes(
                     b"BAD\r\nkeep\r\nkeep\r\nunstaged\r\n"
                 )
+                rejected = self.run_bootstrap("format-staged", check=False)
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn("partially staged", rejected.stderr)
+                self.lifecycle_git("add", "sample.txt")
                 self.run_bootstrap("format-staged")
                 self.assertEqual(
-                    self.lifecycle_git("show", ":sample.txt"), "GOOD\nkeep\nkeep\nlast"
+                    self.lifecycle_git("show", ":sample.txt"),
+                    "GOOD\nkeep\nkeep\nunstaged",
                 )
                 expected = b"GOOD\nkeep\nkeep\nunstaged\n"
                 if policy != "local-override":
@@ -861,7 +908,7 @@ check=["true"]
             "import subprocess\n"
             "for root in ['.', 'nested repository']:\n"
             " for args in [['check-attr','text','eol','--','probe.txt'],['config','--get','core.autocrlf'],['config','--get','core.eol']]:\n"
-            "  subprocess.run(['git','-C',root,*args],check=True)\n"
+            "  subprocess.run(['git','-C',root,*args],check=False)\n"
         )
         config.write_text(config.read_text() + " eol = native\n")
         result = self.run_bootstrap(
@@ -883,9 +930,16 @@ check=["true"]
         result = self.run_bootstrap(
             "exec", "--profile", "core", "--", "python3", "probe.py"
         )
-        self.assertIn(
-            "probe.txt: text: set\nprobe.txt: eol: crlf\nfalse\nnative", result.stdout
-        )
+        if container:
+            self.assertIn(
+                "probe.txt: text: unspecified\nprobe.txt: eol: unspecified",
+                result.stdout,
+            )
+        else:
+            self.assertIn(
+                "probe.txt: text: set\nprobe.txt: eol: crlf\nfalse\nnative",
+                result.stdout,
+            )
         for key in ("core.attributesFile", "core.autocrlf", "core.eol"):
             self.lifecycle_git("config", "--unset", key)
         attributes.write_text("*.txt filter=host-filter\n")
@@ -896,7 +950,7 @@ check=["true"]
         before = (self.root / "sample.txt").read_bytes()
         result = self.run_bootstrap("format-staged", check=False)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Unsupported Git content transformation", result.stderr)
+        self.assertIn("unsupported Git content transformation", result.stderr)
         self.assertEqual((self.root / "sample.txt").read_bytes(), before)
         self.assertFalse((self.root / "must-not-exist").exists())
 
@@ -927,6 +981,8 @@ check=["true"]
         )
         self.run_bootstrap("exec", "--profile", "core", "--", "python3", "probe.py")
 
+        if container:
+            return
         external_hooks = external / "hooks"
         external_hooks.mkdir(exist_ok=True)
         hook = external_hooks / "pre-commit"
@@ -952,31 +1008,6 @@ check=["true"]
             self.assertFalse((self.root / "external-hook-ran").exists())
         else:
             self.assertTrue((self.root / "external-hook-ran").exists())
-
-    def test_container_rejects_old_git_before_contacting_engine(self):
-        tools = self.root / "old-tools"
-        tools.mkdir()
-        git = shutil.which("git")
-        (tools / "git").write_text(
-            '#!/bin/sh\ncase "$*" in *"var GIT_ATTR_"*) exit 1;; esac\nexec '
-            + shlex.quote(git)
-            + ' "$@"\n'
-        )
-        marker = self.root / "engine-contacted"
-        (tools / "docker").write_text(
-            "#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\nexit 1\n"
-        )
-        for path in tools.iterdir():
-            path.chmod(0o755)
-        self.env.update(
-            PATH=str(tools) + os.pathsep + self.env["PATH"],
-            CHAINMAN_MODE="container-nix",
-            CHAINMAN_CONTAINER_ENGINE="docker",
-        )
-        result = self.run_bootstrap("config", check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Git 2.42+", result.stderr)
-        self.assertFalse(marker.exists())
 
     def test_public_full_update_resolves_and_verifies_with_the_new_runtime(self):
         self.runtime_update_lifecycle("deps-update")
@@ -2758,7 +2789,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         record = json.loads(next(nested.glob("record-*.json")).read_text())
         self.assertFalse(record["parent_admin_visible"])
-        self.assertEqual(record["git_name"], "Global policy")
+        self.assertEqual(record["git_name"], "")
 
 
 if __name__ == "__main__":

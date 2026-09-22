@@ -1,5 +1,9 @@
 #!/bin/sh
-# Pinned runtime entry used by the effective lefthook configuration.
+# Callback from native lefthook into the selected, verified runtime.
 set -eu
 if [ -n "${CHAINMAN_HOOK_INPUT:-}" ]; then exec < "$CHAINMAN_HOOK_INPUT"; fi
-exec "$CHAINMAN_RUNTIME_PYTHON" "$CHAINMAN_RUNTIME/scripts/chainman.py" --root "$CHAINMAN_ROOT" "$@"
+if [ "${1:-}" = run ]; then
+    shift
+    set -- task "$@"
+fi
+exec "$CHAINMAN_HOOK_HELPER" hook "$CHAINMAN_HOOK_PLAN" "$@"

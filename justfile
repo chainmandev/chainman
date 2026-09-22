@@ -32,7 +32,7 @@ format-write:
     @./scripts/enter.sh core python3 scripts/format.py
 
 format-staged:
-    @./scripts/enter.sh core python3 scripts/staged_format.py
+    @./scripts/source-hooks.sh
 
 format-check:
     @./scripts/enter.sh core python3 scripts/format.py --check
@@ -101,3 +101,7 @@ gradle-test:
 # Static consumer validation; never executes project workflows.
 consumer-check +args:
     @./scripts/enter.sh core python3 scripts/consumer_contract.py "$@"
+
+# Native Git hooks in disposable fixtures; no application gates or pushes.
+hooks-test:
+    @./scripts/enter.sh control python3 scripts/hook_test.py

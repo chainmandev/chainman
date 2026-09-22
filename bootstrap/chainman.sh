@@ -342,6 +342,24 @@ if [ "$CHAINMAN_REQUEST_ACTION" = format ] && [ "${2:-}" = --staged ]; then
     export CHAINMAN_REQUEST_ACTION
 fi
 
+# Host Git owns repository hooks; managed phases never translate host policy.
+case "$CHAINMAN_REQUEST_ACTION" in
+    hooks | format-staged | trojan-source)
+        lifetime_grace=15
+        lifetime_is_helper=1
+        lifetime_run sh "$script_dir/hooks.sh" "$self" "$root" "$@"
+        exit $?
+        ;;
+    setup)
+        if [ "$#" = 1 ] && [ -z "${CHAINMAN_UPDATE_ACTIVE:-}" ]; then
+            lifetime_grace=15
+            lifetime_is_helper=1
+            lifetime_run sh "$script_dir/hooks.sh" "$self" "$root" "$@"
+            exit $?
+        fi
+        ;;
+esac
+
 case "$CHAINMAN_REQUEST_ACTION" in
     deps-update | chainman-update | format)
         [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || fail 'Start updates through the host launcher so candidate verification can control its own services.'
@@ -493,8 +511,6 @@ os.execv(sys.executable, [sys.executable,
     store + "/scripts/chainman.py", "--root", root, *args])
 ' "$root" "$store" "$@"
 fi
-
-sh "$script_dir/git-attributes.sh" --check
 
 engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
 if [ -z "$engine" ]; then
@@ -917,7 +933,7 @@ while IFS= read -r option; do
     case "${HOME:-/}/" in "$source/"*) fail 'Blanket host or socket mounts are not supported.' ;; esac
     case "$target" in /*) ;; *) fail 'Mount target must be absolute.' ;; esac
     case "$target/" in *'/../'* | *'/./'* | *'//'*) fail 'Mount target must be normalized.' ;; esac
-    case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-x11-authority | /chainman-x11-source | /chainman-x11-output | /chainman-inspection-options | /chainman-git-policy | /chainman-git-policy/* | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
+    case "$target" in / | /tmp | /nix | /nix/* | /chainman-bootstrap | /chainman-x11-authority | /chainman-x11-source | /chainman-x11-output | /chainman-inspection-options | /chainman-downloads | /chainman-downloads/* | "$root" | "$root/.chainman" | "$root/.chainman/"*) fail 'Mount shadows a bootstrap directory.' ;; esac
     case "$root/" in "$target/"*) fail 'Mount shadows the project through an ancestor.' ;; esac
     if [ "$authority" != "$root" ]; then
         case "$target/" in "$authority/"*) fail 'Mount shadows update entry authority.' ;; esac
@@ -976,7 +992,6 @@ fi
 # A linked worktree needs only its Git administrative directory, not its other
 # checkout. Retained Git settings keep their repository/command scope.
 count=0
-policy_unavailable=0
 if [ "$authority" != "$root" ]; then
     # Candidates have a self-contained, frozen Git directory. Never ask their
     # mutable metadata to select host administrative mounts or signing policy.
@@ -1015,81 +1030,7 @@ elif command -v git > /dev/null 2>&1; then
             ;;
         esac
     fi
-    case "$CHAINMAN_REQUEST_ACTION" in
-        hooks | format-staged)
-            if [ -n "${GIT_INDEX_FILE:-}" ]; then
-                case "$GIT_INDEX_FILE" in /*) ;; *) GIT_INDEX_FILE=$root/$GIT_INDEX_FILE ;; esac
-                single_line "$GIT_INDEX_FILE"
-                case "$GIT_INDEX_FILE" in
-                    "$root"/* | "$admin"/* | "$gitdir"/*) ;;
-                    *)
-                        index_parent=$(dirname -- "$GIT_INDEX_FILE")
-                        case "$index_parent" in / | /tmp | /var/tmp | "${HOME:-/}" | *,*) fail 'Use an alternate index in a dedicated directory or the Git administrative directory for container hooks.' ;; esac
-                        [ -d "$index_parent" ] && [ ! -L "$index_parent" ] || fail 'Alternate index needs a real parent directory.'
-                        set -- --mount "type=bind,src=$index_parent,dst=$index_parent" "$@"
-                        ;;
-                esac
-                export GIT_INDEX_FILE
-                set -- --env GIT_INDEX_FILE "$@"
-            fi
-            ;;
-    esac
-    text_scope=global
-    if [ "$git_owner" = "$root" ]; then text_scope=repository; fi
-    sh "$script_dir/git-text-policy.sh" "$root" "$temporary/git-policy" "$text_scope"
-    printf '%s\n%s\n' "$root" "$root" >> "$temporary/mounts"
-    if [ "$git_owner" = "$root" ]; then
-        printf '%s\n%s\n%s\n%s\n' "$admin" "$admin" "$gitdir" "$gitdir" >> "$temporary/mounts"
-        sh "$script_dir/git-local-includes.sh" "$root" "$temporary/mounts"
-    fi
-    # Only the ownership-aware installer may repair an unavailable path. The
-    # runtime must confirm a recorded relocation before setup or any other work.
-    if ! sh "$script_dir/git-hooks-path.sh" "$root" "$temporary/mounts" "$text_scope" 2> "$temporary/hooks-diagnostic"; then
-        case "$CHAINMAN_REQUEST_ACTION:$CHAINMAN_REQUEST_TASK" in
-            hooks:install | setup:)
-                set -- --env TOOLCHAIN_GIT_HOOKS_REPAIR=1 "$@"
-                ;;
-            *)
-                cat "$temporary/hooks-diagnostic" >&2
-                exit 2
-                ;;
-        esac
-    fi
-    if [ "$git_owner" = "$root" ]; then
-        attribute_origin=$(git -C "$root" config --show-scope --get core.attributesFile | cut -f1)
-        case "$attribute_origin" in
-            local | worktree)
-                attribute_raw=$(git -C "$root" config --get core.attributesFile)
-                case "$attribute_raw" in '~'*) fail 'Use an absolute or repository-relative local core.attributesFile in container mode; host HOME is not mounted.' ;; esac
-                attribute_path=$(git -C "$root" var GIT_ATTR_GLOBAL) || attribute_path=
-                case "$attribute_path" in '' | /*) ;; *) attribute_path=$root/$attribute_path ;; esac
-                if [ -e "$attribute_path" ]; then
-                    attribute_parent=$(CDPATH='' cd -P -- "$(dirname -- "$attribute_path")" && pwd -P)
-                    attribute_path=$attribute_parent/$(basename -- "$attribute_path")
-                    [ ! -L "$attribute_path" ] || fail 'Local core.attributesFile symlinks require host-nix; select a regular attribute file or repository .gitattributes.'
-                fi
-                case "$attribute_path" in
-                    '' | /dev/null | "$root"/*) ;;
-                    /*)
-                        single_line "$attribute_path"
-                        case "$attribute_path" in /nix/* | /proc/* | /sys/* | /dev/* | /chainman-* | *,*) fail 'Unsafe external Git attributes destination; use host-nix.' ;; esac
-                        if [ -e "$attribute_path" ]; then
-                            [ -f "$attribute_path" ] && [ -r "$attribute_path" ] || fail 'External Git attributes must be a readable regular file.'
-                            cat -- "$attribute_path" > "$temporary/git-policy/local-attributes"
-                            set -- --mount "type=bind,src=$temporary/git-policy/local-attributes,dst=$attribute_path,readonly" "$@"
-                        fi
-                        ;;
-                esac
-                ;;
-        esac
-    fi
-    set -- --mount "type=bind,src=$temporary/git-policy,dst=/chainman-git-policy,readonly" \
-        --env GIT_ATTR_NOSYSTEM=1 --env GIT_CONFIG_SYSTEM=/chainman-git-policy/system --env GIT_CONFIG_NOSYSTEM=0 \
-        --env GIT_CONFIG_GLOBAL=/chainman-git-policy/global "$@"
-    set -- --env "GIT_CONFIG_KEY_$count=include.path" --env "GIT_CONFIG_VALUE_$count=/chainman-git-policy/command" "$@"
-    count=$((count + 1))
-elif [ -f "${GIT_CONFIG_GLOBAL:-${HOME:-/}/.gitconfig}" ]; then
-    policy_unavailable=1
+
 fi
 case "$self" in "$root"/*) ;; *) set -- --mount "type=bind,src=$source_root,dst=$source_root,readonly" "$@" ;; esac
 if [ "$authority" != "$root" ]; then
@@ -1103,20 +1044,20 @@ if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
     set -- --name "$CHAINMAN_CONTAINER_NAME" --label "dev.chainman.owner=$CHAINMAN_CONTAINER_OWNER" "$@"
 fi
 project_mount="type=bind,src=$root,dst=$root"
-if [ "$CHAINMAN_REQUEST_ACTION" = _control-export ]; then project_mount=$project_mount,readonly; fi
+case "$CHAINMAN_REQUEST_ACTION" in _control-export | _hook-export) project_mount=$project_mount,readonly ;; esac
 set -- --rm --init --interactive --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
     --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
+    --env CHAINMAN_HOOK_REMOTE_NAME --env CHAINMAN_HOOK_REMOTE_URL \
     --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
     --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION --env CHAINMAN_HOST_PLATFORM \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
-    --env "TOOLCHAIN_GIT_POLICY_UNAVAILABLE=$policy_unavailable" --env CI --env TERM \
-    --env GIT_AUTHOR_NAME --env GIT_AUTHOR_EMAIL --env GIT_COMMITTER_NAME --env GIT_COMMITTER_EMAIL "$@"
+    --env CI --env TERM "$@"
 if [ -t 0 ] && [ -t 1 ]; then set -- --tty "$@"; fi
 if [ "$engine" = podman ]; then set -- --userns=keep-id "$@"; fi
 if [ -n "${CHAINMAN_CONTAINER_OPTIONS_FILE:-}" ]; then
@@ -1135,7 +1076,7 @@ if [ "$transport_readiness" = error ]; then
     CHAINMAN_SETUP=error
     export CHAINMAN_SETUP
 fi
-if [ -d "$temporary/git-policy" ] || [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
+if [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
     # The supervisor owns cleanup through interruption and normal exit.
     trap - EXIT HUP INT TERM
     exec sh "$script_dir/setup-prompt.sh" --cleanup-directory "$temporary" "$engine" "$@"

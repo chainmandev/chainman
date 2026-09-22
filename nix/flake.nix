@@ -229,6 +229,10 @@
                 value = import ./control.nix { inherit pkgs target; };
               }
               {
+                name = "hook-lefthook-${target}";
+                value = import ./hook-lefthook.nix { inherit pkgs target; };
+              }
+              {
                 name = "task-${target}";
                 value = import ./control.nix {
                   inherit pkgs target;

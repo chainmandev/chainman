@@ -482,10 +482,6 @@ def staged_entries(root: Path) -> dict[str, tuple[str, str]]:
 
 
 def signing_required(root: Path) -> bool:
-    if os.environ.get("TOOLCHAIN_GIT_POLICY_UNAVAILABLE") == "1":
-        raise ValueError(
-            "Host Git signing policy could not be read; use host mode or --no-commit"
-        )
     result = subprocess.run(
         ["git", "config", "--bool", "--get", "commit.gpgsign"],
         cwd=root,

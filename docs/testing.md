@@ -38,7 +38,11 @@ unit fixtures test the surrounding policy, not the substituted boundary.
 
 Unit transaction tests use real Git/index/raw-file state in disposable projects.
 They cover frozen authority, declared output scope, concurrent edits, verification
-failure, partial application, staged formatting, and resume. Runtime selection tests
+failure, partial application, and resume.
+`just hooks-test` builds the native helper once and tests real host Git indexes,
+installation ownership, partial-file refusal, concurrency, interrupted application,
+and outgoing scanning. The opt-in container hook fixture removes host Nix, Python,
+Node, Go and lefthook from PATH while using real container-managed tools. Runtime selection tests
 cover default-branch discovery and renaming, unavailable/empty remotes, rewritten
 history, same-version/different-SHA updates, unchanged pins, pin copies, failed
 source acquisition, and frozen selection across branch movement and resume.

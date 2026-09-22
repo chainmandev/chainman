@@ -19,6 +19,7 @@ Use focused tests while iterating, then run the full declared gate:
 just exec python3 -B -m unittest discover -s tests -p test_git_bootstrap.py -v
 just exec python3 -B -m unittest discover -s tests -p test_self_update.py -v
 just exec python3 -B -m unittest discover -s tests -p test_update_staging.py -v
+just hooks-test    # focused host-Git hooks and isolated formatter fixtures
 just control-test
 just bootstrap-test docker
 just bootstrap-test podman

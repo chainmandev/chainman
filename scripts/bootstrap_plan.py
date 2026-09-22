@@ -19,6 +19,8 @@ from adapter_data import array, strings, table, text
 
 INTERNAL = {
     "_control-export",
+    "_hook-export",
+    "_hook-worker",
     "_workflow-task",
     "_workflow-service",
     "_workflow-probe",
@@ -101,7 +103,7 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     # nested native-tool export available through the same read-only transport.
     if request in {"services-status", "services-stop", "services-logs"}:
         return True, ["--controller", "1"]
-    if request == "_control-export":
+    if request in {"_control-export", "_hook-export", "_hook-worker"}:
         return False, []
     cfg = config_inspection.validated(root)
     tasks = table(cfg.get("tasks", {}), "Tasks")

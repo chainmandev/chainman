@@ -48,7 +48,7 @@ implementations; project doctor and clean tasks supplement those defaults.
 | `format` | Generate, format/autofix, check formatting and hygiene in an isolated candidate, then commit the exact verified result |
 | `format-write` | Run the declared formatter/autofix tasks in place |
 | `format-check` | Check formatting without changing source |
-| `format-staged` | Format the active staged snapshot; merge formatting into partial working edits |
+| `format-staged` | Format fully staged changes; refuse partial files that need formatting |
 | `verify` | Run the complete declared project gate |
 | `verify-lite` | Run the declared smaller gate |
 | `deps-update` | Resolve, audit, reconcile, verify and commit dependency updates |

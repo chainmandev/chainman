@@ -31,7 +31,8 @@ only formatted bytes on stdout, set `stdin = true`. No filenames are appended in
 this mode. For example, `rustfmt --edition 2024 --emit stdout` formats a single
 Rust source without traversing sibling modules; add `--check` to its check command.
 Supply an explicit config path if the project keeps settings outside its root.
-Symlinks and submodule contents are never formatted.
+Symlinks and submodule contents are never formatted. Paths must be valid UTF-8;
+unsupported filename encodings stop the operation before application.
 
 Add short project-owned recipes alongside the complete bootstrap:
 
@@ -105,90 +106,68 @@ generation, builds, or repository-wide formatting task**. If no declared
 formatter matches, it does not prepare any formatter environment.
 
 The transaction snapshots Git's active index, including `GIT_INDEX_FILE` and the
-temporary index used by `git commit -a` or a path-limited commit. Formatter
-configuration and files come from staged blobs; orchestration declarations are
-frozen independently. Existing working-tree edits cannot silently become staged.
+temporary index supplied by `git commit -a`, amend, or a path-limited commit.
+Formatter configuration and source files come from staged blobs; orchestration
+declarations are frozen separately. `commit -a` retains Git's normal behavior:
+current tracked changes are included even when an earlier version was staged.
 
-For a fully staged file, the formatted result updates both index and worktree.
-For a partially staged file, chainman formats its staged version and three-way
-merges that formatting into the working version. Only formatted staged content
-enters the index. A genuine merge conflict, concurrent edit, formatter failure or
-out-of-scope output stops the transaction. It does not stash, reset, run clean
-filters, or delete Git-owned lockfiles. Resolve a reported conflict by staging a
-coherent version or formatting that file manually, then retry.
+Fully staged files are formatted in the index and working tree. A partially staged
+file passes unchanged when its staged content is already formatted. If its staged
+content needs formatting, the **whole transaction stops before applying changes**.
+Format and review that file, stage the intended changes, and retry. chainman does
+not merge formatting into unstaged edits, stash files, or run repository-wide tasks.
 
-Git's built-in LF/CRLF normalization is respected: a fully staged CRLF working
-file is not an unstaged edit merely because the index contains LF. Formatting
-merges use normalized text and preserve the selected working-tree EOL convention.
-Staged and working repository attributes must agree and remain unchanged during
-the operation. Container entry captures supported external system/global settings
-(identity, signing, hook paths and text policy) and attribute data in read-only
-snapshots. Includes retain their order and conditions: Git evaluates `gitdir` and
-`onbranch` conditions for each repository, including nested ones. Remote-dependent
-`hasconfig` conditions and other unsupported conditions require host-Nix: copying
-remote configuration to evaluate them could expose credentials.
-Relative `gitdir` patterns retain their original configuration-file location.
-External include graphs are bounded to ten levels; cycles or deeper graphs stop
-entry. Unsupported external settings such as filter commands are not copied.
+Native host Git owns index access, repository discovery and configuration queries.
+Git evaluates its own conditional includes, symlinks and attribute paths. Built-in
+LF/CRLF normalization is supported; CRLF alone does not make a file partially staged.
+Staged and working attributes must agree for files being changed. Custom clean/smudge
+filters, ident expansion and working-tree encodings receive an unsupported-transformation
+diagnostic; hooks do not execute these transformations implicitly.
 
-Repository and worktree settings stay live at their normal Git precedence. A
-`git config --local` write is visible to the next Git command in the same shell.
-Explicit command-scope settings still override local settings, as they do in Git.
-Valueless, empty and numeric boolean settings retain Git's interpretation.
-Local/worktree include files must already be reachable through the project, Git
-administration or declared mounts; an unavailable active include stops entry.
-Use absolute or repository-relative local hook and attribute paths, since the
-container has its own HOME. Select regular local attribute files; symlinked local
-attribute files require host-Nix. Root-local external attribute files are copied as
-read-only data at their original paths; changing to another external path requires
-another chainman invocation or an explicit mount. Nested repositories' external
-local files likewise need explicit mounts, or direct entry into that project.
-An empty attributes path or `/dev/null` disables that source as it does in Git.
-Container entry rejects a nonempty host system attributes file: Git cannot redirect
-that source independently. Use `CHAINMAN_MODE=host-nix` for that policy, or keep
-the relevant rules in repository `.gitattributes`.
+You can commit while an independent managed development command is running. Only
+one staged-format operation runs per worktree. Updates and cleanup remain excluded
+while formatting is active. Changed indexes, configuration, selected working files,
+or unexpected formatter output stop application. Git-owned locks are never removed.
 
-The effective hook directory, including Git's default hooks directory, and active
-hook symlink targets must be reachable through the project, Git administration or
-an explicitly declared mount at the same host path. An overridden global hook
-path does not block entry. Unavailable effective paths stop entry with guidance;
-chainman never mounts arbitrary hook directories automatically. `/dev/null`
-explicitly disables hooks. `just hooks install` and complete `just setup` can
-repair an unavailable relocated path only after the runtime validates the recorded
-ownership and intact bridges, before project setup runs. Foreign managers and
-modified bridges still stop repair.
-Nested repositories' hook paths and hook dependencies must be available in their
-execution environment; enter a nested project directly to check its paths.
-Signing executables and credentials remain profile-owned. Missing directories
-within declared mounts remain repairable by setup.
-Changes to external policy take effect on the next invocation; changes to ordinary
-local settings take effect immediately. Original external config files and filter
-programs are not automatically mounted. Container mode requires Git 2.42+ and
-checks attribute-query support before contacting the container engine. Older Git
-stops with update guidance.
-Custom clean/smudge filters, ident expansion and working-tree encodings are not
-executed; they receive an explicit unsupported-transformation diagnostic.
-Replacing a symlink with a regular source file is formatted; the reverse is not.
+Interrupted application retains recovery material under
+`.chainman/staged-format/transaction-*`: `original-index`, numbered original and
+formatted files, the staged snapshot, and `apply.json` naming paths and modes.
+Compare these with the current index and worktree before restoring anything;
+preserve subsequent edits. After resolving the interruption, remove that transaction
+directory and retry. Older recovery directories also remain protected and require
+manual review. Update `resume=` does not apply to staged formatting.
 
-You can commit while an independent managed development command or shell is
-running. Only one staged-format transaction runs per worktree; a second attempt
-asks you to retry. Cleanup and verified updates remain excluded while formatting
-is active, and concurrent changes to the index or selected files still stop
-application of the formatted result.
+## Host Git and managed tools
 
-Before applying anything, the transaction computes every merge and acquires the
-active index's own lock. If interrupted while applying, recovery material remains
-under `.chainman/staged-format/transaction-*`: `original-index`, numbered original
-and merged files, staged snapshot and `apply.json` with paths/modes. Subsequent
-formatting stops until you review that directory. Compare these files with the
-current index/worktree before restoring anything; preserve subsequent edits.
-After resolving the interrupted application, remove its transaction directory
-and retry. The ordinary update `resume=` command is for update transactions, not
-staged formatting. Bare-host mode does not support transactional formatting.
+The verified runtime provisions native lefthook and its small host helper through
+Nix, using host Nix or Docker/Podman. No host Python, Go, Node or lefthook installation
+is needed. The helper is operation-scoped; there is no daemon or global installation.
+Formatters and scanners run in their declared managed environments.
 
-For container hooks, alternate indexes outside the repository must live in a
-dedicated directory that can be mounted; an index directly in `/tmp` or `$HOME`
-would require exposing the whole directory and is rejected with guidance.
+Run `git commit`, `git push`, `just format-staged`, and hook administration from the
+host. Container-only development still supports hooks invoked by **host Git**.
+Git invoked inside a container uses that container's environment and reachable
+repository configuration. chainman does not import host Git configuration, identity,
+credentials, attributes or executable hooks. Invoking chainman's repository hooks
+from inside a container stops with guidance to run Git on the host or use host Nix.
+Verified update candidates retain their separate, frozen Git authority.
+
+Lefthook configuration overrides use native lefthook semantics: direct `run` shell
+commands execute on the host. Use the runtime callback to execute a declared project
+task with its managed profile, setup and environment:
+
+```yaml
+pre-push:
+  commands:
+    project-check:
+      run: '"$CHAINMAN_HOOK_ENTRY" run hook-project-check'
+```
+
+Each callback receives the hook's original stdin. For pre-push tasks,
+`CHAINMAN_HOOK_REMOTE_NAME` and `CHAINMAN_HOOK_REMOTE_URL` identify the destination.
+Do not put project-language commands directly in lefthook `run` unless those tools
+are intentionally provided by the host. Bare-host mode does not provide managed
+hooks or transactional formatting.
 
 ## What pre-push does
 
@@ -214,7 +193,7 @@ clean-source result. The classification identity invalidates older clean caches.
 Traversal inventories the first outgoing tree, then its successive differences;
 it retains one diagnostic location per distinct source blob, not every unchanged
 occurrence in history. Every outgoing tree is still covered, including intermediate
-changes and merge resolutions. Large history walks report progress on stderr.
+changes and merge resolutions.
 
 Scan a particular committed tree explicitly:
 

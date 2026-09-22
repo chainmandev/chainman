@@ -1428,6 +1428,9 @@ func exitCode(e error) int {
 	return 1
 }
 func mainAction(args []string) (result int) {
+	if len(args) > 0 && args[0] == "hook" {
+		return hookAction(args[1:])
+	}
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: chainman-control run|up PLAN; status|stop STATE")
 		return 2

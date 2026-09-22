@@ -15,7 +15,7 @@ verified update; launching a command never silently upgrades it.
 
 ## Prerequisites
 
-- Git (2.42+ for container mode) and [just](https://just.systems).
+- Git and [just](https://just.systems).
 - Docker or Podman for the default **container-Nix** mode, or **Nix 2.24+** for **host-Nix** mode.
 - Ordinary shell utilities available on supported Linux and macOS hosts.
 
