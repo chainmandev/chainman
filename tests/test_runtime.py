@@ -517,6 +517,46 @@ class RuntimeTests(unittest.TestCase):
                     self.assertIn(diagnostic + "\n", result.stderr)
                 self.assertFalse(Path(env["SCCACHE_SERVER_UDS"]).exists())
 
+    def test_service_task_starts_compiler_with_its_live_context_and_setup_leases(self):
+        import workflows
+
+        env = self.cache_fixture()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[profiles.host]
+compiler_cache=true
+[setup.fixture]
+inputs=["check.py"]
+commands=[["touch","installed"]]
+artifacts=["installed"]
+[services.worker]
+command=["true"]
+[tasks.check]
+setup=["fixture"]
+services=["worker"]
+commands=[["python3","check.py"]]
+""")
+        (self.root / "check.py").write_text(
+            "import json, os\n"
+            "from pathlib import Path\n"
+            "fd = int(os.environ['CHAINMAN_SERVICE_CONTEXT_FD'])\n"
+            "receipt = json.loads(os.pread(fd, 65536, 0))\n"
+            "assert receipt['services'] == ['worker']\n"
+            "assert Path('installed').is_file()\n"
+            "assert os.environ['RUSTC_WRAPPER'] == 'sccache'\n"
+            "Path('checked').touch()\n"
+        )
+        with patch.dict(os.environ, dict(env, CHAINMAN_SETUP="auto"), clear=True):
+            self.assertEqual(
+                workflows.run(self.root, "check", [], service_context=True), 0
+            )
+        self.assertTrue((self.root / "checked").exists())
+        self.assertEqual((self.root / "server-exited").read_text(), "yes")
+        self.assertEqual(
+            list((self.root / ".cache/toolchain").glob("compiler-*.lock")), []
+        )
+
     def test_dead_launcher_does_not_authorize_unlinking_a_live_compiler_socket(self):
         env = self.cache_fixture()
         real_popen = subprocess.Popen

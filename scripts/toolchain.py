@@ -962,7 +962,11 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
 
 @contextlib.contextmanager
 def compiler_cache(
-    profile: str | None, env: dict[str, str], root: Path = ROOT
+    profile: str | None,
+    env: dict[str, str],
+    root: Path = ROOT,
+    *,
+    pass_fds: tuple[int, ...] = (),
 ) -> Iterator[dict[str, str]]:
     if host_mode():
         yield env
@@ -1017,6 +1021,7 @@ def compiler_cache(
                 env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                 gc_root=Path(directory) / "profile",
                 stdout=sys.stderr,
+                pass_fds=pass_fds,
             )
         else:
             managed_run(
@@ -1025,6 +1030,7 @@ def compiler_cache(
                 env=dict(env, CHAINMAN_COMPILER_OWNER=str(root)),
                 check=True,
                 stdout=sys.stderr,
+                pass_fds=pass_fds,
             )
         executable = executable_file.read_text().removesuffix("\n")
         if (
@@ -1039,10 +1045,14 @@ def compiler_cache(
         # The shared native command owner contains both the Nix launcher and
         # foreground compiler. Failed startup uses the same bounded cleanup as
         # ordinary finite tasks, including children of an intermediate launcher.
+        # Setup leases and a newly created service receipt are not inherited
+        # operation ancestors yet; forward them with the compiler as with tasks.
         with native_tasks.command(
             root, [[*prefix, "sccache"]], {"shutdown_seconds": 5}
         ) as command:
-            with owned_compiler_cache(root, env, executable, server_env, command):
+            with owned_compiler_cache(
+                root, env, executable, server_env, command, pass_fds=pass_fds
+            ):
                 yield dict(
                     env, RUSTC_WRAPPER="sccache", CHAINMAN_COMPILER_OWNER=str(root)
                 )
@@ -1055,6 +1065,8 @@ def owned_compiler_cache(
     executable: str,
     server_env: dict[str, str],
     command: list[str],
+    *,
+    pass_fds: tuple[int, ...] = (),
 ) -> Iterator[dict[str, str]]:
     endpoint = Path(env["SCCACHE_SERVER_UDS"])
     lifecycle_name = "compiler-" + uuid.uuid4().hex + ".lock"
@@ -1067,7 +1079,7 @@ def owned_compiler_cache(
             "cwd": root,
             "env": server_env,
             "stdout": sys.stderr,
-            "pass_fds": (lifecycle.fileno(),),
+            "pass_fds": (*pass_fds, lifecycle.fileno()),
         }
         server = subprocess.Popen(command, **managed_options(options))
     deadline = time.monotonic() + _COMPILER_STARTUP_SECONDS
@@ -1117,6 +1129,7 @@ def owned_compiler_cache(
                         check=True,
                         timeout=15,
                         stdout=sys.stderr,
+                        pass_fds=pass_fds,
                     )
                 except subprocess.CalledProcessError as stop_failure:
                     # The socket may close before the owned process exits.

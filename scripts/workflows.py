@@ -798,7 +798,9 @@ def run(
                 profile = text(
                     spec.get("profile", default_profile(cfg)), "Task profile"
                 )
-                with tc.compiler_cache(profile, env, root) as selected:
+                with tc.compiler_cache(
+                    profile, env, root, pass_fds=descriptors
+                ) as selected:
                     with serial_use(root, spec) as serial_descriptors:
                         arguments = [
                             strings(argv, "Task command")

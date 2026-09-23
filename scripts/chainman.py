@@ -800,7 +800,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if env.get("CHAINMAN_COMPILER_OWNER") == str(root):
                     env["RUSTC_WRAPPER"] = os.environ.get("RUSTC_WRAPPER", "")
                 with workflows.setup_use(root, cfg, groups, env) as descriptors:
-                    with tc.compiler_cache(name, env, root) as owned:
+                    with tc.compiler_cache(
+                        name, env, root, pass_fds=descriptors
+                    ) as owned:
                         return execute(
                             root,
                             name,

@@ -1133,7 +1133,9 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                     pass_fds=descriptors,
                     check=False,
                 ).returncode
-            with tc.compiler_cache(profile, env, root) as selected:
+            with tc.compiler_cache(
+                profile, env, root, pass_fds=descriptors
+            ) as selected:
                 return chainman.execute(
                     root,
                     profile,
