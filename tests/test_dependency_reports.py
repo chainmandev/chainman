@@ -160,13 +160,21 @@ exclusions=[{pattern="fixture/**",reason="Literal manifest fixture"}]
         self.assertEqual(
             dependency_audit.evaluate({"123": "demo"}, [entry], date(2026, 9, 12)), {}
         )
-        for findings, today in (
-            ({}, date(2026, 9, 12)),
-            ({"123": "other"}, date(2026, 9, 12)),
-            ({"123": "demo"}, date(2027, 1, 1)),
+        for findings, today, diagnostic in (
+            ({}, date(2026, 9, 12), "Stale audit exception 123 \\(demo\\)"),
+            (
+                {"123": "other"},
+                date(2026, 9, 12),
+                "123 \\(demo\\) belongs to reported package other",
+            ),
+            ({"123": "demo"}, date(2027, 1, 1), "123 \\(demo\\) requires review"),
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, diagnostic):
                 dependency_audit.evaluate(findings, [entry], today)
+        with self.assertRaisesRegex(ValueError, "Duplicate audit exception: 123"):
+            dependency_audit.evaluate(
+                {"123": "demo"}, [entry, entry], date(2026, 9, 12)
+            )
 
 
 if __name__ == "__main__":

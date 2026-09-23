@@ -75,15 +75,24 @@ def evaluate(
                 "Audit exceptions require id, package, reason and review_after"
             )
         key = str(entry["id"])
-        if key in ignored or findings.get(key) != entry["package"]:
+        identity = f"{key} ({entry['package']})"
+        if key in ignored:
+            raise ValueError(f"Duplicate audit exception: {identity}")
+        if key not in findings:
             raise ValueError(
-                "Audit exception is duplicate, stale or belongs to another package"
+                f"Stale audit exception {identity}: advisory absent from the current report"
+            )
+        if findings[key] != entry["package"]:
+            raise ValueError(
+                f"Audit exception {identity} belongs to reported package {findings[key]}"
             )
         if (
             date.fromisoformat(ad.text(entry["review_after"], "Exception review date"))
             <= today
         ):
-            raise ValueError("Audit exception requires review")
+            raise ValueError(
+                f"Audit exception {identity} requires review: {entry['review_after']}"
+            )
         ignored.add(key)
     return {key: package for key, package in findings.items() if key not in ignored}
 
