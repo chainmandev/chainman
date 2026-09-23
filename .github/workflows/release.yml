@@ -1,4 +1,4 @@
-name: Publish rolling Chainman
+name: Publish rolling chainman
 "on":
   workflow_dispatch:
     inputs:
@@ -62,6 +62,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         mode: [host-nix, container-nix]
     env:

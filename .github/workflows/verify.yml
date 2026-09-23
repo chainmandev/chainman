@@ -24,6 +24,7 @@ jobs:
   verify:
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
