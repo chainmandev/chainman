@@ -49,6 +49,7 @@ jobs:
           content = content.replace(old, new)
           content = content.replace('timedOut := false\n\tselect {\n\tcase e = <-done:', 'timedOut := false\n\tfmt.Fprintf(os.Stderr, "service diagnostic started owner=%d child=%d\\n", id.PID, cmd.Process.Pid)\n\tselect {\n\tcase e = <-done:\n\t\tfmt.Fprintf(os.Stderr, "service diagnostic child exited owner=%d error=%v\\n", id.PID, e)')
           content = content.replace('fmt.Fprintf(os.Stderr, "service diagnostic owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)', 'os.WriteFile(filepath.Join(state, name+".signal.log"), []byte(fmt.Sprintf("owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)), 0600)')
+          content = content.replace('eventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))', 'os.WriteFile(filepath.Join(state, name+".signal-before.log"), []byte(fmt.Sprintf("received %v\\n", sig)), 0600)\n\t\teventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))')
           source.write_text(content)
           fixture = root / 'tests/test_services_control.py'
           content = fixture.read_text().replace('stdout, stderr = stopper.communicate(timeout=15)', 'stdout, stderr = stopper.communicate(timeout=15)\n                print("stopper diagnostic", stdout, stderr, flush=True)')
@@ -80,7 +81,7 @@ jobs:
                       state = getattr(test, 'state', None)
                       if state:
                           for log in sorted(state.glob('*.log')):
-                              print('\nFixture log:', log.name, '\n', log.read_text(errors='replace')[-6000:], flush=True)
+                              print('\nFixture log:', log.name, '\n', log.read_text(errors='replace').split('Binary Images:')[0][:18000], flush=True)
                       root = getattr(test, 'root', None)
                       if root:
                           for name in ('pid', 'signals', 'ready'):
