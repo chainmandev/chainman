@@ -52,6 +52,13 @@ Real lifecycle tests run Git-pinned runtimes through Nix. They must demonstrate
 successful updates and cleanup, failed candidates, interruption/resume, and runtime
 upgrades that leave the consumer bootstrap byte-identical. Native service tests add
 readiness, startup failure, shared ownership, crash recovery, and volume lifecycle.
+Graceful shutdown checks run on Linux and Darwin. Linux additionally pauses the
+forwarding owner to detect duplicate group signals deterministically. That pause
+is not used on Darwin: the hosted runner also loses a queued termination signal
+in a standalone Go `signal.Notify` program across `SIGSTOP`/`SIGCONT`. Darwin still
+checks one graceful application signal and process cleanup. This is a limitation
+of the pause-based test, not a guarantee of graceful handling by an externally
+suspended process; shutdown deadlines retain their forced-cleanup fallback.
 
 Git transactions assume cooperating processes and are not a filesystem transaction
 against an adversarial same-user writer. Final application or commit interruption

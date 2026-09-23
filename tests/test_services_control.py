@@ -1268,21 +1268,28 @@ while True: time.sleep(.1)
             ]
         else:
             command = [CONTROL, "stop", str(self.state)]
-        # Pause the forwarding owner so a direct group signal cannot coalesce
-        # with the owner's later forward and conceal duplicate delivery.
-        os.kill(owner, signal.SIGSTOP)
+        # Linux permits a deterministic duplicate-delivery check: pause the
+        # owner so direct group delivery cannot coalesce with its later forward.
+        # On the Darwin qualification runner, even a standalone Go signal.Notify
+        # program loses SIGTERM queued between SIGSTOP/SIGCONT. Keep graceful
+        # single-signal shutdown covered there without that platform assumption.
+        pause_owner = platform.system() == "Linux"
+        if pause_owner:
+            os.kill(owner, signal.SIGSTOP)
         stopper = None
         try:
             stopper = subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
             )
-            time.sleep(0.25)
-            self.assertFalse(
-                (self.root / "signals").exists(),
-                "shutdown bypassed the forwarding owner",
-            )
+            if pause_owner:
+                time.sleep(0.25)
+                self.assertFalse(
+                    (self.root / "signals").exists(),
+                    "shutdown bypassed the forwarding owner",
+                )
         finally:
-            os.kill(owner, signal.SIGCONT)
+            if pause_owner:
+                os.kill(owner, signal.SIGCONT)
             if stopper is not None:
                 stdout, stderr = stopper.communicate(timeout=15)
                 self.assertEqual(stopper.returncode, 0, stdout + stderr)
