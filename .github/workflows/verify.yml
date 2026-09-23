@@ -40,7 +40,7 @@ jobs:
               return result
           BootstrapTests.run_bootstrap = visible
           faulthandler.dump_traceback_later(600, exit=True)
-          suite = unittest.TestSuite(BootstrapTests('test_host_setup_readiness_smoke') for _ in range(3))
+          suite = unittest.defaultTestLoader.loadTestsFromTestCase(BootstrapTests)
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           faulthandler.cancel_dump_traceback_later()
           raise SystemExit(not result.wasSuccessful())
