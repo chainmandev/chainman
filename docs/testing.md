@@ -52,6 +52,11 @@ Real lifecycle tests run Git-pinned runtimes through Nix. They must demonstrate
 successful updates and cleanup, failed candidates, interruption/resume, and runtime
 upgrades that leave the consumer bootstrap byte-identical. Native service tests add
 readiness, startup failure, shared ownership, crash recovery, and volume lifecycle.
+Task-entry checks require a durable kernel identity before project code executes,
+including commands that close inherited descriptors. Lease receipts retain their
+original bytes and locked inode; identity publication uses a separate atomic file.
+Tests cover failed publication, removed/replaced leases, surviving descendants,
+and caller death without losing local or repository service ownership.
 Graceful shutdown checks run on Linux and Darwin. Linux additionally pauses the
 forwarding owner to detect duplicate group signals deterministically. That pause
 is not used on Darwin: the hosted runner also loses a queued termination signal

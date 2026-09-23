@@ -97,7 +97,10 @@ type Lease struct {
 	Persistent        bool       `json:"persistent"`
 	Container         *Container `json:"container,omitempty"`
 	Task              *Identity  `json:"task,omitempty"`
-	Parent            *LeaseRef  `json:"parent,omitempty"`
+	// The explicit field also makes older readers reject this receipt instead
+	// of overlooking a task identity they do not know how to inspect.
+	TaskReceipt bool      `json:"task_receipt,omitempty"`
+	Parent      *LeaseRef `json:"parent,omitempty"`
 }
 type Process struct {
 	Name    string `json:"name"`
@@ -595,7 +598,7 @@ func active(p Plan) (map[string]bool, error) {
 				return nil, err
 			}
 			if !present {
-				if e = os.Remove(path); e != nil {
+				if e = removeLease(path); e != nil {
 					return nil, e
 				}
 				continue
@@ -609,7 +612,10 @@ func active(p Plan) (map[string]bool, error) {
 		if err == nil {
 			f.Close()
 			if !l.Persistent {
-				present := l.Task != nil && l.Task.alive()
+				present, err := leaseTaskAlive(path, l)
+				if err != nil {
+					return nil, err
+				}
 				if !present && l.Container != nil {
 					info, err := inspectContainer(l.Container)
 					if err != nil {
@@ -618,7 +624,7 @@ func active(p Plan) (map[string]bool, error) {
 					present = info != nil && info.Running
 				}
 				if !present {
-					if e = os.Remove(path); e != nil {
+					if e = removeLease(path); e != nil {
 						return nil, e
 					}
 					continue
@@ -962,7 +968,7 @@ func releaseUnused(p Plan, force bool) error {
 		if force {
 			entries, _ := filepath.Glob(filepath.Join(p.State, "*.lease"))
 			for _, path := range entries {
-				_ = os.Remove(path)
+				_ = removeLease(path)
 			}
 		}
 	}
@@ -1068,7 +1074,7 @@ func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (
 		}
 	}
 	leasePath := filepath.Join(p.State, token()+".lease")
-	if e = atomic(leasePath, Lease{Services: selected, ExclusiveServices: p.ExclusiveServices, Persistent: persistent, Container: p.TaskContainer, Parent: parent}); e != nil {
+	if e = atomic(leasePath, Lease{Services: selected, ExclusiveServices: p.ExclusiveServices, Persistent: persistent, Container: p.TaskContainer, Parent: parent, TaskReceipt: !persistent && parent == nil}); e != nil {
 		return nil, "", e
 	}
 	lease, e := locked(leasePath, false)
@@ -1077,7 +1083,7 @@ func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (
 	}
 	cleanup := func(err error) (*os.File, string, error) {
 		lease.Close()
-		_ = os.Remove(leasePath)
+		_ = removeLease(leasePath)
 		_ = releaseUnused(p, false)
 		return nil, "", err
 	}
@@ -1460,6 +1466,9 @@ func mainAction(args []string) (result int) {
 		}
 		return taskCommand(args[0], args[1])
 	}
+	if args[0] == "leased-task" && len(args) == 2 {
+		return exitCode(leasedTask(args[1]))
+	}
 	if args[0] == "controller" && len(args) == 3 {
 		return controllerExec(args[1], args[2])
 	}
@@ -1679,7 +1688,14 @@ func mainAction(args []string) (result int) {
 		}
 		task = Command{Argv: []string{self, "command", path}, Directory: p.Root, Environment: map[string]string{"CHAINMAN_SERVICE_LEASE_FDS": "[3]"}}
 	}
-	cmd, e := child(task)
+	if e = atomic(lease.Name()+".command.json", task); e != nil {
+		return exitCode(e)
+	}
+	self, e := os.Executable()
+	if e != nil {
+		return exitCode(e)
+	}
+	cmd, e := child(Command{Argv: []string{self, "leased-task", lease.Name()}})
 	if e != nil {
 		return exitCode(e)
 	}
@@ -1691,34 +1707,6 @@ func mainAction(args []string) (result int) {
 	}
 	if p.WaitForServices {
 		fmt.Fprintln(os.Stderr, "Services ready; following logs. Inspect separately with just chainman services-logs --follow")
-	}
-	// A foreground Nix/shell entry may close inherited descriptors. Its kernel
-	// identity is a second lease witness until the complete task returns.
-	if identity, err := identify(cmd.Process.Pid); err == nil {
-		gate, err := locked(filepath.Join(p.State, "gate"), false)
-		if err == nil {
-			selected, orderErr := ordered(p, p.Requested)
-			if orderErr == nil {
-				// Keep the locked inode: replacing it would disconnect inherited
-				// descriptor leases from the receipt observed by other clients.
-				_, err = lease.Seek(0, 0)
-				if err == nil {
-					err = lease.Truncate(0)
-				}
-				if err == nil {
-					err = json.NewEncoder(lease).Encode(Lease{Services: selected, ExclusiveServices: p.ExclusiveServices, Container: p.TaskContainer, Task: &identity})
-				}
-				if err == nil {
-					err = lease.Sync()
-				}
-			} else {
-				err = orderErr
-			}
-			gate.Close()
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "task ownership receipt:", err)
-		}
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()

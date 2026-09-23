@@ -1409,6 +1409,67 @@ while True: time.sleep(.1)
         self.assertEqual(json.loads((self.root / "argv").read_text()), arguments)
         self.assertFalse((self.root / "injected").exists())
 
+    def test_task_entry_preserves_lookup_and_inherited_directory(self):
+        entry = self.root / "task-entry"
+        entry.write_text("#!/bin/sh\ntouch project-ran\nexit 7\n")
+        entry.chmod(0o700)
+        for inherit in (False, True):
+            with self.subTest(inherit=inherit):
+                self.plan["task"] = self.command(
+                    [str(entry) if inherit else entry.name]
+                )
+                if inherit:
+                    self.plan["task"]["directory"] = ""
+                self.path.write_text(json.dumps(self.plan))
+                result = subprocess.run(
+                    [CONTROL, "run", str(self.path)],
+                    cwd=self.base if inherit else self.root,
+                    env=dict(os.environ, PATH="." + os.pathsep + os.environ["PATH"]),
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 7 if inherit else 1, result.stderr)
+                if inherit:
+                    self.assertTrue((self.base / "project-ran").exists())
+                else:
+                    self.assertIn("relative to current directory", result.stderr)
+                self.assertFalse((self.root / "project-ran").exists())
+
+    def test_task_identity_is_published_before_project_entry(self):
+        arguments = ["two words", "", "$(touch injected)", "'quoted'"]
+        script = """import json,os,sys
+from pathlib import Path
+state = Path(os.environ['LEASE_STATE'])
+lease, = state.glob('*.lease')
+assert json.loads(lease.read_text())['task_receipt']
+assert lease.stat().st_ino == os.fstat(3).st_ino
+identity = json.loads(Path(str(lease) + '.task.json').read_text())
+assert identity['pid'] == os.getpid()
+Path('task-result').write_text(json.dumps([sys.argv[1:], sys.stdin.read(), os.environ['LITERAL']]))
+raise SystemExit(7)
+"""
+        self.plan["task"] = self.command([sys.executable, "-c", script, *arguments])
+        self.plan["task"]["environment"] = {
+            "LEASE_STATE": str(self.state),
+            "LITERAL": "value with spaces $()",
+        }
+        self.path.write_text(json.dumps(self.plan))
+        result = subprocess.run(
+            [CONTROL, "run", str(self.path)],
+            input="literal input\nsecond line\n",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertEqual(
+            json.loads((self.root / "task-result").read_text()),
+            [arguments, "literal input\nsecond line\n", "value with spaces $()"],
+        )
+        self.assertFalse((self.root / "injected").exists())
+        self.assertFalse(list(self.state.glob("*.lease*")))
+
     def test_task_retains_resource_lease_after_client_is_killed(self):
         self.plan["task"] = self.command(
             [

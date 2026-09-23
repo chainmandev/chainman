@@ -32,8 +32,7 @@ func parentAlive(p Plan, ref LeaseRef) (bool, error) {
 		return false, e
 	}
 	defer file.Close()
-	// Parent writers retain the inode lock while rewriting its task identity. A
-	// locked parent is live without parsing a possibly in-progress receipt. Never
+	// A locked parent is live before its child publishes the exec identity. Never
 	// wait on a parent gate: scope acquisition always locks parent then resource.
 	e = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if errors.Is(e, syscall.EWOULDBLOCK) {
@@ -52,7 +51,11 @@ func parentAlive(p Plan, ref LeaseRef) (bool, error) {
 	if l.Parent != nil {
 		return false, fmt.Errorf("nested resource parent lease")
 	}
-	if l.Persistent || (l.Task != nil && l.Task.alive()) {
+	present, e := leaseTaskAlive(filepath.Join(ref.State, ref.File), l)
+	if e != nil {
+		return false, e
+	}
+	if l.Persistent || present {
 		return true, nil
 	}
 	if l.Container != nil {
