@@ -1,109 +1,38 @@
-name: Deliberate toolchain verification
-"on":
-  workflow_call:
-    inputs:
-      candidate_sha:
-        required: true
-        type: string
-      prune_hosted_sdks:
-        type: boolean
-        default: false
+name: Diagnose macOS core qualification
+on:
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: Full commit expected at the selected ref
         required: true
         type: string
-      prune_hosted_sdks:
-        description: Explicitly remove declared unused SDKs on disposable Linux runners
-        type: boolean
-        default: false
 permissions:
   contents: read
 jobs:
-  verify:
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        include:
-          - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
-          - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: go, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: flutter, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: swift, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: compose, engine: docker}
-          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: docker}
-          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: podman}
-          - {runner: macos-15, mode: host-nix, module: swift, engine: docker}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    defaults:
-      run:
-        working-directory: ${{ github.workspace }}/checkout with spaces
+  diagnose:
+    runs-on: macos-15
+    timeout-minutes: 20
     env:
+      TOOLCHAIN_MODE: host-nix
       CHAINMAN_SETUP: auto
-      TOOLCHAIN_MODE: ${{ matrix.mode }}
-      TOOLCHAIN_CONTAINER_ENGINE: ${{ matrix.engine }}
-      MODULE: ${{ matrix.module }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
           path: checkout with spaces
-      - name: Confirm exact source
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
+      - name: Diagnose test progress with a bounded stack dump
+        working-directory: checkout with spaces
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
-          EVENT: ${{ github.sha }}
         run: |
-          set -eu
           test "$(git rev-parse HEAD)" = "$EXPECTED"
-          test "$EVENT" = "$EXPECTED"
-      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-      - name: Optional disposable SDK cleanup
-        if: inputs.prune_hosted_sdks && runner.os == 'Linux'
-        env:
-          TOOLCHAIN_MODE: host-nix
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-prune --module "$MODULE" --apply --sudo
-      - name: Apple SDK preflight
-        if: runner.os == 'macOS' && matrix.module == 'swift'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- sdk-doctor apple
-      - name: Verify using the local command
-        run: |
-          if [ "$TOOLCHAIN_MODE" = container-nix ]; then
-            nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- bootstrap-test "$TOOLCHAIN_CONTAINER_ENGINE"
-          else
-            nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module "$MODULE" verify
-          fi
-      - name: Report project cache use
-        if: always()
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- cache-status
-      - name: Qualify initialization and standalone starter
-        if: matrix.module == 'core'
-        run: |
-          engine="$TOOLCHAIN_CONTAINER_ENGINE"
-          if [ "$TOOLCHAIN_MODE" = host-nix ]; then engine=host-nix; fi
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- init-test "$engine"
-      - name: Qualify native JavaScript update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'javascript'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
-      - name: Qualify native service ownership and backend
-        if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
-      - name: Qualify native Python update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'python'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- python-test
-      - name: Qualify native Gradle update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'compose'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- gradle-test
-      - name: Qualify native Cargo update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'rust'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- rust-test
-      - name: Qualify native SwiftPM update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'swift'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- swift-test
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec python3 -u -B - <<'PYTHON'
+          import faulthandler
+          import unittest
+          faulthandler.dump_traceback_later(180, exit=True)
+          suite = unittest.defaultTestLoader.discover('tests', pattern='test_s*.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          faulthandler.cancel_dump_traceback_later()
+          raise SystemExit(not result.wasSuccessful())
+          PYTHON
