@@ -30,7 +30,12 @@ revisions fail explicitly. Source imported into Nix is checked against the verif
 Git export and rooted through execution.
 
 Bootstrap tests use restricted PATH fixtures without host language interpreters.
-Container-only qualification must also exclude host Nix. Keep these lanes distinct
+Container-only qualification must also exclude host Nix. A usable container engine
+includes its installed helper programs: rootless Podman needs UID mapping,
+networking and OCI helpers. Restricted fixtures retain those specific executables,
+without restoring the host PATH or adding Python, Node, Go, lefthook, gh, curl or wget.
+See Podman's [rootless setup](https://github.com/podman-container-tools/podman/blob/main/docs/tutorials/rootless_tutorial.md).
+Keep these lanes distinct
 from unit tests that substitute a Nix store import or starter generation: those
 unit fixtures test the surrounding policy, not the substituted boundary.
 

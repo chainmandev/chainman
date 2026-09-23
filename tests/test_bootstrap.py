@@ -216,6 +216,26 @@ class BootstrapTests(unittest.TestCase):
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
 
+    def preserve_container_helpers(self, tools):
+        # Rootless Podman invokes its installed UID, networking and OCI helpers
+        # through PATH. Keep that engine installation usable without exposing
+        # host language interpreters or Nix to the consumer bootstrap.
+        if self.test_engine != "podman":
+            return
+        for name in (
+            "newuidmap",
+            "newgidmap",
+            "slirp4netns",
+            "pasta",
+            "conmon",
+            "crun",
+            "runc",
+            "fuse-overlayfs",
+        ):
+            executable = shutil.which(name) or shutil.which(name, path=os.defpath)
+            if executable:
+                (tools / name).symlink_to(executable)
+
     def authority_projection(self, *, container=False):
         self.use_real_runtime()
         subprocess.run(["git", "init", str(self.root)], check=True, capture_output=True)
@@ -678,8 +698,19 @@ check=["true"]
             path = shutil.which(name) or shutil.which(name, path=os.defpath)
             self.assertIsNotNone(path, name)
             (tools / name).symlink_to(path)
+        self.preserve_container_helpers(tools)
         self.env["PATH"] = str(tools)
-        for name in ("nix", "python3", "node", "go", "lefthook"):
+        for name in (
+            "nix",
+            "python",
+            "python3",
+            "node",
+            "go",
+            "lefthook",
+            "gh",
+            "curl",
+            "wget",
+        ):
             self.assertIsNone(shutil.which(name, path=str(tools)))
         self.test_public_hook_setup_and_commit_a()
         rejected = self.run_bootstrap(
@@ -2085,6 +2116,20 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             executable = shutil.which(name) or shutil.which(name, path=os.defpath)
             self.assertIsNotNone(executable, name)
             (tools / name).symlink_to(executable)
+        if mode == "container-nix":
+            self.preserve_container_helpers(tools)
+            self.assertIsNone(shutil.which("nix", path=str(tools)))
+        for name in (
+            "python",
+            "python3",
+            "node",
+            "go",
+            "lefthook",
+            "gh",
+            "curl",
+            "wget",
+        ):
+            self.assertIsNone(shutil.which(name, path=str(tools)))
         (tools / "git").unlink()
         (tools / "git").write_text(
             '#!/bin/sh\ncase " $* " in *" fetch "*) test "${TEST_GIT_OFFLINE:-0}" = 0 || exit 73;; esac\nexec '
