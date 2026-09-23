@@ -41,6 +41,30 @@ jobs:
           sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
           import toolchain as tc
 
+          with tempfile.TemporaryDirectory(prefix='primitive signal ') as probe_dir:
+              probe_dir = Path(probe_dir)
+              program = probe_dir / 'probe.go'
+              program.write_text('package main\nimport("fmt";"os";"os/signal";"syscall")\nfunc main(){c:=make(chan os.Signal,8);signal.Notify(c,syscall.SIGTERM);fmt.Println("ready");fmt.Println(<-c)}\n')
+              executable = probe_dir / 'probe'
+              subprocess.run(['go', 'build', '-o', str(executable), str(program)], check=True)
+              import signal, time
+              for pause in (False, True):
+                  proc = subprocess.Popen([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                  print('Primitive ready', pause, proc.stdout.readline().strip(), flush=True)
+                  if pause:
+                      os.kill(proc.pid, signal.SIGSTOP)
+                      time.sleep(.2)
+                  os.kill(proc.pid, signal.SIGTERM)
+                  if pause:
+                      time.sleep(.2)
+                      os.kill(proc.pid, signal.SIGCONT)
+                  try:
+                      output = proc.communicate(timeout=3)
+                      print('Primitive signal', pause, proc.returncode, output, flush=True)
+                  except subprocess.TimeoutExpired:
+                      proc.kill()
+                      print('Primitive signal TIMEOUT', pause, proc.communicate(), flush=True)
+
           source = root / 'nix/control/main.go'
           content = source.read_text()
           old = 'case sig := <-signals:\n\t\t_ = syscall.Kill(-id.PID, sig.(syscall.Signal))'
@@ -59,6 +83,9 @@ jobs:
           content = content.replace('        os.kill(owner, signal.SIGSTOP)', '        subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n        os.kill(owner, signal.SIGSTOP)')
           content = content.replace('            os.kill(owner, signal.SIGCONT)', '            print("Before resume", flush=True)\n            subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n            os.kill(owner, signal.SIGCONT)\n            time.sleep(.2)\n            print("After resume", flush=True)\n            subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n            sample = subprocess.run(["/usr/bin/sample", str(owner), "1", "1", "-file", str(self.state / "sample.log")], capture_output=True, text=True, timeout=4)\n            print("Sample", sample.returncode, sample.stderr, flush=True)')
           content = content.replace('        if backend:\n            import hashlib', '        if backend == "direct":\n            command = [sys.executable, "-c", "import os, signal; os.kill(" + str(owner) + ", signal.SIGTERM)"]\n        elif backend:\n            import hashlib')
+          content = content.replace('        os.kill(owner, signal.SIGSTOP)', '        if getattr(self, "pause_owner", True):\n            os.kill(owner, signal.SIGSTOP)')
+          content = content.replace('                (self.root / "signals").exists(),\n                "shutdown bypassed', '                getattr(self, "pause_owner", True) and (self.root / "signals").exists(),\n                "shutdown bypassed')
+          content = content.replace('            os.kill(owner, signal.SIGCONT)', '            if getattr(self, "pause_owner", True):\n                os.kill(owner, signal.SIGCONT)')
           fixture.write_text(content)
           print('Disposable signal tracing is enabled; this is diagnostic evidence, not exact-source qualification.', flush=True)
           target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
@@ -99,8 +126,13 @@ jobs:
                       super().addFailure(test, err)
               import test_services_control
               test_services_control.ServiceControlTests.test_direct_owner_shutdown_signal = lambda self: self.assert_single_shutdown_signal(backend='direct')
+              def unpaused(self):
+                  self.pause_owner = False
+                  self.assert_single_shutdown_signal(backend='direct')
+              test_services_control.ServiceControlTests.test_unpaused_owner_shutdown_signal = unpaused
               suite = unittest.defaultTestLoader.loadTestsFromNames([
                   'test_services_control.ServiceControlTests.' + name for name in (
+                      'test_unpaused_owner_shutdown_signal',
                       'test_direct_owner_shutdown_signal',
                       'test_backend_sends_single_shutdown_signal',
                       'test_controller_sends_single_shutdown_signal',
