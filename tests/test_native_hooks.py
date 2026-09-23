@@ -1,15 +1,19 @@
 """Native Git is the oracle: real indexes/commits, isolated managed formatter."""
 
 import base64
+import fcntl
 import json
 import os
 from pathlib import Path
 import shlex
 import shutil
 import signal
+import pty
+import select
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 
@@ -481,6 +485,170 @@ check=["true"]
 
     def test_real_lefthook_cancellation_stops_nested_managed_callback(self):
         self.check_hook_child_lifetimes(("TERM",), real_lefthook=True, nested=True)
+
+    def test_real_hook_setup_consent_uses_foreground_terminal_and_preserves_refs(self):
+        for answer in (b"y\n", b"\n", b"n\n", b"\x04", None):
+            with self.subTest(answer=answer):
+                self.check_hook_setup_consent(answer)
+
+    def test_real_hook_setup_without_terminal_fails_before_side_effects(self):
+        self.check_hook_setup_consent(b"n\n", terminal=False)
+
+    def test_hook_consent_survives_container_prompt_entry(self):
+        self.check_hook_setup_consent(b"y\n", container_relay=True)
+
+    def check_hook_setup_consent(self, answer, *, terminal=True, container_relay=False):
+        for name in ("installed", "received", "channel"):
+            (self.root / name).unlink(missing_ok=True)
+        shutil.rmtree(self.root / ".cache", ignore_errors=True)
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[hooks]
+enabled=true
+[setup.fixture]
+inputs=["chainman.lock"]
+artifacts=["installed"]
+commands=[["touch","installed"]]
+[tasks.fixture]
+setup=["fixture"]
+commands=[["sh","-c","cat > received"]]
+""")
+        self.stage()
+        entry = self.control / "entry.py"
+        entry.write_text(
+            "import os,sys\nfrom pathlib import Path\n"
+            f"sys.path.insert(0,{str(SOURCE / 'scripts')!r})\n"
+            "import chainman\n"
+            + (
+                "for arg in sys.argv:\n"
+                " if arg.startswith('type=bind,src='):\n"
+                "  os.environ['CHAINMAN_SETUP_CHANNEL']=str(Path(arg.split('src=',1)[1].split(',dst=',1)[0]).parent)\n"
+                if container_relay
+                else ""
+            )
+            + f"root=Path({str(self.root)!r})\n"
+            "(root/'channel').write_text(os.environ.get('CHAINMAN_SETUP_CHANNEL',''))\n"
+            "sys.exit(chainman.main(['--root',str(root),'run','fixture']))\n"
+        )
+        engine = self.control / "engine"
+        engine.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(entry))} "$@"\n'
+        )
+        engine.chmod(0o755)
+        self.launcher.write_text(
+            "#!/bin/sh\nexec "
+            + (
+                f"sh {shlex.quote(str(SOURCE / 'bootstrap/setup-prompt.sh'))} "
+                if container_relay
+                else ""
+            )
+            + shlex.quote(str(engine))
+            + ' "$@"\n'
+        )
+        shutil.copyfile(
+            SOURCE / "bootstrap/hook-task.sh", self.control / "hook-task.sh"
+        )
+        (self.control / "hook-task.sh").chmod(0o755)
+        config = self.control / "lefthook.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "pre-push": {
+                        "commands": {
+                            "fixture": {"run": '"$CHAINMAN_HOOK_ENTRY" run fixture'}
+                        }
+                    }
+                }
+            )
+        )
+        actual = shutil.which("lefthook")
+        self.assertIsNotNone(actual)
+        self.plan.update(lefthook=actual, config=str(config))
+        self.save_plan()
+        env = {
+            k: v
+            for k, v in self.env.items()
+            if not k.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+        }
+        env.update(CHAINMAN_MODE="host", CHAINMAN_SETUP="prompt")
+        records = (
+            b"refs/heads/fixture "
+            + b"a" * 40
+            + b" refs/heads/fixture "
+            + b"0" * 40
+            + b"\n"
+        )
+        master, slave = pty.openpty() if terminal else (None, None)
+
+        def controlling_terminal():
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+        with (self.base / "hook-output").open("w+b") as log:
+            child = subprocess.Popen(
+                [
+                    CONTROL,
+                    "hook",
+                    str(self.control / "plan.json"),
+                    "run",
+                    "pre-push",
+                    "origin",
+                    "unused",
+                ],
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=slave if terminal else log,
+                stderr=slave if terminal else log,
+                start_new_session=True,
+                preexec_fn=controlling_terminal if terminal else None,
+            )
+            if slave is not None:
+                os.close(slave)
+            try:
+                child.stdin.write(records)
+                child.stdin.close()
+                output = b""
+                if terminal:
+                    deadline = time.monotonic() + 8
+                    while b"[Y/n]" not in output and time.monotonic() < deadline:
+                        if select.select([master], [], [], 0.1)[0]:
+                            try:
+                                output += os.read(master, 8192)
+                            except OSError:
+                                break
+                        if child.poll() is not None:
+                            break
+                    self.assertIn(b"[Y/n]", output)
+                    self.assertFalse((self.root / "installed").exists())
+                    if answer is None:
+                        child.send_signal(signal.SIGTERM)
+                    else:
+                        os.write(master, answer)
+                result = child.wait(timeout=12)
+                if terminal and answer in (b"y\n", b"\n"):
+                    self.assertEqual(result, 0, output)
+                    self.assertTrue((self.root / "installed").exists())
+                    self.assertEqual((self.root / "received").read_bytes(), records)
+                else:
+                    self.assertNotEqual(result, 0)
+                    self.assertFalse((self.root / "installed").exists())
+                    self.assertFalse((self.root / "received").exists())
+                if not terminal:
+                    log.seek(0)
+                    self.assertIn(b"Setup is not ready", log.read())
+                channel = (self.root / "channel").read_text()
+                if channel:
+                    self.assertFalse(Path(channel).exists())
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=12)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+                if master is not None:
+                    os.close(master)
 
     def check_hook_child_lifetimes(self, actions, *, real_lefthook, nested=False):
         for action in actions:

@@ -307,6 +307,13 @@ func hookAction(args []string) int {
 		}
 	}
 	var e error
+	if args[1] == "run" || args[1] == "task" {
+		cleanup, err := hookPrompt()
+		if err != nil {
+			return exitCode(err)
+		}
+		defer cleanup()
+	}
 	switch args[1] {
 	case "status":
 		var s map[string]any

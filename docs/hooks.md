@@ -174,6 +174,11 @@ pre-push:
 
 Each callback receives the hook's original stdin. For pre-push tasks,
 `CHAINMAN_HOOK_REMOTE_NAME` and `CHAINMAN_HOOK_REMOTE_URL` identify the destination.
+If a callback needs setup, the foreground host helper asks once for its required
+repairs using the controlling terminal. Lefthook's private terminal and captured
+output do not own that question. Refusal, EOF, a missing foreground terminal, or
+an interrupted consent helper stops admission without running the task. Unattended
+callers should run setup first or explicitly select `CHAINMAN_SETUP=auto`.
 Do not put project-language commands directly in lefthook `run` unless those tools
 are intentionally provided by the host. Bare-host mode does not provide managed
 hooks or transactional formatting.

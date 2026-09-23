@@ -299,9 +299,12 @@ all nested directories, on every supported Python version. Exclusions apply to
 the resulting file paths; changes, additions, and removals invalidate readiness.
 
 Ordinary commands ask once before repairing their required setup groups, using the
-controlling terminal independently of piped stdin. Interactive containers use their
-own terminal; piped commands use a host-side consent relay. Decline,
-EOF, or no terminal aborts with the exact recovery command. Explicit `just setup`
+foreground controlling terminal independently of piped stdin. Interactive containers
+use their own terminal. Piped commands, managed hooks, and credential-free setup
+preflight use a runtime-owned host helper. Private regular-file messages carry
+consent across the container boundary; no Unix socket or FIFO must cross a
+container VM. Missing or unresponsive participants refuse consent.
+Decline, EOF, or no foreground terminal aborts with the exact recovery command. Explicit `just setup`
 does not prompt. For CI, run setup first or explicitly opt into automatic repair:
 
 ```sh
@@ -760,8 +763,8 @@ container status; forcing a client to exit does not guarantee the engine stopped
 its workload. Bootstrap and preflight clients use the same bounded shutdown.
 Nested verified preparation helpers receive five seconds so their own client
 shutdown can finish; cancellation aborts entry before subsequent setup or tasks.
-The final entry owns both its setup-prompt relay and private files, avoiding
-competing cleanup wrappers. Abrupt host termination cannot guarantee cleanup. No `xhost` changes
+The final entry owns its private transport files. Abrupt host termination cannot
+guarantee cleanup. No `xhost` changes
 or host-language installation are needed. A graphical application still has the
 access granted by the selected X server; this does not isolate applications from
 one another on that desktop.

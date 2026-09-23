@@ -1,14 +1,18 @@
 """Runtime qualification uses real Nix behind the verified Git entrypoint."""
 
+import fcntl
 import hashlib
 import json
 import os
+import pty
+import select
 import shutil
 import shlex
 import signal
 import socket
 import subprocess
 import tempfile
+import termios
 import time
 import unittest
 import urllib.request
@@ -1517,6 +1521,89 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
                 for mount in layer["mounts"]
             )
         )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_interactive_container_prompts_before_credential_mounts(self):
+        self.use_real_runtime()
+        key = self.root / "neutral credential"
+        key.write_text("fixture")
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[profiles.private]\nruntime_profile="bootstrap"\nentry_setup=["prepare"]\n'
+            'transport={mounts=[{source_env="DEMO_KEY",target="/fixture-key"}]}\n'
+            '[setup.prepare]\nprofile="host"\ninputs=["chainman.lock"]\nartifacts=["ready"]\n'
+            'commands=[["sh","-eu","-c","test ! -e /fixture-key; touch ready"]]\n'
+        )
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_SETUP="prompt",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            DEMO_KEY=str(key),
+        )
+        for answer in (b"n\n", b"y\n"):
+            with self.subTest(answer=answer):
+                master, slave = pty.openpty()
+
+                def terminal():
+                    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+                child = subprocess.Popen(
+                    [
+                        str(self.launcher),
+                        "exec",
+                        "--profile",
+                        "private",
+                        "--",
+                        "sh",
+                        "-eu",
+                        "-c",
+                        "test -f /fixture-key; touch executed",
+                    ],
+                    cwd=self.root,
+                    env=env,
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    start_new_session=True,
+                    preexec_fn=terminal,
+                )
+                os.close(slave)
+                output = b""
+                answered = False
+                try:
+                    deadline = time.monotonic() + 240
+                    while time.monotonic() < deadline:
+                        if select.select([master], [], [], 0.1)[0]:
+                            try:
+                                output += os.read(master, 65536)
+                            except OSError:
+                                break
+                        if b"[Y/n]" in output and not answered:
+                            self.assertFalse((self.root / "ready").exists())
+                            os.write(master, answer)
+                            answered = True
+                        if child.poll() is not None:
+                            break
+                    self.assertTrue(answered, output.decode(errors="replace"))
+                    status = child.wait(timeout=10)
+                    accepted = answer == b"y\n"
+                    self.assertEqual(
+                        status == 0, accepted, output.decode(errors="replace")
+                    )
+                    self.assertEqual((self.root / "ready").exists(), accepted)
+                    self.assertEqual((self.root / "executed").exists(), accepted)
+                finally:
+                    if child.poll() is None:
+                        child.terminate()
+                        try:
+                            child.wait(timeout=20)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.wait()
+                    os.close(master)
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"

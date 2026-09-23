@@ -92,20 +92,23 @@ def authorize(
     if selected == "prompt":
         channel = env.get("CHAINMAN_SETUP_CHANNEL")
         if channel:
-            # Container entry supplies two private FIFOs. Command stdin remains
-            # untouched, including Git's pre-push ref stream.
-            with open(Path(channel) / "request", "w") as request:
-                request.write(message + "\n")
-            with open(Path(channel) / "response") as response:
-                answer = response.readline()
-            if answer.strip().lower() == "yes":
-                return
+            # The foreground caller owns terminal input. Regular messages also
+            # work across a Docker Desktop/Podman VM filesystem boundary.
+            try:
+                import setup_channel
+
+                if setup_channel.request(Path(channel), message):
+                    return
+            except OSError:
+                pass
         else:
             try:
                 with (
                     open("/dev/tty", "r") as answers,
                     open("/dev/tty", "w") as terminal,
                 ):
+                    if os.tcgetpgrp(answers.fileno()) != os.getpgrp():
+                        raise OSError("Setup consent requires a foreground terminal")
                     terminal.write(message)
                     terminal.flush()
                     answer = answers.readline()

@@ -579,6 +579,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.action == "_hook-export":
                 return hook_worker.export(root, args.arguments)
             return hook_worker.run(root, args.arguments)
+        if args.action == "_consent-export":
+            import hook_worker
+
+            return hook_worker.export_consent(args.arguments)
         if args.action == "_control-export":
             import services
 

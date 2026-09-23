@@ -87,9 +87,12 @@ do not weaken acceptance or dependency policy to turn either into a passing resu
 to check semantic composition, optional inputs, inspection, credential scoping and cleanup.
 `test_setup_terminal.py` checks prompt consent without consuming command stdin,
 plus bounded HUP/INT/TERM shutdown before a prompt request and removal of private
-transport and relay files.
+transport files. Its native-controller cases run in `just control-test`.
+`test_native_hooks.py` exercises actual lefthook terminal handling and callback
+cancellation; it checks helper exit separately from captured-pipe completion.
 `test_bootstrap.py` includes opt-in real-container profile and display-helper
-checks. The display-helper fixture uses a local Unix socket and synthetic cookie;
+checks, including interactive setup consent before credential mounts.
+The display-helper fixture uses a local Unix socket and synthetic cookie;
 it proves transport behavior, not browser rendering or a real desktop login.
 Run these focused tests sequentially; no application build or production account
 is needed.

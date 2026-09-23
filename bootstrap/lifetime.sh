@@ -1,9 +1,7 @@
 #!/bin/sh
 # Sourced only by verified runtime scripts. Own direct children and private paths.
 lifetime_child=
-lifetime_relay=
 lifetime_directory=
-lifetime_channel=
 lifetime_grace=3
 lifetime_starting=0
 lifetime_signal=
@@ -12,19 +10,19 @@ lifetime_is_helper=0
 
 lifetime_stop() {
     lifetime_remaining=$lifetime_grace
-    for lifetime_pid in $lifetime_child $lifetime_relay; do
+    for lifetime_pid in $lifetime_child; do
         kill -"$1" "$lifetime_pid" 2> /dev/null || true
     done
     while [ "$lifetime_remaining" -gt 0 ]; do
         lifetime_alive=
-        for lifetime_pid in $lifetime_child $lifetime_relay; do
+        for lifetime_pid in $lifetime_child; do
             if kill -0 "$lifetime_pid" 2> /dev/null; then lifetime_alive=yes; fi
         done
         [ -n "$lifetime_alive" ] || break
         sleep 1
         lifetime_remaining=$((lifetime_remaining - 1))
     done
-    for lifetime_pid in $lifetime_child $lifetime_relay; do
+    for lifetime_pid in $lifetime_child; do
         if kill -0 "$lifetime_pid" 2> /dev/null; then
             printf '%s\n' 'chainman: owned helper did not stop; forcing client exit. Check container status if the engine is unresponsive.' >&2
             kill -KILL "$lifetime_pid" 2> /dev/null || true
@@ -32,13 +30,11 @@ lifetime_stop() {
         wait "$lifetime_pid" 2> /dev/null || true
     done
     lifetime_child=
-    lifetime_relay=
 }
 
 lifetime_cleanup() {
     trap '' HUP INT TERM
     lifetime_stop TERM
-    [ -z "$lifetime_channel" ] || rm -rf -- "$lifetime_channel"
     [ -z "$lifetime_directory" ] || rm -rf -- "$lifetime_directory"
 }
 

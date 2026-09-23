@@ -386,6 +386,36 @@ EOF
         ;;
 esac
 
+# Piped container commands still need the caller's terminal for setup consent.
+# A native hook already supplies this channel. Interactive sessions use their
+# attached terminal, but credential-free setup preflight temporarily detaches
+# stdin and needs the same host channel before the final container starts.
+if [ "$mode" = container-nix ] && [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] \
+    && [ "${CHAINMAN_SETUP:-prompt}" = prompt ] && [ -z "${CHAINMAN_SETUP_CHANNEL:-}" ] \
+    && { [ ! -t 0 ] || [ ! -t 1 ]; } && (: < /dev/tty) 2> /dev/null; then
+    case "$CHAINMAN_REQUEST_ACTION" in
+        _transport-prepare | _service-prepare | [!_]*)
+            consent_output=$(mktemp -d "${TMPDIR:-/tmp}/chainman-consent-export.XXXXXXXX")
+            lifetime_directory=$consent_output
+            consent_output=$(CDPATH='' cd -P -- "$consent_output" && pwd)
+            lifetime_directory=$consent_output
+            case "$(uname -s):$(uname -m)" in
+                Linux:aarch64 | Linux:arm64) consent_target=linux-arm64 ;;
+                Linux:x86_64) consent_target=linux-amd64 ;;
+                Darwin:arm64) consent_target=darwin-arm64 ;;
+                Darwin:x86_64) consent_target=darwin-amd64 ;;
+                *) fail 'Unsupported native setup-consent platform.' ;;
+            esac
+            printf '%s\n%s\n' --mount "type=bind,src=$consent_output,dst=$consent_output" > "$consent_output/mounts"
+            CHAINMAN_SETUP=error CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$consent_output/mounts \
+                lifetime_helper "$self" _consent-export "$consent_output" "$consent_target" < /dev/null >&2
+            lifetime_grace=10
+            lifetime_run "$consent_output/chainman-control" setup-consent "$self" "$@"
+            exit $?
+            ;;
+    esac
+fi
+
 if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     # Nix assigns TMPDIR on every shell entry. Keep the caller's selected base
     # across the bootstrap and later profile refreshes, within this mode only.
@@ -1044,7 +1074,7 @@ if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
     set -- --name "$CHAINMAN_CONTAINER_NAME" --label "dev.chainman.owner=$CHAINMAN_CONTAINER_OWNER" "$@"
 fi
 project_mount="type=bind,src=$root,dst=$root"
-case "$CHAINMAN_REQUEST_ACTION" in _control-export | _hook-export) project_mount=$project_mount,readonly ;; esac
+case "$CHAINMAN_REQUEST_ACTION" in _control-export | _hook-export | _consent-export) project_mount=$project_mount,readonly ;; esac
 set -- --rm --init --interactive --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \

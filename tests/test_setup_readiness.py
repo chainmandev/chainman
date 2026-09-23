@@ -255,6 +255,10 @@ class SetupReadinessTests(unittest.TestCase):
                             pass
 
     def test_prompt_answers_and_noninteractive_recovery(self):
+        self.enterContext(
+            patch("setup_readiness.os.tcgetpgrp", return_value=os.getpgrp())
+        )
+
         class Terminal(io.StringIO):
             def __init__(self, answer):
                 super().__init__()
@@ -262,6 +266,9 @@ class SetupReadinessTests(unittest.TestCase):
 
             def readline(self):
                 return self.answer
+
+            def fileno(self):
+                return 0
 
         for answer in ("\n", "y\n", "Y\n", "yes\n"):
             with patch("builtins.open", return_value=Terminal(answer)):

@@ -42,31 +42,7 @@ def export(root: Path, args: list[str]) -> int:
     if action in {"hooks", "setup"}:
         packages.append(("hook-lefthook", "lefthook"))
     for package, executable in packages:
-        with tc.nix_temporary_directory("chainman-hook-export-") as temporary:
-            store = subprocess.run(
-                [
-                    tc.nix_command(),
-                    "--extra-experimental-features",
-                    "nix-command flakes",
-                    "build",
-                    tc.nix_path_reference(
-                        chainman.RUNTIME / "nix", f"{package}-{target}"
-                    ),
-                    "--out-link",
-                    str(Path(temporary) / "package"),
-                    "--print-out-paths",
-                    "--no-write-lock-file",
-                ],
-                check=True,
-                stdout=subprocess.PIPE,
-                text=True,
-            ).stdout.strip()
-            if not store.startswith("/nix/store/") or "\n" in store:
-                raise ValueError("Invalid native hook package output")
-            source = Path(store) / "bin" / executable
-            if source.is_symlink() or not source.is_file():
-                raise ValueError("Native hook output must be a regular executable")
-            tc.atomic_bytes(destination / executable, source.read_bytes(), 0o700)
+        export_binary(destination, target, package, executable)
     tc.atomic_json(
         destination / "plan.json",
         {
@@ -83,6 +59,51 @@ def export(root: Path, args: list[str]) -> int:
             },
         },
     )
+    return 0
+
+
+def export_binary(
+    destination: Path, target: str, package: str, executable: str
+) -> None:
+    with tc.nix_temporary_directory("chainman-hook-export-") as temporary:
+        store = subprocess.run(
+            [
+                tc.nix_command(),
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "build",
+                tc.nix_path_reference(chainman.RUNTIME / "nix", f"{package}-{target}"),
+                "--out-link",
+                str(Path(temporary) / "package"),
+                "--print-out-paths",
+                "--no-write-lock-file",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        if not store.startswith("/nix/store/") or "\n" in store:
+            raise ValueError("Invalid native hook package output")
+        source = Path(store) / "bin" / executable
+        if source.is_symlink() or not source.is_file():
+            raise ValueError("Native hook output must be a regular executable")
+        tc.atomic_bytes(destination / executable, source.read_bytes(), 0o700)
+
+
+def export_consent(args: list[str]) -> int:
+    if len(args) != 2:
+        raise ValueError("Invalid consent helper export")
+    output, target = args
+    destination = Path(output)
+    if (
+        not destination.is_absolute()
+        or destination.is_symlink()
+        or not destination.is_dir()
+    ):
+        raise ValueError("Consent helper requires a private output directory")
+    if target not in {"linux-arm64", "linux-amd64", "darwin-arm64", "darwin-amd64"}:
+        raise ValueError("Unsupported native consent platform")
+    export_binary(destination, target, "task", "chainman-control")
     return 0
 
 

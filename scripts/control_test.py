@@ -70,6 +70,23 @@ def main() -> None:
         subprocess.run(
             [
                 "python3",
+                "-B",
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-p",
+                "test_setup_terminal.py",
+                "-v",
+            ],
+            cwd=ROOT,
+            env=dict(env, CHAINMAN_TEST_HOOK_CONTROL=package + "/bin/chainman-control"),
+            check=True,
+        )
+        subprocess.run(
+            [
+                "python3",
                 "-m",
                 "unittest",
                 "discover",

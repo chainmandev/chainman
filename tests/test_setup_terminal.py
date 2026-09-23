@@ -14,6 +14,7 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+CONTROL = os.environ.get("CHAINMAN_TEST_HOOK_CONTROL")
 
 
 class SetupTerminalTests(unittest.TestCase):
@@ -29,7 +30,7 @@ import setup_readiness
 env = {{}}
 for arg in sys.argv:
     if arg.startswith('type=bind,src='):
-        env['CHAINMAN_SETUP_CHANNEL'] = arg.split('src=',1)[1].split(',dst=',1)[0]
+        env['CHAINMAN_SETUP_CHANNEL'] = str(Path(arg.split('src=',1)[1].split(',dst=',1)[0]).parent)
 try:
     setup_readiness.authorize({{'javascript':'stale'}}, env)
 except ValueError as error:
@@ -57,7 +58,11 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                 else [str(engine)]
             )
             child = subprocess.Popen(
-                command,
+                (
+                    [CONTROL, "setup-consent", *command]
+                    if mode == "container"
+                    else command
+                ),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -86,7 +91,7 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                 else:
                     os.write(master, answer)
                 _, error = child.communicate(
-                    b"refs/heads/master 123 remote 456\n", timeout=5
+                    b"refs/heads/master 123 remote 456\n", timeout=12
                 )
                 if mode == "container":
                     self.assertFalse(private.exists())
@@ -108,9 +113,47 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
     def test_host_accepts_without_consuming_git_input(self):
         self.run_prompt("host", b"y\n")
 
+    def test_background_host_refuses_instead_of_stopping_on_terminal_read(self):
+        master, slave = pty.openpty()
+
+        def terminal():
+            fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+        program = (
+            f"import sys; sys.path.insert(0, {str(ROOT / 'scripts')!r}); "
+            "import setup_readiness; "
+            "setup_readiness.authorize({'fixture': 'stale'}, {})"
+        )
+        parent = (
+            "import subprocess,sys; "
+            "sys.exit(subprocess.run(sys.argv[1:], process_group=0, timeout=3).returncode)"
+        )
+        child = subprocess.Popen(
+            [sys.executable, "-c", parent, sys.executable, "-c", program],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            preexec_fn=terminal,
+            pass_fds=(slave,),
+        )
+        os.close(slave)
+        try:
+            _, error = child.communicate(timeout=5)
+            self.assertNotEqual(child.returncode, 0)
+            self.assertIn(b"Setup is not ready", error)
+            self.assertNotIn(b"TimeoutExpired", error)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=5)
+            os.close(master)
+
+    @unittest.skipUnless(CONTROL, "run just control-test for native consent")
     def test_container_relay_accepts_default_without_consuming_git_input(self):
         self.run_prompt("container", b"\n")
 
+    @unittest.skipUnless(CONTROL, "run just control-test for native consent")
     def test_container_decline(self):
         self.run_prompt("container", b"n\n")
 
@@ -165,9 +208,11 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.readline())
                 child.wait(timeout=3)
                 os.close(master)
 
+    @unittest.skipUnless(CONTROL, "run just control-test for native consent")
     def test_container_interruption(self):
         self.run_prompt("container", None)
 
+    @unittest.skipUnless(CONTROL, "run just control-test for native consent")
     def test_unresponsive_engine_before_prompt_is_bounded_and_reaped(self):
         for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
             with self.subTest(signal=sig), tempfile.TemporaryDirectory() as directory:
@@ -193,6 +238,8 @@ time.sleep(30)
 
                 child = subprocess.Popen(
                     [
+                        CONTROL,
+                        "setup-consent",
                         "sh",
                         str(ROOT / "bootstrap/setup-prompt.sh"),
                         "--cleanup-directory",
@@ -213,10 +260,10 @@ time.sleep(30)
                         time.sleep(0.01)
                     self.assertTrue(ready.exists())
                     child.send_signal(sig)
-                    _, error = child.communicate(timeout=6)
+                    _, error = child.communicate(timeout=12)
                     self.assertEqual(child.returncode, 128 + sig, error)
                     self.assertFalse(private.exists())
-                    self.assertEqual(list(root.glob("chainman-setup-prompt.*")), [])
+                    self.assertEqual(list(root.glob("chainman-consent-*")), [])
                     with self.assertRaises(ProcessLookupError):
                         os.kill(int(ready.read_text()), 0)
                 finally:
