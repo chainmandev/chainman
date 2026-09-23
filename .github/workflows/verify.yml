@@ -10,7 +10,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: macos-15
-    timeout-minutes: 12
+    timeout-minutes: 20
     env:
       TOOLCHAIN_MODE: host-nix
       CHAINMAN_SETUP: auto
@@ -57,3 +57,7 @@ jobs:
               faulthandler.cancel_dump_traceback_later()
               raise SystemExit(not result.wasSuccessful())
           PYTHON
+      - name: Qualify the complete native controller lane
+        working-directory: checkout with spaces
+        run: |
+          PYTHONUNBUFFERED=1 nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
