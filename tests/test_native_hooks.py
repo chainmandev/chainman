@@ -17,6 +17,8 @@ import termios
 import time
 import unittest
 
+from terminal_fixture import wait_terminal
+
 SOURCE = Path(__file__).resolve().parents[1]
 CONTROL = os.environ.get("CHAINMAN_TEST_HOOK_CONTROL")
 
@@ -624,7 +626,11 @@ commands=[["sh","-c","cat > received"]]
                         child.send_signal(signal.SIGTERM)
                     else:
                         os.write(master, answer)
-                result = child.wait(timeout=12)
+                if terminal:
+                    result, remaining_output = wait_terminal(child, master, 12)
+                    output += remaining_output
+                else:
+                    result = child.wait(timeout=12)
                 if terminal and answer in (b"y\n", b"\n"):
                     self.assertEqual(result, 0, output)
                     self.assertTrue((self.root / "installed").exists())
@@ -640,15 +646,11 @@ commands=[["sh","-c","cat > received"]]
                 if channel:
                     self.assertFalse(Path(channel).exists())
             finally:
-                if child.poll() is None:
-                    child.terminate()
-                    try:
-                        child.wait(timeout=12)
-                    except subprocess.TimeoutExpired:
-                        child.kill()
-                        child.wait()
                 if master is not None:
                     os.close(master)
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=3)
 
     def check_hook_child_lifetimes(self, actions, *, real_lefthook, nested=False):
         for action in actions:

@@ -13,28 +13,13 @@ import termios
 import time
 import unittest
 
+from terminal_fixture import wait_terminal
+
 ROOT = Path(__file__).resolve().parents[1]
 CONTROL = os.environ.get("CHAINMAN_TEST_HOOK_CONTROL")
 
 
 class SetupTerminalTests(unittest.TestCase):
-    def wait_terminal(self, child, master, timeout):
-        # Darwin can wait for pending PTY output to drain while closing the
-        # terminal. Keep consuming echoed input until the process exits.
-        deadline = time.monotonic() + timeout
-        while child.poll() is None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(child.args, timeout)
-            if select.select([master], [], [], min(0.1, remaining))[0]:
-                try:
-                    if os.read(master, 4096):
-                        continue
-                except OSError:
-                    pass
-                return child.wait(timeout=remaining)
-        return child.returncode
-
     def run_prompt(self, mode, answer):
         with tempfile.TemporaryDirectory(prefix="setup tty ") as directory:
             root = Path(directory)
@@ -113,7 +98,7 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                 except BrokenPipeError:
                     pass
                 child.stdin = None
-                self.wait_terminal(child, master, 12)
+                wait_terminal(child, master, 12)
                 _, error = child.communicate(timeout=3)
                 if mode == "container":
                     self.assertFalse(private.exists())
@@ -220,7 +205,7 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.readline())
                             break
                 self.assertIn(b"[Y/n]", output)
                 os.write(master, b"y\nliteral terminal input\n")
-                self.assertEqual(self.wait_terminal(child, master, 3), 0)
+                self.assertEqual(wait_terminal(child, master, 3)[0], 0)
                 self.assertEqual(
                     (root / "input").read_bytes(), b"literal terminal input\n"
                 )
