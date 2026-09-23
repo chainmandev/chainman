@@ -201,22 +201,24 @@ func hookPrompt() (func(), error) {
 }
 
 func hookAnswer(ctx context.Context, tty *os.File, alive func() bool) bool {
+	fd := int(tty.Fd())
+	if err := unix.SetNonblock(fd, true); err != nil {
+		return false
+	}
+	// Darwin's poll does not support /dev/tty. A nonblocking read with a
+	// bounded retry works for both platforms and remains cancellable.
+	retry := time.NewTicker(100 * time.Millisecond)
+	defer retry.Stop()
 	answer := []byte{}
 	for ctx.Err() == nil && alive() {
-		ready := []unix.PollFd{{Fd: int32(tty.Fd()), Events: unix.POLLIN}}
-		_, err := unix.Poll(ready, 100)
-		if err == syscall.EINTR {
-			continue
-		}
-		if err != nil || ready[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
-			return false
-		}
-		if ready[0].Revents&unix.POLLIN == 0 {
-			continue
-		}
 		var data [256]byte
-		n, err := unix.Read(int(tty.Fd()), data[:])
+		n, err := unix.Read(fd, data[:])
 		if err == syscall.EAGAIN || err == syscall.EINTR {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-retry.C:
+			}
 			continue
 		}
 		if err != nil || n == 0 {
