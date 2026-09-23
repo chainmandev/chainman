@@ -6,13 +6,14 @@ floor is copied elsewhere: future vulnerability detection belongs to the gate.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping, MutableSequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import stat
 import sys
 import tomllib
+from typing import cast
 
 import tomlkit
 
@@ -345,11 +346,12 @@ def retire(
         for path, indices in allowed.items():
             # tomlkit retains unrelated formatting/comments. Keep an empty list to
             # avoid resurrecting an exception inherited from a lower-priority file.
-            parent = rendered
+            # permitted() already validated the nested table and array shapes.
+            parent: MutableMapping[str, object] = rendered
             for key in path[:-1]:
-                parent = parent[key]
+                parent = cast(MutableMapping[str, object], parent[key])
             approved = [original_lists[path][i] for i in indices]
-            items = parent.get(path[-1], tomlkit.array())
+            items = cast(MutableSequence[object], parent.get(path[-1], tomlkit.array()))
             remaining = current_lists.get(path, [])
             for index in reversed(range(len(remaining))):
                 if remaining[index] in approved:
