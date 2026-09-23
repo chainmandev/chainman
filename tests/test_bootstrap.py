@@ -1256,7 +1256,11 @@ commands=[["cat","ready"]]
             )
         denied = self.run_bootstrap("run", "check", env=env, check=False)
         self.assertNotEqual(denied.returncode, 0)
-        self.assertIn("just chainman setup fixture", denied.stderr)
+        self.assertIn(
+            "just chainman setup fixture",
+            denied.stderr,
+            f"bootstrap exited {denied.returncode}: {denied.stdout!r} {denied.stderr!r}",
+        )
         self.assertFalse((self.root / "ready").exists())
         self.run_bootstrap("setup", env=env)
         self.assertEqual(self.run_bootstrap("run", "check", env=env).stdout, "ready\n")
