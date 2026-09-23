@@ -18,6 +18,23 @@ CONTROL = os.environ.get("CHAINMAN_TEST_HOOK_CONTROL")
 
 
 class SetupTerminalTests(unittest.TestCase):
+    def wait_terminal(self, child, master, timeout):
+        # Darwin can wait for pending PTY output to drain while closing the
+        # terminal. Keep consuming echoed input until the process exits.
+        deadline = time.monotonic() + timeout
+        while child.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(child.args, timeout)
+            if select.select([master], [], [], min(0.1, remaining))[0]:
+                try:
+                    if os.read(master, 4096):
+                        continue
+                except OSError:
+                    pass
+                return child.wait(timeout=remaining)
+        return child.returncode
+
     def run_prompt(self, mode, answer):
         with tempfile.TemporaryDirectory(prefix="setup tty ") as directory:
             root = Path(directory)
@@ -90,9 +107,14 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                     child.send_signal(signal.SIGTERM)
                 else:
                     os.write(master, answer)
-                _, error = child.communicate(
-                    b"refs/heads/master 123 remote 456\n", timeout=12
-                )
+                try:
+                    child.stdin.write(b"refs/heads/master 123 remote 456\n")
+                    child.stdin.close()
+                except BrokenPipeError:
+                    pass
+                child.stdin = None
+                self.wait_terminal(child, master, 12)
+                _, error = child.communicate(timeout=3)
                 if mode == "container":
                     self.assertFalse(private.exists())
                 if answer in (b"y\n", b"\n"):
@@ -105,10 +127,10 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
                     self.assertNotEqual(child.returncode, 0)
                     self.assertFalse((root / "input").exists())
             finally:
+                os.close(master)
                 if child.poll() is None:
                     child.kill()
-                    child.communicate()
-                os.close(master)
+                child.communicate(timeout=3)
 
     def test_host_accepts_without_consuming_git_input(self):
         self.run_prompt("host", b"y\n")
@@ -144,10 +166,10 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.read())
             self.assertIn(b"Setup is not ready", error)
             self.assertNotIn(b"TimeoutExpired", error)
         finally:
+            os.close(master)
             if child.poll() is None:
                 child.kill()
             child.communicate(timeout=5)
-            os.close(master)
 
     @unittest.skipUnless(CONTROL, "run just control-test for native consent")
     def test_container_relay_accepts_default_without_consuming_git_input(self):
@@ -198,15 +220,15 @@ Path({str(root / "input")!r}).write_bytes(sys.stdin.buffer.readline())
                             break
                 self.assertIn(b"[Y/n]", output)
                 os.write(master, b"y\nliteral terminal input\n")
-                self.assertEqual(child.wait(timeout=3), 0)
+                self.assertEqual(self.wait_terminal(child, master, 3), 0)
                 self.assertEqual(
                     (root / "input").read_bytes(), b"literal terminal input\n"
                 )
             finally:
+                os.close(master)
                 if child.poll() is None:
                     child.kill()
                 child.wait(timeout=3)
-                os.close(master)
 
     @unittest.skipUnless(CONTROL, "run just control-test for native consent")
     def test_container_interruption(self):
@@ -267,12 +289,12 @@ time.sleep(30)
                     with self.assertRaises(ProcessLookupError):
                         os.kill(int(ready.read_text()), 0)
                 finally:
+                    os.close(master)
                     if child.poll() is None:
                         child.kill()
-                    child.communicate()
+                    child.communicate(timeout=3)
                     if ready.exists():
                         try:
                             os.kill(int(ready.read_text()), signal.SIGKILL)
                         except ProcessLookupError:
                             pass
-                    os.close(master)
