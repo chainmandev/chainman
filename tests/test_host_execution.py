@@ -23,7 +23,7 @@ class HostExecutionTests(unittest.TestCase):
             self.origin / "scripts",
             ignore=shutil.ignore_patterns("__pycache__"),
         )
-        for filename in ("chainman.sh", "git-entry.sh", "lifetime.sh"):
+        for filename in ("chainman.sh", "git-entry.sh", "lifetime.sh", "reenter.sh"):
             shutil.copy2(
                 SOURCE / "bootstrap" / filename, self.origin / "bootstrap" / filename
             )
@@ -109,6 +109,16 @@ commands = [["python3", "-c", "import os; print(':'.join(os.environ[k] for k in 
         (self.project / "input.txt").write_text("changed")
         self.assertEqual(self.run_entry("run", "check").returncode, 0)
         self.assertEqual((self.project / "prepared").read_text(), "xx")
+
+    def test_public_nested_task_reuses_bare_host_setup_without_nix(self):
+        self.assertEqual(self.run_entry("setup").returncode, 0)
+        stamp = self.project / ".cache/toolchain/setup-groups/prepare.json"
+        before = stamp.read_bytes()
+        result = self.run_entry("exec", "--", "just", "chainman", "run", "check")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"project:profile:host\n")
+        self.assertEqual(stamp.read_bytes(), before)
+        self.assertEqual((self.project / "prepared").read_text(), "x")
 
     def test_entire_task_graph_rejected_before_setup(self):
         for requirement in (

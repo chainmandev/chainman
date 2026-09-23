@@ -1325,6 +1325,9 @@ commands=[["sh","-c","cp input.txt ready"]]
 [tasks.check]
 setup=["fixture"]
 commands=[["cat","ready"]]
+[tasks.parent]
+setup=["fixture"]
+commands=[["just","chainman","run","check"]]
 """)
         (self.root / "input.txt").write_text("ready\n")
         env = dict(self.env, CHAINMAN_SETUP="error")
@@ -1336,7 +1339,19 @@ commands=[["cat","ready"]]
                     "CHAINMAN_TEST_WARM_VOLUME", self.test_volume
                 ),
             )
-        entry = 'exec "$CHAINMAN_RUNTIME/bootstrap/reenter.sh" "$CHAINMAN_ROOT" check'
+            # The fixture commit is intentionally unpublished. Make its Git
+            # objects available to the public bootstrap inside the project mount;
+            # a container cannot see the outer test runner's download cache.
+            nested_cache = self.root / ".cache/nested Git cache"
+            self.prepare_cache(dict(env, XDG_CACHE_HOME=str(nested_cache)))
+            config = self.root / "chainman.toml"
+            config.write_text(
+                config.read_text()
+                + "\n[environment.values]\nXDG_CACHE_HOME="
+                + json.dumps(str(nested_cache))
+                + "\n"
+            )
+        entry = "exec just chainman run check"
         denied = self.run_bootstrap(
             "exec", "--", "sh", "-c", entry, env=env, check=False
         )
@@ -1344,8 +1359,47 @@ commands=[["cat","ready"]]
         self.assertIn("just chainman setup fixture", denied.stderr)
         self.assertFalse((self.root / "ready").exists())
         self.run_bootstrap("setup", env=env)
+        stamp = self.root / ".cache/toolchain/setup-groups/fixture.json"
+        before = stamp.read_bytes()
         result = self.run_bootstrap("exec", "--", "sh", "-c", entry, env=env)
         self.assertEqual(result.stdout, "ready\n")
+        self.assertEqual(stamp.read_bytes(), before)
+        result = self.run_bootstrap("run", "parent", env=env)
+        self.assertEqual(result.stdout, "ready\n")
+        self.assertEqual(stamp.read_bytes(), before)
+        status = self.run_bootstrap("setup-status", env=env)
+        self.assertTrue(json.loads(status.stdout)["current"])
+        rejected = self.run_bootstrap(
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            'export CHAINMAN_RUNTIME="$PWD"; exec just chainman run check',
+            env=env,
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("requires an immutable Nix-store runtime", rejected.stderr)
+        foreign = self.root / "foreign-runtime/scripts"
+        foreign.mkdir(parents=True)
+        (foreign / "reentry.py").write_text(
+            "from pathlib import Path; Path('unchecked-runtime-ran').touch()"
+        )
+        rejected = self.run_bootstrap(
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "CHAINMAN_RUNTIME=$(nix --extra-experimental-features nix-command store add-path "
+            "--name chainman-source foreign-runtime); export CHAINMAN_RUNTIME; "
+            "exec just chainman run check",
+            env=env,
+            check=False,
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("runtime differs from the verified Git source", rejected.stderr)
+        self.assertFalse((self.root / "unchecked-runtime-ran").exists())
+        self.assertEqual(stamp.read_bytes(), before)
         (self.root / "input.txt").write_text("changed\n")
         denied = self.run_bootstrap(
             "exec", "--", "sh", "-c", entry, env=env, check=False

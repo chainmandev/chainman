@@ -113,6 +113,11 @@ container store. Temporary environment roots remain while their managed operatio
 need them. Runtime generations coexist across projects and updates. Cache cleanup
 must respect active operations and service ownership.
 
+Nested commands in an active Nix environment verify the pinned Git tree again
+and reuse the matching Nix-store runtime. A fresh temporary Git export does not
+invalidate setup readiness. A changed pin or mismatched runtime requires leaving
+the active environment and entering it again.
+
 The owned container daemon uses pressure garbage collection. Host Nix retains its
 own configuration. Nix collection does not prune package-manager downloads or
 project outputs. Inspect project caches explicitly:
