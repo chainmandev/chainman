@@ -374,14 +374,29 @@ print('entry and Git authority are read-only')
         )
         if not cache.exists():
             cache.parent.mkdir(parents=True, exist_ok=True)
+            # Exercise Git object transfer, not local clone's filesystem-copy
+            # shortcut. Each fixture needs an independent, complete cache.
             subprocess.run(
                 [
                     "git",
                     "clone",
                     "--bare",
+                    "--no-local",
                     "-q",
                     str(self.repositories[self.lock]),
                     str(cache),
+                ],
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "--git-dir=" + str(cache),
+                    "fsck",
+                    "--full",
+                    "--strict",
+                    "--no-reflogs",
+                    "--no-dangling",
                 ],
                 check=True,
             )
