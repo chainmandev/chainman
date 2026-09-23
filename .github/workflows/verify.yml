@@ -21,7 +21,7 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: checkout with spaces
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
-      - name: Qualify native controller with bounded per-test diagnostics
+      - name: Diagnose six native service failures in the normal test environment
         working-directory: checkout with spaces
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
@@ -41,11 +41,6 @@ jobs:
           sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
           import toolchain as tc
 
-          source = root / 'nix/control'
-          formatted = subprocess.check_output(['gofmt', '-l', *map(str, source.glob('*.go'))], text=True)
-          assert not formatted, formatted
-          subprocess.run(['go', 'vet', '-mod=readonly', './...'], cwd=source, check=True)
-          subprocess.run(['go', 'test', '-race', '-mod=readonly', './...'], cwd=source, env=dict(os.environ, CGO_ENABLED='1'), check=True)
           target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
           with tempfile.TemporaryDirectory(prefix='native consent diagnostic ') as directory:
               package = subprocess.check_output([
@@ -83,15 +78,15 @@ jobs:
                       self.diagnostics(test)
                       super().addFailure(test, err)
               suite = unittest.defaultTestLoader.loadTestsFromNames([
-                  'test_native_hooks', 'test_setup_terminal', 'test_terminal_fixture', 'test_services_control',
+                  'test_services_control.ServiceControlTests.' + name for name in (
+                      'test_backend_sends_single_shutdown_signal',
+                      'test_controller_sends_single_shutdown_signal',
+                      'test_owned_command_cancellation_cleans_signal_resistant_child',
+                      'test_owned_command_cleans_descendants_after_success',
+                      'test_owned_command_sequence_preserves_arguments_and_failure_status',
+                      'test_owned_command_timeout_kills_signal_resistant_descendants',
+                  )
               ])
               result = unittest.TextTestRunner(verbosity=2, resultclass=BoundedResult).run(suite)
-              for system in ('linux', 'darwin'):
-                  for arch in ('arm64', 'amd64'):
-                      subprocess.run([
-                          'go', 'build', '-mod=readonly', '-trimpath', '-buildvcs=false',
-                          '-o', str(Path(directory) / (system + '-' + arch)), '.',
-                      ], cwd=source, env=dict(os.environ, CGO_ENABLED='0', GOOS=system, GOARCH=arch), check=True)
-                      print(system, arch, 'cross-build passed', flush=True)
               raise SystemExit(not result.wasSuccessful())
           PYTHON
