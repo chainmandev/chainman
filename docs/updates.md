@@ -38,6 +38,39 @@ fetching, so an interrupted download also retries the same SHA. After preparatio
 resume retains that runtime, verifies its exact Git objects, and
 re-audits/reverifies the candidate without rerunning project resolution.
 
+## Which tools does an update own?
+
+Repository tooling belongs in the dependency inventory, alongside application
+libraries. Its installation source determines which adapter updates it:
+
+| Tool source | Update owner |
+| --- | --- |
+| Project Nix environment, including its Git and SDK packages | The project's `nix` adapter updates its declared input locks. |
+| Independently pinned package-manager or SDK artifact | A declared source/artifact adapter selects the eligible artifact; `toolchain` probes reconcile its version with project manifests. |
+| chainman's built-in tools and container image | chainman's maintainer `just deps-update` workflow; consumers acquire qualified changes through their runtime SHA. |
+| Caller-installed Git, just, Nix, Docker or Podman | The developer or system administrator; chainman does not replace global prerequisites. |
+
+A Nix lock refresh does not rewrite a project's package-family selector such as
+`pkgs.pnpm_10`. Document compatibility holds and review them explicitly; use an
+independent source pin when a tool should advance separately from Nixpkgs.
+Toolchain version reconciliation does not infer or remove arbitrary constraints
+in a flake.
+
+Inspect ownership and policy before refreshing:
+
+```sh
+just chainman deps-coverage
+just chainman deps-policy-report
+```
+
+Coverage means a dependency has an update owner, not that its installed version is
+current. The default 30-day window is a **minimum release age**, not an update
+schedule or a maximum pin age. Run verified updates regularly; setup, hooks and
+ordinary launches intentionally keep the committed pins. Explicit-only targets
+also remain unchanged unless selected.
+
+## Verification and recovery
+
 Schema 3 consumers declare `updates.verify_task = "verify"` (or another finite
 task). The launcher runs that ordinary task against the candidate's updated Nix
 lock and verified runtime. Its setup groups, service readiness, container namespaces
