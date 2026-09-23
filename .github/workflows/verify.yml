@@ -1,4 +1,4 @@
-name: Diagnose macOS core qualification
+name: Diagnose macOS native control qualification
 on:
   workflow_dispatch:
     inputs:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       TOOLCHAIN_MODE: host-nix
       CHAINMAN_SETUP: auto
@@ -21,27 +21,10 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: checkout with spaces
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
-      - name: Diagnose test progress with a bounded stack dump
+      - name: Qualify the complete native controller lane
         working-directory: checkout with spaces
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED"
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec python3 -u -B - <<'PYTHON'
-          import faulthandler
-          import sys
-          import unittest
-          sys.path.insert(0, 'tests')
-          from test_bootstrap import BootstrapTests
-          original = BootstrapTests.run_bootstrap
-          def visible(self, *args, **kwargs):
-              result = original(self, *args, **kwargs)
-              print('BOOTSTRAP', args, 'STATUS', result.returncode, 'STDOUT', repr(result.stdout), 'STDERR', repr(result.stderr), flush=True)
-              return result
-          BootstrapTests.run_bootstrap = visible
-          faulthandler.dump_traceback_later(600, exit=True)
-          suite = unittest.defaultTestLoader.loadTestsFromTestCase(BootstrapTests)
-          result = unittest.TextTestRunner(verbosity=2).run(suite)
-          faulthandler.cancel_dump_traceback_later()
-          raise SystemExit(not result.wasSuccessful())
-          PYTHON
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
