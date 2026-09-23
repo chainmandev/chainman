@@ -1436,6 +1436,38 @@ while True: time.sleep(.1)
                     self.assertIn("relative to current directory", result.stderr)
                 self.assertFalse((self.root / "project-ran").exists())
 
+    def test_owned_task_overrides_inherited_lease_environment(self):
+        self.plan.update(own_task=True, task_shutdown_seconds=1)
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import os; from pathlib import Path; "
+                "assert 'CHAINMAN_SERVICE_LEASE_FDS' not in os.environ; "
+                "assert Path('ready').is_file(); "
+                "Path('task-result').write_text(os.environ['DECLARED']); "
+                "raise SystemExit(7)",
+            ]
+        )
+        # The owned anchor receives the new lease; project code must not
+        # advertise its host descriptors through a subsequent Nix/engine entry.
+        self.plan["task"]["environment"] = {"DECLARED": "project override"}
+        self.path.write_text(json.dumps(self.plan))
+        result = subprocess.run(
+            [CONTROL, "run", str(self.path)],
+            env=dict(
+                os.environ,
+                CHAINMAN_SERVICE_LEASE_FDS="stale caller metadata",
+                DECLARED="caller value",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+        self.assertEqual((self.root / "task-result").read_text(), "project override")
+        self.assertFalse(list(self.state.glob("*.lease*")))
+
     def test_task_identity_is_published_before_project_entry(self):
         arguments = ["two words", "", "$(touch injected)", "'quoted'"]
         script = """import json,os,sys

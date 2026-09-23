@@ -102,5 +102,8 @@ func leasedTask(path string) error {
 			return err
 		}
 	}
-	return syscall.Exec(cmd.Path, cmd.Args, cmd.Env)
+	// Preserve os/exec's last-value-wins overrides. Raw Env can contain both
+	// inherited and declared entries; execve leaves their interpretation to the
+	// child, and Go/libc would otherwise keep the inherited value.
+	return syscall.Exec(cmd.Path, cmd.Args, cmd.Environ())
 }

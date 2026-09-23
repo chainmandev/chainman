@@ -56,7 +56,9 @@ Task-entry checks require a durable kernel identity before project code executes
 including commands that close inherited descriptors. Lease receipts retain their
 original bytes and locked inode; identity publication uses a separate atomic file.
 Tests cover failed publication, removed/replaced leases, surviving descendants,
-and caller death without losing local or repository service ownership.
+and caller death without losing local or repository service ownership. Exec
+checks preserve executable lookup, inherited directories, and declared environment
+overrides, including replacement of inherited service-lease metadata.
 Graceful shutdown checks run on Linux and Darwin. Linux additionally pauses the
 forwarding owner to detect duplicate group signals deterministically. That pause
 is not used on Darwin: the hosted runner also loses a queued termination signal

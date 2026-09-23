@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,6 +133,65 @@ func TestTaskPublicationRejectsRemovedOrReplacedLease(t *testing.T) {
 func TestLeaseEntryHelper(t *testing.T) {
 	if path := os.Getenv("CHAINMAN_TEST_LEASE_ENTRY"); path != "" {
 		os.Exit(mainAction([]string{"leased-task", path}))
+	}
+}
+
+func TestLeaseEnvironmentHelper(t *testing.T) {
+	if os.Getenv("CHAINMAN_TEST_ENVIRONMENT_OUTPUT") != "1" {
+		return
+	}
+	values := map[string]string{}
+	for _, name := range []string{"CHAINMAN_TEST_OVERRIDE", "CHAINMAN_SERVICE_LEASE_FDS"} {
+		values[name] = os.Getenv(name)
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(values); err != nil {
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func TestLeaseEntryAppliesDeclaredEnvironmentOverrides(t *testing.T) {
+	t.Setenv("CHAINMAN_TEST_OVERRIDE", "inherited")
+	t.Setenv("CHAINMAN_SERVICE_LEASE_FDS", "[999]")
+	path := filepath.Join(leaseTestState(t), "client.lease")
+	if err := atomic(path, Lease{TaskReceipt: true}); err != nil {
+		t.Fatal(err)
+	}
+	lease, err := locked(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Close()
+	want := map[string]string{
+		"CHAINMAN_TEST_OVERRIDE":     "declared with spaces $()",
+		"CHAINMAN_SERVICE_LEASE_FDS": "[3]",
+	}
+	environment := map[string]string{"CHAINMAN_TEST_ENVIRONMENT_OUTPUT": "1"}
+	for name, value := range want {
+		environment[name] = value
+	}
+	command := Command{
+		Argv:        []string{os.Args[0], "-test.run=^TestLeaseEnvironmentHelper$"},
+		Environment: environment,
+	}
+	if err = atomic(path+".command.json", command); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^TestLeaseEntryHelper$")
+	cmd.Env = append(os.Environ(), "CHAINMAN_TEST_LEASE_ENTRY="+path)
+	cmd.ExtraFiles = []*os.File{lease}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("task entry failed: %s, %v", output, err)
+	}
+	var got map[string]string
+	if err = json.Unmarshal(output, &got); err != nil {
+		t.Fatalf("invalid task output: %s, %v", output, err)
+	}
+	for name, value := range want {
+		if got[name] != value {
+			t.Errorf("%s: got %q, want %q", name, got[name], value)
+		}
 	}
 }
 
