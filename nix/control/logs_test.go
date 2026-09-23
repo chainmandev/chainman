@@ -60,7 +60,7 @@ func TestLogCursorRotationTruncationAndBoundedHistory(t *testing.T) {
 }
 
 func TestLogsUseOnlySelectedScopesAndNeverLeaseServices(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	state, resource, unrelated := filepath.Join(base, "worktree"), filepath.Join(base, "resource"), filepath.Join(base, "unrelated")
 	for _, path := range []string{state, resource, unrelated} {
 		if e := os.Mkdir(path, 0700); e != nil {
