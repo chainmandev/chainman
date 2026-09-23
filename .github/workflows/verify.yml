@@ -10,7 +10,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 12
     env:
       TOOLCHAIN_MODE: host-nix
       CHAINMAN_SETUP: auto
@@ -21,10 +21,39 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: checkout with spaces
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
-      - name: Qualify the complete native controller lane
+      - name: Diagnose native hook consent with bounded stack capture
         working-directory: checkout with spaces
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED"
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec-in control python3 -u -B - <<'PYTHON'
+          import faulthandler
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import sys
+          import tempfile
+          import unittest
+
+          root = Path.cwd()
+          sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
+          import toolchain as tc
+
+          target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
+          with tempfile.TemporaryDirectory(prefix='native consent diagnostic ') as directory:
+              package = subprocess.check_output([
+                  tc.nix_command(), '--extra-experimental-features', 'nix-command flakes',
+                  'build', tc.nix_path_reference(root / 'nix', 'control-' + target),
+                  '--out-link', str(Path(directory) / 'runtime'), '--print-out-paths',
+                  '--no-write-lock-file',
+              ], text=True).strip()
+              os.environ['CHAINMAN_TEST_HOOK_CONTROL'] = package + '/bin/chainman-control'
+              name = 'test_native_hooks.NativeHookTests.test_hook_consent_survives_container_prompt_entry'
+              print('Starting bounded diagnostic:', name, flush=True)
+              faulthandler.dump_traceback_later(90, exit=True)
+              result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromName(name))
+              faulthandler.cancel_dump_traceback_later()
+              raise SystemExit(not result.wasSuccessful())
+          PYTHON
