@@ -41,6 +41,18 @@ jobs:
           sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
           import toolchain as tc
 
+          source = root / 'nix/control/main.go'
+          content = source.read_text()
+          old = 'case sig := <-signals:\n\t\t_ = syscall.Kill(-id.PID, sig.(syscall.Signal))'
+          new = 'case sig := <-signals:\n\t\teventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))\n\t\tfmt.Fprintf(os.Stderr, "service diagnostic owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)'
+          assert content.count(old) == 1
+          content = content.replace(old, new)
+          content = content.replace('timedOut := false\n\tselect {\n\tcase e = <-done:', 'timedOut := false\n\tfmt.Fprintf(os.Stderr, "service diagnostic started owner=%d child=%d\\n", id.PID, cmd.Process.Pid)\n\tselect {\n\tcase e = <-done:\n\t\tfmt.Fprintf(os.Stderr, "service diagnostic child exited owner=%d error=%v\\n", id.PID, e)')
+          source.write_text(content)
+          fixture = root / 'tests/test_services_control.py'
+          content = fixture.read_text().replace('stdout, stderr = stopper.communicate(timeout=15)', 'stdout, stderr = stopper.communicate(timeout=15)\n                print("stopper diagnostic", stdout, stderr, flush=True)')
+          fixture.write_text(content)
+          print('Disposable signal tracing is enabled; this is diagnostic evidence, not exact-source qualification.', flush=True)
           target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
           with tempfile.TemporaryDirectory(prefix='native consent diagnostic ') as directory:
               package = subprocess.check_output([
@@ -81,10 +93,6 @@ jobs:
                   'test_services_control.ServiceControlTests.' + name for name in (
                       'test_backend_sends_single_shutdown_signal',
                       'test_controller_sends_single_shutdown_signal',
-                      'test_owned_command_cancellation_cleans_signal_resistant_child',
-                      'test_owned_command_cleans_descendants_after_success',
-                      'test_owned_command_sequence_preserves_arguments_and_failure_status',
-                      'test_owned_command_timeout_kills_signal_resistant_descendants',
                   )
               ])
               result = unittest.TextTestRunner(verbosity=2, resultclass=BoundedResult).run(suite)
