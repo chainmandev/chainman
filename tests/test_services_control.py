@@ -963,6 +963,59 @@ if text=='bad': raise SystemExit(3)
         self.assertIn("following logs", result.stderr)
         self.assertFalse(self.alive(self.pid()))
 
+    def test_foreground_group_interrupt_releases_services(self):
+        self.plan.update(own_task=True, task_shutdown_seconds=2, wait_for_services=True)
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import time; Path('task-ready').touch(); time.sleep(120)",
+            ]
+        )
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "client.log").open("w+b") as log:
+            client = subprocess.Popen(
+                [CONTROL, "run", str(self.path)],
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+            )
+            try:
+                self.wait_file(self.root / "task-ready")
+                pid = self.pid()
+                os.killpg(client.pid, signal.SIGINT)
+                client.wait(timeout=15)
+                status = json.loads(self.run_control("status", check=0).stdout)
+                log.seek(0)
+                self.assertFalse(status["running"], log.read().decode())
+                self.assertFalse(self.alive(pid))
+                self.assertEqual(status["leases"], {})
+            finally:
+                if client.poll() is None:
+                    client.kill()
+                    client.wait(timeout=5)
+
+    def test_killed_task_supervisor_releases_anchor_before_services(self):
+        client = self.waiting_task()
+        try:
+            pid = self.pid()
+            receipts = list(self.state.glob("*.lease.task.json"))
+            self.assertEqual(len(receipts), 1)
+            task = json.loads(receipts[0].read_text())
+            # Bounded cancellation can kill this intermediary before its owned
+            # process group has finished shutting down (notably Docker clients).
+            os.kill(task["pid"], signal.SIGKILL)
+            self.assertEqual(client.wait(timeout=20), 137)
+            self.assertFalse(self.alive(pid), "service survived its last client")
+            status = json.loads(self.run_control("status", check=0).stdout)
+            self.assertFalse(status["running"])
+            self.assertEqual(status["leases"], {})
+            self.assertFalse(list((self.state / "tasks").glob("*/task.owner.json")))
+        finally:
+            if client.poll() is None:
+                client.kill()
+                client.wait(timeout=5)
+
     def test_log_viewer_interrupts_with_a_full_output_pipe(self):
         self.run_control("up", check=0)
         (self.state / "services.log").write_text("fixture output\n" * 10000)

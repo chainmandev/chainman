@@ -1623,6 +1623,20 @@ func mainAction(args []string) (result int) {
 			lease.Close()
 			return
 		}
+		if recoveryState != "" {
+			// Bounded cancellation may have killed the task intermediary before
+			// its identity anchor released inherited leases. Finish that exact
+			// owned group before deciding which services still have clients.
+			taskPlan := Plan{State: recoveryState, Services: map[string]Service{"task": {Shutdown: p.TaskShutdown}}}
+			if err := stopOwner(taskPlan, "task"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				if result == 0 {
+					result = 1
+				}
+				lease.Close()
+				return
+			}
+		}
 		lease.Close()
 		lock, err := locked(filepath.Join(p.State, "gate"), false)
 		if err == nil {
