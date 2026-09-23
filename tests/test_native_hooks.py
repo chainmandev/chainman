@@ -815,15 +815,23 @@ commands=[["sh","-c","cat > received"]]
         self.assertFalse((self.root / ".git/chainman-hooks/pre-commit").exists())
 
     def test_invalid_utf8_path_fails_without_application(self):
-        name = os.fsencode(self.root) + b"/invalid-\xff.txt"
-        with open(name, "wb") as file:
-            file.write(b"BAD\n")
-        self.git("add", "--", os.fsdecode(name))
+        self.stage()
+        # Git can carry byte paths that the host filesystem cannot create.
+        # Stage the malformed name directly so macOS exercises the same guard.
+        blob = self.git("hash-object", "-w", "--stdin", input=b"BAD\n").stdout.strip()
+        self.git(
+            "update-index",
+            "-z",
+            "--index-info",
+            input=b"100644 " + blob + b"\tinvalid-\xff.txt\0",
+        )
         before = (self.root / ".git/index").read_bytes()
-        self.assertNotEqual(self.hook("format-staged", check=False).returncode, 0)
+        result = self.hook("format-staged", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"valid UTF-8", result.stderr)
         self.assertEqual((self.root / ".git/index").read_bytes(), before)
-        with open(name, "rb") as file:
-            self.assertEqual(file.read(), b"BAD\n")
+        self.assertEqual((self.root / "a.txt").read_bytes(), b"BAD\n")
+        self.assertEqual(self.git("cat-file", "-p", blob.decode()).stdout, b"BAD\n")
 
     def test_scanner_languages_exceptions_and_unchanged_worktree(self):
         paths = [
