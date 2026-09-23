@@ -51,10 +51,14 @@ jobs:
           content = content.replace('fmt.Fprintf(os.Stderr, "service diagnostic owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)', 'os.WriteFile(filepath.Join(state, name+".signal.log"), []byte(fmt.Sprintf("owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)), 0600)')
           content = content.replace('eventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))', 'os.WriteFile(filepath.Join(state, name+".signal-before.log"), []byte(fmt.Sprintf("received %v\\n", sig)), 0600)\n\t\teventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))')
           source.write_text(content)
+          controller = root / 'nix/control/controller.go'
+          control_content = controller.read_text().replace('"--log-file", os.DevNull', '"--log-file", filepath.Join(p.State, "backend-debug.log")')
+          controller.write_text(control_content)
           fixture = root / 'tests/test_services_control.py'
           content = fixture.read_text().replace('stdout, stderr = stopper.communicate(timeout=15)', 'stdout, stderr = stopper.communicate(timeout=15)\n                print("stopper diagnostic", stdout, stderr, flush=True)')
           content = content.replace('        os.kill(owner, signal.SIGSTOP)', '        subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n        os.kill(owner, signal.SIGSTOP)')
           content = content.replace('            os.kill(owner, signal.SIGCONT)', '            print("Before resume", flush=True)\n            subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n            os.kill(owner, signal.SIGCONT)\n            time.sleep(.2)\n            print("After resume", flush=True)\n            subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n            sample = subprocess.run(["/usr/bin/sample", str(owner), "1", "1", "-file", str(self.state / "sample.log")], capture_output=True, text=True, timeout=4)\n            print("Sample", sample.returncode, sample.stderr, flush=True)')
+          content = content.replace('        if backend:\n            import hashlib', '        if backend == "direct":\n            command = [sys.executable, "-c", "import os, signal; os.kill(" + str(owner) + ", signal.SIGTERM)"]\n        elif backend:\n            import hashlib')
           fixture.write_text(content)
           print('Disposable signal tracing is enabled; this is diagnostic evidence, not exact-source qualification.', flush=True)
           target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
@@ -93,8 +97,11 @@ jobs:
                   def addFailure(self, test, err):
                       self.diagnostics(test)
                       super().addFailure(test, err)
+              import test_services_control
+              test_services_control.ServiceControlTests.test_direct_owner_shutdown_signal = lambda self: self.assert_single_shutdown_signal(backend='direct')
               suite = unittest.defaultTestLoader.loadTestsFromNames([
                   'test_services_control.ServiceControlTests.' + name for name in (
+                      'test_direct_owner_shutdown_signal',
                       'test_backend_sends_single_shutdown_signal',
                       'test_controller_sends_single_shutdown_signal',
                   )
