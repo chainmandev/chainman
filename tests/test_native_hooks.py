@@ -550,7 +550,27 @@ check=["true"]
                     pid = int(marker.read_text())
                     if action != "exit":
                         helper.send_signal(getattr(signal, "SIG" + action))
-                    _, errors = helper.communicate(timeout=12)
+                    # Wait for the helper itself. communicate() can hide early
+                    # return by waiting on descriptors retained by descendants.
+                    helper.wait(timeout=12)
+                    if action == "KILL":
+                        # SIGKILL cannot wait for cleanup. The surviving finite
+                        # supervisor detects owner death and cleans up within
+                        # its deadline; catchable signals must finish first.
+                        deadline = time.monotonic() + 8
+                        while time.monotonic() < deadline:
+                            status = subprocess.run(
+                                ["/bin/ps", "-o", "stat=", "-p", str(pid)],
+                                capture_output=True,
+                                text=True,
+                            ).stdout.strip()
+                            if not status or status.startswith("Z"):
+                                break
+                            time.sleep(0.05)
+                    trigger.touch()
+                    time.sleep(0.1)
+                    self.assertFalse(late.exists(), "child wrote after hook completion")
+                    _, errors = helper.communicate(timeout=2)
                     self.assertEqual(
                         helper.returncode,
                         23
@@ -560,9 +580,6 @@ check=["true"]
                         else 128 + getattr(signal, "SIG" + action),
                         errors.decode(),
                     )
-                    trigger.touch()
-                    time.sleep(0.1)
-                    self.assertFalse(late.exists(), "child wrote after hook completion")
                     status = subprocess.run(
                         ["/bin/ps", "-o", "stat=", "-p", str(pid)],
                         capture_output=True,
@@ -577,7 +594,7 @@ check=["true"]
                             pass
                     if helper.poll() is None:
                         helper.kill()
-                        helper.communicate()
+                    helper.communicate(timeout=12)
 
     def test_bare_backed_worktree_preserves_primary_identity(self):
         bare = self.base / "bare.git"

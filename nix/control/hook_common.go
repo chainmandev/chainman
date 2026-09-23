@@ -388,7 +388,20 @@ func hookAction(args []string) int {
 		c.Stderr = os.Stderr
 		// Lefthook cancels its own job/PTY groups through its SIGINT context.
 		// TERM/HUP would otherwise kill it before it can stop those groups.
+		barrier, err := os.CreateTemp(p.Directory, "callbacks-")
+		if err != nil {
+			e = err
+			break
+		}
+		c.Env = append(c.Env, "CHAINMAN_HOOK_CALLBACK_BARRIER="+barrier.Name())
 		e = hookRun(c, syscall.SIGINT)
+		if err := hookDrainCallbacks(barrier); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			if e == nil {
+				e = err
+			}
+		}
+		barrier.Close()
 	default:
 		return 2
 	}
@@ -399,6 +412,14 @@ func hookAction(args []string) int {
 // The calling helper stays in its caller's group so nested callbacks still
 // receive cancellation. No persistent state or background supervisor is needed.
 func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
+	lease, e := hookCallbackLease()
+	if e != nil {
+		return e
+	}
+	if lease != nil {
+		defer lease.Close()
+		c.ExtraFiles = append(c.ExtraFiles, lease)
+	}
 	self, e := os.Executable()
 	if e != nil {
 		return e
@@ -456,7 +477,10 @@ func hookExec(args []string) error {
 	}
 	owner := os.NewFile(uintptr(fd), "hook-owner")
 	defer owner.Close()
-	syscall.CloseOnExec(fd)
+	// The supervisor, not arbitrary project children, holds the callback lease.
+	for inherited := 3; inherited <= fd; inherited++ {
+		syscall.CloseOnExec(inherited)
+	}
 	ownerGone := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, owner)
