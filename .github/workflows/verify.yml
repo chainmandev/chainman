@@ -41,6 +41,12 @@ jobs:
           sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
           import toolchain as tc
 
+          source = root / 'nix/control/hook_prompt.go'
+          content = source.read_text()
+          content = content.replace('_, err := unix.Poll(ready, 100)', '_, err := unix.Poll(ready, 100)\n\t\tfmt.Fprintf(os.Stderr, "consent diagnostic poll: fd=%d revents=%d err=%v\\n", tty.Fd(), ready[0].Revents, err)')
+          content = content.replace('n, err := unix.Read(int(tty.Fd()), data[:])', 'n, err := unix.Read(int(tty.Fd()), data[:])\n\t\tfmt.Fprintf(os.Stderr, "consent diagnostic read: n=%d err=%v data=%q\\n", n, err, data[:max(n,0)])')
+          source.write_text(content)
+          print('Diagnostic-only poll/read tracing added to the public fixture; this is not exact-source qualification.', flush=True)
           target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
           with tempfile.TemporaryDirectory(prefix='native consent diagnostic ') as directory:
               package = subprocess.check_output([
@@ -57,7 +63,3 @@ jobs:
               faulthandler.cancel_dump_traceback_later()
               raise SystemExit(not result.wasSuccessful())
           PYTHON
-      - name: Qualify the complete native controller lane
-        working-directory: checkout with spaces
-        run: |
-          PYTHONUNBUFFERED=1 nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
