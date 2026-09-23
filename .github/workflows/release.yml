@@ -78,7 +78,10 @@ jobs:
           checkout="$RUNNER_TEMP/public checkout"
           test "$(git -C "$checkout" rev-parse HEAD)" = "$EXPECTED"
           export XDG_CACHE_HOME="$RUNNER_TEMP/fresh cache"
-          nix --extra-experimental-features 'nix-command flakes' build "path:$checkout/nix#just" --out-link "$RUNNER_TEMP/just"
+          (
+            cd "$checkout/nix"
+            nix --extra-experimental-features 'nix-command flakes' build .#just --out-link "$RUNNER_TEMP/just"
+          )
           "$RUNNER_TEMP/just/bin/just" --justfile "$checkout/justfile" init "$RUNNER_TEMP/public starter" --no-git
           test "$(cat "$RUNNER_TEMP/public starter/chainman.lock")" = "$EXPECTED"
           rm -rf "$checkout"
