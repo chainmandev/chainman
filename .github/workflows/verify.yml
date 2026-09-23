@@ -21,7 +21,7 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: checkout with spaces
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
-      - name: Diagnose native hook consent with bounded stack capture
+      - name: Qualify native controller with bounded per-test diagnostics
         working-directory: checkout with spaces
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
@@ -41,6 +41,11 @@ jobs:
           sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
           import toolchain as tc
 
+          source = root / 'nix/control'
+          formatted = subprocess.check_output(['gofmt', '-l', *map(str, source.glob('*.go'))], text=True)
+          assert not formatted, formatted
+          subprocess.run(['go', 'vet', '-mod=readonly', './...'], cwd=source, check=True)
+          subprocess.run(['go', 'test', '-race', '-mod=readonly', './...'], cwd=source, env=dict(os.environ, CGO_ENABLED='1'), check=True)
           target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
           with tempfile.TemporaryDirectory(prefix='native consent diagnostic ') as directory:
               package = subprocess.check_output([
@@ -50,14 +55,27 @@ jobs:
                   '--no-write-lock-file',
               ], text=True).strip()
               os.environ['CHAINMAN_TEST_HOOK_CONTROL'] = package + '/bin/chainman-control'
-              name = 'test_native_hooks.NativeHookTests.test_hook_consent_survives_container_prompt_entry'
-              print('Starting bounded diagnostic:', name, flush=True)
-              faulthandler.dump_traceback_later(90, exit=True)
-              result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromName(name))
-              faulthandler.cancel_dump_traceback_later()
+              os.environ['CHAINMAN_TEST_CONTROL'] = package + '/bin/chainman-control'
+              os.environ['CHAINMAN_TEST_PROCESS_COMPOSE'] = package + '/bin/process-compose'
+              os.environ['CHAINMAN_TEST_WATCHEXEC'] = package + '/bin/watchexec'
+              class BoundedResult(unittest.TextTestResult):
+                  def startTest(self, test):
+                      print('\nStarting:', test.id(), flush=True)
+                      faulthandler.dump_traceback_later(150, exit=True)
+                      super().startTest(test)
+                  def stopTest(self, test):
+                      faulthandler.cancel_dump_traceback_later()
+                      super().stopTest(test)
+              suite = unittest.defaultTestLoader.loadTestsFromNames([
+                  'test_native_hooks', 'test_setup_terminal', 'test_terminal_fixture', 'test_services_control',
+              ])
+              result = unittest.TextTestRunner(verbosity=2, resultclass=BoundedResult).run(suite)
+              for system in ('linux', 'darwin'):
+                  for arch in ('arm64', 'amd64'):
+                      subprocess.run([
+                          'go', 'build', '-mod=readonly', '-trimpath', '-buildvcs=false',
+                          '-o', str(Path(directory) / (system + '-' + arch)), '.',
+                      ], cwd=source, env=dict(os.environ, CGO_ENABLED='0', GOOS=system, GOARCH=arch), check=True)
+                      print(system, arch, 'cross-build passed', flush=True)
               raise SystemExit(not result.wasSuccessful())
           PYTHON
-      - name: Qualify the complete native controller lane
-        working-directory: checkout with spaces
-        run: |
-          PYTHONUNBUFFERED=1 nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
