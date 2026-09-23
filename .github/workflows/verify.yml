@@ -1,4 +1,4 @@
-name: Diagnose macOS native control qualification
+name: Qualify exact macOS native control
 on:
   workflow_dispatch:
     inputs:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   diagnose:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       TOOLCHAIN_MODE: host-nix
       CHAINMAN_SETUP: auto
@@ -21,123 +21,12 @@ jobs:
           ref: ${{ inputs.candidate_sha }}
           path: checkout with spaces
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
-      - name: Trace paused service owners and durable signal events
+      - name: Qualify unchanged source through the normal native test entry
         working-directory: checkout with spaces
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED"
-          ./scripts/enter.sh control python3 -u -B - <<'PYTHON'
-          import faulthandler
-          import os
-          from pathlib import Path
-          import platform
-          import subprocess
-          import sys
-          import tempfile
-          import unittest
-
-          root = Path.cwd()
-          sys.path[:0] = [str(root / 'scripts'), str(root / 'tests')]
-          import toolchain as tc
-
-          with tempfile.TemporaryDirectory(prefix='primitive signal ') as probe_dir:
-              probe_dir = Path(probe_dir)
-              program = probe_dir / 'probe.go'
-              program.write_text('package main\nimport("fmt";"os";"os/signal";"syscall")\nfunc main(){c:=make(chan os.Signal,8);signal.Notify(c,syscall.SIGTERM);fmt.Println("ready");fmt.Println(<-c)}\n')
-              executable = probe_dir / 'probe'
-              subprocess.run(['go', 'build', '-o', str(executable), str(program)], check=True)
-              import signal, time
-              for pause in (False, True):
-                  proc = subprocess.Popen([str(executable)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
-                  print('Primitive ready', pause, proc.stdout.readline().strip(), flush=True)
-                  if pause:
-                      os.kill(proc.pid, signal.SIGSTOP)
-                      time.sleep(.2)
-                  os.kill(proc.pid, signal.SIGTERM)
-                  if pause:
-                      time.sleep(.2)
-                      os.kill(proc.pid, signal.SIGCONT)
-                  try:
-                      output = proc.communicate(timeout=3)
-                      print('Primitive signal', pause, proc.returncode, output, flush=True)
-                  except subprocess.TimeoutExpired:
-                      proc.kill()
-                      print('Primitive signal TIMEOUT', pause, proc.communicate(), flush=True)
-
-          source = root / 'nix/control/main.go'
-          content = source.read_text()
-          old = 'case sig := <-signals:\n\t\t_ = syscall.Kill(-id.PID, sig.(syscall.Signal))'
-          new = 'case sig := <-signals:\n\t\teventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))\n\t\tfmt.Fprintf(os.Stderr, "service diagnostic owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)'
-          assert content.count(old) == 1
-          content = content.replace(old, new)
-          content = content.replace('timedOut := false\n\tselect {\n\tcase e = <-done:', 'timedOut := false\n\tfmt.Fprintf(os.Stderr, "service diagnostic started owner=%d child=%d\\n", id.PID, cmd.Process.Pid)\n\tselect {\n\tcase e = <-done:\n\t\tfmt.Fprintf(os.Stderr, "service diagnostic child exited owner=%d error=%v\\n", id.PID, e)')
-          content = content.replace('fmt.Fprintf(os.Stderr, "service diagnostic owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)', 'os.WriteFile(filepath.Join(state, name+".signal.log"), []byte(fmt.Sprintf("owner=%d child=%d signal=%v forward=%v\\n", id.PID, cmd.Process.Pid, sig, eventErr)), 0600)')
-          content = content.replace('eventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))', 'os.WriteFile(filepath.Join(state, name+".signal-before.log"), []byte(fmt.Sprintf("received %v\\n", sig)), 0600)\n\t\teventErr := syscall.Kill(-id.PID, sig.(syscall.Signal))')
-          source.write_text(content)
-          controller = root / 'nix/control/controller.go'
-          control_content = controller.read_text().replace('"--log-file", os.DevNull', '"--log-file", filepath.Join(p.State, "backend-debug.log")')
-          controller.write_text(control_content)
-          fixture = root / 'tests/test_services_control.py'
-          content = fixture.read_text().replace('stdout, stderr = stopper.communicate(timeout=15)', 'stdout, stderr = stopper.communicate(timeout=15)\n                print("stopper diagnostic", stdout, stderr, flush=True)')
-          content = content.replace('        os.kill(owner, signal.SIGSTOP)', '        subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n        os.kill(owner, signal.SIGSTOP)')
-          content = content.replace('            os.kill(owner, signal.SIGCONT)', '            print("Before resume", flush=True)\n            subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n            os.kill(owner, signal.SIGCONT)\n            time.sleep(.2)\n            print("After resume", flush=True)\n            subprocess.run(["/bin/ps", "-o", "pid,ppid,pgid,stat,command", "-p", str(owner)+","+str(self.pid())])\n            sample = subprocess.run(["/usr/bin/sample", str(owner), "1", "1", "-file", str(self.state / "sample.log")], capture_output=True, text=True, timeout=4)\n            print("Sample", sample.returncode, sample.stderr, flush=True)')
-          content = content.replace('        if backend:\n            import hashlib', '        if backend == "direct":\n            command = [sys.executable, "-c", "import os, signal; os.kill(" + str(owner) + ", signal.SIGTERM)"]\n        elif backend:\n            import hashlib')
-          content = content.replace('        os.kill(owner, signal.SIGSTOP)', '        if getattr(self, "pause_owner", True):\n            os.kill(owner, signal.SIGSTOP)')
-          content = content.replace('                (self.root / "signals").exists(),\n                "shutdown bypassed', '                getattr(self, "pause_owner", True) and (self.root / "signals").exists(),\n                "shutdown bypassed')
-          content = content.replace('            os.kill(owner, signal.SIGCONT)', '            if getattr(self, "pause_owner", True):\n                os.kill(owner, signal.SIGCONT)')
-          fixture.write_text(content)
-          print('Disposable signal tracing is enabled; this is diagnostic evidence, not exact-source qualification.', flush=True)
-          target = 'darwin-' + {'arm64': 'arm64', 'x86_64': 'amd64'}[platform.machine()]
-          with tempfile.TemporaryDirectory(prefix='native consent diagnostic ') as directory:
-              package = subprocess.check_output([
-                  tc.nix_command(), '--extra-experimental-features', 'nix-command flakes',
-                  'build', tc.nix_path_reference(root / 'nix', 'control-' + target),
-                  '--out-link', str(Path(directory) / 'runtime'), '--print-out-paths',
-                  '--no-write-lock-file',
-              ], text=True).strip()
-              os.environ['CHAINMAN_TEST_HOOK_CONTROL'] = package + '/bin/chainman-control'
-              os.environ['CHAINMAN_TEST_CONTROL'] = package + '/bin/chainman-control'
-              os.environ['CHAINMAN_TEST_PROCESS_COMPOSE'] = package + '/bin/process-compose'
-              os.environ['CHAINMAN_TEST_WATCHEXEC'] = package + '/bin/watchexec'
-              class BoundedResult(unittest.TextTestResult):
-                  def startTest(self, test):
-                      print('\nStarting:', test.id(), flush=True)
-                      faulthandler.dump_traceback_later(150, exit=True)
-                      super().startTest(test)
-                  def stopTest(self, test):
-                      faulthandler.cancel_dump_traceback_later()
-                      super().stopTest(test)
-                  def diagnostics(self, test):
-                      state = getattr(test, 'state', None)
-                      if state:
-                          for log in sorted(state.glob('*.log')):
-                              print('\nFixture log:', log.name, '\n', log.read_text(errors='replace').split('Binary Images:')[0][:18000], flush=True)
-                      root = getattr(test, 'root', None)
-                      if root:
-                          for name in ('pid', 'signals', 'ready'):
-                              path = root / name
-                              print('Fixture file:', name, path.read_text() if path.exists() else '<absent>', flush=True)
-                  def addError(self, test, err):
-                      self.diagnostics(test)
-                      super().addError(test, err)
-                  def addFailure(self, test, err):
-                      self.diagnostics(test)
-                      super().addFailure(test, err)
-              import test_services_control
-              test_services_control.ServiceControlTests.test_direct_owner_shutdown_signal = lambda self: self.assert_single_shutdown_signal(backend='direct')
-              def unpaused(self):
-                  self.pause_owner = False
-                  self.assert_single_shutdown_signal(backend='direct')
-              test_services_control.ServiceControlTests.test_unpaused_owner_shutdown_signal = unpaused
-              suite = unittest.defaultTestLoader.loadTestsFromNames([
-                  'test_services_control.ServiceControlTests.' + name for name in (
-                      'test_unpaused_owner_shutdown_signal',
-                      'test_direct_owner_shutdown_signal',
-                      'test_backend_sends_single_shutdown_signal',
-                      'test_controller_sends_single_shutdown_signal',
-                  )
-              ])
-              result = unittest.TextTestRunner(verbosity=2, resultclass=BoundedResult).run(suite)
-              raise SystemExit(not result.wasSuccessful())
-          PYTHON
+          test -z "$(git status --porcelain)"
+          ./scripts/enter.sh control python3 -u -B scripts/control_test.py
+          test -z "$(git status --porcelain)"
