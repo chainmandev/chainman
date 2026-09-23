@@ -15,7 +15,7 @@ DEFAULT_PATHS = [
     "*." + suffix
     for suffix in "astro bash c cc cjs cpp cs css cts dart go gql graphql h hpp html j2 java js json jsx just kt kts less lua m mdx mjs mts nix php pl py r rb rs scss sh sql svelte swift toml ts tsx vue xml yaml yml".split()
 ] + ["[Jj]ustfile", "**/[Jj]ustfile", "Dockerfile", "**/Dockerfile"]
-SCANNER = "anti-trojan-source@1.12.1:high:v2"
+SCANNER = "anti-trojan-source@1.12.1:high:v3"
 
 
 def binary_executable(body: bytes) -> bool:
@@ -37,6 +37,54 @@ def binary_executable(body: bytes) -> bool:
             b"\xbf\xba\xfe\xca",
         )
     )
+
+
+def binary_asset(path: str, body: bytes) -> bool:
+    """Recognize non-source media despite an accidental executable Git mode.
+
+    Both extension and signature must agree. This only classifies a non-UTF-8
+    executable fallback; explicit source patterns always require source scanning.
+    It does not validate decoders or certify media as malware-free.
+    """
+    signatures = {
+        ".png": (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR",),
+        ".jpg": (b"\xff\xd8\xff",),
+        ".jpeg": (b"\xff\xd8\xff",),
+        ".gif": (b"GIF87a", b"GIF89a"),
+        ".ico": (b"\x00\x00\x01\x00",),
+        ".woff": (b"wOFF",),
+        ".woff2": (b"wOF2",),
+        ".webm": (b"\x1a\x45\xdf\xa3",),
+    }
+    suffix = Path(path).suffix.lower()
+    if suffix in signatures:
+        return body.startswith(signatures[suffix])
+    if suffix == ".mp3":
+        start = 0
+        if body.startswith(b"ID3"):
+            if (
+                len(body) < 10
+                or body[3] not in (2, 3, 4)
+                or any(b & 128 for b in body[6:10])
+            ):
+                return False
+            start = 10 + sum(
+                b << shift for b, shift in zip(body[6:10], (21, 14, 7, 0), strict=True)
+            )
+            if body[3] == 4 and body[5] & 16:
+                start += 10
+        # MPEG audio sync, nonreserved version/layer, bitrate and sample rate.
+        frame = body[start : start + 4]
+        return (
+            len(frame) == 4
+            and frame[0] == 255
+            and frame[1] & 224 == 224
+            and frame[1] & 24 != 8
+            and frame[1] & 6 != 0
+            and frame[2] >> 4 not in (0, 15)
+            and frame[2] & 12 != 12
+        )
+    return False
 
 
 def worker(root: Path, directory: Path, phase: str) -> int:
@@ -110,9 +158,16 @@ def worker(root: Path, directory: Path, phase: str) -> int:
             try:
                 texts.append(body.decode("utf-8"))
             except UnicodeDecodeError:
-                if not source and binary_executable(body):
+                kind = (
+                    "native executable"
+                    if binary_executable(body)
+                    else "binary asset"
+                    if binary_asset(path, body)
+                    else None
+                )
+                if not source and kind:
                     print(
-                        f"Trojan Source: native executable not scanned: {revision} {path!r}",
+                        f"Trojan Source: {kind} not scanned: {revision} {path!r}",
                         file=sys.stderr,
                     )
                     continue

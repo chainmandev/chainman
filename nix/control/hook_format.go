@@ -147,13 +147,23 @@ func (p HookPlan) hookFormat() error {
 		items[path] = entry
 		ordered = append(ordered, entry)
 	}
-	raw, e = p.git(p.Root, index, nil, false, "diff", "--cached", "--no-renames", "--name-only", "--diff-filter=ACMT", "-z")
+	raw, e = p.git(p.Root, index, nil, false, "diff", "--cached", "--no-renames", "--raw", "--no-abbrev", "--diff-filter=ACMT", "-z")
 	if e != nil {
 		return e
 	}
 	paths := []string{}
-	for _, raw := range bytes.Split(raw, []byte{0}) {
-		path := string(raw)
+	records := bytes.Split(bytes.TrimSuffix(raw, []byte{0}), []byte{0})
+	for i := 0; i+1 < len(records); i += 2 {
+		fields := strings.Fields(string(records[i]))
+		if len(fields) != 5 {
+			return fmt.Errorf("invalid staged diff record")
+		}
+		// A permissions-only change must not turn into a content-formatting
+		// commit. New files and real content changes still enter the formatter.
+		if fields[2] == fields[3] {
+			continue
+		}
+		path := string(records[i+1])
 		if items[path].Mode == "100644" || items[path].Mode == "100755" {
 			paths = append(paths, path)
 		}

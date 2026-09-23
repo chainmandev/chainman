@@ -116,6 +116,7 @@ file passes unchanged when its staged content is already formatted. If its stage
 content needs formatting, the **whole transaction stops before applying changes**.
 Format and review that file, stage the intended changes, and retry. chainman does
 not merge formatting into unstaged edits, stash files, or run repository-wide tasks.
+Permissions-only changes retain their existing content without formatting it.
 
 Native host Git owns index access, repository discovery and configuration queries.
 Git evaluates its own conditional includes, symlinks and attribute paths. Built-in
@@ -199,10 +200,21 @@ diagnostics identify commit, path, line, column and character. Each hook check g
 the original pre-push ref stream independently. Setup prompts use the controlling
 terminal, leaving that stream untouched.
 
+The runtime invokes Lefthook with file-diff skipping and unstaged-change hiding
+disabled. chainman selects staged blobs and outgoing commits itself; Lefthook
+must not hide the working files used by the partial-staging check, or skip an
+outgoing scan because an intermediate change was later reverted. Consumer
+`stage_fixed` settings are ignored: only the staged-format transaction stages
+formatter results. Explicit consumer hook/job skip policies still apply.
+
 Source-classified files are scanned as UTF-8, including embedded NULs; unsupported
 encodings fail with a commit/path diagnostic. Only the implicit executable-file
-fallback skips recognized native binaries that cannot decode as UTF-8; valid UTF-8
-executable text is always scanned. Skips are reported without caching a
+fallback skips recognized native binaries and media (PNG, JPEG, GIF, ICO, WOFF,
+WOFF2, WebM and MP3) that cannot decode as UTF-8. Media extensions and signatures
+must agree; unknown binary formats still fail. Explicit source patterns always
+take precedence, and valid UTF-8 executable text is always scanned. This handles
+accidental executable modes on assets; it is not media-decoder or malware
+verification. Skips are reported without caching a
 clean-source result. The classification identity invalidates older clean caches.
 Traversal inventories the first outgoing tree, then its successive differences;
 it retains one diagnostic location per distinct source blob, not every unchanged

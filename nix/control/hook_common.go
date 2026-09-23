@@ -362,18 +362,20 @@ func hookAction(args []string) int {
 		}
 		a := []string{"dump"}
 		if args[1] == "run" {
-			a = append([]string{"run", "--no-auto-install"}, args[2:]...)
+			// chainman owns staged snapshots and outgoing Git inventories. Do not
+			// let Lefthook hide unstaged edits or skip jobs based on a final diff.
+			a = append([]string{"run", "--no-auto-install", "--no-stage-fixed", "--force"}, args[2:]...)
 		}
+		var input []byte
 		if args[1] == "run" && args[2] == "pre-push" {
 			if len(args) != 5 {
 				return 2
 			}
-			var b []byte
-			b, e = io.ReadAll(os.Stdin)
+			input, e = io.ReadAll(os.Stdin)
 			if e != nil {
 				break
 			}
-			e = hookWrite(filepath.Join(p.Directory, "input"), b, 0600)
+			e = hookWrite(filepath.Join(p.Directory, "input"), input, 0600)
 			if e != nil {
 				break
 			}
@@ -391,6 +393,9 @@ func hookAction(args []string) int {
 			c.Env = append(c.Env, "CHAINMAN_HOOK_INPUT="+filepath.Join(p.Directory, "input"), "CHAINMAN_HOOK_REMOTE_NAME="+args[3], "CHAINMAN_HOOK_REMOTE_URL="+args[4])
 		}
 		c.Stdin = os.Stdin
+		if input != nil {
+			c.Stdin = bytes.NewReader(input)
+		}
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
 		// Lefthook cancels its own job/PTY groups through its SIGINT context.

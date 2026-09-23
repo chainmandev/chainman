@@ -58,3 +58,15 @@ commands=[["sh","-c","touch ready"]]
         self.assertTrue(trojan_source.binary_executable(b"\x7fELF\x00\xff"))
         self.assertFalse(trojan_source.binary_executable(b"\x00text"))
         self.assertFalse(trojan_source.binary_executable(b"MZshort"))
+
+    def test_media_classification_requires_matching_extension_and_signature(self):
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff"
+        self.assertTrue(trojan_source.binary_asset("icon.png", png))
+        self.assertFalse(trojan_source.binary_asset("source.ts", png))
+        self.assertFalse(trojan_source.binary_asset("icon.png", b"#!/bin/sh\nexit 0\n"))
+        audio = b"ID3\x03\0\0\0\0\0\0\xff\xfb\x90\0"
+        self.assertTrue(trojan_source.binary_asset("beep.mp3", audio))
+        self.assertFalse(trojan_source.binary_asset("beep.mp3", b"ID3short"))
+        self.assertFalse(
+            trojan_source.binary_asset("beep.mp3", audio[:6] + b"\x7f" * 4 + audio[10:])
+        )

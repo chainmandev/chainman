@@ -127,6 +127,100 @@ check=["true"]
         )
         hook.chmod(0o755)
 
+    def install_real_hooks(self):
+        sys.path.insert(0, str(SOURCE / "scripts"))
+        import hooks
+
+        self.plan.update(
+            lefthook=shutil.which("lefthook"),
+            config=str(hooks.effective(self.root, self.control)),
+        )
+        self.assertIsNotNone(self.plan["lefthook"])
+        shutil.copyfile(
+            SOURCE / "bootstrap/hook-task.sh", self.control / "hook-task.sh"
+        )
+        (self.control / "hook-task.sh").chmod(0o755)
+        self.save_plan()
+        (self.root / ".git/hooks").mkdir(exist_ok=True)
+        for event in ("pre-commit", "pre-push"):
+            path = self.root / ".git/hooks" / event
+            path.write_text(
+                f"#!/bin/sh\nexec {shlex.quote(CONTROL)} hook "
+                f'{shlex.quote(str(self.control / "plan.json"))} run {event} "$@"\n'
+            )
+            path.chmod(0o755)
+
+    def test_real_lefthook_commit_preserves_partial_staging_contract(self):
+        self.install_real_hooks()
+        self.stage()
+        self.git("commit", "-qm", "Fully staged formatting")
+        self.assertEqual(self.git("show", "HEAD:a.txt").stdout, b"GOOD\n")
+        self.stage(body=b"BAD\nkeep\n")
+        (self.root / "a.txt").write_text("BAD\nunstaged\n")
+        head = self.git("rev-parse", "HEAD").stdout
+        staged = self.git("ls-files", "--stage", "-z").stdout
+        result = self.git("commit", "-qm", "Must refuse", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"partially staged", result.stdout + result.stderr)
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout, head)
+        self.assertEqual(self.git("ls-files", "--stage", "-z").stdout, staged)
+        self.assertEqual((self.root / "a.txt").read_bytes(), b"BAD\nunstaged\n")
+        self.stage(body=b"GOOD\nkeep\n")
+        (self.root / "a.txt").write_text("GOOD\nunstaged\n")
+        self.git("commit", "-qm", "Already formatted partial file")
+        self.assertEqual(self.git("show", "HEAD:a.txt").stdout, b"GOOD\nkeep\n")
+        self.assertEqual((self.root / "a.txt").read_bytes(), b"GOOD\nunstaged\n")
+
+    def test_real_lefthook_mode_only_commit_preserves_blobs(self):
+        self.stage(body=b"BAD\n")
+        self.git("commit", "-qm", "Existing unformatted content")
+        self.install_real_hooks()
+        blob = self.git("rev-parse", "HEAD:a.txt").stdout
+        (self.root / "a.txt").chmod(0o755)
+        self.git("add", "a.txt")
+        self.git("commit", "-qm", "Permissions only")
+        self.assertEqual(self.git("rev-parse", "HEAD:a.txt").stdout, blob)
+        self.assertEqual((self.root / "a.txt").read_bytes(), b"BAD\n")
+        self.assertTrue(
+            self.git("ls-files", "--stage", "a.txt").stdout.startswith(b"100755 ")
+        )
+
+    def test_real_lefthook_push_scans_reverted_intermediate_and_replays_stdin(self):
+        bare = self.base / "remote.git"
+        self.git("init", "--bare", "--quiet", str(bare))
+        self.git("remote", "add", "origin", str(bare))
+        self.git("push", "-u", "origin", "HEAD:refs/heads/fixture")
+        baseline = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        (self.root / "source.ts").write_text("// Harmless canary \u202e\n")
+        self.git("add", "source.ts")
+        self.git("commit", "-qm", "Intermediate canary")
+        self.git("rm", "source.ts")
+        self.git("commit", "-qm", "Restore baseline tree")
+        self.assertEqual(self.git("diff", baseline, "HEAD").stdout, b"")
+        self.install_real_hooks()
+        config = Path(self.plan["config"])
+        data = json.loads(config.read_text())
+        received = self.control / "received"
+        data["pre-push"]["commands"]["input-check"] = {
+            "run": "cat > " + shlex.quote(str(received)),
+            "use_stdin": True,
+        }
+        config.write_text(json.dumps(data))
+        head = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        result = self.git("push", "origin", "HEAD:refs/heads/fixture", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"U+202E", result.stdout + result.stderr)
+        self.assertEqual(
+            received.read_bytes(),
+            f"HEAD {head} refs/heads/fixture {baseline}\n".encode(),
+        )
+        self.assertEqual(
+            self.git("ls-remote", "origin", "refs/heads/fixture")
+            .stdout.split()[0]
+            .decode(),
+            baseline,
+        )
+
     def test_commit_a_includes_pre_staged_and_tracked_work(self):
         self.install_format_fixture()
         self.stage()
@@ -919,3 +1013,37 @@ commands=[["sh","-c","cat > received"]]
         for _ in range(2):
             result = self.hook("trojan-source", revision)
             self.assertIn(b"native executable not scanned", result.stderr)
+
+    def test_scanner_media_never_bypasses_source_or_text_checks(self):
+        png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff"
+        (self.root / "icon.png").write_bytes(png)
+        (self.root / "icon.png").chmod(0o755)
+        self.git("add", ".")
+        self.git("commit", "-qm", "Executable media")
+        revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.assertIn(
+            b"binary asset not scanned", self.hook("trojan-source", revision).stderr
+        )
+        config = self.root / "chainman.toml"
+        original = config.read_text()
+        config.write_text(original + '\n[hooks.trojan_source]\npaths=["*.png"]\n')
+        self.save_plan()
+        self.assertNotEqual(
+            self.hook("trojan-source", revision, check=False).returncode, 0
+        )
+        config.write_text(original)
+        self.save_plan()
+        (self.root / "icon.png").write_text("#!/bin/sh\n# Harmless \u202e\n")
+        self.git("add", "icon.png")
+        self.git("commit", "-qm", "Executable text with media suffix")
+        revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        result = self.hook("trojan-source", revision, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"U+202E", result.stderr)
+        (self.root / "source.ts").write_bytes(png)
+        self.git("add", "source.ts")
+        self.git("commit", "-qm", "Media signature in source")
+        revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        result = self.hook("trojan-source", revision, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"unsupported source encoding", result.stderr)
