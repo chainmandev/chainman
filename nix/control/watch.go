@@ -23,6 +23,16 @@ type Watch struct {
 
 const watchSuffix = "-chainman-watch"
 
+func serviceProbe(name string, s Service) (Command, error) {
+	// Generated watchers run on the host. Their Container is the transient
+	// build owner retained for cleanup, not the marker probe's destination.
+	// expandWatches reserves the suffix so a project cannot select this path.
+	if strings.HasSuffix(name, watchSuffix) {
+		return s.Readiness.Command, nil
+	}
+	return containerProbe(s.Container, s.Readiness.Command)
+}
+
 func expandWatches(p *Plan, self string) error {
 	for name, s := range p.Services {
 		if strings.HasSuffix(name, watchSuffix) {

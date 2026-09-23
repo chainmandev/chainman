@@ -1251,7 +1251,7 @@ func owned(state, name string, probe bool, generation string) int {
 		if s.Readiness.HTTPGet != nil {
 			return exitCode(fmt.Errorf("HTTP readiness is evaluated by Process Compose"))
 		}
-		command, e = containerProbe(s.Container, s.Readiness.Command)
+		command, e = serviceProbe(name, s)
 		if e != nil {
 			return exitCode(e)
 		}

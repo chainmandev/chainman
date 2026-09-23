@@ -9,6 +9,30 @@ import (
 	"testing"
 )
 
+func TestWatchMarkerProbeDoesNotEnterTransientBuildContainer(t *testing.T) {
+	owner := &Container{Engine: "/missing/docker", Name: "transient-build", Token: strings.Repeat("a", 32)}
+	p := Plan{Root: "/fixture", State: "/fixture/state", Watcher: "/fixture/watcher", Services: map[string]Service{
+		"app": {Watch: &Watch{Build: Command{Argv: []string{"/bin/true"}}, Paths: []string{"/fixture"}, Debounce: 100, Startup: 5, Container: owner}},
+	}}
+	if e := expandWatches(&p, "/fixture/control"); e != nil {
+		t.Fatal(e)
+	}
+	s := p.Services["app"+watchSuffix]
+	command, e := serviceProbe("app"+watchSuffix, s)
+	if e != nil || !reflect.DeepEqual(command.Argv, []string{"/fixture/control", "built", p.State, "app"}) {
+		t.Fatal("host marker probe changed", command, e)
+	}
+	if s.Container != owner {
+		t.Fatal("lost transient build cleanup ownership")
+	}
+	if _, e = serviceProbe("ordinary", s); e == nil {
+		t.Fatal("ordinary container service accepted a host probe")
+	}
+	if e = expandWatches(&p, "/fixture/control"); e == nil {
+		t.Fatal("accepted project declaration with reserved watch suffix")
+	}
+}
+
 func TestContainerProbeBindsOwnedRunningIdentity(t *testing.T) {
 	root := physicalTempDir(t)
 	engine := filepath.Join(root, "engine")
