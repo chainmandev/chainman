@@ -61,13 +61,17 @@ class TimingTests(unittest.TestCase):
             self.assertEqual(
                 [(r["phase"], r["event"]) for r in records],
                 [
+                    ("setup_validation", "start"),
+                    ("setup_validation", "end"),
                     ("profile_entry", "start"),
                     ("profile_entry", "end"),
                     ("command", "start"),
                     ("command", "end"),
                 ],
             )
-            self.assertEqual(len({r["operation"] for r in records}), 1)
+            self.assertEqual(len({r["operation"] for r in records[:2]}), 1)
+            self.assertEqual(len({r["operation"] for r in records[2:]}), 1)
+            self.assertNotEqual(records[0]["operation"], records[2]["operation"])
             self.assertEqual(len({r["parent"] for r in records}), 1)
             self.assertNotEqual(records[0]["operation"], records[0]["parent"])
             self.assertEqual(

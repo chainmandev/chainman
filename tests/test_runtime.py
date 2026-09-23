@@ -225,6 +225,7 @@ class SetupCacheTests(unittest.TestCase):
             self.spec,
             dict(os.environ, SETUP_FIXTURE_FAIL="1" if fail else ""),
             self.root,
+            explicit=True,
         )
 
     def test_invalid_cache_shapes_rebuild_once_and_then_reuse_ready_outputs(self):
@@ -247,13 +248,16 @@ class SetupCacheTests(unittest.TestCase):
         self.setup()
         self.assertEqual((self.root / "runs.txt").read_text(), "run\n")
         (self.root / "ready.txt").unlink()
-        previous = self.stamp.read_bytes()
         with self.assertRaises(subprocess.CalledProcessError) as error:
             self.setup(fail=True)
         self.assertEqual(error.exception.returncode, 23)
-        self.assertEqual(self.stamp.read_bytes(), previous)
+        self.assertFalse(self.stamp.exists())
         self.assertFalse((self.root / "ready.txt").exists())
         self.setup()
+        self.assertEqual(
+            json.loads(self.stamp.read_text()),
+            {"fingerprint": toolchain.fingerprint(self.spec, self.root)},
+        )
         (self.root / "input.txt").write_text("changed declared input")
         self.setup()
         self.setup()
@@ -762,17 +766,28 @@ class RuntimeTests(unittest.TestCase):
                     self.assertEqual(env[name], overrides[selected])
 
     def test_pnpm_task_policy_does_not_inherit_nested_install_defaults(self):
-        unsafe = {
-            "pnpm_config_verify_deps_before_run": "install",
-            "npm_config_enable_global_virtual_store": "true",
+        guards = {
+            "enable_global_virtual_store": ("true", "false"),
+            "verify_deps_before_run": ("install", "error"),
+            "manage_package_manager_versions": ("true", "false"),
+            "pm_on_fail": ("download", "error"),
+            "package_manager_strict_version": ("false", "true"),
         }
-        with patch.dict(os.environ, unsafe):
-            env = toolchain.environment(self.root)
-        for aliases, value in zip(
-            toolchain.PNPM_SETTING_VARIABLES[1:], ("false", "error"), strict=True
+        aliases = {
+            alias: values
+            for setting, values in guards.items()
+            for alias in (
+                "PNPM_CONFIG_" + setting.upper(),
+                "pnpm_config_" + setting,
+                "npm_config_" + setting,
+            )
+        }
+        with patch.dict(
+            os.environ, {name: values[0] for name, values in aliases.items()}
         ):
-            for name in aliases:
-                self.assertEqual(env[name], value)
+            env = toolchain.environment(self.root)
+        for name, (_, expected) in aliases.items():
+            self.assertEqual(env[name], expected)
 
     def test_explicit_pnpm_policy_layers_reconcile_all_aliases(self):
         env = toolchain.environment(self.root)

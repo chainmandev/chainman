@@ -27,11 +27,13 @@ develop_runtime() {
     if [ "$develop_action" = exec ]; then exec "$@"; else lifetime_run "$@"; fi
 }
 script_dir=$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd)
-# shellcheck source=bootstrap/lifetime.sh
-. "$script_dir/lifetime.sh"
+single_line "$script_dir"
 self=$script_dir/$(basename -- "$0")
 root=$(CDPATH='' cd -P -- "${CHAINMAN_PROJECT_ROOT:-$script_dir/..}" && pwd)
 single_line "$root"
+# Validate entry paths before loading companions or creating private state.
+# shellcheck source=bootstrap/lifetime.sh
+. "$script_dir/lifetime.sh"
 # Transaction launchers carry frozen entry authority outside the writable tree.
 # A nested launch inherits it, but it applies only to its declared candidate.
 if [ -f "$script_dir/authority-root" ]; then CHAINMAN_ENTRY_AUTHORITY=$script_dir; fi

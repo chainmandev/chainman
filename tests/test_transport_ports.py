@@ -25,7 +25,7 @@ transport={ports=["127.0.0.1:{env:DOCS_PORT}:{env:DOCS_PORT}"]}
             with patch.dict(os.environ, DOCS_PORT=value):
                 controller, options = bootstrap_plan.plan(self.root, "run", "preview")
                 self.assertFalse(controller)
-                self.assertIn(f"127.0.0.1:{value}:{value}", options)
+                self.assertIn(f"127.0.0.1:{value}:{value}/tcp", options)
         for value in ("0", "65536", "123:456", "$(command)", "1\n2", ""):
             with (
                 patch.dict(os.environ, DOCS_PORT=value),
@@ -55,5 +55,5 @@ transport={ports=["127.0.0.1:{env:DOCS_PORT}:{env:DOCS_PORT}"]}
             CHAINMAN_MODE="container-nix",
         ):
             _, options = bootstrap_plan.plan(self.root, "run", "preview")
-        self.assertIn("127.0.0.1:54321:54321", options)
+        self.assertIn("127.0.0.1:54321:54321/tcp", options)
         self.assertNotIn("must-not-appear", str(options))

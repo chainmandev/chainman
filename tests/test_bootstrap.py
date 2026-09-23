@@ -369,7 +369,7 @@ print('entry and Git authority are read-only')
     def lifecycle_git(self, *args):
         return subprocess.check_output(
             ["git", "-C", str(self.root), *args], text=True, env=self.env
-        ).strip()
+        ).removesuffix("\n")
 
     def update_lifecycle(self, *, reject=False, block=False):
         self.use_real_runtime()
@@ -1221,7 +1221,12 @@ check=["true"]
         result = self.run_bootstrap("config", "validate")
         self.assertEqual(
             json.loads(result.stdout),
-            {"schema": 1, "configuration_schema": 3, "valid": True},
+            {
+                "schema": 1,
+                "configuration_schema": 3,
+                "valid": True,
+                "files": ["chainman.toml"],
+            },
         )
         self.assertEqual(self.run_bootstrap("run", "probe").stdout, "composed-command")
 
