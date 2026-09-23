@@ -102,8 +102,12 @@ commands=[["node","-e","require('fs').writeFileSync('ran','yes')"]]
                 patchfile.write_text(
                     patchfile.read_text().replace("exports = 2", "exports = 3")
                 )
-                with self.assertRaisesRegex(ValueError, "inputs-changed"):
+                (root / "ran").unlink()
+                with self.assertRaisesRegex(
+                    ValueError, r"javascript: changed: setup:fixture\.patch"
+                ):
                     workflows.run(root, "check", [])
+                self.assertFalse((root / "ran").exists())
                 with self.assertRaises(subprocess.CalledProcessError):
                     workflows.run(root, "setup", [])
                 self.assertFalse(
