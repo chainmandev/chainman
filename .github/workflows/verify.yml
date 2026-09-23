@@ -27,7 +27,7 @@ jobs:
           EXPECTED: ${{ inputs.candidate_sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED"
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec-in control python3 -u -B - <<'PYTHON'
+          ./scripts/enter.sh control python3 -u -B - <<'PYTHON'
           import faulthandler
           import os
           from pathlib import Path
@@ -66,6 +66,22 @@ jobs:
                   def stopTest(self, test):
                       faulthandler.cancel_dump_traceback_later()
                       super().stopTest(test)
+                  def diagnostics(self, test):
+                      state = getattr(test, 'state', None)
+                      if state:
+                          for log in sorted(state.glob('*.log')):
+                              print('\nFixture log:', log.name, '\n', log.read_text(errors='replace')[-6000:], flush=True)
+                      root = getattr(test, 'root', None)
+                      if root:
+                          for name in ('pid', 'signals', 'ready'):
+                              path = root / name
+                              print('Fixture file:', name, path.read_text() if path.exists() else '<absent>', flush=True)
+                  def addError(self, test, err):
+                      self.diagnostics(test)
+                      super().addError(test, err)
+                  def addFailure(self, test, err):
+                      self.diagnostics(test)
+                      super().addFailure(test, err)
               suite = unittest.defaultTestLoader.loadTestsFromNames([
                   'test_native_hooks', 'test_setup_terminal', 'test_terminal_fixture', 'test_services_control',
               ])
