@@ -57,6 +57,9 @@ source_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd)
 helper=$script_dir/fetch.nix
 export CHAINMAN_SOURCE_ROOT="$source_root"
 if [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ] && [ -n "${CHAINMAN_ROOT:-}" ]; then
+    if [ "$#" = 2 ] && [ "$1" = hooks ] && [ "$2" = config ]; then
+        exec "$script_dir/reenter.sh" "$root" --entry hooks config
+    fi
     case "${1:-}" in
         exec | shell | script | run | preflight)
             exec "$script_dir/reenter.sh" "$root" --entry "$@"
@@ -341,6 +344,13 @@ if [ "$CHAINMAN_REQUEST_ACTION" = format ] && [ "${2:-}" = --staged ]; then
     [ "$#" = 2 ] || fail 'usage: format --staged'
     set -- format-staged
     CHAINMAN_REQUEST_ACTION=format-staged
+    export CHAINMAN_REQUEST_ACTION
+fi
+
+# Inspection uses the pinned parser without host Git or hook installation.
+if [ "$#" = 2 ] && [ "$1" = hooks ] && [ "$2" = config ]; then
+    set -- _hooks-config
+    CHAINMAN_REQUEST_ACTION=_hooks-config
     export CHAINMAN_REQUEST_ACTION
 fi
 
@@ -1076,7 +1086,7 @@ if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
     set -- --name "$CHAINMAN_CONTAINER_NAME" --label "dev.chainman.owner=$CHAINMAN_CONTAINER_OWNER" "$@"
 fi
 project_mount="type=bind,src=$root,dst=$root"
-case "$CHAINMAN_REQUEST_ACTION" in _control-export | _hook-export | _consent-export) project_mount=$project_mount,readonly ;; esac
+case "$CHAINMAN_REQUEST_ACTION" in _control-export | _hook-export | _hooks-config | _consent-export) project_mount=$project_mount,readonly ;; esac
 set -- --rm --init --interactive --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \

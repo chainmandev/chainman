@@ -573,9 +573,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             import update_staging
 
             return update_staging.run(root, args.action, args.arguments)
-        if args.action in {"_hook-export", "_hook-worker"}:
+        if args.action in {"_hook-export", "_hook-worker", "_hooks-config"}:
             import hook_worker
 
+            if args.action == "_hooks-config":
+                return hook_worker.inspect_config(root, args.arguments)
             if args.action == "_hook-export":
                 return hook_worker.export(root, args.arguments)
             return hook_worker.run(root, args.arguments)

@@ -127,6 +127,10 @@ def main(arguments: list[str]) -> int:
         args = args[1:]
     else:
         args = ["run", *args]
+    if args == ["hooks", "config"]:
+        # This reads declarations only; it needs neither profile transport nor
+        # setup admission, and cannot install or execute repository hooks.
+        return chainman.main(["--root", str(root), "_hooks-config"])
     if args[:1] == ["script"]:
         args = args[1:]
         profile: list[str] = []

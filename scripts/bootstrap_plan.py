@@ -20,6 +20,7 @@ from adapter_data import array, strings, table, text
 INTERNAL = {
     "_control-export",
     "_hook-export",
+    "_hooks-config",
     "_hook-worker",
     "_workflow-task",
     "_workflow-service",

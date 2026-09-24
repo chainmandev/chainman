@@ -61,6 +61,12 @@ just hooks install
 just hooks uninstall
 ```
 
+`just hooks config` prints the effective preset and project extensions through the
+pinned lefthook parser. It is read-only and works inside managed host-Nix and
+container-Nix profiles without setup, installing hooks, or running their commands.
+Installation, execution, and Git-index changes still enter from host Git. Bare
+host mode does not provision hook tools.
+
 Complete setup prepares **every** declared setup group, runs the project's
 `recipes.setup` extensions, then validates and installs hooks. Raw
 `just chainman setup` has the same contract. `just setup --no-hooks` is the explicit

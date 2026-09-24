@@ -636,6 +636,66 @@ format-check=["format-check"]
     def test_public_runtime_update_lifecycle_switches_only_after_verification(self):
         self.runtime_update_lifecycle("chainman-update")
 
+    def test_public_hook_config_is_readonly_inside_managed_profile(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[hooks]
+enabled=true
+config="lefthook.yml"
+""")
+        (self.root / "lefthook.yml").write_text(
+            "pre-push:\n  commands:\n    inspection-only:\n      run: 'touch should-not-run'\n"
+        )
+        self.lifecycle_git("init", "-q")
+        modes = ["host-nix"]
+        if self.test_engine:
+            modes.append("container-nix")
+        for mode in modes:
+            self.env["CHAINMAN_MODE"] = mode
+            if self.test_engine:
+                self.env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
+            direct = self.run_bootstrap("hooks", "config")
+            self.assertIn("inspection-only", direct.stdout)
+            # This unpublished fixture SHA exists only in the test transport.
+            # Reenter its already verified store runtime inside the container;
+            # public-consumer Just reentry is also exercised after publication.
+            entry = [
+                "sh",
+                "-c",
+                'exec "$CHAINMAN_RUNTIME/bootstrap/chainman.sh" "$@"',
+                "nested",
+            ]
+            nested = self.run_bootstrap(
+                "exec", "--profile", "host", "--", *entry, "hooks", "config"
+            )
+            self.assertEqual(direct.stdout, nested.stdout)
+            self.assertIn("format-staged", nested.stdout)
+            self.assertIn("trojan-source", nested.stdout)
+            self.assertFalse((self.root / "should-not-run").exists())
+            self.assertFalse((self.root / ".git/index").exists())
+            self.assertFalse((self.root / ".git/hooks/pre-commit").exists())
+            for args in [
+                ("hooks", "install"),
+                ("hooks", "run", "pre-commit"),
+                ("format-staged",),
+            ]:
+                denied = self.run_bootstrap(
+                    "exec",
+                    "--profile",
+                    "host",
+                    "--",
+                    "env",
+                    "CHAINMAN_BOOTSTRAP_CONTAINER=1",
+                    *entry,
+                    *args,
+                    check=False,
+                )
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertIn("host", denied.stderr)
+            self.assertFalse((self.root / ".git/hooks/pre-commit").exists())
+
     def test_public_hook_setup_and_commit_a(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text("""schema=3

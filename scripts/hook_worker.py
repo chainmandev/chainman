@@ -2,8 +2,11 @@
 
 import base64
 import json
+import os
 from pathlib import Path
+import platform
 import subprocess
+import tempfile
 
 import chainman
 import configuration_files
@@ -13,6 +16,33 @@ import hooks
 import staged_format
 import toolchain as tc
 from adapter_data import strings, table
+
+
+def inspect_config(root: Path, args: list[str]) -> int:
+    if args:
+        raise ValueError("usage: hooks config")
+    cfg = config_inspection.validated(root)
+    if not hooks.declaration(cfg).get("enabled", False):
+        raise ValueError("declare [hooks] enabled=true")
+    target = (
+        platform.system().lower()
+        + "-"
+        + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}[platform.machine()]
+    )
+    with tempfile.TemporaryDirectory(prefix="chainman-hook-config-") as temporary:
+        directory = Path(temporary)
+        config = hooks.effective(root, directory)
+        export_binary(directory, target, "hook-lefthook", "lefthook")
+        return tc.managed_run(
+            [str(directory / "lefthook"), "dump"],
+            cwd=root,
+            env=dict(
+                os.environ,
+                LEFTHOOK_CONFIG=str(config),
+                CHAINMAN_HOOK_ENTRY=str(chainman.RUNTIME / "bootstrap/hook-task.sh"),
+            ),
+            check=False,
+        ).returncode
 
 
 def export(root: Path, args: list[str]) -> int:

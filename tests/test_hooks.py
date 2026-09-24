@@ -5,11 +5,15 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import os
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import hooks
 import chainman
 import trojan_source
+import reentry
+import hook_worker
 
 
 class HookDeclarations(unittest.TestCase):
@@ -25,6 +29,36 @@ class HookDeclarations(unittest.TestCase):
             self.assertEqual(set(data["pre-commit"]["commands"]), {"format-staged"})
             self.assertEqual(set(data["pre-push"]["commands"]), {"trojan-source"})
             self.assertEqual(data["extends"], [str(root / "lefthook.yml")])
+
+    def test_config_reentry_skips_setup_and_profile_transport(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.object(reentry, "validate") as validate,
+                patch.object(reentry.chainman, "main", return_value=0) as main,
+                patch.object(
+                    reentry.workflows,
+                    "configuration",
+                    side_effect=AssertionError("transport admission"),
+                ),
+                patch.dict(os.environ, {"CHAINMAN_ACTIVE_MODE": "container-nix"}),
+            ):
+                self.assertEqual(
+                    reentry.main([str(root), "--entry", "hooks", "config"]), 0
+                )
+                validate.assert_called_once_with(root)
+                main.assert_called_once_with(["--root", str(root), "_hooks-config"])
+
+    def test_config_requires_enabled_hooks_and_exact_arguments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(
+                hook_worker.config_inspection, "validated", return_value={}
+            ):
+                with self.assertRaisesRegex(ValueError, "enabled=true"):
+                    hook_worker.inspect_config(root, [])
+            with self.assertRaisesRegex(ValueError, "usage"):
+                hook_worker.inspect_config(root, ["install"])
 
     def test_unknown_hook_settings_are_rejected(self):
         with self.assertRaises(ValueError):
