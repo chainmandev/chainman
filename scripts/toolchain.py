@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import signal
 from pathlib import Path
 import platform
 import shutil
@@ -38,6 +39,14 @@ _nix_root_fds: tuple[int, ...] = ()
 _COMPILER_STARTUP_SECONDS = 120
 
 type OperationState = tuple[int | None, int | None, str, int | None, tuple[int, ...]]
+
+
+def foreground_signals() -> None:
+    """Undo POSIX asynchronous-shell ignores at verified Python entrypoints."""
+    if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+    if signal.getsignal(signal.SIGQUIT) == signal.SIG_IGN:
+        signal.signal(signal.SIGQUIT, signal.SIG_DFL)
 
 
 class ProcessIOOptions(TypedDict, total=False):

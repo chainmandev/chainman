@@ -196,6 +196,7 @@ def main(arguments: list[str]) -> int:
 
 
 if __name__ == "__main__":
+    tc.foreground_signals()
     try:
         raise SystemExit(main(sys.argv[1:]))
     except (ValueError, OSError) as error:

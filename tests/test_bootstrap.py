@@ -751,6 +751,47 @@ config="lefthook.yml"
             self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), unsafe)
             self.assertFalse((self.root / ".git/hooks/pre-commit").exists())
 
+    def test_public_entry_restores_foreground_interrupts(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+        )
+        command = [
+            "python3",
+            "-c",
+            "import signal; assert signal.getsignal(signal.SIGINT) != signal.SIG_IGN; assert signal.getsignal(signal.SIGQUIT) != signal.SIG_IGN; print('interruptible')",
+        ]
+        for mode in [
+            "host",
+            "host-nix",
+            *(["container-nix"] if self.test_engine else []),
+        ]:
+            self.env["CHAINMAN_MODE"] = mode
+            if self.test_engine:
+                self.env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
+            self.assertEqual(
+                self.run_bootstrap("exec", "--profile", "host", "--", *command).stdout,
+                "interruptible\n",
+            )
+            # A nested public Git entry also inherits POSIX asynchronous-shell
+            # ignores. Exercise the verified reentry path with that disposition.
+            nested = self.run_bootstrap(
+                "exec",
+                "--profile",
+                "host",
+                "--",
+                "sh",
+                "-c",
+                'trap "" INT QUIT; exec "$CHAINMAN_RUNTIME/bootstrap/chainman.sh" "$@"',
+                "nested",
+                "exec",
+                "--profile",
+                "host",
+                "--",
+                *command,
+            )
+            self.assertEqual(nested.stdout, "interruptible\n")
+
     def test_public_hook_setup_and_commit_a(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text("""schema=3
