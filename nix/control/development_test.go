@@ -1,13 +1,119 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestDevelopmentConcurrentPruningAndInspection(t *testing.T) {
+	t.Setenv("CHAINMAN_DEV_OUTPUT", "summary")
+	for round := 0; round < 30; round++ {
+		state := physicalTempDir(t)
+		if err := private(filepath.Join(state, "applications")); err != nil {
+			t.Fatal(err)
+		}
+		// A new operation can prune the oldest of 21 completed records while
+		// another launch or status query is reading its directory snapshot.
+		for i := 0; i < 21; i++ {
+			id := fmt.Sprintf("%032x", i+1)
+			now := time.Now().Add(time.Duration(i-21) * time.Second)
+			row := ApplicationStatus{ID: id, Presentation: Presentation{Title: "Fixture", Task: "dev"}, Phase: "stopped", Started: now, Updated: now}
+			if err := atomic(filepath.Join(state, "applications", id+".json"), row); err != nil {
+				t.Fatal(err)
+			}
+		}
+		start := make(chan struct{})
+		failures := make(chan error, 12)
+		var group sync.WaitGroup
+		for i := 0; i < 12; i++ {
+			group.Add(1)
+			go func(i int) {
+				defer group.Done()
+				<-start
+				if i < 4 {
+					plan := Plan{State: state, WaitForServices: true, Presentation: Presentation{Task: "dev", Title: "Fixture"}}
+					session, err := beginDevelopment(&plan)
+					if err != nil {
+						failures <- fmt.Errorf("launch: %w", err)
+						return
+					}
+					session.finish(0)
+				} else {
+					for n := 0; n < 12; n++ {
+						if _, err := applicationStatuses(state); err != nil {
+							failures <- fmt.Errorf("inspection: %w", err)
+							return
+						}
+					}
+				}
+			}(i)
+		}
+		close(start)
+		group.Wait()
+		close(failures)
+		for err := range failures {
+			t.Fatalf("round %d: %v", round, err)
+		}
+	}
+}
+
+func TestDevelopmentCorruptRecordStillRejected(t *testing.T) {
+	state := physicalTempDir(t)
+	path := filepath.Join(state, "applications")
+	if err := private(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, strings.Repeat("a", 32)+".json"), []byte("invalid JSON"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applicationStatuses(state); err == nil {
+		t.Fatal("malformed record was silently ignored")
+	}
+}
+
+func TestDevelopmentHumanSharedResourceStatus(t *testing.T) {
+	value := map[string]any{
+		"services": []Process{{Name: "frontend", Status: "Running", Ready: "Ready", Running: true}},
+		"running":  true, "recovery_required": false,
+		"resources": []map[string]any{
+			{"state": "/fixture/shared-database", "running": false, "recovery_required": true,
+				"services": []Process{{Name: "postgres", Status: "Error", Ready: "NotReady", Running: false}}},
+			{"state": "/fixture/shared-network", "bridge": "fixture-network", "running": false, "clients": 1, "recovery_required": true},
+			{"state": "/fixture/healthy-network", "bridge": "healthy-network", "running": true, "clients": 2, "recovery_required": false},
+		},
+	}
+	before, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	writeHumanDevelopmentStatus(&out, nil, value)
+	for _, expected := range []string{
+		"Service frontend: Running (ready=Ready)",
+		"Shared resource /fixture/shared-database:\n  Service postgres: Error (ready=NotReady)\n  Service controller recovery required;",
+		"Shared resource /fixture/shared-network:\n  Network bridge fixture-network: running=false (clients=1)\n  Service controller recovery required;",
+		"Shared resource /fixture/healthy-network:\n  Network bridge healthy-network: running=true (clients=2)",
+	} {
+		if !strings.Contains(out.String(), expected) {
+			t.Fatalf("missing %q in status:\n%s", expected, out.String())
+		}
+	}
+	if strings.Count(out.String(), "recovery required") != 2 {
+		t.Fatal("recovery warning assigned to the wrong scope", out.String())
+	}
+	after, err := json.Marshal(value)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("human rendering changed JSON state", err)
+	}
+}
 
 func TestDevelopmentOutputModes(t *testing.T) {
 	for _, tty := range []bool{true, false} {

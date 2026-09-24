@@ -475,6 +475,16 @@ else: raise AssertionError(sys.argv)
         self.assertTrue(bridge_status["running"])
         self.assertEqual(bridge_status["clients"], 2)
         self.assertEqual(bridge_status["network_id"], network["Id"])
+        human = subprocess.run(
+            [CONTROL, "status", str(self.state), "--human"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        self.assertIn(f"Shared resource {network_state}:", human)
+        self.assertIn(
+            f"Network bridge {network['Name']}: running=true (clients=2)", human
+        )
         self.select_scope(first)
         self.run_control("stop", check=0)
         self.assertTrue(network_file.exists())
@@ -512,6 +522,14 @@ else: raise AssertionError(sys.argv)
         self.assertTrue(self.alive(pid))
         status = json.loads(self.run_control("status", check=0).stdout)
         self.assertTrue(status["resources"][0]["running"])
+        human = subprocess.run(
+            [CONTROL, "status", str(self.state), "--human"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        self.assertIn(f"Shared resource {shared}:", human)
+        self.assertIn("Service worker: Running (ready=Ready)", human)
         self.run_control("stop", check=0)
         self.wait_until(lambda: not self.alive(pid))
 

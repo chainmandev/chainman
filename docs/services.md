@@ -104,6 +104,10 @@ Records are scoped by worktree and execution mode, separate from shared-resource
 ownership. Up to 20 completed records are kept when a new operation starts,
 alongside active clients.
 
+The human view includes shared repository services (such as a database), network
+bridges, and recovery warnings under their own resource scopes. Concurrent status
+inspection and development launches tolerate completed records being pruned.
+
 An observed failed watched build or lost service readiness makes the application
 **degraded**, even if the last successful server remains available. A later
 successful build/healthy observation clears that condition. Fatal service or

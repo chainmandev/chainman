@@ -86,6 +86,11 @@ func applicationStatuses(state string) ([]ApplicationStatus, error) {
 		}
 		var row ApplicationStatus
 		if err = readJSON(filepath.Join(path, entry.Name()), &row); err != nil {
+			// Another client may prune completed records after this directory
+			// snapshot. Their absence must not prevent inspection or task startup.
+			if os.IsNotExist(err) {
+				continue
+			}
 			return nil, err
 		}
 		if len(row.ID) != 32 || strings.Trim(row.ID, "0123456789abcdef") != "" || row.ID+".json" != entry.Name() {
@@ -150,26 +155,43 @@ func printDevelopmentStatus(state string, value map[string]any, human bool) int 
 	if !human {
 		return exitCode(json.NewEncoder(os.Stdout).Encode(value))
 	}
+	writeHumanDevelopmentStatus(os.Stdout, rows, value)
+	return 0
+}
+
+func writeHumanDevelopmentStatus(w io.Writer, rows []ApplicationStatus, value map[string]any) {
 	if len(rows) == 0 {
-		fmt.Println("No recorded application operation in this service scope.")
+		fmt.Fprintln(w, "No recorded application operation in this service scope.")
 	}
 	for i, row := range rows {
 		// Show every active client and the newest completed operation only.
 		if i > 0 && terminalPhase(row.Phase) {
 			continue
 		}
-		fmt.Printf("Operation %s (%s)\n", row.ID, row.Presentation.Task)
-		fmt.Print(developmentSummary(row, false))
+		fmt.Fprintf(w, "Operation %s (%s)\n", row.ID, row.Presentation.Task)
+		fmt.Fprint(w, developmentSummary(row, false))
+	}
+	writeServiceStatus(w, value, "")
+	if resources, ok := value["resources"].([]map[string]any); ok {
+		for _, resource := range resources {
+			fmt.Fprintf(w, "Shared resource %s:\n", resource["state"])
+			writeServiceStatus(w, resource, "  ")
+		}
+	}
+}
+
+func writeServiceStatus(w io.Writer, value map[string]any, indent string) {
+	if bridge, ok := value["bridge"].(string); ok {
+		fmt.Fprintf(w, "%sNetwork bridge %s: running=%v (clients=%v)\n", indent, bridge, value["running"], value["clients"])
 	}
 	if services, ok := value["services"].([]Process); ok {
 		for _, service := range services {
-			fmt.Printf("Service %s: %s (ready=%s)\n", service.Name, service.Status, service.Ready)
+			fmt.Fprintf(w, "%sService %s: %s (ready=%s)\n", indent, service.Name, service.Status, service.Ready)
 		}
 	}
 	if value["recovery_required"] == true {
-		fmt.Println("Service controller recovery required; inspect JSON status and service logs.")
+		fmt.Fprintln(w, indent+"Service controller recovery required; inspect JSON status and service logs.")
 	}
-	return 0
 }
 
 // Neither a full output pipe nor a stalled terminal may hold a service lease.
