@@ -792,6 +792,76 @@ config="lefthook.yml"
             )
             self.assertEqual(nested.stdout, "interruptible\n")
 
+    def test_public_nested_service_entry_preserves_fd9_context(self):
+        self.use_real_runtime()
+        # The nested container cannot reach the host cache. Seed real Git
+        # objects in the fixture mount; unpublished test SHAs are not on GitHub.
+        self.prepare_cache(
+            dict(self.env, XDG_CACHE_HOME=str(self.root / ".runtime-cache"))
+        )
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[services.worker]
+command=["sleep","600"]
+shutdown_seconds=1
+[tasks.outer]
+services=["worker"]
+commands=[["python3","nested.py"]]
+cleanup_children=true
+shutdown_seconds=2
+[tasks.inner]
+services=["worker"]
+commands=[["python3","-c","import sys; print(repr(sys.argv[1:]), flush=True); sys.stdout.buffer.write(sys.stdin.buffer.read())"]]
+""")
+        (self.root / "nested.py").write_text("""import fcntl,json,os,sys
+from pathlib import Path
+os.environ['XDG_CACHE_HOME']=str(Path.cwd()/'.runtime-cache')
+names=['TOOLCHAIN_LOCK_FD','TOOLCHAIN_GATE_FD','TOOLCHAIN_COMPAT_FD','CHAINMAN_SERVICE_CONTEXT_FD']
+lists=['TOOLCHAIN_ANCESTOR_FDS','CHAINMAN_SERVICE_LEASE_FDS']
+def remap(old,new):
+ for name in names:
+  if os.environ.get(name)==str(old): os.environ[name]=str(new)
+ for name in lists:
+  if name in os.environ:
+   os.environ[name]=json.dumps([new if fd==old else fd for fd in json.loads(os.environ[name])])
+try:
+ os.fstat(9)
+except OSError: pass
+else:
+ saved=fcntl.fcntl(9,fcntl.F_DUPFD,20)
+ remap(9,saved)
+context=int(os.environ['CHAINMAN_SERVICE_CONTEXT_FD'])
+os.dup2(context,9)
+remap(context,9)
+if context != 9: os.close(context)
+os.execvp('just',['just','chainman','run','inner','--',*sys.argv[1:]])
+""")
+        for mode in ["host-nix", *(["container-nix"] if self.test_engine else [])]:
+            env = dict(self.env, CHAINMAN_MODE=mode)
+            if self.test_engine:
+                env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
+            self.prepare_cache(env)
+            try:
+                result = subprocess.run(
+                    [str(self.launcher), "run", "outer", "--", "literal $() spaces"],
+                    env=env,
+                    input="piped service input\n",
+                    text=True,
+                    capture_output=True,
+                    timeout=240,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(
+                    "['literal $() spaces']\npiped service input\n", result.stdout
+                )
+                status = json.loads(
+                    self.run_bootstrap("services-status", env=env).stdout
+                )
+                self.assertFalse(status["running"])
+            finally:
+                self.run_bootstrap("services-stop", env=env)
+
     def test_public_hook_setup_and_commit_a(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text("""schema=3

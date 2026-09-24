@@ -107,9 +107,12 @@ case "$CHAINMAN_REQUEST_ACTION" in
     _bootstrap-options | _display-prepare) ;;
     *) unset CHAINMAN_REQUEST_PROFILE ;;
 esac
-# Do not let a validation container drain the following command's input.
+# Planning and setup admission must not let an interactive engine client drain
+# the application's piped input. Setup consent uses its separate terminal channel.
+case "$CHAINMAN_REQUEST_ACTION" in
+    preflight | _service-prepare | _control-export | _workflow-prepare) exec < /dev/null ;;
+esac
 if [ "$CHAINMAN_REQUEST_ACTION" = preflight ]; then
-    exec < /dev/null
     CHAINMAN_PREFLIGHT_TASKS=$(
         first=1
         for task in "$@"; do

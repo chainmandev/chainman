@@ -147,6 +147,10 @@ the caller restores its foreground group and terminal settings afterward. Ctrl-C
 cancels the task and releases its services, retaining resources used by another
 client and preserving persistent volumes. Piped input remains a pipe. Background
 services and readiness probes never acquire the caller's terminal.
+Planning and setup-admission phases receive empty stdin so container clients
+cannot consume the application's input early. Setup consent still uses its
+separate controlling-terminal channel; foreground application commands retain
+the caller's stdin.
 
 The verified Git entrypoint forwards INT, TERM and HUP to its owned runtime and
 waits for bounded cleanup before removing its temporary export. Automation should
