@@ -1343,6 +1343,7 @@ func owned(state, name string, probe bool, generation string) int {
 		timeout = timer.C
 	}
 	timedOut := false
+	var interrupted syscall.Signal
 	select {
 	case e = <-done:
 	case <-timeout:
@@ -1356,6 +1357,7 @@ func owned(state, name string, probe bool, generation string) int {
 			e = <-done
 		}
 	case sig := <-signals:
+		interrupted = sig.(syscall.Signal)
 		if s.ForwardLeases {
 			fmt.Fprintln(os.Stderr, "chainman: stopping task…")
 		}
@@ -1381,6 +1383,21 @@ func owned(state, name string, probe bool, generation string) int {
 	_ = os.Remove(path)
 	if timedOut {
 		return 124
+	}
+	if s.ForwardLeases {
+		// Cancellation is an operation result, even if a cooperative child
+		// exits zero or preparation finishes while the interrupt is in flight.
+		// Otherwise the caller can admit another task or wait on services.
+		if interrupted == 0 {
+			select {
+			case sig := <-signals:
+				interrupted = sig.(syscall.Signal)
+			default:
+			}
+		}
+		if interrupted != 0 {
+			return 128 + int(interrupted)
+		}
 	}
 	return exitCode(e)
 }

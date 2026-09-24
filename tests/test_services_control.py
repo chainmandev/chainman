@@ -82,7 +82,9 @@ while True:time.sleep(.1)
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
 
-    def terminal_command(self, code, *, interrupt=False, timeout=0):
+    def terminal_command(
+        self, code, *, interrupt=False, timeout=0, ignored_interrupt=False
+    ):
         """Use a controlling terminal, not killpg on a redirected subprocess."""
         task = self.base / "terminal-task.json"
         recovery = self.base / "terminal-owner"
@@ -104,6 +106,10 @@ while True:time.sleep(.1)
             "assert termios.tcgetattr(0)==before, 'terminal settings not restored'; "
             "print('RESTORED',r.returncode,flush=True)"
         )
+        if ignored_interrupt:
+            harness = (
+                "import signal; signal.signal(signal.SIGINT,signal.SIG_IGN); " + harness
+            )
         pid, master = pty.fork()
         if pid == 0:
             os.execv(
@@ -182,6 +188,17 @@ while True:time.sleep(.1)
         self.assertIn("RAW READY", output)
         self.assertIn("RESTORED 124", output)
 
+    def test_owned_terminal_interrupt_cannot_become_successful_preparation(self):
+        # Async shell/container entry can inherit ignored SIGINT. A cooperative
+        # command may then exit zero after the anchor forwards cancellation.
+        code = (
+            "import signal,time; "
+            "signal.signal(signal.SIGINT,lambda *_:exit(0)); "
+            "print('INTERRUPT READY',flush=True); time.sleep(120)"
+        )
+        output = self.terminal_command(code, interrupt=True, ignored_interrupt=True)
+        self.assertIn("RESTORED 130", output)
+
     def test_stopped_task_owner_handles_cancellation_without_kill_timeout(self):
         receipt = self.base / "stopped-owner"
         ready = self.root / "stopped-ready"
@@ -229,6 +246,37 @@ while True:time.sleep(.1)
                     except ProcessLookupError:
                         pass
                 client.kill()
+                client.communicate(timeout=5)
+
+    def test_cancelled_task_cannot_report_success_when_child_exits_zero(self):
+        ready = self.root / "cooperative-ready"
+        spec = {
+            "command": self.command(
+                [
+                    sys.executable,
+                    "-c",
+                    "import signal,time; from pathlib import Path; "
+                    "signal.signal(signal.SIGINT,lambda *_:exit(0)); "
+                    f"Path({str(ready)!r}).touch(); time.sleep(120)",
+                ]
+            ),
+            "shutdown_seconds": 1,
+            "forward_leases": True,
+        }
+        (self.state / "task.command.json").write_text(json.dumps(spec))
+        client = subprocess.Popen(
+            [CONTROL, "exec", str(self.state), "task"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            self.wait_file(ready)
+            client.send_signal(signal.SIGINT)
+            _, error = client.communicate(timeout=3)
+            self.assertEqual(client.returncode, 130, error)
+        finally:
+            if client.poll() is None:
+                client.terminate()
                 client.communicate(timeout=5)
 
     def test_exported_plan_runs_after_readiness_and_preserves_task_exit(self):
