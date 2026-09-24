@@ -470,7 +470,7 @@ func configuration(p Plan, self string) error {
 	}
 	return atomic(filepath.Join(p.State, "compose.json"), map[string]any{
 		"version": "0.5", "processes": processes, "log_location": "services.log", "log_length": 500,
-		"log_configuration": map[string]any{"flush_each_line": true, "disable_json": true, "no_color": true, "add_timestamp": true, "rotation": map[string]any{"max_size_mb": 10, "max_backups": 3, "max_age_days": 7}},
+		"log_configuration": map[string]any{"flush_each_line": true, "disable_json": false, "no_color": true, "add_timestamp": true, "rotation": map[string]any{"max_size_mb": 10, "max_backups": 3, "max_age_days": 7}},
 	})
 }
 func start(p Plan, self string) error {
@@ -864,6 +864,8 @@ func stopReceipt(p Plan, n, receipt string, shutdown int) error {
 		if e = syscall.Kill(o.Identity.PID, syscall.SIGTERM); e != nil && e != syscall.ESRCH {
 			return e
 		}
+		// A job-control stopped owner cannot forward termination until resumed.
+		_ = syscall.Kill(o.Identity.PID, syscall.SIGCONT)
 		deadline := time.Now().Add(time.Duration(shutdown) * time.Second)
 		for o.Identity.alive() && time.Now().Before(deadline) {
 			time.Sleep(50 * time.Millisecond)
@@ -1346,6 +1348,7 @@ func owned(state, name string, probe bool, generation string) int {
 	case <-timeout:
 		timedOut = true
 		_ = syscall.Kill(-id.PID, syscall.SIGTERM)
+		_ = syscall.Kill(-id.PID, syscall.SIGCONT)
 		select {
 		case e = <-done:
 		case <-time.After(time.Duration(s.Shutdown) * time.Second):
@@ -1353,7 +1356,11 @@ func owned(state, name string, probe bool, generation string) int {
 			e = <-done
 		}
 	case sig := <-signals:
+		if s.ForwardLeases {
+			fmt.Fprintln(os.Stderr, "chainman: stopping task…")
+		}
 		_ = syscall.Kill(-id.PID, sig.(syscall.Signal))
+		_ = syscall.Kill(-id.PID, syscall.SIGCONT)
 		select {
 		case e = <-done:
 		case <-time.After(time.Duration(s.Shutdown) * time.Second):
@@ -1591,9 +1598,13 @@ func mainAction(args []string) (result int) {
 	defer signal.Stop(signals)
 	startup := &startupGuard{signals: signals, stops: map[string]string{}}
 	if p.WaitForServices && args[0] == "run" {
+		cursors, err := liveLogCursors(p)
+		if err != nil {
+			return exitCode(err)
+		}
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
-			if err := streamLogs(ctx, p, os.Stderr, true); err != nil {
+			if err := streamLogCursors(ctx, cursors, os.Stderr, true); err != nil {
 				fmt.Fprintln(os.Stderr, "Service log viewer:", err)
 			}
 		}()
@@ -1720,7 +1731,7 @@ func mainAction(args []string) (result int) {
 		return exitCode(e)
 	}
 	if p.WaitForServices {
-		fmt.Fprintln(os.Stderr, "Services ready; following logs. Inspect separately with just chainman services-logs --follow")
+		fmt.Fprintln(os.Stderr, "Services responding; running application preparation and following logs. Inspect separately with just chainman services-logs --follow")
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
@@ -1730,6 +1741,7 @@ func mainAction(args []string) (result int) {
 	select {
 	case e = <-done:
 	case sig := <-signals:
+		fmt.Fprintln(os.Stderr, "chainman: stopping task and releasing its services…")
 		e = cancelTask(cmd, done, sig, p.TaskShutdown)
 	case e = <-failed:
 		_ = cancelTask(cmd, done, syscall.SIGTERM, p.TaskShutdown)

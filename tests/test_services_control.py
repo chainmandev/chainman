@@ -5,6 +5,8 @@ import fcntl
 import os
 from pathlib import Path
 import platform
+import pty
+import select
 import shlex
 import shutil
 import signal
@@ -79,6 +81,155 @@ while True:time.sleep(.1)
 
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
+
+    def terminal_command(self, code, *, interrupt=False, timeout=0):
+        """Use a controlling terminal, not killpg on a redirected subprocess."""
+        task = self.base / "terminal-task.json"
+        recovery = self.base / "terminal-owner"
+        task.write_text(
+            json.dumps(
+                {
+                    "commands": [self.command([sys.executable, "-c", code])],
+                    "shutdown_seconds": 1,
+                    "timeout_seconds": timeout,
+                    "recovery_state": str(recovery),
+                }
+            )
+        )
+        harness = (
+            "import os,subprocess,sys,termios; "
+            "before=termios.tcgetattr(0); "
+            "r=subprocess.run(sys.argv[1:]); "
+            "assert os.tcgetpgrp(0)==os.getpgrp(), 'foreground not restored'; "
+            "assert termios.tcgetattr(0)==before, 'terminal settings not restored'; "
+            "print('RESTORED',r.returncode,flush=True)"
+        )
+        pid, master = pty.fork()
+        if pid == 0:
+            os.execv(
+                sys.executable,
+                [sys.executable, "-c", harness, CONTROL, "command", str(task)],
+            )
+        output = bytearray()
+        exited = False
+        sent = False
+        deadline = time.monotonic() + 12
+        try:
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.1)[0]:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+                if not sent and b"INPUT READY" in output:
+                    os.write(master, b"literal spaces $()\n")
+                    sent = True
+                if interrupt and b"INTERRUPT READY" in output:
+                    os.write(master, b"\x03")
+                    interrupt = False
+                if b"RESTORED " in output:
+                    break
+            self.assertIn(b"RESTORED ", output, output.decode(errors="replace"))
+            _, status = os.waitpid(pid, 0)
+            exited = True
+            self.assertEqual(os.waitstatus_to_exitcode(status), 0, output)
+            return output.decode(errors="replace")
+        finally:
+            if not exited:
+                owner = recovery / "task.owner.json"
+                if owner.exists():
+                    group = json.loads(owner.read_text())["identity"]["pid"]
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                os.kill(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+            os.close(master)
+
+    def test_owned_terminal_input_output_and_restore(self):
+        code = (
+            "import os,sys,termios; "
+            "assert os.tcgetpgrp(0)==os.getpgrp(); "
+            "print('INPUT READY',flush=True); "
+            "assert input()=='literal spaces $()'; "
+            "settings=termios.tcgetattr(0); settings[3]&=~termios.ECHO; "
+            "termios.tcsetattr(0,termios.TCSANOW,settings); "
+            "print('APPLICATION READY',flush=True); sys.exit(7)"
+        )
+        output = self.terminal_command(code)
+        self.assertIn("APPLICATION READY", output)
+        self.assertIn("RESTORED 7", output)
+
+    def test_owned_terminal_ctrl_c_and_restore(self):
+        code = (
+            "import os,signal,time; "
+            "assert os.tcgetpgrp(0)==os.getpgrp(); "
+            "signal.signal(signal.SIGINT,lambda *_:exit(130)); "
+            "print('INTERRUPT READY',flush=True); time.sleep(120)"
+        )
+        output = self.terminal_command(code, interrupt=True)
+        self.assertIn("RESTORED 130", output)
+        self.assertIn("stopping task", output)
+
+    def test_owned_terminal_timeout_restores_raw_terminal(self):
+        code = (
+            "import signal,time,tty; "
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+            "tty.setraw(0); print('RAW READY',flush=True); time.sleep(120)"
+        )
+        output = self.terminal_command(code, timeout=1)
+        self.assertIn("RAW READY", output)
+        self.assertIn("RESTORED 124", output)
+
+    def test_stopped_task_owner_handles_cancellation_without_kill_timeout(self):
+        receipt = self.base / "stopped-owner"
+        ready = self.root / "stopped-ready"
+        task = self.base / "stopped-task.json"
+        task.write_text(
+            json.dumps(
+                {
+                    "commands": [
+                        self.command(
+                            [
+                                sys.executable,
+                                "-c",
+                                "import signal,time; from pathlib import Path; "
+                                "signal.signal(signal.SIGTERM,lambda *_:(Path('term-received').touch(),exit(23))); "
+                                f"Path({str(ready)!r}).touch(); time.sleep(120)",
+                            ]
+                        )
+                    ],
+                    "shutdown_seconds": 5,
+                    "recovery_state": str(receipt),
+                }
+            )
+        )
+        client = subprocess.Popen(
+            [CONTROL, "command", str(task)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        group = None
+        try:
+            self.wait_file(ready)
+            group = json.loads((receipt / "task.owner.json").read_text())["identity"][
+                "pid"
+            ]
+            os.killpg(group, signal.SIGSTOP)
+            client.terminate()
+            _, error = client.communicate(timeout=3)
+            self.assertEqual(client.returncode, 143, error)
+            self.assertTrue((self.root / "term-received").exists(), error)
+        finally:
+            if client.poll() is None:
+                if group:
+                    try:
+                        os.killpg(group, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                client.kill()
+                client.communicate(timeout=5)
 
     def test_exported_plan_runs_after_readiness_and_preserves_task_exit(self):
         output = self.base / "exported"

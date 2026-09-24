@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -15,9 +17,10 @@ const logHistoryBytes = 64 * 1024
 
 // A viewer holds only read descriptors: it never acquires or releases services.
 type logCursor struct {
-	path   string
-	file   *os.File
-	offset int64
+	path        string
+	file        *os.File
+	offset      int64
+	initialized bool
 }
 
 func (c *logCursor) close() {
@@ -71,7 +74,11 @@ func (c *logCursor) copy(w io.Writer) error {
 		if !st.Mode().IsRegular() {
 			return fmt.Errorf("service log must be a regular file: %s", c.path)
 		}
-		c.offset = max(0, st.Size()-logHistoryBytes)
+		c.offset = 0
+		if !c.initialized {
+			c.offset = max(0, st.Size()-logHistoryBytes)
+		}
+		c.initialized = true
 		if _, err = c.file.Seek(c.offset, io.SeekStart); err != nil {
 			return err
 		}
@@ -115,20 +122,102 @@ func streamLogs(ctx context.Context, p Plan, w io.Writer, follow bool) error {
 	if err != nil {
 		return err
 	}
+	return streamLogCursors(ctx, cursors, w, follow)
+}
+
+// Freeze the live-view boundary before acquiring services, including logs that
+// do not exist yet. Startup output must neither be replayed nor lost in a race.
+func liveLogCursors(p Plan) ([]*logCursor, error) {
+	cursors, err := logCursors(p)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range cursors {
+		if err := c.copy(io.Discard); err != nil {
+			for _, open := range cursors {
+				open.close()
+			}
+			return nil, err
+		}
+		c.initialized = true
+	}
+	return cursors, nil
+}
+
+// Process Compose's level denotes stdout/stderr, not application severity.
+// Decode its envelope only; retain the application's complete message and pass
+// historical plain-text logs and controller diagnostics through unchanged.
+type logRenderer struct {
+	destination io.Writer
+	pending     []byte
+}
+
+func (r *logRenderer) line(line []byte) error {
+	var record struct {
+		Level   string `json:"level"`
+		Process string `json:"process"`
+		Time    string `json:"time"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(line, &record) == nil && validName.MatchString(record.Process) && (record.Level == "info" || record.Level == "error") {
+		stream := "stdout"
+		if record.Level == "error" {
+			stream = "stderr"
+		}
+		_, err := fmt.Fprintf(r.destination, "%s [%s %s] %s\n", record.Time, record.Process, stream, record.Message)
+		return err
+	}
+	_, err := r.destination.Write(line)
+	return err
+}
+
+func (r *logRenderer) Write(data []byte) (int, error) {
+	size := len(data)
+	r.pending = append(r.pending, data...)
+	for {
+		i := bytes.IndexByte(r.pending, '\n')
+		if i < 0 {
+			break
+		}
+		if err := r.line(r.pending[:i+1]); err != nil {
+			return 0, err
+		}
+		r.pending = r.pending[i+1:]
+	}
+	// Do not accumulate unbounded memory for an unfinished application line.
+	if len(r.pending) >= logHistoryBytes {
+		if _, err := r.destination.Write(r.pending); err != nil {
+			return 0, err
+		}
+		r.pending = nil
+	}
+	return size, nil
+}
+
+func streamLogCursors(ctx context.Context, cursors []*logCursor, w io.Writer, follow bool) error {
 	defer func() {
 		for _, c := range cursors {
 			c.close()
 		}
 	}()
+	renderers := make([]*logRenderer, len(cursors))
+	for i := range cursors {
+		renderers[i] = &logRenderer{destination: w}
+	}
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		for _, c := range cursors {
-			if err = c.copy(w); err != nil {
+		for i, c := range cursors {
+			if err := c.copy(renderers[i]); err != nil {
 				return err
 			}
 		}
 		if !follow {
+			for _, r := range renderers {
+				if _, err := w.Write(r.pending); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		select {

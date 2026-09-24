@@ -184,7 +184,7 @@ func closeForwarded(cmd *exec.Cmd) {
 	}
 }
 
-func taskCommand(action, path string) int {
+func taskCommand(action, path string) (result int) {
 	var task TaskCommands
 	if e := readJSON(path, &task); e != nil {
 		return exitCode(e)
@@ -256,6 +256,18 @@ func taskCommand(action, path string) int {
 		return exitCode(e)
 	}
 	defer closeForwarded(cmd)
+	restore, e := taskTerminal(cmd)
+	if e != nil {
+		return exitCode(e)
+	}
+	defer func() {
+		if err := restore(); err != nil {
+			fmt.Fprintln(os.Stderr, "Restore task terminal:", err)
+			if result == 0 {
+				result = 1
+			}
+		}
+	}()
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -268,6 +280,7 @@ func taskCommand(action, path string) int {
 	case e = <-done:
 	case sig := <-signals:
 		_ = cmd.Process.Signal(sig)
+		_ = cmd.Process.Signal(syscall.SIGCONT)
 		e = <-done
 	}
 	return exitCode(e)

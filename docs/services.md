@@ -63,7 +63,24 @@ Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
 
 Foreground tasks with `wait_for_services = true` stream service output, including
-watched build, failure, and restart messages. `services-logs` shows the latest
+watched build, failure, and restart messages, from the start of the current
+operation. Existing log history is not replayed during startup. A service probe
+only establishes service availability: project preparation commands still have
+to finish before the application is ready. Projects should print their ready
+message and URL after that preparation succeeds.
+
+Owned foreground commands receive the controlling terminal for their lifetime;
+the caller restores its foreground group and terminal settings afterward. Ctrl-C
+cancels the task and releases its services, retaining resources used by another
+client and preserving persistent volumes. Piped input remains a pipe. Background
+services and readiness probes never acquire the caller's terminal.
+
+New service logs identify `stdout` and `stderr` explicitly. These are output
+streams, not severity levels: PostgreSQL and compilers write ordinary progress
+to stderr. Application warnings and errors retain their original text. Older
+saved logs keep their original presentation.
+
+`services-logs` shows the latest
 64 KiB per log; `--follow` continues across log rotation and truncation. It uses
 saved worktree/mode state and its associated repository resources, even when the
 current configuration is broken. A log viewer acquires no service lease: Ctrl-C
