@@ -1081,6 +1081,9 @@ def owned_compiler_cache(
             # This is a background helper, not the user's foreground task.
             # It must neither consume command input nor borrow its terminal.
             "stdin": subprocess.DEVNULL,
+            # Terminal interrupts belong to the task; its finally block stops
+            # this helper through the cache protocol and native lifetime owner.
+            "start_new_session": True,
             "stdout": sys.stderr,
             "pass_fds": (*pass_fds, lifecycle.fileno()),
         }

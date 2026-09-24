@@ -595,6 +595,39 @@ commands=[["python3","check.py"]]
         self.assertEqual(result.stdout, "literal project input\n")
         self.assertEqual((self.root / "compiler-input").read_bytes(), b"")
 
+    def test_background_compiler_survives_the_callers_terminal_interrupt(self):
+        env = self.cache_fixture()
+        wrapper = textwrap.dedent("""\
+            import os, signal, socket, sys, time
+            from pathlib import Path
+            sys.path.insert(0, sys.argv[1])
+            import toolchain
+            root = Path(sys.argv[2])
+            signal.signal(signal.SIGINT, lambda *_: None)
+            with toolchain.operation(root):
+                with toolchain.compiler_cache("rust", dict(os.environ), root):
+                    os.killpg(os.getpgrp(), signal.SIGINT)
+                    time.sleep(0.2)
+                    with socket.socket(socket.AF_UNIX) as client:
+                        client.connect(os.environ["SCCACHE_SERVER_UDS"])
+            """)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                str(toolchain.RUNTIME / "scripts"),
+                str(self.root),
+            ],
+            env=env,
+            start_new_session=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / "server-exited").read_text(), "yes")
+
     def test_dead_launcher_does_not_authorize_unlinking_a_live_compiler_socket(self):
         env = self.cache_fixture()
         real_popen = subprocess.Popen
