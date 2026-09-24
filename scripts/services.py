@@ -94,6 +94,7 @@ class Plan(TypedDict):
     prepare: NotRequired[Command]
     task: NotRequired[Command]
     wait_for_services: NotRequired[bool]
+    presentation: NotRequired[Table]
     exclusive_services: NotRequired[bool]
     own_task: NotRequired[bool]
     task_shutdown_seconds: NotRequired[int]
@@ -911,6 +912,25 @@ def export(root: Path, arguments: list[str]) -> int:
             for name in task_order
         ),
     }
+    if plan["wait_for_services"]:
+        import development_status
+
+        spec = tasks_by_name[task]
+        profile = text(
+            spec.get("profile", workflows.default_profile(cfg)), "Task profile"
+        )
+        effective = chainman.profile_environment(
+            root,
+            table(
+                table(cfg.get("profiles", {}), "Profiles").get(profile, {}), "Profile"
+            ),
+            planning_env,
+            spec.get("environment", {}),
+            cfg=cfg,
+        )
+        plan["presentation"] = development_status.resolve(
+            spec.get("presentation", {}), root, effective, task
+        )
     if needs_bridge:
         if not engine:
             raise ValueError(

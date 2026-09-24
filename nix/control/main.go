@@ -76,6 +76,7 @@ type Plan struct {
 	Prepare            *Command           `json:"prepare,omitempty"`
 	TaskContainer      *Container         `json:"task_container,omitempty"`
 	WaitForServices    bool               `json:"wait_for_services,omitempty"`
+	Presentation       Presentation       `json:"presentation,omitempty"`
 	ExclusiveServices  bool               `json:"exclusive_services,omitempty"`
 	OwnTask            bool               `json:"own_task,omitempty"`
 	TaskShutdown       int                `json:"task_shutdown_seconds,omitempty"`
@@ -1513,6 +1514,10 @@ func mainAction(args []string) (result int) {
 		return owned(args[1], args[2], args[0] == "probe", generation)
 	}
 	if args[0] == "status" || args[0] == "stop" {
+		if len(args) != 2 && !(args[0] == "status" && len(args) == 3 && args[2] == "--human") {
+			return 2
+		}
+		human := len(args) == 3
 		if e := private(args[1]); e != nil {
 			fmt.Fprintln(os.Stderr, e)
 			return 1
@@ -1544,8 +1549,7 @@ func mainAction(args []string) (result int) {
 		defer lock.Close()
 		var p Plan
 		if e = readJSON(filepath.Join(args[1], "plan.json"), &p); os.IsNotExist(e) {
-			fmt.Println("{\"services\":[],\"running\":false}")
-			return 0
+			return printDevelopmentStatus(args[1], map[string]any{"services": []Process{}, "running": false}, human)
 		}
 		if e != nil {
 			fmt.Fprintln(os.Stderr, e)
@@ -1572,8 +1576,7 @@ func mainAction(args []string) (result int) {
 		if resourceError != nil {
 			return exitCode(resourceError)
 		}
-		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "resources": resources, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0})
-		return 0
+		return printDevelopmentStatus(p.State, map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "resources": resources, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0}, human)
 	}
 	if args[0] != "run" && args[0] != "up" && args[0] != "reset" {
 		return 2
@@ -1601,6 +1604,15 @@ func mainAction(args []string) (result int) {
 		}
 		return 0
 	}
+	var development *developmentSession
+	if args[0] == "run" {
+		var err error
+		development, err = beginDevelopment(&p)
+		if err != nil {
+			return exitCode(err)
+		}
+		defer func() { development.finish(result) }()
+	}
 	if p.Prepare != nil {
 		cmd, e := child(*p.Prepare)
 		if e != nil {
@@ -1621,7 +1633,7 @@ func mainAction(args []string) (result int) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		go func() {
-			if err := streamLogCursors(ctx, cursors, os.Stderr, true); err != nil {
+			if err := streamLogCursors(ctx, cursors, development.writer(), true); err != nil {
 				fmt.Fprintln(os.Stderr, "Service log viewer:", err)
 			}
 		}()
@@ -1640,6 +1652,7 @@ func mainAction(args []string) (result int) {
 	}
 	recoveryState := ""
 	defer func() {
+		development.phase("stopping", "")
 		// Docker/Podman clients do not carry descriptors into their daemon's
 		// containers. Stop an owned task before releasing its service lease;
 		// if this client is killed outright, active() uses the container receipt.
@@ -1747,20 +1760,20 @@ func mainAction(args []string) (result int) {
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
 	}
-	if p.WaitForServices {
-		fmt.Fprintln(os.Stderr, "Services responding; running application preparation and following logs. Inspect separately with just chainman services-logs --follow")
-	}
+	development.phase("preparing", "")
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	monitorContext, cancelMonitor := context.WithCancel(context.Background())
 	defer cancelMonitor()
-	failed := monitorServices(monitorContext, p)
+	failed := monitorServices(monitorContext, p, development)
 	select {
 	case e = <-done:
 	case sig := <-signals:
+		development.phase("stopping", "")
 		fmt.Fprintln(os.Stderr, "chainman: stopping task and releasing its services…")
 		e = cancelTask(cmd, done, sig, p.TaskShutdown)
 	case e = <-failed:
+		development.phase("stopping", "")
 		_ = cancelTask(cmd, done, syscall.SIGTERM, p.TaskShutdown)
 	}
 	// Forced recovery may end the native task before the monitor's next tick.

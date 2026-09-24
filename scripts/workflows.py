@@ -204,6 +204,12 @@ def configuration(root: Path) -> Table:
                     raise ValueError("cleanup_children must be a boolean")
                 if type(spec.get("wait_for_services", False)) is not bool:
                     raise ValueError("wait_for_services must be a boolean")
+                if "presentation" in spec:
+                    import development_status
+
+                    development_status.declaration(spec["presentation"])
+                    if not spec.get("wait_for_services", False):
+                        raise ValueError("Task presentation requires wait_for_services")
                 for field in ("timeout_seconds", "shutdown_seconds"):
                     task_seconds(spec, field)
         order(entries, list(entries))
@@ -773,6 +779,10 @@ def run(
             setup_use(root, cfg, groups, env) as setup_descriptors,
         ):
             descriptors = (*service_descriptors, *setup_descriptors)
+            if service_context:
+                import development_status
+
+                development_status.publish(action, "preparing")
             for key in task_names:
                 spec = dict(tasks[key])
                 if "timeout_env" in spec:
@@ -850,6 +860,8 @@ def run(
                                     pass_fds=(*descriptors, *serial_descriptors),
                                 )
                     if spec.get("wait_for_services", False):
+                        if key == action and service_context:
+                            development_status.publish(action, "ready")
                         wait_for_services()
     return 0
 

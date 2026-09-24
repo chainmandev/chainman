@@ -14,7 +14,7 @@ var servicesStopped = errors.New("services explicitly stopped")
 
 // A service client observes backend outcomes; it does not implement restarts or
 // readiness probes. Setup leases remain in its ordinary project task process.
-func monitorServices(ctx context.Context, p Plan) <-chan error {
+func monitorServices(ctx context.Context, p Plan, development *developmentSession) <-chan error {
 	result := make(chan error, 1)
 	go func() {
 		var saved Plan
@@ -46,7 +46,7 @@ func monitorServices(ctx context.Context, p Plan) <-chan error {
 				return
 			}
 			for _, pool := range pools {
-				if e := serviceOutcome(pool); e != nil {
+				if e := serviceOutcome(pool, development); e != nil {
 					result <- e
 					return
 				}
@@ -56,7 +56,7 @@ func monitorServices(ctx context.Context, p Plan) <-chan error {
 	return result
 }
 
-func serviceOutcome(p Plan) error {
+func serviceOutcome(p Plan, development *developmentSession) error {
 	selected, e := ordered(p, p.Requested)
 	if e != nil {
 		return e
@@ -77,6 +77,7 @@ func serviceOutcome(p Plan) error {
 	for _, name := range selected {
 		wanted[name] = true
 	}
+	development.services(p, ps, wanted)
 	for _, process := range ps {
 		if wanted[process.Name] && (process.Status == "Error" || process.Status == "Completed" || process.Status == "Skipped") {
 			return fmt.Errorf("service %s ended: %s", process.Name, process.Status)

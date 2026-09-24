@@ -22,7 +22,7 @@ def table(value: object, location: str) -> Table:
 
 FIELDS = {
     "tasks": set(
-        "commands profile directory depends_on setup services cleanup_children timeout_seconds timeout_env shutdown_seconds wait_for_services environment context_environment transport exclusive exclusive_services serial_group network_service allowed_modes allowed_platforms".split()
+        "commands profile directory presentation depends_on setup services cleanup_children timeout_seconds timeout_env shutdown_seconds wait_for_services environment context_environment transport exclusive exclusive_services serial_group network_service allowed_modes allowed_platforms".split()
     ),
     "setup": set(
         "commands profile directory depends_on inputs exclude_inputs environment_inputs artifacts readiness pnpm".split()
@@ -35,6 +35,7 @@ FIELDS = {
     ),
 }
 TABLES = {
+    "presentation": {"title", "urls", "details"},
     "readiness": set(
         "command http_get period_seconds timeout_seconds failure_threshold".split()
     ),
@@ -75,7 +76,7 @@ def fields(value: object, allowed: Set[str], location: str) -> Table:
         path = f"{location}.{key}"
         if key in TABLES:
             fields(value, TABLES[key], path)
-        elif key in {"environment", "context_environment"}:
+        elif key in {"environment", "context_environment", "urls", "details"}:
             if not isinstance(value, dict) or any(
                 not isinstance(v, str) or "\0" in v for v in value.values()
             ):

@@ -28,6 +28,10 @@ failure_threshold = 30
 [tasks.preview]
 services = ["preview"]
 wait_for_services = true
+
+[tasks.preview.presentation]
+title = "Local preview"
+urls = { Browser = "http://localhost:8000" }
 ```
 
 Run the task through the project entrypoint:
@@ -39,7 +43,7 @@ just chainman run preview
 From another terminal in the project:
 
 ```sh
-just chainman services-status
+just chainman services-status --human
 just chainman services-logs --follow
 just chainman services-stop
 ```
@@ -62,12 +66,47 @@ uses `wait_for_services = true` to retain ownership until stop or interruption.
 Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
 
-Foreground tasks with `wait_for_services = true` stream service output, including
-watched build, failure, and restart messages, from the start of the current
-operation. Existing log history is not replayed during startup. A service probe
-only establishes service availability: project preparation commands still have
-to finish before the application is ready. Projects should print their ready
-message and URL after that preparation succeeds.
+### Development display and readiness
+
+Tasks with `wait_for_services = true` show their declared URLs when service startup
+begins, marked **starting**, then **preparing** while their commands run. Only the
+verified workflow's successful completion of preparation reports **ready**. An
+HTTP response alone does not establish application readiness. Setup and any
+project-owned preflight wrapper still run before this operation is admitted.
+
+`CHAINMAN_DEV_OUTPUT=auto` (the default) selects a concise summary when stdin and
+stderr are terminals, and streams service logs otherwise. Summary mode prints
+lifecycle transitions, startup/preparation reminders every 15 seconds, and the
+ready summary. Routine service logs remain collected. Preparation commands keep
+their ordinary stdin/stdout/stderr; chainman does not capture or silence them.
+Finite tasks and shells are unchanged.
+
+```sh
+CHAINMAN_DEV_OUTPUT=summary just chainman run preview
+CHAINMAN_DEV_OUTPUT=logs just chainman run preview
+# In a second terminal:
+just chainman services-status --human
+just chainman services-status
+just chainman services-logs --follow
+```
+
+Status JSON retains the service fields and adds `applications`: distinct operation
+IDs, task presentation, owner identity, phase, timestamps, elapsed seconds, outcome,
+and `reached_ready` (a historical fact, not current health). Active phases are
+starting, preparing, ready, degraded and stopping; final phases are stopped or
+failed. Dead owners and explicit cancellation never remain currently ready.
+Records are scoped by worktree and execution mode, separate from shared-resource
+ownership. Up to 20 completed records are kept when a new operation starts,
+alongside active clients.
+
+An observed failed watched build or lost service readiness makes the application
+**degraded**, even if the last successful server remains available. A later
+successful build/healthy observation clears that condition. Fatal service or
+preparation failures end the operation. Summary mode prints up to 16 KiB of recent
+service diagnostics from this operation; it never labels all stderr as errors or
+claims to detect every application error. Foreground preparation failures stay in
+the foreground output. Saved status is observational and cannot start, stop or
+lease services. A future viewer can use it without taking execution authority.
 
 Owned foreground commands receive the controlling terminal for their lifetime;
 the caller restores its foreground group and terminal settings afterward. Ctrl-C

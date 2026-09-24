@@ -10,6 +10,18 @@ if [ "${1:-}" = --cleanup-directory ]; then
 fi
 engine=$1
 shift
+if [ -n "${CHAINMAN_DEV_CHANNEL:-}" ]; then
+    [ -d "$CHAINMAN_DEV_CHANNEL" ] && [ ! -L "$CHAINMAN_DEV_CHANNEL" ] || {
+        echo 'chainman: development status channel is unavailable.' >&2
+        exit 1
+    }
+    # This private channel is observational only. Controller state and leases
+    # remain on the host; a workload cannot issue service-control requests here.
+    set -- --mount "type=bind,src=$CHAINMAN_DEV_CHANNEL,dst=/chainman-development" \
+        --env CHAINMAN_DEV_CHANNEL=/chainman-development \
+        --env "CHAINMAN_DEV_OPERATION=$CHAINMAN_DEV_OPERATION" \
+        --env "CHAINMAN_DEV_TASK=$CHAINMAN_DEV_TASK" "$@"
+fi
 if [ "${CHAINMAN_SETUP:-prompt}" = prompt ] && [ -n "${CHAINMAN_SETUP_CHANNEL:-}" ]; then
     channel=$CHAINMAN_SETUP_CHANNEL
     [ -d "$channel/incoming" ] && [ -f "$channel/outgoing/alive" ] || {

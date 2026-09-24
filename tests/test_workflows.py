@@ -730,11 +730,25 @@ readiness={command=["python3","probe.py"]}
         self.write_config()
 
         def waiting():
+            self.assertEqual(json.loads(progress.read_text())["phase"], "ready")
             with workflows.serial_use(self.root, {"serial_group": "data"}):
                 pass
 
-        with patch.object(workflows, "wait_for_services", side_effect=waiting) as wait:
+        progress = self.root / "progress.json"
+        with (
+            patch.dict(
+                os.environ,
+                CHAINMAN_DEV_CHANNEL=str(self.root),
+                CHAINMAN_DEV_OPERATION="c" * 32,
+                CHAINMAN_DEV_TASK="build",
+            ),
+            patch.object(workflows, "wait_for_services", side_effect=waiting) as wait,
+        ):
             workflows.run(self.root, "build", [], service_context=True)
+            (self.root / "task.py").write_text("raise SystemExit(17)")
+            with self.assertRaises(subprocess.CalledProcessError):
+                workflows.run(self.root, "build", [], service_context=True)
+            self.assertEqual(json.loads(progress.read_text())["phase"], "preparing")
         wait.assert_called_once()
 
     def test_serial_group_child_retains_lease_after_parent_death(self):

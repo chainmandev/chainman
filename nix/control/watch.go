@@ -120,7 +120,7 @@ func watchAction(action, state, name string) int {
 	if cleanup := stopContainer(w.Container, s.Shutdown); cleanup != nil {
 		return exitCode(cleanup)
 	}
-	result := map[string]string{"finished": time.Now().UTC().Format(time.RFC3339Nano)}
+	result := map[string]string{"finished": time.Now().UTC().Format(time.RFC3339Nano), "generation": p.Generation}
 	if e != nil {
 		result["error"] = e.Error()
 		_ = atomic(filepath.Join(state, name+".build-result.json"), result)

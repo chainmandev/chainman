@@ -194,6 +194,12 @@ need configured adapters and a complete verification gate. The starter includes
 both for its small example. The minimal existing-project configuration above
 intentionally introduces only one task.
 
+Service-backed development tasks can declare a title, browser URLs and selected
+details. Interactive launches show a quiet **starting → preparing → ready**
+summary; service logs stay available separately. Use `CHAINMAN_DEV_OUTPUT=logs`
+for continuous output and `just chainman services-status --human` to inspect
+application readiness. See [development services](docs/services.md).
+
 Runtime updates resolve the current public default branch immediately and compare
 Git SHAs. A changed SHA is eligible even when `VERSION` is unchanged. Project
 dependencies retain their configurable 30-day maturity policy. Exact security

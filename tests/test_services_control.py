@@ -1159,8 +1159,99 @@ if text=='bad': raise SystemExit(3)
         )
         result = self.run_control("run", check=0)
         self.assertIn("fixture service output", result.stderr)
-        self.assertIn("following logs", result.stderr)
+        self.assertIn("preparing", result.stderr)
         self.assertFalse(self.alive(self.pid()))
+
+    def test_development_summary_preparation_input_stop_and_retained_logs(self):
+        worker = self.root / "worker.py"
+        worker.write_text(
+            "print('routine service noise\\n'*3000, flush=True)\n" + worker.read_text()
+        )
+        self.plan.update(
+            wait_for_services=True,
+            own_task=True,
+            task_shutdown_seconds=2,
+            presentation={
+                "task": "dev",
+                "title": "Fixture app",
+                "urls": {"Browser": "http://localhost:4321"},
+            },
+        )
+        scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                f"""import sys,time
+from pathlib import Path
+sys.path.insert(0, {scripts!r})
+import development_status
+development_status.publish('dev','preparing')
+Path('preparing').touch()
+assert sys.stdin.readline() == 'literal $() input\\n'
+print('foreground preparation output', flush=True)
+development_status.publish('dev','ready')
+time.sleep(120)
+""",
+            ]
+        )
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "display").open("w+b") as display:
+            client = subprocess.Popen(
+                [CONTROL, "run", str(self.path)],
+                stdin=subprocess.PIPE,
+                stdout=display,
+                stderr=display,
+                env=dict(os.environ, CHAINMAN_DEV_OUTPUT="summary"),
+            )
+            try:
+                self.wait_file(self.root / "preparing")
+                display.seek(0)
+                starting = display.read().decode()
+                self.assertIn("http://localhost:4321", starting)
+                self.assertNotIn("— ready", starting)
+                self.assertNotIn("routine service noise", starting)
+                status = json.loads(self.run_control("status", check=0).stdout)
+                self.assertFalse(status["applications"][0]["reached_ready"])
+                client.stdin.write(b"literal $() input\n")
+                client.stdin.flush()
+                self.wait_until(
+                    lambda: (
+                        json.loads(self.run_control("status", check=0).stdout)[
+                            "applications"
+                        ][0]["phase"]
+                        == "ready"
+                    )
+                )
+                human = subprocess.run(
+                    [CONTROL, "status", str(self.state), "--human"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("Fixture app — ready", human.stdout)
+                self.run_control("stop", check=0)
+                self.assertEqual(client.wait(timeout=15), 0)
+                display.seek(0)
+                output = display.read().decode()
+                self.assertIn("foreground preparation output", output)
+                self.assertIn("Fixture app — ready", output)
+                self.assertNotIn("routine service noise", output)
+                self.assertLess(len(output), 10000)
+                status = json.loads(self.run_control("status", check=0).stdout)
+                self.assertEqual(status["applications"][0]["phase"], "stopped")
+                logs = subprocess.run(
+                    [CONTROL, "logs", str(self.state)],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                self.assertIn("routine service noise", logs.stdout)
+            finally:
+                client.stdin.close()
+                if client.poll() is None:
+                    client.terminate()
+                    client.wait(timeout=15)
 
     def test_foreground_group_interrupt_releases_services(self):
         self.plan.update(own_task=True, task_shutdown_seconds=2, wait_for_services=True)
@@ -1189,6 +1280,8 @@ if text=='bad': raise SystemExit(3)
                 self.assertFalse(status["running"], log.read().decode())
                 self.assertFalse(self.alive(pid))
                 self.assertEqual(status["leases"], {})
+                self.assertEqual(status["applications"][0]["phase"], "stopped")
+                self.assertFalse(status["applications"][0]["reached_ready"])
             finally:
                 if client.poll() is None:
                     client.kill()
@@ -1233,6 +1326,70 @@ if text=='bad': raise SystemExit(3)
             if viewer.poll() is None:
                 viewer.kill()
             viewer.communicate(timeout=5)
+
+    @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
+    def test_development_reports_failed_rebuild_with_old_server_running(self):
+        source = self.root / "source"
+        source.write_text("good")
+        self.plan.update(
+            wait_for_services=True,
+            own_task=True,
+            task_shutdown_seconds=2,
+            watcher=WATCHER,
+            presentation={"task": "dev", "title": "Watched app"},
+        )
+        self.plan["services"]["worker"]["watch"] = {
+            "build": self.command(
+                [
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; import sys; sys.exit(1 if Path('source').read_text()=='bad' else 0)",
+                ]
+            ),
+            "paths": [str(source)],
+            "ignore": [],
+            "debounce_ms": 100,
+            "startup_seconds": 10,
+        }
+        scripts = str(Path(__file__).resolve().parents[1] / "scripts")
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                f"import sys,time; sys.path.insert(0,{scripts!r}); import development_status; development_status.publish('dev','ready'); time.sleep(120)",
+            ]
+        )
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "display").open("w+b") as display:
+            parent = subprocess.Popen(
+                [CONTROL, "run", str(self.path)],
+                stdout=display,
+                stderr=display,
+                env=dict(os.environ, CHAINMAN_DEV_OUTPUT="summary"),
+            )
+
+            def phase():
+                rows = list((self.state / "applications").glob("*.json"))
+                return json.loads(rows[0].read_text())["phase"] if rows else ""
+
+            try:
+                self.wait_until(lambda: phase() == "ready")
+                previous = self.pid()
+                source.write_text("bad")
+                self.wait_until(lambda: phase() == "degraded")
+                self.assertTrue(self.alive(previous))
+                self.assertEqual(self.pid(), previous)
+                self.assertIsNone(parent.poll())
+                display.seek(0)
+                self.assertIn("Build failed: worker", display.read().decode())
+                source.write_text("good again")
+                self.wait_until(lambda: self.pid() != previous and phase() == "ready")
+                self.run_control("stop", check=0)
+                self.assertEqual(parent.wait(timeout=15), 0)
+            finally:
+                if parent.poll() is None:
+                    parent.terminate()
+                    parent.wait(timeout=15)
 
     @unittest.skipUnless(WATCHER, "requires the pinned Watchexec backend")
     def test_watch_restart_preserves_active_client_but_real_exit_cancels_it(self):

@@ -237,6 +237,9 @@ or the discouraged caller-maintained `host` mode), `CHAINMAN_CONTAINER_ENGINE`
 for host Nix). See [execution modes](runtime.md) for capabilities and prerequisites.
 `CHAINMAN_SETUP=prompt|auto|error` controls repair before ordinary commands;
 `prompt` is the default. Explicit setup always authorizes installation.
+`CHAINMAN_DEV_OUTPUT=auto|summary|logs` controls the display of service-backed
+development tasks. `auto` uses summary output on an interactive terminal and
+streams service logs otherwise. See [development status](services.md#development-display-and-readiness).
 Runtime routing variables such as `CHAINMAN_PROJECT_ROOT` are internal; the
 consumer recipe selects its project. Paths with spaces and invocation from another working
 directory are supported. Newlines and ambiguous container comma-paths are rejected.
@@ -474,13 +477,27 @@ Inspection and stop still work with broken project configuration. For example:
 [tasks.dev]
 services = ["server", "frontend"]
 wait_for_services = true
+
+[tasks.dev.presentation]
+title = "Example development"
+urls = { Application = "http://localhost:3000" }
+details = { Database = "{env:PROJECT_DATABASE_MODE}" }
 ```
+
+`presentation` is optional and requires `wait_for_services = true`. It supports a
+title and up to 16 labeled `urls` and `details` each. Values use the same literal
+expansion as task environment, resolved with the effective project, profile and
+task values. Declare any referenced variable (such as `PROJECT_DATABASE_MODE`
+above) in project configuration. URLs must be absolute HTTP(S) browser addresses
+without credentials. Select details explicitly: never put tokens, passwords or
+connection strings here. Labels and values must be printable text. Metadata is
+not a probe and does not publish ports or affect service ownership.
 
 Service-bearing task commands also run under the native process-group owner, so
 cancelling the client cleans up its foreground command descendants. The native
 anchor retains service descriptors across Nix entry; container ownership receipts
-cover a surviving daemon-side task as well. Waiting tasks report the log path when
-services are ready. `services-up` starts the services and setup only, without
+cover a surviving daemon-side task as well. Waiting tasks publish application
+readiness after successful preparation. `services-up` starts the services and setup only, without
 running the task's application preparation commands.
 
 Task leases also record the task process birth identity and, in container mode,

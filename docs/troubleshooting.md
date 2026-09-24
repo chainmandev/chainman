@@ -49,6 +49,15 @@ those next steps.
 
 ## Setup and services
 
+For a development task that appears stuck, run `just chainman services-status
+--human` from another terminal. **Preparing** means application commands have not
+completed; a healthy HTTP endpoint can coexist with unfinished seeding. **Degraded**
+can mean a watched rebuild failed while the previous server is still running.
+Inspect `just chainman services-logs --follow` and the original terminal's
+preparation output. Fix the reported issue, stop with `just chainman services-stop`,
+then rerun the development command. A failed or cancelled preparation never earns
+a ready state. Do not delete persistent development data to clear a status record.
+
 ```sh
 just chainman setup-status
 just chainman setup

@@ -76,6 +76,9 @@ files=[{path="project.env",override=true}]
 pass=["HOST_SEED"]
 [tasks.main]
 commands=[["true"]]
+wait_for_services=true
+presentation={title="Example",urls={Browser="http://localhost:4321"},details={Context="{env:APP_CONTEXT}", Task="{env:DISPLAY}"}}
+environment={DISPLAY="selected task"}
 services=["worker","database"]
 context_environment={APP_CONTEXT="{env:HOST_SEED}"}
 [tasks.build]
@@ -138,6 +141,10 @@ readiness={command=["true"]}
                         )
                         plans[task] = json.loads((output / "plan.json").read_text())
                 plan = plans["main"]
+                self.assertEqual(
+                    plan["presentation"]["details"],
+                    {"Context": "project", "Task": "selected task"},
+                )
                 self.assertEqual(plan["fingerprint"], plans["other"]["fingerprint"])
                 self.assertNotEqual(
                     plan["fingerprint"], plans["changed"]["fingerprint"]
