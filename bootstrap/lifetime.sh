@@ -62,12 +62,28 @@ lifetime_interrupt() {
 }
 
 lifetime_run() {
-    exec 9<&0
+    # POSIX async commands may replace stdin with /dev/null even with <&0.
+    # Borrow a closed shell-addressable descriptor; inherited leases may use any
+    # of them. Never move or close a caller-owned descriptor to make room.
+    lifetime_input=
+    for lifetime_candidate in 9 8 7 6 5 4 3; do
+        if ! (: <&"$lifetime_candidate") 2> /dev/null && ! (: >&"$lifetime_candidate") 2> /dev/null; then
+            lifetime_input=$lifetime_candidate
+            break
+        fi
+    done
+    if [ -z "$lifetime_input" ]; then
+        printf '%s\n' 'chainman: cannot preserve stdin: descriptors 3–9 are all occupied. Close unused inherited descriptors or start this command from a fresh host shell.' >&2
+        return 2
+    fi
+    # Only the fixed numeric selection enters eval; command arguments remain
+    # literal positional parameters. POSIX sh cannot expand the redirection LHS.
+    eval "exec $lifetime_input<&0"
     lifetime_starting=1
-    "$@" <&9 9<&- &
+    eval '"$@" <&'"$lifetime_input $lifetime_input"'<&- &'
     lifetime_child=$!
     lifetime_starting=0
-    exec 9<&-
+    eval "exec $lifetime_input<&-"
     if [ -n "$lifetime_signal" ]; then lifetime_interrupt "$lifetime_signal" "$lifetime_status"; fi
     lifetime_result=0
     wait "$lifetime_child" || lifetime_result=$?

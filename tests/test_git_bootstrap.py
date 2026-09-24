@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -73,7 +74,11 @@ class GitBootstrapTests(unittest.TestCase):
             "rm",
             "tar",
         ):
-            executable = shutil.which(command) or shutil.which(command, path=os.defpath)
+            executable = (
+                shutil.which(command, path=os.defpath)
+                if command == "sh"
+                else shutil.which(command) or shutil.which(command, path=os.defpath)
+            )
             self.assertIsNotNone(executable, command)
             (self.binaries / command).symlink_to(executable)
         self.env = dict(
@@ -307,6 +312,139 @@ class GitBootstrapTests(unittest.TestCase):
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=5)
+
+    def test_public_entry_preserves_real_nested_operation_lease_at_fd9(self):
+        for name in ("git-entry.sh", "lifetime.sh"):
+            shutil.copyfile(
+                SOURCE / "bootstrap" / name, self.origin / "bootstrap" / name
+            )
+        runtime = self.origin / "bootstrap/chainman.sh"
+        runtime.write_text(
+            '#!/bin/sh\nexec "$FIXTURE_PYTHON" "$(dirname "$0")/../worker.py" "$@"\n'
+        )
+        runtime.chmod(0o755)
+        (self.origin / "worker.py").write_text(
+            "import os,sys\nfrom pathlib import Path\n"
+            f"sys.path.insert(0, {str(SOURCE / 'scripts')!r})\n"
+            "import toolchain as tc\n"
+            "root=Path(os.environ['CHAINMAN_PROJECT_ROOT'])\n"
+            "with tc.operation(root):\n"
+            " assert int(os.environ['TOOLCHAIN_LOCK_FD']) == 9\n"
+            " os.fstat(9)\n"
+            " if sys.argv[1] == 'nested':\n"
+            "  raise SystemExit(tc.managed_run(['just', 'chainman', 'leaf', *sys.argv[2:]], cwd=root).returncode)\n"
+            " print(repr(sys.argv[2:]), flush=True)\n"
+            " sys.stdout.buffer.write(sys.stdin.buffer.read())\n"
+            "raise SystemExit(37)\n"
+        )
+        self.git_run("add", ".")
+        self.git_run("-c", "commit.gpgsign=false", "commit", "-qm", "Lease fixture")
+        revision = self.git_run("rev-parse", "HEAD").stdout.strip()
+        (self.project / "chainman.lock").write_text(revision + "\n")
+        (self.binaries / "dirname").symlink_to(shutil.which("dirname"))
+        # Allocate a real operation in a fresh process, so the test runner's own
+        # descriptors cannot influence which shell descriptors are available.
+        runner = (
+            "import os,sys,subprocess\nfrom pathlib import Path\n"
+            f"sys.path.insert(0, {str(SOURCE / 'scripts')!r})\n"
+            "import toolchain as tc\n"
+            "with tc.operation(Path.cwd()):\n"
+            " options=tc.managed_options({})\n"
+            " original=int(options['env']['TOOLCHAIN_LOCK_FD'])\n"
+            " assert 9 not in options['pass_fds']\n"
+            " os.dup2(original,9)\n"
+            " options['env']['TOOLCHAIN_LOCK_FD']='9'\n"
+            " options['pass_fds']=(*options['pass_fds'],9)\n"
+            " result=subprocess.run(['just','chainman','nested','literal $() spaces'], **options)\n"
+            " os.close(9)\n"
+            "raise SystemExit(result.returncode)\n"
+        )
+        env = {
+            key: value
+            for key, value in self.env.items()
+            if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", runner],
+            cwd=self.project,
+            env=dict(env, FIXTURE_PYTHON=sys.executable),
+            input=b"piped input\n",
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertEqual(result.stdout, b"['literal $() spaces']\npiped input\n")
+
+    def test_full_descriptor_table_fails_without_starting_or_closing_leases(self):
+        check = self.project / "check-descriptors.py"
+        check.write_text(
+            "import os,sys\n"
+            "expected=os.stat(sys.argv[1])\n"
+            "for fd in range(3,10):\n"
+            " actual=os.fstat(fd)\n"
+            " assert (actual.st_dev,actual.st_ino)==(expected.st_dev,expected.st_ino)\n"
+            "raise SystemExit(int(sys.argv[2]))\n"
+        )
+        runner = (
+            "import os,subprocess,sys\n"
+            "fd=os.open(sys.argv[1],os.O_RDONLY)\n"
+            "for target in range(3,10): os.dup2(fd,target)\n"
+            "result=subprocess.run(['sh','-c',sys.argv[2]], pass_fds=tuple(range(3,10)))\n"
+            "raise SystemExit(result.returncode)\n"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                runner,
+                str(self.project / "chainman.lock"),
+                '. "$FIXTURE_LIFETIME"; lifetime_run sh -c "echo unexpected"; '
+                'result=$?; exec "$FIXTURE_PYTHON" "$FIXTURE_CHECK" '
+                '"$FIXTURE_INPUT" "$result"',
+            ],
+            env=dict(
+                self.env,
+                FIXTURE_LIFETIME=str(SOURCE / "bootstrap/lifetime.sh"),
+                FIXTURE_PYTHON=sys.executable,
+                FIXTURE_CHECK=str(check),
+                FIXTURE_INPUT=str(self.project / "chainman.lock"),
+            ),
+            input=b"unconsumed input\n",
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual(result.stdout, b"")
+        self.assertIn(b"all occupied", result.stderr)
+
+    def test_lifetime_preserves_write_only_descriptors_in_each_shell(self):
+        for shell in dict.fromkeys(
+            [shutil.which("sh", path=os.defpath), shutil.which("bash")]
+        ):
+            if shell is None:
+                continue
+            with self.subTest(shell=shell):
+                output = self.project / "inherited-output"
+                result = subprocess.run(
+                    [
+                        shell,
+                        "-c",
+                        'exec 9> "$FIXTURE_OUTPUT"; . "$FIXTURE_LIFETIME"; '
+                        "lifetime_run sh -c 'printf child >&9; cat'; "
+                        "printf parent >&9",
+                    ],
+                    env=dict(
+                        self.env,
+                        FIXTURE_LIFETIME=str(SOURCE / "bootstrap/lifetime.sh"),
+                        FIXTURE_OUTPUT=str(output),
+                    ),
+                    input=b"piped input\n",
+                    capture_output=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, b"piped input\n")
+                self.assertEqual(output.read_bytes(), b"childparent")
 
     def test_exit_status_and_signal(self):
         self.assertEqual(self.run_entry("failure").returncode, 37)

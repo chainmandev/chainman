@@ -160,6 +160,12 @@ Just can leave its recipe running without forwarding that signal. Terminal Ctrl-
 and hangup target foreground process groups; they are different from signalling
 only the command runner.
 
+Shell entry preserves inherited operation/service lease descriptors. It needs
+one unused descriptor from 3 through 9 to preserve stdin across portable POSIX
+background execution. If all seven are occupied, entry fails before launching
+the command; close unused inherited descriptors or start from a fresh host shell.
+It never closes a caller's lease to make room.
+
 New service logs identify `stdout` and `stderr` explicitly. These are output
 streams, not severity levels: PostgreSQL and compilers write ordinary progress
 to stderr. Application warnings and errors retain their original text. Older
