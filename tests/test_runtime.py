@@ -557,6 +557,44 @@ commands=[["python3","check.py"]]
             list((self.root / ".cache/toolchain").glob("compiler-*.lock")), []
         )
 
+    def test_background_compiler_cannot_consume_project_stdin(self):
+        env = self.cache_fixture()
+        server = self.root / "scripts/sccache"
+        server.write_text(
+            server.read_text().replace(
+                'os.fstat(int(os.environ["TOOLCHAIN_LOCK_FD"]))',
+                'os.fstat(int(os.environ["TOOLCHAIN_LOCK_FD"]))\n'
+                '    Path("compiler-input").write_bytes(os.read(0, 1))',
+            )
+        )
+        wrapper = textwrap.dedent("""\
+            import os, sys
+            from pathlib import Path
+            sys.path.insert(0, sys.argv[1])
+            import toolchain
+            root = Path(sys.argv[2])
+            with toolchain.operation(root):
+                with toolchain.compiler_cache("rust", dict(os.environ), root):
+                    sys.stdout.write(sys.stdin.read())
+            """)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                wrapper,
+                str(toolchain.RUNTIME / "scripts"),
+                str(self.root),
+            ],
+            env=env,
+            input="literal project input\n",
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "literal project input\n")
+        self.assertEqual((self.root / "compiler-input").read_bytes(), b"")
+
     def test_dead_launcher_does_not_authorize_unlinking_a_live_compiler_socket(self):
         env = self.cache_fixture()
         real_popen = subprocess.Popen
