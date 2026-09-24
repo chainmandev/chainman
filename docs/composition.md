@@ -179,6 +179,23 @@ durations use monotonic clocks. Timing is disabled by default.
 Bootstrap measurements include runtime realization and, for schema 3, trusted
 planning. Record cold/warm cache conditions alongside measurements; do not sum
 overlapping parent/child phases or treat unpaired records as completed work.
+
+For readiness probes, measure the endpoint or command separately from the full
+`_workflow-probe` invocation. Command probes revalidate configuration, profile
+inputs and setup before entering the selected profile. A fast HTTP response does
+not establish that this surrounding work is fast. CPU profiling can distinguish
+configuration parsing/composition and fingerprinting from process or Nix entry.
+Keep a profiling run separate from ordinary timing samples: profiling adds cost.
+Use the native `http_get` readiness form when its status-code check expresses the
+actual readiness contract; retain command probes when they need richer checks.
+
+Repeated Nix `running auto-GC` messages are a separate measurement confounder.
+Compare free space with the host's configured `min-free` and `max-free` values;
+a threshold above available space can trigger collection and subsequent tool
+downloads on repeated entries. Record this condition before attributing latency
+to chainman. Do not delete service data or disable readiness checks to improve a
+benchmark.
+
 Normal application output continues to use its usual streams independently of
 the timing records.
 
