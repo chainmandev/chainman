@@ -74,10 +74,12 @@ default_profile="host"
 [environment]
 files=[{path="project.env",override=true}]
 pass=["HOST_SEED"]
+[environment.defaults]
+UNPASSED_LABEL="container default"
 [tasks.main]
 commands=[["true"]]
 wait_for_services=true
-presentation={title="Example",urls={Browser="http://localhost:4321"},details={Context="{env:APP_CONTEXT}", Task="{env:DISPLAY}"}}
+presentation={title="Example",urls={Browser="http://localhost:4321"},details={Context="{env:APP_CONTEXT}", Task="{env:DISPLAY}", Inherited="{env:UNPASSED_LABEL}"}}
 environment={DISPLAY="selected task"}
 services=["worker","database"]
 context_environment={APP_CONTEXT="{env:HOST_SEED}"}
@@ -101,7 +103,9 @@ container={image="example.invalid/database@sha256:AAAAAAAA",environment={DATA_CO
 readiness={command=["true"]}
 """.replace("AAAAAAAA", "a" * 64)
             )
-            (output / "host-environment").write_bytes(b"HOST_SEED=caller\0")
+            (output / "host-environment").write_bytes(
+                b"HOST_SEED=caller\0UNPASSED_LABEL=host inherited\0"
+            )
             real_run = subprocess.run
 
             def run(argv, **kwargs):
@@ -143,7 +147,13 @@ readiness={command=["true"]}
                 plan = plans["main"]
                 self.assertEqual(
                     plan["presentation"]["details"],
-                    {"Context": "project", "Task": "selected task"},
+                    {
+                        "Context": "project",
+                        "Task": "selected task",
+                        "Inherited": "host inherited"
+                        if mode == "host-nix"
+                        else "container default",
+                    },
                 )
                 self.assertEqual(plan["fingerprint"], plans["other"]["fingerprint"])
                 self.assertNotEqual(
@@ -161,6 +171,7 @@ readiness={command=["true"]}
                             "NODE_OPTIONS",
                             "DOCKER_HOST",
                             "APP_CONTEXT",
+                            "UNPASSED_LABEL",
                         }
                     )
                     if "HOST_SEED" in environment:

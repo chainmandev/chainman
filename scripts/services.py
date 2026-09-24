@@ -916,6 +916,17 @@ def export(root: Path, arguments: list[str]) -> int:
         import development_status
 
         spec = tasks_by_name[task]
+        # Host-Nix execution inherits the caller's environment. Read those values
+        # as data for presentation too; never forward this broader map to host
+        # commands or install it in the planner's process environment.
+        display_env = (
+            dict(
+                project_environment.host_inputs(destination, {"pass": ["*"]}),
+                **planning_env,
+            )
+            if mode == "host-nix"
+            else planning_env
+        )
         profile = text(
             spec.get("profile", workflows.default_profile(cfg)), "Task profile"
         )
@@ -924,7 +935,7 @@ def export(root: Path, arguments: list[str]) -> int:
             table(
                 table(cfg.get("profiles", {}), "Profiles").get(profile, {}), "Profile"
             ),
-            planning_env,
+            display_env,
             spec.get("environment", {}),
             cfg=cfg,
         )
