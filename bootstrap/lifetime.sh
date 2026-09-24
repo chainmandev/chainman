@@ -7,12 +7,22 @@ lifetime_starting=0
 lifetime_signal=
 lifetime_status=
 lifetime_is_helper=0
+lifetime_wait_for_child=0
 
 lifetime_stop() {
     lifetime_remaining=$lifetime_grace
     for lifetime_pid in $lifetime_child; do
         kill -"$1" "$lifetime_pid" 2> /dev/null || true
     done
+    # Verified supervisors enforce their own task/service shutdown deadlines.
+    # Killing that supervisor on a shorter shell timeout would orphan its work.
+    if [ "$lifetime_wait_for_child" = 1 ]; then
+        for lifetime_pid in $lifetime_child; do
+            wait "$lifetime_pid" 2> /dev/null || true
+        done
+        lifetime_child=
+        return
+    fi
     while [ "$lifetime_remaining" -gt 0 ]; do
         lifetime_alive=
         for lifetime_pid in $lifetime_child; do
@@ -74,6 +84,16 @@ lifetime_helper() {
     lifetime_grace=3
     lifetime_is_helper=0
     return "$lifetime_helper_result"
+}
+
+lifetime_supervise() {
+    lifetime_wait_for_child=1
+    lifetime_is_helper=1
+    lifetime_supervise_result=0
+    lifetime_run "$@" || lifetime_supervise_result=$?
+    lifetime_wait_for_child=0
+    lifetime_is_helper=0
+    return "$lifetime_supervise_result"
 }
 
 trap lifetime_cleanup EXIT

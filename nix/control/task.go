@@ -20,6 +20,24 @@ type TaskCommands struct {
 	RecoveryState string    `json:"recovery_state,omitempty"`
 }
 
+// Preparation precedes service acquisition but still owns foreground work.
+// Reuse command containment so direct signals cannot leave installers running.
+func prepareCommand(command Command, shutdown int) int {
+	if shutdown == 0 {
+		shutdown = 10
+	}
+	directory, err := os.MkdirTemp("", "chainman-preparation-")
+	if err != nil {
+		return exitCode(err)
+	}
+	defer os.RemoveAll(directory)
+	path := filepath.Join(directory, "command.json")
+	if err := atomic(path, TaskCommands{Commands: []Command{command}, Shutdown: shutdown}); err != nil {
+		return exitCode(err)
+	}
+	return taskCommand("command", path)
+}
+
 // Service-bearing tasks publish their anchor below the private service scope.
 // Explicit stop can then recover them even when their original client is gone.
 func taskRecoveryState(p Plan) (string, error) {

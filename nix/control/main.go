@@ -1654,16 +1654,12 @@ func mainAction(args []string) (result int) {
 		defer func() { development.finish(result) }()
 	}
 	if p.Prepare != nil {
-		cmd, e := child(*p.Prepare)
-		if e != nil {
-			return exitCode(e)
-		}
-		if e = cmd.Run(); e != nil {
-			return exitCode(e)
+		if result := prepareCommand(*p.Prepare, p.TaskShutdown); result != 0 {
+			return result
 		}
 	}
 	signals := make(chan os.Signal, 2)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	startup := &startupGuard{signals: signals, stops: map[string]string{}}
 	if p.WaitForServices && args[0] == "run" {

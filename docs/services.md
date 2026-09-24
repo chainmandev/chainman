@@ -148,6 +148,18 @@ cancels the task and releases its services, retaining resources used by another
 client and preserving persistent volumes. Piped input remains a pipe. Background
 services and readiness probes never acquire the caller's terminal.
 
+The verified Git entrypoint forwards INT, TERM and HUP to its owned runtime and
+waits for bounded cleanup before removing its temporary export. Automation should
+retain the invocation and wait for it to exit after cancellation. If an external
+runner forcibly kills processes or disconnects from a container engine, inspect
+`services-status` and use `services-stop` to release the repository's owned work;
+an outer process exit alone is not proof that all work has stopped.
+For programmatic cancellation of `just`, send TERM and wait, or signal a process
+group owned by the caller. Do not rely on HUP sent only to the outer `just` PID:
+Just can leave its recipe running without forwarding that signal. Terminal Ctrl-C
+and hangup target foreground process groups; they are different from signalling
+only the command runner.
+
 New service logs identify `stdout` and `stderr` explicitly. These are output
 streams, not severity levels: PostgreSQL and compilers write ordinary progress
 to stderr. Application warnings and errors retain their original text. Older

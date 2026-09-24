@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import time
 import unittest
 import zlib
 
@@ -225,8 +226,16 @@ class GitBootstrapTests(unittest.TestCase):
         shutil.copyfile(
             SOURCE / "bootstrap/git-entry.sh", self.origin / "bootstrap/git-entry.sh"
         )
+        shutil.copyfile(
+            SOURCE / "bootstrap/lifetime.sh", self.origin / "bootstrap/lifetime.sh"
+        )
         runtime = self.origin / "bootstrap/chainman.sh"
-        runtime.write_text('#!/bin/sh\nset -eu\ncat "$(dirname "$0")/../VERSION"\n')
+        runtime.write_text(
+            "#!/bin/sh\nset -eu\n"
+            'case "$1" in\n'
+            ' stdin) shift; printf "%s\\0" "$@"; cat; exit 37 ;;\n'
+            'esac\ncat "$(dirname "$0")/../VERSION"\n'
+        )
         runtime.chmod(0o755)
         (self.origin / "VERSION").write_text("verified\n")
         self.git_run("add", ".")
@@ -240,6 +249,64 @@ class GitBootstrapTests(unittest.TestCase):
         result = self.run_entry("report", GIT_DIR=str(self.origin / ".git"))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, b"verified\n")
+        result = self.run_entry("stdin", "literal $() spaces", input=b"piped input\n")
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertEqual(result.stdout, b"literal $() spaces\0piped input\n")
+
+    def test_real_entry_forwards_signals_directed_only_at_entrypoint(self):
+        for name in ("git-entry.sh", "lifetime.sh"):
+            shutil.copyfile(
+                SOURCE / "bootstrap" / name, self.origin / "bootstrap" / name
+            )
+        runtime = self.origin / "bootstrap/chainman.sh"
+        runtime.write_text(
+            "#!/bin/sh\nset -eu\n"
+            'trap \'sleep "${FIXTURE_SHUTDOWN_DELAY:-0}"; printf stopped > "$CHAINMAN_PROJECT_ROOT/stopped"; exit 0\' TERM HUP\n'
+            'printf ready > "$CHAINMAN_PROJECT_ROOT/ready"\n'
+            "while :; do sleep 1; done\n"
+        )
+        runtime.chmod(0o755)
+        self.git_run("add", ".")
+        self.git_run("-c", "commit.gpgsign=false", "commit", "-qm", "Signal fixture")
+        revision = self.git_run("rev-parse", "HEAD").stdout.strip()
+        for sent, expected in [
+            (signal.SIGTERM, 143),
+            (signal.SIGHUP, 129),
+            (signal.SIGINT, 130),
+        ]:
+            with self.subTest(signal=sent):
+                for name in ("ready", "stopped"):
+                    (self.project / name).unlink(missing_ok=True)
+                process = subprocess.Popen(
+                    [
+                        "sh",
+                        str(SOURCE / "bootstrap/git-entry.sh"),
+                        str(self.project),
+                        str(self.origin / ".git"),
+                        revision,
+                    ],
+                    env=dict(
+                        self.env,
+                        FIXTURE_SHUTDOWN_DELAY="6" if sent == signal.SIGTERM else "0",
+                    ),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                )
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (self.project / "ready").exists():
+                        self.assertIsNone(process.poll())
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.02)
+                    process.send_signal(sent)
+                    output = process.communicate(timeout=12)
+                    self.assertEqual(process.returncode, expected, output)
+                    self.assertTrue((self.project / "stopped").exists())
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                        process.communicate(timeout=5)
 
     def test_exit_status_and_signal(self):
         self.assertEqual(self.run_entry("failure").returncode, 37)

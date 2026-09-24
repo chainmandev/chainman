@@ -1272,6 +1272,47 @@ time.sleep(120)
                     client.wait(timeout=15)
 
     def test_foreground_group_interrupt_releases_services(self):
+        self.foreground_signal_releases_services(signal.SIGINT, group=True)
+
+    def test_direct_hangup_releases_services(self):
+        self.foreground_signal_releases_services(signal.SIGHUP, group=False)
+
+    def test_direct_termination_during_preparation_stops_owned_work(self):
+        self.plan.update(own_task=True, task_shutdown_seconds=2)
+        self.plan["prepare"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import os,time; from pathlib import Path; Path('preparation-pid').write_text(str(os.getpid())); time.sleep(120)",
+            ]
+        )
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "preparation.log").open("w+b") as log:
+            client = subprocess.Popen(
+                [CONTROL, "run", str(self.path)],
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+            )
+            worker = None
+            try:
+                self.wait_file(self.root / "preparation-pid")
+                worker = int((self.root / "preparation-pid").read_text())
+                client.terminate()
+                client.wait(timeout=15)
+                self.assertFalse(self.alive(worker), "preparation outlived its caller")
+                self.assertFalse(
+                    (self.root / "pid").exists(), "service started after cancellation"
+                )
+                self.assertNotEqual(client.returncode, 0)
+            finally:
+                if client.poll() is None:
+                    client.kill()
+                    client.wait(timeout=5)
+                if worker and self.alive(worker):
+                    os.kill(worker, signal.SIGKILL)
+
+    def foreground_signal_releases_services(self, sent, *, group):
         self.plan.update(own_task=True, task_shutdown_seconds=2, wait_for_services=True)
         self.plan["task"] = self.command(
             [
@@ -1291,7 +1332,7 @@ time.sleep(120)
             try:
                 self.wait_file(self.root / "task-ready")
                 pid = self.pid()
-                os.killpg(client.pid, signal.SIGINT)
+                (os.killpg if group else os.kill)(client.pid, sent)
                 client.wait(timeout=15)
                 status = json.loads(self.run_control("status", check=0).stdout)
                 log.seek(0)

@@ -181,11 +181,11 @@ control_dispatch() {
             IFS= read -r control_state < "$control_output/state"
             control_action=${1#services-}
             shift
-            "$control_output/chainman-control" "$control_action" "$control_state" "$@"
+            lifetime_supervise "$control_output/chainman-control" "$control_action" "$control_state" "$@"
             ;;
-        services-up) "$control_output/chainman-control" up "$control_output/plan.json" ;;
-        services-reset) "$control_output/chainman-control" reset "$control_output/plan.json" --discard-data ;;
-        *) "$control_output/chainman-control" run "$control_output/plan.json" ;;
+        services-up) lifetime_supervise "$control_output/chainman-control" up "$control_output/plan.json" ;;
+        services-reset) lifetime_supervise "$control_output/chainman-control" reset "$control_output/plan.json" --discard-data ;;
+        *) lifetime_supervise "$control_output/chainman-control" run "$control_output/plan.json" ;;
     esac
     control_result=$?
     rm -rf -- "$control_output"

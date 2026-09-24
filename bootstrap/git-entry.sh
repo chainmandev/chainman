@@ -52,4 +52,9 @@ export_tree --work-tree="$staging/source" checkout-index --all --prefix="$stagin
 export CHAINMAN_PROJECT_ROOT="$project" CHAINMAN_SOURCE_REVISION="$revision"
 # Retain the private export until all host orchestration exits. The executable
 # environments and runtime used inside Nix are rooted separately in its store.
-"$staging/source/bootstrap/chainman.sh" "$@"
+# A foreground shell wait defers traps until its child exits. Use the verified
+# lifetime helper so a signal directed only at this entrypoint reaches the child.
+# shellcheck source=bootstrap/lifetime.sh
+. "$staging/source/bootstrap/lifetime.sh"
+lifetime_directory=$staging
+lifetime_supervise sh "$staging/source/bootstrap/chainman.sh" "$@"
