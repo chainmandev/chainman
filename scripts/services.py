@@ -920,9 +920,14 @@ def export(root: Path, arguments: list[str]) -> int:
         # as data for presentation too; never forward this broader map to host
         # commands or install it in the planner's process environment.
         display_env = (
-            dict(
-                project_environment.host_inputs(destination, {"pass": ["*"]}),
-                **planning_env,
+            workflows.context_environment(
+                root,
+                cfg,
+                task,
+                dict(
+                    project_environment.host_inputs(destination, {"pass": ["*"]}),
+                    CHAINMAN_MODE=mode,
+                ),
             )
             if mode == "host-nix"
             else planning_env
