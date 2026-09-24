@@ -15,9 +15,13 @@ Add these declarations to a schema-3 project with a `core` profile:
 ```toml
 [services.preview]
 profile = "core"
-command = ["python3", "-m", "http.server", "8000", "--bind", "127.0.0.1"]
+command = ["sh", "-eu", "-c", "exec python3 -m http.server 8000 --bind \"$PREVIEW_BIND\""]
+environment = { PREVIEW_BIND = "{bind}" }
 restart = "no"
 shutdown_seconds = 5
+
+[services.preview.transport]
+ports = ["127.0.0.1:8000:8000"]
 
 [services.preview.readiness]
 command = ["python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000', timeout=2).close()"]
@@ -48,9 +52,10 @@ just chainman services-logs --follow
 just chainman services-stop
 ```
 
-The command probe runs in the service's execution context. In container mode,
-publishing a browser-accessible port requires the project's explicit container
-port configuration; host loopback and container loopback are different networks.
+The command probe runs in the service's execution context. `{bind}` selects host
+loopback in host-Nix and the container interface in container-Nix. The explicit
+transport publishes port 8000 on host loopback in container mode; it does not
+expose the host service to other machines.
 For services exposing host loopback HTTP endpoints, the native `http_get` probe
 avoids a shell/Nix entry per probe. See the reference for namespace and port rules.
 
@@ -107,6 +112,11 @@ service diagnostics from this operation; it never labels all stderr as errors or
 claims to detect every application error. Foreground preparation failures stay in
 the foreground output. Saved status is observational and cannot start, stop or
 lease services. A future viewer can use it without taking execution authority.
+
+`CHAINMAN_DEV_CHANNEL`, `CHAINMAN_DEV_OPERATION` and `CHAINMAN_DEV_TASK` are internal
+runtime coordination variables. Users configure only `CHAINMAN_DEV_OUTPUT` and
+the task's presentation metadata. The private channel carries bounded progress
+records and mounts no controller state or service-control socket into workloads.
 
 Owned foreground commands receive the controlling terminal for their lifetime;
 the caller restores its foreground group and terminal settings afterward. Ctrl-C
