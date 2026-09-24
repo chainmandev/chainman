@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs only on the caller's host, from the verified runtime export.
+# Host hook operations, or an explicit read-only scan in a managed environment.
 set -eu
 self=$1
 root=$2
@@ -7,7 +7,14 @@ cd "$root"
 # shellcheck source=bootstrap/lifetime.sh
 . "$(dirname -- "$self")/lifetime.sh"
 shift 2
-[ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || {
+readonly_scan=0
+if [ "$#" = 2 ] && [ "$1" = trojan-source ]; then
+    case "$2" in
+        '' | *[!0-9a-f]*) ;;
+        *) case "${#2}" in 40 | 64) readonly_scan=1 ;; esac ;;
+    esac
+fi
+[ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || [ "$readonly_scan" = 1 ] || {
     echo 'chainman: run Git/hooks on the host (Docker/Podman still supplies hook tools), or use host Nix.' >&2
     exit 2
 }

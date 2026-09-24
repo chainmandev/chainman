@@ -696,6 +696,61 @@ config="lefthook.yml"
                 self.assertIn("host", denied.stderr)
             self.assertFalse((self.root / ".git/hooks/pre-commit").exists())
 
+    def test_public_explicit_scan_inside_managed_profile(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+        )
+        self.lifecycle_git("init", "-q")
+        self.lifecycle_git("config", "user.name", "Fixture")
+        self.lifecycle_git("config", "user.email", "fixture@example.invalid")
+        self.lifecycle_git("config", "commit.gpgsign", "false")
+        (self.root / "safe.js").write_text("// ordinary text\n")
+        self.lifecycle_git("add", "safe.js")
+        self.lifecycle_git("commit", "-qm", "clean")
+        clean = self.lifecycle_git("rev-parse", "HEAD")
+        (self.root / "unsafe.js").write_text("// harmless fixture \u202e marker\n")
+        self.lifecycle_git("add", "unsafe.js")
+        self.lifecycle_git("commit", "-qm", "scanner fixture")
+        unsafe = self.lifecycle_git("rev-parse", "HEAD")
+        before = (self.root / ".git/index").read_bytes()
+        entry = [
+            "sh",
+            "-c",
+            'exec "$CHAINMAN_RUNTIME/bootstrap/chainman.sh" "$@"',
+            "nested",
+        ]
+        for mode in ["host-nix", *(["container-nix"] if self.test_engine else [])]:
+            self.env["CHAINMAN_MODE"] = mode
+            if self.test_engine:
+                self.env["CHAINMAN_CONTAINER_ENGINE"] = self.test_engine
+            direct = self.run_bootstrap("trojan-source", clean)
+            nested = self.run_bootstrap(
+                "exec", "--profile", "host", "--", *entry, "trojan-source", clean
+            )
+            self.assertIn("checked", direct.stdout + direct.stderr)
+            self.assertIn("checked", nested.stdout + nested.stderr)
+            rejected = self.run_bootstrap(
+                "exec",
+                "--profile",
+                "host",
+                "--",
+                *entry,
+                "trojan-source",
+                unsafe,
+                check=False,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("unsafe.js", rejected.stdout + rejected.stderr)
+            for args in [("trojan-source", "f" * 40), ("trojan-source", "HEAD")]:
+                rejected = self.run_bootstrap(
+                    "exec", "--profile", "host", "--", *entry, *args, check=False
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+            self.assertEqual((self.root / ".git/index").read_bytes(), before)
+            self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), unsafe)
+            self.assertFalse((self.root / ".git/hooks/pre-commit").exists())
+
     def test_public_hook_setup_and_commit_a(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text("""schema=3

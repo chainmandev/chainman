@@ -234,6 +234,14 @@ revision=$(git rev-parse HEAD)
 just chainman trojan-source "$revision"
 ```
 
+An explicit scan accepts a full commit SHA and also works inside a managed
+host-Nix or container-Nix task, for example as part of a verification gate. It
+reads Git objects using the operation's frozen scanner policy; it does not install
+hooks, stage files, or import host Git credentials. Lefthook configuration is not
+needed for this read-only operation. Symbolic names such as `HEAD` must first be
+resolved to a full SHA. The no-argument pre-push form, which reads Git's outgoing
+references from stdin, remains a host hook operation.
+
 Defaults include common source formats (including CommonJS `.cjs`, Dart, Astro, Nix and Just),
 Justfiles, Dockerfiles and executable regular files regardless of extension.
 The exact patterns are in the runtime's `scripts/trojan_source.py`. Override `hooks.trojan_source.paths` to select project source formats. A narrow

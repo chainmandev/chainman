@@ -1,6 +1,7 @@
 """Declarative hook contract; native execution is qualified by hooks-test."""
 
 import json
+import base64
 from pathlib import Path
 import sys
 import tempfile
@@ -17,6 +18,51 @@ import hook_worker
 
 
 class HookDeclarations(unittest.TestCase):
+    def test_scan_export_uses_frozen_authority_without_loading_lefthook_config(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root, authority, output = (
+                base / name for name in ("project", "authority", "output")
+            )
+            for directory in (root, authority, output):
+                directory.mkdir()
+            original = "schema=3\n[hooks]\nenabled=true\n"
+            (authority / "chainman.toml").write_text(original)
+            (authority / "chainman.lock").write_text("a" * 40 + "\n")
+            (root / "chainman.toml").write_text("schema=3\n[hooks]\nenabled=false\n")
+            with (
+                patch.object(
+                    hook_worker.tc, "configuration_root", return_value=authority
+                ),
+                patch.object(
+                    hook_worker.config_inspection, "validated", return_value={}
+                ),
+                patch.object(hook_worker, "export_binary") as binary,
+                patch.object(
+                    hook_worker.hooks,
+                    "effective",
+                    side_effect=AssertionError("Lefthook config must not be read"),
+                ),
+            ):
+                hook_worker.export(
+                    root,
+                    [
+                        str(output),
+                        "linux-arm64",
+                        "/bin/git",
+                        "/runtime/chainman.sh",
+                        "trojan-source",
+                    ],
+                )
+            plan = json.loads((output / "plan.json").read_text())
+            self.assertEqual(
+                base64.b64decode(plan["authority"]["chainman.toml"]), original.encode()
+            )
+            self.assertEqual(plan["config"], "")
+            binary.assert_called_once_with(
+                output, "linux-arm64", "task", "chainman-control"
+            )
+
     def test_preset_is_formatting_only_and_extensible(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

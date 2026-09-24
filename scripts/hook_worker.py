@@ -63,11 +63,15 @@ def export(root: Path, args: list[str]) -> int:
     tc.atomic_bytes(destination / "enabled", b"1\n" if enabled else b"0\n")
     if action == "setup" and not enabled:
         return 0
-    name = "chainman.toml" if (root / "chainman.toml").exists() else "toolchain.toml"
-    authority = configuration_files.read(root, name).documents
-    if (root / "chainman.lock").exists():
-        authority["chainman.lock"] = tc.regular_input(root, "chainman.lock")
-    config = hooks.effective(root, destination)
+    source = tc.configuration_root(root)
+    name = "chainman.toml" if (source / "chainman.toml").exists() else "toolchain.toml"
+    authority = configuration_files.read(source, name).documents
+    if (source / "chainman.lock").exists():
+        authority["chainman.lock"] = tc.regular_input(source, "chainman.lock")
+    # Explicit scans need policy and immutable Git objects, not Lefthook config.
+    config = (
+        "" if action == "trojan-source" else str(hooks.effective(root, destination))
+    )
     packages = [("task", "chainman-control")]
     if action in {"hooks", "setup"}:
         packages.append(("hook-lefthook", "lefthook"))
@@ -82,7 +86,7 @@ def export(root: Path, args: list[str]) -> int:
             "lefthook": str(destination / "lefthook"),
             "directory": str(destination),
             "enabled": enabled,
-            "config": str(config),
+            "config": config,
             "authority": {
                 name: base64.b64encode(body).decode()
                 for name, body in authority.items()
