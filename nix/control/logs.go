@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -254,4 +255,65 @@ func serviceLogs(state string, follow bool) int {
 		// owns no services and main's process exit closes its read descriptors.
 		return 0
 	}
+}
+
+// Finite tasks stay quiet on success. On failed acquisition, read only the end
+// of output produced since admission; a noisy startup must not hide its error.
+func (c *logCursor) latest(w io.Writer) error {
+	if c.file != nil {
+		st, err := c.file.Stat()
+		if err != nil {
+			return err
+		}
+		if st.Size() < c.offset {
+			c.offset = 0
+		}
+		c.offset = max(c.offset, st.Size()-logHistoryBytes)
+		if _, err = c.file.Seek(c.offset, io.SeekStart); err != nil {
+			return err
+		}
+	}
+	// copy handles replacement and truncation. For a newly created/replaced
+	// file use its bounded tail, not its possibly enormous initial prefix.
+	st, err := os.Lstat(c.path)
+	if err == nil && c.file != nil {
+		old, e := c.file.Stat()
+		if e != nil {
+			return e
+		}
+		if !os.SameFile(st, old) {
+			if _, e = io.CopyN(w, c.file, logHistoryBytes); e != nil && e != io.EOF {
+				return e
+			}
+			c.close()
+		}
+	}
+	if c.file == nil {
+		c.initialized = false
+	}
+	return c.copy(w)
+}
+
+func startupDiagnostics(cursors []*logCursor) {
+	var message strings.Builder
+	fmt.Fprintln(&message, "Service startup failed; recent output from this attempt:")
+	for _, cursor := range cursors {
+		fmt.Fprintln(&message, "Log: "+cursor.path)
+		var tail diagnosticTail
+		renderer := &logRenderer{destination: &tail}
+		if err := cursor.latest(renderer); err != nil {
+			fmt.Fprintln(&message, "  Log unavailable:", err)
+			continue
+		}
+		_, _ = tail.Write(renderer.pending)
+		excerpt := tail.excerpt()
+		if excerpt == "" {
+			fmt.Fprintln(&message, "  No new output captured.")
+		} else {
+			fmt.Fprintln(&message, excerpt)
+		}
+	}
+	output := newDevelopmentOutput()
+	output.write(message.String())
+	output.close()
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -46,7 +45,19 @@ func bridgeCommand(b *Bridge, args ...string) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	out, e := exec.CommandContext(ctx, b.Engine, append([]string{"network"}, args...)...).CombinedOutput()
+	return bridgeOutput(ctx, b, args...)
+}
+func bridgeCommandContext(ctx context.Context, b *Bridge, args ...string) ([]byte, error) {
+	if e := validateBridge(b); e != nil {
+		return nil, e
+	}
+	if e := checkEngineContext(ctx, &Container{Engine: b.Engine, EngineIdentity: b.EngineIdentity, Name: b.Name}); e != nil {
+		return nil, e
+	}
+	return bridgeOutput(ctx, b, args...)
+}
+func bridgeOutput(ctx context.Context, b *Bridge, args ...string) ([]byte, error) {
+	out, e := queryCommand(ctx, b.Engine, append([]string{"network"}, args...)...).CombinedOutput()
 	if e != nil {
 		return nil, fmt.Errorf("network %s: %w: %s", b.Name, e, strings.TrimSpace(string(out)))
 	}
@@ -54,9 +65,15 @@ func bridgeCommand(b *Bridge, args ...string) ([]byte, error) {
 }
 
 func inspectBridge(b *Bridge) (*BridgeState, error) {
-	out, e := bridgeCommand(b, "inspect", b.Name)
+	return inspectBridgeUsing(b, func(args ...string) ([]byte, error) { return bridgeCommand(b, args...) })
+}
+func inspectBridgeContext(ctx context.Context, b *Bridge) (*BridgeState, error) {
+	return inspectBridgeUsing(b, func(args ...string) ([]byte, error) { return bridgeCommandContext(ctx, b, args...) })
+}
+func inspectBridgeUsing(b *Bridge, command func(...string) ([]byte, error)) (*BridgeState, error) {
+	out, e := command("inspect", b.Name)
 	if e != nil {
-		listed, err := bridgeCommand(b, "ls", "--format", "{{.Name}}")
+		listed, err := command("ls", "--format", "{{.Name}}")
 		if err != nil {
 			return nil, err
 		}

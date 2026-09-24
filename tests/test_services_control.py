@@ -1756,12 +1756,22 @@ while True: time.sleep(.1)
 
     def test_failed_startup_does_not_run_task(self):
         self.plan["services"]["worker"]["command"] = self.command(
-            [sys.executable, "-c", "raise SystemExit(3)"]
+            [
+                sys.executable,
+                "-c",
+                "print('current startup problem',flush=True); raise SystemExit(3)",
+            ]
         )
+        (self.state / "services.log").write_text("obsolete error from a previous run\n")
         self.plan["task"] = self.command(
             [sys.executable, "-c", "from pathlib import Path; Path('task-ran').touch()"]
         )
-        self.run_control("run", check=1)
+        result = self.run_control("run", check=1)
+        self.assertIn("exited before readiness", result.stderr)
+        self.assertIn("exit code 3", result.stderr)
+        self.assertIn("current startup problem", result.stderr)
+        self.assertNotIn("obsolete error", result.stderr)
+        self.assertIn(str(self.state / "services.log"), result.stderr)
         self.assertFalse((self.root / "task-ran").exists())
         self.assertFalse(list(self.state.glob("*.lease")))
 
@@ -1790,6 +1800,14 @@ while True: time.sleep(.1)
             try:
                 self.wait_file(self.root / "pid")
                 started = time.monotonic()
+                snapshot = self.run_control("status", check=0, timeout=3)
+                data = json.loads(snapshot.stdout)
+                self.assertTrue(data["busy"])
+                self.assertFalse(data["complete"])
+                self.assertIsNone(data["recovery_required"])
+                if shared:
+                    self.assertTrue(data["resources"][0]["busy"])
+                self.assertLess(time.monotonic() - started, 3)
                 if interrupt is None:
                     self.run_control("stop", check=0, timeout=8)
                     expected = 1
@@ -1801,6 +1819,10 @@ while True: time.sleep(.1)
                 self.assertFalse(self.alive(self.pid()))
                 self.assertFalse((self.root / "task-ran").exists())
                 self.assertFalse(list(self.state.glob("*.lease")))
+                log.flush()
+                self.assertNotIn(
+                    "Service startup failed", (self.base / "startup.log").read_text()
+                )
             finally:
                 if parent.poll() is None:
                     parent.kill()

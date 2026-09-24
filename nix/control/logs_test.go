@@ -96,6 +96,7 @@ func TestLogsUseOnlySelectedScopesAndNeverLeaseServices(t *testing.T) {
 func TestLiveLogsStartBeforeAcquisitionWithoutReplayingHistory(t *testing.T) {
 	for _, existing := range []bool{false, true} {
 		state := physicalTempDir(t)
+		os.Chmod(state, 0700)
 		if err := os.Chmod(state, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -139,5 +140,43 @@ func TestLogRendererDistinguishesStreamsAndRetainsRealErrors(t *testing.T) {
 		"historical plain text\n{\"level\":\"error\",\"message\":\"controller failed\"}\n"
 	if out.String() != want {
 		t.Fatalf("got %q", out.String())
+	}
+}
+
+func TestStartupFailureTailOmitsHistoryAndRetainsLatestError(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		state := physicalTempDir(t)
+		os.Chmod(state, 0700)
+		if err := private(state); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(state, "services.log")
+		os.WriteFile(path, []byte("STALE_FAILURE\n"), 0600)
+		cursors, err := liveLogCursors(Plan{State: state})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := cursors[0]
+		defer c.close()
+		var empty bytes.Buffer
+		if err := c.latest(&empty); err != nil || empty.Len() != 0 {
+			t.Fatal("replayed history", err)
+		}
+		if rotate {
+			os.Rename(path, path+".old")
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.WriteString(strings.Repeat("startup noise\n", logHistoryBytes) + "CURRENT_FAILURE\n")
+		f.Close()
+		var out bytes.Buffer
+		if err := c.latest(&out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(out.String(), "CURRENT_FAILURE\n") || strings.Contains(out.String(), "STALE_FAILURE") || out.Len() > logHistoryBytes {
+			t.Fatal("incorrect bounded tail", out.Len())
+		}
 	}
 }

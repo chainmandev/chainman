@@ -84,7 +84,8 @@ stderr are terminals, and streams service logs otherwise. Summary mode prints
 lifecycle transitions, startup/preparation reminders every 15 seconds, and the
 ready summary. Routine service logs remain collected. Preparation commands keep
 their ordinary stdin/stdout/stderr; chainman does not capture or silence them.
-Finite tasks and shells are unchanged.
+Finite tasks and shells retain their ordinary output. A finite service-backed
+task that fails during service acquisition also prints bounded startup diagnostics.
 
 ```sh
 CHAINMAN_DEV_OUTPUT=summary just chainman run preview
@@ -107,6 +108,25 @@ alongside active clients.
 The human view includes shared repository services (such as a database), network
 bridges, and recovery warnings under their own resource scopes. Concurrent status
 inspection and development launches tolerate completed records being pruned.
+
+Inspection never waits for a service-ownership lock or removes abandoned leases.
+The native controller shares a two-second probe budget across the worktree and
+its shared resources. During startup/shutdown it returns the available snapshot:
+`complete=false`, `busy=true` for scopes with a held ownership lock, and
+`inspection_errors` explaining unavailable observations. Unavailable fields are
+`null`, not evidence that a service is healthy or stopped. Root `complete` also
+reflects incomplete shared resources. Application preparation status remains
+separate from service health. Retry status after the transition; recovery and
+cleanup remain the responsibility of start/stop operations. Runtime bootstrap
+and provisioning time are outside this native inspection budget.
+
+When a service exits before readiness, the error identifies the service, backend
+status, exit code when supplied, and log path. Finite tasks also show up to 16 KiB
+per service scope from the end of this startup attempt; older log history is
+excluded. Cancellation does not produce this failure diagnostic. Full retained
+output remains available through `services-logs`; logs from concurrent clients of
+a shared scope can overlap, so the excerpt is a time window, not exclusive
+attribution to one client.
 
 An observed failed watched build or lost service readiness makes the application
 **degraded**, even if the last successful server remains available. A later

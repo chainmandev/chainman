@@ -104,16 +104,17 @@ type Lease struct {
 	Parent      *LeaseRef `json:"parent,omitempty"`
 }
 type Process struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Ready   string `json:"is_ready"`
-	Running bool   `json:"is_running"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Ready    string `json:"is_ready"`
+	Running  bool   `json:"is_running"`
+	ExitCode *int   `json:"exit_code,omitempty"`
 }
 
 var validName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 func readJSON(path string, v any) error {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
@@ -157,7 +158,9 @@ func atomic(path string, v any) error {
 	}
 	return os.Rename(f.Name(), path)
 }
-func private(path string) error {
+func private(path string) error         { return stateDirectory(path, true) }
+func existingPrivate(path string) error { return stateDirectory(path, false) }
+func stateDirectory(path string, create bool) error {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return fmt.Errorf("state paths must be absolute and normalized")
 	}
@@ -175,8 +178,10 @@ func private(path string) error {
 			return fmt.Errorf("state path contains indirection: %s", p)
 		}
 	}
-	if err := os.MkdirAll(path, 0700); err != nil {
-		return err
+	if create {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			return err
+		}
 	}
 	st, err := os.Stat(path)
 	if err != nil {
@@ -260,15 +265,29 @@ func child(c Command) (*exec.Cmd, error) {
 	cmd.Stderr = os.Stderr
 	return cmd, nil
 }
+
+// Bound pipe draining as well as process lifetime if an engine leaves a child
+// holding its query output open after cancellation.
+func queryCommand(ctx context.Context, executable string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd.WaitDelay = 100 * time.Millisecond
+	return cmd
+}
 func backend(p Plan, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	socket, e := socketPath(p)
+	return backendContext(ctx, p, args...)
+}
+func backendContext(ctx context.Context, p Plan, args ...string) ([]byte, error) {
+	socket, e := socketLocation(p)
 	if e != nil {
 		return nil, e
 	}
+	if e := existingPrivate(filepath.Dir(socket)); e != nil {
+		return nil, e
+	}
 	base := []string{"--use-uds", "--unix-socket", socket, "--log-file", os.DevNull}
-	cmd := exec.CommandContext(ctx, p.Backend, append(base, args...)...)
+	cmd := queryCommand(ctx, p.Backend, append(base, args...)...)
 	out, err := cmd.Output()
 	if err != nil {
 		var failure *exec.ExitError
@@ -281,14 +300,18 @@ func backend(p Plan, args ...string) ([]byte, error) {
 	return out, err
 }
 func socketPath(p Plan) (string, error) {
+	path, err := socketLocation(p)
+	if err == nil {
+		err = private(filepath.Dir(path))
+	}
+	return path, err
+}
+func socketLocation(p Plan) (string, error) {
 	base, e := filepath.EvalSymlinks("/tmp")
 	if e != nil {
 		return "", e
 	}
 	directory := filepath.Join(base, fmt.Sprintf("chainman-control-%d", os.Geteuid()))
-	if e = private(directory); e != nil {
-		return "", e
-	}
 	if directory == p.Root || strings.HasPrefix(directory, p.Root+"/") {
 		return "", fmt.Errorf("controller socket cannot be inside project mounts")
 	}
@@ -296,10 +319,15 @@ func socketPath(p Plan) (string, error) {
 	return filepath.Join(directory, hex.EncodeToString(key[:12])+".sock"), nil
 }
 func states(p Plan) ([]Process, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return statesContext(ctx, p)
+}
+func statesContext(ctx context.Context, p Plan) ([]Process, error) {
 	if len(p.Services) == 0 {
 		return []Process{}, nil
 	}
-	b, e := backend(p, "process", "list", "-o", "json")
+	b, e := backendContext(ctx, p, "process", "list", "-o", "json")
 	if e != nil {
 		return nil, e
 	}
@@ -565,7 +593,11 @@ func ready(p Plan, names []string, startup *startupGuard) error {
 				return fmt.Errorf("backend omitted service %s", n)
 			}
 			if s.Status == "Completed" || s.Status == "Error" || s.Status == "Skipped" {
-				return fmt.Errorf("service %s failed: %s", n, s.Status)
+				detail := s.Status
+				if s.ExitCode != nil {
+					detail += fmt.Sprintf(", exit code %d", *s.ExitCode)
+				}
+				return fmt.Errorf("service %s exited before readiness (%s); log: %s", n, detail, filepath.Join(p.State, "services.log"))
 			}
 			if !s.Running || (p.Services[n].Readiness != nil && s.Ready != "Ready") {
 				all = false
@@ -654,10 +686,19 @@ func inspectContainer(c *Container) (*ContainerState, error) {
 	// container that happens to reuse a friendly name.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	out, e := exec.CommandContext(ctx, c.Engine, "container", "inspect", c.Name).Output()
+	return containerStateContext(ctx, c)
+}
+func inspectContainerContext(ctx context.Context, c *Container) (*ContainerState, error) {
+	if e := checkEngineContext(ctx, c); e != nil {
+		return nil, e
+	}
+	return containerStateContext(ctx, c)
+}
+func containerStateContext(ctx context.Context, c *Container) (*ContainerState, error) {
+	out, e := queryCommand(ctx, c.Engine, "container", "inspect", c.Name).Output()
 	if e != nil {
 		// An engine outage is not evidence of absence. A separate list must succeed.
-		list, err := exec.CommandContext(ctx, c.Engine, "container", "ls", "-aq", "--filter", "name=^/"+c.Name+"$").Output()
+		list, err := queryCommand(ctx, c.Engine, "container", "ls", "-aq", "--filter", "name=^/"+c.Name+"$").Output()
 		if err != nil {
 			return nil, fmt.Errorf("cannot inspect owned container: %w", err)
 		}
@@ -713,15 +754,18 @@ func containerProbe(c *Container, command Command) (Command, error) {
 }
 
 func engineIdentity(engine string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return engineIdentityContext(ctx, engine)
+}
+func engineIdentityContext(ctx context.Context, engine string) (string, error) {
 	format := "{{.ID}}"
 	if filepath.Base(engine) == "podman" {
 		format = "{{.Host.Hostname}} {{.Store.GraphRoot}} {{.Host.Security.Rootless}}"
 	} else if filepath.Base(engine) != "docker" {
 		return "", fmt.Errorf("unsupported host engine")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	data, e := exec.CommandContext(ctx, engine, "info", "--format", format).Output()
+	data, e := queryCommand(ctx, engine, "info", "--format", format).Output()
 	if e != nil {
 		return "", e
 	}
@@ -732,10 +776,15 @@ func engineIdentity(engine string) (string, error) {
 	return value, nil
 }
 func checkEngine(c *Container) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return checkEngineContext(ctx, c)
+}
+func checkEngineContext(ctx context.Context, c *Container) error {
 	if c == nil || c.EngineIdentity == "" {
 		return nil
 	}
-	current, e := engineIdentity(c.Engine)
+	current, e := engineIdentityContext(ctx, c.Engine)
 	if e != nil {
 		return e
 	}
@@ -1513,34 +1562,38 @@ func mainAction(args []string) (result int) {
 		}
 		return owned(args[1], args[2], args[0] == "probe", generation)
 	}
-	if args[0] == "status" || args[0] == "stop" {
-		if len(args) != 2 && !(args[0] == "status" && len(args) == 3 && args[2] == "--human") {
+	if args[0] == "status" {
+		if len(args) != 2 && !(len(args) == 3 && args[2] == "--human") {
 			return 2
 		}
-		human := len(args) == 3
+		return serviceStatus(args[1], len(args) == 3)
+	}
+	if args[0] == "stop" {
+		if len(args) != 2 {
+			return 2
+		}
 		if e := private(args[1]); e != nil {
 			fmt.Fprintln(os.Stderr, e)
 			return 1
 		}
-		if args[0] == "stop" {
-			stopping, e := locked(filepath.Join(args[1], "stop.admission"), false)
-			if e != nil {
-				return exitCode(e)
-			}
-			defer stopping.Close()
-			notice := stopNotice{Token: token(), Pending: true}
-			path := filepath.Join(args[1], "startup-stop.json")
-			if e = atomic(path, notice); e != nil {
-				return exitCode(e)
-			}
-			defer func() {
-				notice.Pending = false
-				if err := atomic(path, notice); err != nil {
-					fmt.Fprintln(os.Stderr, err)
-					result = 1
-				}
-			}()
+		stopping, e := locked(filepath.Join(args[1], "stop.admission"), false)
+		if e != nil {
+			return exitCode(e)
 		}
+		defer stopping.Close()
+		notice := stopNotice{Token: token(), Pending: true}
+		path := filepath.Join(args[1], "startup-stop.json")
+		if e = atomic(path, notice); e != nil {
+			return exitCode(e)
+		}
+		defer func() {
+			notice.Pending = false
+			if err := atomic(path, notice); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				result = 1
+			}
+		}()
+
 		lock, e := locked(filepath.Join(args[1], "gate"), false)
 		if e != nil {
 			fmt.Fprintln(os.Stderr, e)
@@ -1549,7 +1602,7 @@ func mainAction(args []string) (result int) {
 		defer lock.Close()
 		var p Plan
 		if e = readJSON(filepath.Join(args[1], "plan.json"), &p); os.IsNotExist(e) {
-			return printDevelopmentStatus(args[1], map[string]any{"services": []Process{}, "running": false}, human)
+			return 0
 		}
 		if e != nil {
 			fmt.Fprintln(os.Stderr, e)
@@ -1559,24 +1612,11 @@ func mainAction(args []string) (result int) {
 			fmt.Fprintln(os.Stderr, "saved service scope does not match requested state")
 			return 1
 		}
-		if args[0] == "stop" {
-			if e = releaseUnused(p, true); e != nil {
-				fmt.Fprintln(os.Stderr, e)
-				return 1
-			}
-			return 0
-		}
-		used, e := active(p)
-		if e != nil {
+		if e = releaseUnused(p, true); e != nil {
 			fmt.Fprintln(os.Stderr, e)
 			return 1
 		}
-		ps, backendError := states(p)
-		resources, resourceError := resourceStatus(p)
-		if resourceError != nil {
-			return exitCode(resourceError)
-		}
-		return printDevelopmentStatus(p.State, map[string]any{"running": controller(p).alive(), "leases": used, "services": ps, "resources": resources, "log": filepath.Join(p.State, "services.log"), "recovery_required": backendError != nil && len(used) > 0}, human)
+		return 0
 	}
 	if args[0] != "run" && args[0] != "up" && args[0] != "reset" {
 		return 2
@@ -1641,8 +1681,25 @@ func mainAction(args []string) (result int) {
 		// main exits after releasing ownership; it need not join a blocked viewer.
 		defer cancel()
 	}
+	var startupLogs []*logCursor
+	if !p.WaitForServices || args[0] != "run" {
+		var err error
+		startupLogs, err = liveLogCursors(p)
+		if err != nil {
+			return exitCode(err)
+		}
+		defer func() {
+			for _, cursor := range startupLogs {
+				cursor.close()
+			}
+		}()
+	}
 	lease, _, e := acquire(p, args[0] == "up", nil, startup)
 	if e != nil {
+		var interrupted *startupInterrupted
+		if len(startupLogs) > 0 && !errors.Is(e, servicesStopped) && !errors.As(e, &interrupted) {
+			startupDiagnostics(startupLogs)
+		}
 		return exitCode(e)
 	}
 	if args[0] == "up" {

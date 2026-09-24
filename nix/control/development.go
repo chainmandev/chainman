@@ -181,6 +181,14 @@ func writeHumanDevelopmentStatus(w io.Writer, rows []ApplicationStatus, value ma
 }
 
 func writeServiceStatus(w io.Writer, value map[string]any, indent string) {
+	if value["complete"] == false {
+		fmt.Fprintf(w, "%sPartial service snapshot (busy=%v); unknown fields are null in JSON.\n", indent, value["busy"])
+		if details, ok := value["inspection_errors"].([]string); ok {
+			for _, detail := range details {
+				fmt.Fprintln(w, indent+"  "+detail)
+			}
+		}
+	}
 	if bridge, ok := value["bridge"].(string); ok {
 		fmt.Fprintf(w, "%sNetwork bridge %s: running=%v (clients=%v)\n", indent, bridge, value["running"], value["clients"])
 	}
