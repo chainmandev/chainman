@@ -909,31 +909,40 @@ def export(root: Path, arguments: list[str]) -> int:
                 ),
             }
             if "http_get" in probe:
-                if "container" in spec:
-                    probe_env = literal_environment(
-                        table(spec["container"], "Container").get("environment", {}),
-                        root,
-                        planning_env,
-                    )
+                http_spec = table(probe["http_get"], "HTTP readiness")
+                if not (
+                    http_spec.get("headers_from_environment")
+                    or "basic_auth" in http_spec
+                ):
+                    prepared_probe["http_get"] = http_readiness(http_spec)
                 else:
-                    _, profile_spec = chainman.profile(
-                        root,
-                        text(
-                            spec.get("profile", workflows.default_profile(cfg)),
-                            "Service profile",
-                        ),
-                        cfg=cfg,
+                    if "container" in spec:
+                        probe_env = literal_environment(
+                            table(spec["container"], "Container").get(
+                                "environment", {}
+                            ),
+                            root,
+                            planning_env,
+                        )
+                    else:
+                        _, profile_spec = chainman.profile(
+                            root,
+                            text(
+                                spec.get("profile", workflows.default_profile(cfg)),
+                                "Service profile",
+                            ),
+                            cfg=cfg,
+                        )
+                        probe_env = chainman.profile_environment(
+                            root,
+                            profile_spec,
+                            planning_env,
+                            spec.get("environment", {}),
+                            cfg=cfg,
+                        )
+                    prepared_probe["http_get"] = resolve_http_readiness(
+                        probe["http_get"], probe_env
                     )
-                    probe_env = chainman.profile_environment(
-                        root,
-                        profile_spec,
-                        planning_env,
-                        spec.get("environment", {}),
-                        cfg=cfg,
-                    )
-                prepared_probe["http_get"] = resolve_http_readiness(
-                    probe["http_get"], probe_env
-                )
             elif "container" in spec:
                 probe_command = [
                     engine,

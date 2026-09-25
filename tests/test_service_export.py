@@ -93,6 +93,12 @@ context_environment={APP_CONTEXT="{env:HOST_SEED}"}
 commands=[["true"]]
 services=["worker","database"]
 context_environment={APP_CONTEXT="different"}
+[profiles.external]
+environment={EXTERNAL_URL="{env:UNSET_EXTERNAL_URL}"}
+[services.external]
+profile="external"
+command=["true"]
+readiness={http_get={port=8081,body="OK"}}
 [services.worker]
 command=["true"]
 environment={PYTHONPATH="{root}/service-python",PROBE_AUTH="{env:APP_CONTEXT}"}
