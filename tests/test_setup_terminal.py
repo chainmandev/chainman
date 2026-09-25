@@ -20,6 +20,117 @@ CONTROL = os.environ.get("CHAINMAN_TEST_HOOK_CONTROL")
 
 
 class SetupTerminalTests(unittest.TestCase):
+    def test_owned_container_without_private_cleanup_becomes_engine(self):
+        with tempfile.TemporaryDirectory(prefix="setup engine signals ") as directory:
+            root = Path(directory)
+            engine = root / "engine"
+            engine.write_text(f"""#!{sys.executable}
+import json,os,signal,sys,time
+from pathlib import Path
+signals = []
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, lambda number, _: signals.append(number))
+assert sys.argv[1:] == ['run', 'literal value', '', '$(literal)']
+assert sys.stdin.readline() == 'preserved input\\n'
+Path({str(root / "ready")!r}).write_text(str(os.getpid()))
+while not signals: time.sleep(.01)
+time.sleep(.3)
+print(json.dumps(signals), flush=True)
+raise SystemExit(128 + signals[0])
+""")
+            engine.chmod(0o755)
+            for number, group in ((signal.SIGTERM, False), (signal.SIGINT, True)):
+                with self.subTest(signal=number, group=group):
+                    ready = root / "ready"
+                    ready.unlink(missing_ok=True)
+                    child = subprocess.Popen(
+                        [
+                            "sh",
+                            str(ROOT / "bootstrap/setup-prompt.sh"),
+                            str(engine),
+                            "literal value",
+                            "",
+                            "$(literal)",
+                        ],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        start_new_session=True,
+                        env={
+                            "CHAINMAN_CONTAINER_OWNER": "a" * 32,
+                            **{
+                                key: value
+                                for key, value in os.environ.items()
+                                if not key.startswith("CHAINMAN_")
+                            },
+                        },
+                    )
+                    try:
+                        child.stdin.write("preserved input\n")
+                        child.stdin.flush()
+                        deadline = time.monotonic() + 5
+                        while not ready.exists() and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertEqual(int(ready.read_text()), child.pid)
+                        if group:
+                            os.killpg(child.pid, number)
+                        else:
+                            child.send_signal(number)
+                        output, error = child.communicate(timeout=5)
+                        self.assertEqual(child.returncode, 128 + number, error)
+                        self.assertEqual(output.strip(), str([int(number)]))
+                    finally:
+                        if child.poll() is None:
+                            child.kill()
+                        child.communicate(timeout=5)
+
+    def test_unowned_container_keeps_bounded_client_shutdown(self):
+        with tempfile.TemporaryDirectory(
+            prefix="bootstrap stalled engine "
+        ) as directory:
+            root = Path(directory)
+            engine = root / "engine"
+            ready = root / "ready"
+            engine.write_text(f"""#!{sys.executable}
+import os,signal,time
+from pathlib import Path
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+Path({str(ready)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+""")
+            engine.chmod(0o755)
+            child = subprocess.Popen(
+                ["sh", str(ROOT / "bootstrap/setup-prompt.sh"), str(engine)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env={
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith("CHAINMAN_")
+                },
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                child.terminate()
+                _, error = child.communicate(timeout=8)
+                self.assertEqual(child.returncode, 143, error)
+                self.assertIn(b"owned helper did not stop", error)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(ready.read_text()), 0)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
+                if ready.exists():
+                    try:
+                        os.kill(int(ready.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
     def run_prompt(self, mode, answer):
         with tempfile.TemporaryDirectory(prefix="setup tty ") as directory:
             root = Path(directory)

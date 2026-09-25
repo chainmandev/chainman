@@ -216,6 +216,12 @@ func taskCommand(action, path string) (result int) {
 		}
 	}
 	if action == "sequence" {
+		// The owner signals this whole process group. Stay alive until the
+		// current child has finished its graceful shutdown; exiting here would
+		// make the owner immediately signal its still-running descendants again.
+		signals := make(chan os.Signal, 8)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		defer signal.Stop(signals)
 		for _, command := range task.Commands {
 			cmd, e := child(command)
 			if e != nil {
@@ -236,6 +242,11 @@ func taskCommand(action, path string) (result int) {
 			cmd.Env = env
 			e = cmd.Run()
 			closeForwarded(cmd)
+			select {
+			case sig := <-signals:
+				return 128 + int(sig.(syscall.Signal))
+			default:
+			}
 			if e != nil {
 				return exitCode(e)
 			}

@@ -890,6 +890,61 @@ else: raise AssertionError(sys.argv)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.alive(int((self.root / "descendant").read_text())))
 
+    def test_owned_sequence_waits_for_graceful_cancellation(self):
+        for number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=number):
+                ready = self.root / "sequence-ready"
+                finished = self.root / "sequence-finished"
+                ready.unlink(missing_ok=True)
+                finished.unlink(missing_ok=True)
+                code = """import signal,time
+from pathlib import Path
+signals = []
+def stop(number, _):
+    signals.append(number)
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+Path('sequence-ready').touch()
+while not signals: time.sleep(.01)
+time.sleep(.5)
+Path('sequence-finished').write_text(str(signals))
+"""
+                path = self.base / "commands.json"
+                path.write_text(
+                    json.dumps(
+                        {
+                            "commands": [
+                                self.command([sys.executable, "-c", code]),
+                                self.command(
+                                    [
+                                        sys.executable,
+                                        "-c",
+                                        "from pathlib import Path; Path('unexpected').touch()",
+                                    ]
+                                ),
+                            ],
+                            "shutdown_seconds": 3,
+                        }
+                    )
+                )
+                parent = subprocess.Popen(
+                    [CONTROL, "command", str(path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                try:
+                    self.wait_file(ready)
+                    parent.send_signal(number)
+                    stdout, stderr = parent.communicate(timeout=8)
+                    self.assertEqual(parent.returncode, 128 + number, stdout + stderr)
+                    self.assertEqual(finished.read_text(), str([int(number)]))
+                    self.assertFalse((self.root / "unexpected").exists())
+                finally:
+                    if parent.poll() is None:
+                        parent.kill()
+                    parent.communicate(timeout=5)
+
     def test_owned_command_timeout_kills_signal_resistant_descendants(self):
         code = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('timeout-pid').write_text(str(os.getpid())); time.sleep(120)"
         started = time.monotonic()
