@@ -862,6 +862,213 @@ os.execvp('just',['just','chainman','run','inner','--',*sys.argv[1:]])
             finally:
                 self.run_bootstrap("services-stop", env=env)
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_stale_setup_consent_preserves_piped_task_input(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[setup.fixture]
+inputs=["input"]
+artifacts=["ready"]
+commands=[["sh","-eu","-c","cp input ready"]]
+[services.worker]
+command=["sleep","600"]
+shutdown_seconds=1
+[tasks.probe]
+setup=["fixture"]
+services=["worker"]
+commands=[["sh","-eu","-c","cat > received"]]
+""")
+        (self.root / "input").write_text("original")
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_SETUP="prompt",
+            CHAINMAN_CONTAINER_ENGINE=self.test_engine,
+        )
+        self.run_bootstrap("setup", env=env)
+        (self.root / "input").write_text("changed")
+        payload = b"literal hook or piped input $()\nsecond line\n"
+        for answer in (b"n\n", b"y\n"):
+            master, slave = pty.openpty()
+
+            def terminal():
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+
+            child = subprocess.Popen(
+                [str(self.launcher), "run", "probe"],
+                cwd=self.root,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+                preexec_fn=terminal,
+            )
+            os.close(slave)
+            output = b""
+            answered = False
+            try:
+                child.stdin.write(payload)
+                child.stdin.close()
+                deadline = time.monotonic() + 240
+                while time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.1)[0]:
+                        try:
+                            output += os.read(master, 65536)
+                        except OSError:
+                            break
+                    if b"[Y/n]" in output and not answered:
+                        self.assertEqual((self.root / "ready").read_text(), "original")
+                        self.assertFalse((self.root / "received").exists())
+                        os.write(master, answer)
+                        answered = True
+                    if child.poll() is not None:
+                        break
+                self.assertTrue(answered, output.decode(errors="replace"))
+                self.assertEqual(child.wait(timeout=10) == 0, answer == b"y\n", output)
+                if answer == b"y\n":
+                    self.assertEqual((self.root / "ready").read_text(), "changed")
+                    self.assertEqual((self.root / "received").read_bytes(), payload)
+                else:
+                    self.assertEqual((self.root / "ready").read_text(), "original")
+                    self.assertFalse((self.root / "received").exists())
+                self.assertFalse(
+                    json.loads(self.run_bootstrap("services-status", env=env).stdout)[
+                        "running"
+                    ]
+                )
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                    try:
+                        child.wait(timeout=20)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+                os.close(master)
+                self.run_bootstrap("services-stop", env=env)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_timing_repeated_container_entry_starts_fresh(self):
+        self.use_real_runtime()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+        )
+        env = dict(self.env, CHAINMAN_TIMING="1")
+
+        def bootstrap_record(result, elapsed):
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [
+                json.loads(line.removeprefix("CHAINMAN_TIMING "))
+                for line in result.stderr.splitlines()
+                if line.startswith("CHAINMAN_TIMING ")
+            ]
+            rows = [row for row in rows if row["phase"] == "bootstrap"]
+            self.assertEqual(len(rows), 1, result.stderr)
+            self.assertLessEqual(rows[0]["elapsed_ns"] / 1e9, elapsed + 1.2)
+            return rows[0]
+
+        started = time.monotonic()
+        bootstrap_record(
+            self.run_bootstrap("version", env=env), time.monotonic() - started
+        )
+        name = (
+            "chainman-timing-"
+            + hashlib.sha256(str(self.root).encode()).hexdigest()[:16]
+        )
+        env.update(
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=self.test_engine,
+            CHAINMAN_CONTAINER_NAME=name,
+            CHAINMAN_CONTAINER_OWNER="a" * 32,
+            CHAINMAN_TIMING_PARENT="b" * 32,
+        )
+        self.prepare_cache(env)
+        marker = self.root / "runtime-path"
+        with (self.root / "timing-output").open("w+") as log:
+            child = subprocess.Popen(
+                [
+                    str(self.launcher),
+                    "exec",
+                    "--profile",
+                    "host",
+                    "--",
+                    "python3",
+                    "-c",
+                    "import os,pathlib,time; pathlib.Path('runtime-path').write_text(os.environ['CHAINMAN_RUNTIME']); time.sleep(240)",
+                ],
+                env=env,
+                cwd=self.root,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+            )
+            try:
+                deadline = time.monotonic() + 180
+                while (
+                    not marker.exists()
+                    and child.poll() is None
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.1)
+                log.seek(0)
+                self.assertTrue(marker.exists(), log.read())
+                configured = json.loads(
+                    subprocess.check_output(
+                        [
+                            self.test_engine,
+                            "inspect",
+                            "--format",
+                            "{{json .Config.Env}}",
+                            name,
+                        ],
+                        text=True,
+                    )
+                )
+                for key in (
+                    "CHAINMAN_TIMING_BOOTSTRAP_STARTED=",
+                    "CHAINMAN_TIMING_PARENT=",
+                ):
+                    self.assertFalse(any(value.startswith(key) for value in configured))
+                operations = []
+                for _ in range(2):
+                    time.sleep(2.2)
+                    started = time.monotonic()
+                    result = run_captured(
+                        [
+                            self.test_engine,
+                            "exec",
+                            name,
+                            "sh",
+                            marker.read_text() + "/bootstrap/chainman.sh",
+                            "version",
+                        ],
+                        env=env,
+                    )
+                    row = bootstrap_record(result, time.monotonic() - started)
+                    self.assertNotIn("parent", row)
+                    operations.append(row["operation"])
+                self.assertNotEqual(*operations)
+            finally:
+                if child.poll() is None:
+                    child.terminate()
+                try:
+                    child.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+                # This exact name and token belong only to this fixture.
+                remaining = subprocess.run(
+                    [self.test_engine, "inspect", name], capture_output=True
+                )
+                self.assertNotEqual(remaining.returncode, 0)
+
     def test_public_hook_setup_and_commit_a(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text("""schema=3

@@ -179,6 +179,10 @@ durations use monotonic clocks. Timing is disabled by default.
 Bootstrap measurements include runtime realization and, for schema 3, trusted
 planning. Record cold/warm cache conditions alongside measurements; do not sum
 overlapping parent/child phases or treat unpaired records as completed work.
+The initial host-to-container entry retains its start timestamp across that
+handoff. Invocation timestamps and parent identities are not stored as container
+defaults: a later probe in an existing container measures its own entry, not the
+container's age.
 
 For readiness probes, measure the endpoint or command separately from the full
 `_workflow-probe` invocation. Command probes revalidate configuration, profile

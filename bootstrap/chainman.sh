@@ -842,7 +842,11 @@ prepare_action=$CHAINMAN_REQUEST_ACTION
 prepare_task=$CHAINMAN_REQUEST_TASK
 prepare_profile=
 transport_readiness=
-set -- "$image" sh -eu -c "$container_init" sh "$self" "$@"
+# Invocation timings belong to this process, not reusable container defaults.
+# Later engine exec probes must start fresh rather than inherit container age.
+set -- "$image" sh -eu -c "$container_init" sh env \
+    "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" \
+    "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" "$self" "$@"
 while IFS= read -r option; do
     [ -n "$option" ] || continue
     IFS= read -r value || fail 'Container option lacks a value.'
@@ -1094,7 +1098,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \
     --mount "type=volume,src=$downloads_volume,dst=/chainman-downloads" --env TOOLCHAIN_DOWNLOAD_CACHE=/chainman-downloads \
     --workdir "$root" \
-    --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" --env "CHAINMAN_TIMING_BOOTSTRAP_STARTED=${CHAINMAN_TIMING_BOOTSTRAP_STARTED:-}" --env "CHAINMAN_TIMING_PARENT=${CHAINMAN_TIMING_PARENT:-}" \
+    --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_HOOK_REMOTE_NAME --env CHAINMAN_HOOK_REMOTE_URL \
     --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
