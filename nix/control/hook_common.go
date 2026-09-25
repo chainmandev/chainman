@@ -121,7 +121,7 @@ func hookEnv(clean bool) []string {
 		}
 		env = append(env, v)
 	}
-	env = append(env, "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=0")
+	env = append(env, "GIT_NO_REPLACE_OBJECTS=1", "GIT_OPTIONAL_LOCKS=0", "GIT_NO_LAZY_FETCH=1")
 	if clean {
 		env = append(env, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
 	}
@@ -424,6 +424,12 @@ func hookAction(args []string) int {
 // The calling helper stays in its caller's group so nested callbacks still
 // receive cancellation. No persistent state or background supervisor is needed.
 func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
+	return hookRunBounded(c, cancelSignal, 0)
+}
+
+// Remote discovery gets a deadline and no controlling terminal. The existing
+// finite-command supervisor still owns its credential/transport descendants.
+func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Duration) error {
 	lease, e := hookCallbackLease()
 	if e != nil {
 		return e
@@ -447,6 +453,13 @@ func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
 	c.Args = append([]string{self, "hook-exec", strconv.Itoa(fd), strconv.Itoa(int(cancelSignal)), c.Path}, c.Args[1:]...)
 	c.Path = self
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var expired <-chan time.Time
+	if timeout > 0 {
+		c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		expired = timer.C
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
@@ -459,6 +472,29 @@ func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
 	select {
 	case e := <-done:
 		return e
+	case <-expired:
+		_ = syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
+		cleanup := time.NewTimer(8 * time.Second)
+		defer cleanup.Stop()
+		var interrupted os.Signal
+		for {
+			select {
+			case <-done:
+				select {
+				case interrupted = <-signals:
+				default:
+				}
+				if interrupted != nil {
+					return &startupInterrupted{interrupted.(syscall.Signal)}
+				}
+				return fmt.Errorf("remote discovery timed out")
+			case sig := <-signals:
+				interrupted = sig
+				_ = syscall.Kill(-c.Process.Pid, sig.(syscall.Signal))
+			case <-cleanup.C:
+				_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+			}
+		}
 	case sig := <-signals:
 		forward := sig.(syscall.Signal)
 		if cancelSignal != 0 {

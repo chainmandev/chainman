@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -25,9 +28,85 @@ type hookScanInput struct {
 	Roots   []string        `json:"roots"`
 }
 
+// Remote advertisements are metadata, not source or policy. Bound captured
+// output, suppress transport diagnostics (which may contain credential URLs),
+// and never import objects or change remote-tracking refs during a push hook.
+type hookAdvertisement struct{ body bytes.Buffer }
+
+func (b *hookAdvertisement) Write(p []byte) (int, error) {
+	if b.body.Len()+len(p) > 4<<20 {
+		return 0, fmt.Errorf("remote advertisement exceeds 4 MiB")
+	}
+	return b.body.Write(p)
+}
+
+func advertisedHookObjects(body []byte) ([]string, error) {
+	objects := []string{}
+	seen := map[string]bool{}
+	for _, line := range bytes.Split(bytes.TrimSpace(body), []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		fields := strings.Fields(string(line))
+		if len(fields) != 2 || !hookOID.MatchString(fields[0]) || strings.Trim(fields[0], "0") == "" || !strings.HasPrefix(fields[1], "refs/") {
+			return nil, fmt.Errorf("invalid remote advertisement")
+		}
+		if !seen[fields[0]] {
+			objects = append(objects, fields[0])
+			seen[fields[0]] = true
+		}
+	}
+	return objects, nil
+}
+
+func (p HookPlan) advertisedBases(destination string) ([]string, error) {
+	if destination == "" {
+		return nil, fmt.Errorf("push destination is unavailable")
+	}
+	c := exec.Command(p.Git, "-C", p.Root, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.interactive=false", "ls-remote", "--refs", "--", destination)
+	c.Env = append(hookEnv(false), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=false", "SSH_ASKPASS_REQUIRE=never")
+	c.Dir = p.Root
+	var output hookAdvertisement
+	c.Stdout, c.Stderr = &output, io.Discard
+	if e := hookRunBounded(c, 0, 10*time.Second); e != nil {
+		var interrupted *startupInterrupted
+		if errors.As(e, &interrupted) {
+			return nil, e
+		}
+		return nil, fmt.Errorf("remote discovery failed or exceeded its deadline")
+	}
+	objects, e := advertisedHookObjects(output.body.Bytes())
+	if e != nil || len(objects) == 0 {
+		return nil, fmt.Errorf("remote advertisement has no usable baseline")
+	}
+	selectors := make([]string, len(objects))
+	for i, oid := range objects {
+		selectors[i] = oid + "^{commit}"
+	}
+	raw, e := p.git(p.Root, "", []byte(strings.Join(selectors, "\n")+"\n"), false, "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if e != nil {
+		return nil, fmt.Errorf("advertised objects could not be inspected locally")
+	}
+	bases := []string{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[1] == "commit" && hookOID.MatchString(fields[0]) && !seen[fields[0]] {
+			bases = append(bases, fields[0])
+			seen[fields[0]] = true
+		}
+	}
+	if len(bases) == 0 {
+		return nil, fmt.Errorf("advertised commits are unavailable locally")
+	}
+	return bases, nil
+}
+
 func (p HookPlan) outgoing(records []byte) ([]string, error) {
 	roots := []string{}
 	seen := map[string]bool{}
+	discovered := false
+	var advertised []string
 	add := func(s string) {
 		if !seen[s] {
 			roots = append(roots, s)
@@ -55,22 +134,41 @@ func (p HookPlan) outgoing(records []byte) ([]string, error) {
 			return nil, e
 		}
 		if kind == "commit" {
-			argv := []string{"rev-list", "--topo-order", "--reverse", local}
+			selectors := []string{local}
 			if strings.Trim(remote, "0") != "" {
 				base, e := p.query("rev-parse", "--verify", remote+"^{commit}")
 				if e == nil {
-					argv = append(argv, "^"+base)
+					selectors = append(selectors, "^"+base)
 				} else {
-					fmt.Fprintf(os.Stderr, "Trojan Source: remote base %s is unavailable; scanning all locally reachable history for %s\n", remote, local)
+					fmt.Fprintf(os.Stderr, "Trojan Source: remote base %s is unavailable; discovering destination refs\n", remote)
 				}
 			}
-			revisions, e := p.query(argv...)
+			if len(selectors) == 1 {
+				if !discovered {
+					discovered = true
+					advertised, e = p.advertisedBases(os.Getenv("CHAINMAN_HOOK_REMOTE_URL"))
+					if e != nil {
+						var interrupted *startupInterrupted
+						if errors.As(e, &interrupted) {
+							return nil, e
+						}
+						fmt.Fprintf(os.Stderr, "Trojan Source: %s; conservatively scanning all locally reachable history\n", e)
+					}
+				}
+				for _, base := range advertised {
+					selectors = append(selectors, "^"+base)
+				}
+			}
+			revisions, e := p.git(p.Root, "", []byte(strings.Join(selectors, "\n")+"\n"), false, "rev-list", "--topo-order", "--reverse", "--stdin")
 			if e != nil {
 				return nil, e
 			}
-			for _, rev := range strings.Fields(revisions) {
+			for _, rev := range strings.Fields(string(revisions)) {
 				add(rev)
 			}
+			// A new ref may introduce no commits relative to another remote ref.
+			// Its proposed tree must still pass the current scanner policy.
+			add(peeled)
 		} else if kind == "tree" || kind == "blob" {
 			add(peeled)
 		} else {

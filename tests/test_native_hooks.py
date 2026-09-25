@@ -995,6 +995,191 @@ commands=[["sh","-c","cat > received"]]
             0,
         )
 
+    def test_scanner_new_refs_use_destination_history_and_always_check_tips(self):
+        source = self.root / "historical.ts"
+        source.write_text("// historical fixture \u202e\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Historical canary")
+        self.git("rm", "historical.ts")
+        self.git("commit", "-qm", "Published clean tree")
+        base = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        bare = self.base / "destination.git"
+        self.git("init", "--bare", "-q", str(bare))
+        self.git("push", str(bare), "HEAD:refs/heads/base")
+        self.env["CHAINMAN_HOOK_REMOTE_URL"] = str(bare)
+        zero = "0" * 40
+
+        def scan(revision, remote=zero):
+            return self.hook(
+                "trojan-source",
+                input=f"HEAD {revision} refs/heads/review {remote}\n".encode(),
+                check=False,
+            )
+
+        # An identical tip still gets one tree scan, without rescanning ancestry.
+        result = scan(base)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b"across 1 Git objects", result.stdout)
+        source.write_text("// outgoing fixture \u202e\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Outgoing canary")
+        bad = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.git("rm", "historical.ts")
+        self.git("commit", "-qm", "Reverted outgoing canary")
+        head = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        # A stale local tracking ref must not bless the outgoing history.
+        self.git("update-ref", "refs/remotes/origin/base", head)
+        for remote in (zero, "f" * 40, base):
+            result = scan(head, remote)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(bad.encode(), result.stderr)
+        # Even when a bad tip is already advertised, the proposed tree is checked.
+        self.git("push", str(bare), bad + ":refs/heads/existing")
+        result = scan(bad)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"U+202E", result.stderr)
+
+    def test_scanner_remote_discovery_once_without_fetching_or_credentials_output(self):
+        bare = self.base / "destination.git"
+        self.git("init", "--bare", "-q", str(bare))
+        self.git("push", str(bare), "HEAD:refs/heads/base")
+        base = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.git("commit", "--allow-empty", "-qm", "Outgoing")
+        head = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        queries = self.base / "queries"
+        wrapper = self.base / "git-wrapper"
+        real_git = self.plan["git"]
+        wrapper.write_text(
+            '#!/bin/sh\ncase " $* " in *" ls-remote "*)\n'
+            ' test "$GIT_TERMINAL_PROMPT" = 0 || exit 91\n'
+            ' test "$GIT_NO_LAZY_FETCH" = 1 || exit 93\n'
+            f" echo query >> {shlex.quote(str(queries))};;\n"
+            '*" fetch "*) exit 92;; esac\n'
+            f'exec {shlex.quote(real_git)} "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        self.plan["git"] = str(wrapper)
+        self.save_plan()
+        self.env["CHAINMAN_HOOK_REMOTE_URL"] = str(bare)
+        before = self.git("for-each-ref").stdout
+        zero = "0" * 40
+        self.hook(
+            "trojan-source",
+            input=(
+                f"HEAD {head} refs/heads/one {zero}\nHEAD {base} refs/heads/two {zero}\n"
+            ).encode(),
+        )
+        self.assertEqual(queries.read_text(), "query\n")
+        self.assertEqual(self.git("for-each-ref").stdout, before)
+        self.assertFalse((self.root / ".git/FETCH_HEAD").exists())
+        wrapper.write_text(
+            '#!/bin/sh\ncase " $* " in *" ls-remote "*)\n'
+            ' echo "https://user:private-token@example.invalid" >&2; exit 77;; esac\n'
+            f'exec {shlex.quote(real_git)} "$@"\n'
+        )
+        result = self.hook(
+            "trojan-source", input=f"HEAD {head} refs/heads/one {zero}\n".encode()
+        )
+        self.assertIn(b"conservatively", result.stderr)
+        self.assertNotIn(b"private-token", result.stdout + result.stderr)
+
+    def test_scanner_partial_clone_does_not_fetch_advertised_missing_objects(self):
+        source = self.root
+        self.git("config", "uploadpack.allowFilter", "true")
+        self.git("config", "uploadpack.allowAnySHA1InWant", "true")
+        partial = self.base / "partial clone"
+        self.git("clone", "--filter=blob:none", source.as_uri(), str(partial))
+        self.git("commit", "--allow-empty", "-qm", "Remote-only commit")
+        missing = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        self.root = partial
+        self.plan["root"] = str(partial)
+        self.save_plan()
+        self.env["CHAINMAN_HOOK_REMOTE_URL"] = source.as_uri()
+        objects = partial / ".git/objects"
+        before = sorted(
+            str(p.relative_to(objects)) for p in objects.rglob("*") if p.is_file()
+        )
+        head = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        result = self.hook(
+            "trojan-source", input=f"HEAD {head} refs/heads/new {'0' * 40}\n".encode()
+        )
+        self.assertIn(b"advertised commits are unavailable locally", result.stderr)
+        self.assertEqual(
+            sorted(
+                str(p.relative_to(objects)) for p in objects.rglob("*") if p.is_file()
+            ),
+            before,
+        )
+        # Positive control: this exact missing commit really is lazy-fetchable.
+        self.assertEqual(self.git("cat-file", "-t", missing).stdout, b"commit\n")
+        self.assertNotEqual(
+            sorted(
+                str(p.relative_to(objects)) for p in objects.rglob("*") if p.is_file()
+            ),
+            before,
+        )
+
+    def test_scanner_discovery_timeout_and_cancellation_stop_transport_children(self):
+        head = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        record = f"HEAD {head} refs/heads/new {'0' * 40}\n".encode()
+        wrapper = self.base / "git-wrapper"
+        child_pid = self.base / "transport-pid"
+        wrapper.write_text(
+            '#!/bin/sh\ncase " $* " in *" ls-remote "*)\n'
+            ' trap "" TERM INT HUP\n'
+            " sleep 60 &\n"
+            f" echo $! > {shlex.quote(str(child_pid))}\n"
+            " wait; exit;; esac\n"
+            f'exec {shlex.quote(self.plan["git"])} "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        self.plan["git"] = str(wrapper)
+        self.save_plan()
+        self.env["CHAINMAN_HOOK_REMOTE_URL"] = "/unused"
+        for cancel in (False, True, "after-deadline"):
+            child_pid.unlink(missing_ok=True)
+            process = subprocess.Popen(
+                [CONTROL, "hook", str(self.control / "plan.json"), "trojan-source"],
+                env=self.env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                process.stdin.write(record)
+                process.stdin.close()
+                process.stdin = None
+                deadline = time.monotonic() + 10
+                while not child_pid.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(child_pid.exists())
+                if cancel == "after-deadline":
+                    time.sleep(10.5)
+                if cancel:
+                    process.terminate()
+                stdout, stderr = process.communicate(timeout=25)
+                self.assertEqual(process.returncode, 143 if cancel else 0, stderr)
+                if cancel:
+                    self.assertNotIn(b"distinct source blobs", stdout)
+                else:
+                    self.assertIn(b"conservatively", stderr)
+                pid = int(child_pid.read_text())
+                # A reaped or zombie child cannot retain a running transport.
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    pass
+                else:
+                    stat = Path(f"/proc/{pid}/stat")
+                    self.assertTrue(
+                        stat.exists()
+                        and stat.read_text().split(") ", 1)[1].startswith("Z ")
+                    )
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    process.communicate(timeout=12)
+
     def test_scanner_invalid_source_and_native_binary(self):
         (self.root / "source.ts").write_bytes(b"\xff\x00")
         self.git("add", ".")

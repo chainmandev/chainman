@@ -194,9 +194,16 @@ hooks or transactional formatting.
 
 The default scan checks source blobs in **all outgoing commits**, including
 intermediate commits removed from the final tree. It handles multiple ref updates,
-new refs, force pushes, annotated tags and deletions. With a missing remote base,
-it explains that it is conservatively scanning locally reachable history. It never
-silently skips that history or fetches remote objects during the hook.
+new refs, force pushes, annotated tags and deletions. Every proposed tip is checked,
+even when its commits are already present on another destination ref.
+
+For a new ref or missing remote base, the host queries the actual push destination
+once, without interactive authentication, with a ten-second discovery deadline and
+bounded child cleanup. Freshly advertised commits already available locally bound
+the outgoing history. Stale local remote-tracking refs are not a baseline. Discovery
+failure or no usable local baseline produces an explicit conservative scan of all
+locally reachable history. The hook never fetches objects or changes Git refs.
+Ordinary updates with an available remote tip require no additional remote query.
 
 The separately hash-pinned upstream
 [anti-trojan-source](https://github.com/lirantal/anti-trojan-source) library detects
