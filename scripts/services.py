@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import re
 import hashlib
 import json
 import os
@@ -44,6 +46,9 @@ class HTTPProbe(TypedDict):
     port: int
     path: str
     status_code: int
+    body: NotRequired[str]
+    trim_body: NotRequired[bool]
+    headers: NotRequired[dict[str, str]]
 
 
 class Probe(TypedDict):
@@ -111,7 +116,15 @@ def integer(value: object, field: str) -> int:
 
 
 def http_readiness(value: object) -> HTTPProbe:
-    if not isinstance(value, dict) or set(value) - {"port", "path", "status_code"}:
+    if not isinstance(value, dict) or set(value) - {
+        "port",
+        "path",
+        "status_code",
+        "body",
+        "trim_body",
+        "headers_from_environment",
+        "basic_auth",
+    }:
         raise ValueError("Invalid HTTP readiness declaration")
     port, path, status = (
         value.get("port"),
@@ -132,7 +145,90 @@ def http_readiness(value: object) -> HTTPProbe:
         raise ValueError(
             "HTTP readiness requires a loopback port, absolute path and 2xx status"
         )
-    return {"port": port, "path": path, "status_code": status}
+    result: HTTPProbe = {"port": port, "path": path, "status_code": status}
+    if "body" in value:
+        body = value["body"]
+        if not isinstance(body, str) or len(body.encode("utf-8")) > 4096:
+            raise ValueError("HTTP readiness body must be at most 4096 UTF-8 bytes")
+        result["body"] = body
+    if "trim_body" in value:
+        if type(value["trim_body"]) is not bool or "body" not in value:
+            raise ValueError("trim_body requires a body predicate and a boolean")
+        result["trim_body"] = value["trim_body"]
+    headers = table(
+        value.get("headers_from_environment", {}), "HTTP header environment"
+    )
+    seen: set[str] = set()
+    for key, variable in headers.items():
+        if (
+            not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key)
+            or key.lower() in seen
+            or key.lower()
+            in {
+                "host",
+                "connection",
+                "content-length",
+                "transfer-encoding",
+                "accept-encoding",
+                "proxy-authorization",
+            }
+        ):
+            raise ValueError("Invalid HTTP readiness header name")
+        seen.add(key.lower())
+        project_environment.variable(variable)
+    auth = value.get("basic_auth")
+    if auth is not None:
+        auth = table(auth, "HTTP basic authentication")
+        if (
+            set(auth) - {"username_env", "password_env", "optional", "trim"}
+            or not {"username_env", "password_env"} <= set(auth)
+            or "authorization" in seen
+        ):
+            raise ValueError("Invalid HTTP basic authentication declaration")
+        for key in ("username_env", "password_env"):
+            project_environment.variable(auth[key])
+        for key in ("optional", "trim"):
+            if type(auth.get(key, False)) is not bool:
+                raise ValueError("HTTP basic authentication flags must be boolean")
+    return result
+
+
+def resolve_http_readiness(value: object, env: Mapping[str, str]) -> HTTPProbe:
+    result = http_readiness(value)
+    spec = table(value, "HTTP readiness")
+    headers: dict[str, str] = {}
+    for key, variable in table(
+        spec.get("headers_from_environment", {}), "HTTP headers"
+    ).items():
+        name = project_environment.variable(variable)
+        if not env.get(name):
+            raise ValueError(f"HTTP readiness requires environment variable {name}")
+        headers[key] = env[name]
+    if "basic_auth" in spec:
+        auth = table(spec["basic_auth"], "HTTP authentication")
+        user, password = (
+            env.get(project_environment.variable(auth[key]), "")
+            for key in ("username_env", "password_env")
+        )
+        if auth.get("trim", False):
+            user, password = user.strip(), password.strip()
+        if user or password or not auth.get("optional", False):
+            if not user or not password or ":" in user:
+                raise ValueError(
+                    "HTTP readiness requires a complete basic authentication pair"
+                )
+            headers["Authorization"] = "Basic " + base64.b64encode(
+                f"{user}:{password}".encode()
+            ).decode("ascii")
+    if (
+        len(headers) > 16
+        or sum(len(k.encode()) + len(v.encode()) for k, v in headers.items()) > 8192
+        or any(any(ord(c) < 32 or ord(c) == 127 for c in v) for v in headers.values())
+    ):
+        raise ValueError("Invalid or oversized HTTP readiness headers")
+    if headers:
+        result["headers"] = headers
+    return result
 
 
 def volume_compatibility(root: Path, volume: object) -> str:
@@ -813,7 +909,31 @@ def export(root: Path, arguments: list[str]) -> int:
                 ),
             }
             if "http_get" in probe:
-                prepared_probe["http_get"] = http_readiness(probe["http_get"])
+                if "container" in spec:
+                    probe_env = literal_environment(
+                        table(spec["container"], "Container").get("environment", {}),
+                        root,
+                        planning_env,
+                    )
+                else:
+                    _, profile_spec = chainman.profile(
+                        root,
+                        text(
+                            spec.get("profile", workflows.default_profile(cfg)),
+                            "Service profile",
+                        ),
+                        cfg=cfg,
+                    )
+                    probe_env = chainman.profile_environment(
+                        root,
+                        profile_spec,
+                        planning_env,
+                        spec.get("environment", {}),
+                        cfg=cfg,
+                    )
+                prepared_probe["http_get"] = resolve_http_readiness(
+                    probe["http_get"], probe_env
+                )
             elif "container" in spec:
                 probe_command = [
                     engine,

@@ -57,7 +57,9 @@ loopback in host-Nix and the container interface in container-Nix. The explicit
 transport publishes port 8000 on host loopback in container mode; it does not
 expose the host service to other machines.
 For services exposing host loopback HTTP endpoints, the native `http_get` probe
-avoids a shell/Nix entry per probe. See the reference for namespace and port rules.
+avoids a shell/Nix entry per probe. It supports bounded body checks and headers
+from declared environment variables, including Basic authentication. See the
+[configuration reference](configuration.md#services) for port and credential rules.
 
 ## Application ownership
 

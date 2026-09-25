@@ -430,14 +430,48 @@ Probes use the service profile without starting a compiler-cache server. Their
 command deadline includes bounded descendant cleanup before the backend's fallback
 deadline. Probe recovery uses a separate ownership receipt from the application.
 
-For simple HTTP endpoints, `readiness.http_get = { port = 4444, path = "/status" }`
-uses Process Compose's native HTTP checker directly, without a shell, interpreter,
-Nix evaluation or container exec for each probe. It connects to the host's
-`127.0.0.1`; container services must publish that port on loopback, including when
-another service owns their network namespace. `path` defaults to `/` and
-`status_code` to `200`; an explicit expected status must be between 200 and 299.
-The same startup bounds apply. Keep command probes for authentication, response
-body checks or endpoints that are only accessible inside a container.
+For HTTP endpoints, `readiness.http_get = { port = 4444, path = "/status" }`
+uses the verified native controller without an interpreter, Nix evaluation or
+container exec per request. Process Compose still schedules probes and owns
+service readiness. Requests connect only to host `127.0.0.1`; containers must
+publish that loopback port, including when another service owns their network
+namespace. `path` defaults to `/` and `status_code` to `200` (allowed: 200–299).
+Proxies and redirects are disabled. Command probes remain available for endpoints
+accessible only inside a container and arbitrary application checks.
+
+Optional `body` matches the complete response; `trim_body = true` removes leading
+and trailing Unicode whitespace before comparison. Expected text is limited to
+4096 UTF-8 bytes and responses used for body checks to 64 KiB. A wrong status,
+wrong/oversized body, network error or timeout fails readiness. No response body
+or credential is printed in diagnostics.
+
+```toml
+[services.api.readiness]
+period_seconds = 2
+timeout_seconds = 4
+failure_threshold = 60
+[services.api.readiness.http_get]
+port = 8000
+path = "/health/ready"
+body = "OK"
+trim_body = true
+headers_from_environment = { Authorization = "LOCAL_API_AUTHORIZATION" }
+```
+
+Header values are resolved once from the service's effective declared project,
+profile and service environment, then stored in private controller state. They
+never become host execution environment overrides, command arguments or status
+output. Missing/empty header variables fail planning. At most 16 headers and 8 KiB
+of header names/values are allowed; routing, connection and compression overrides
+are rejected.
+
+For Basic authentication, use `basic_auth = { username_env = "LOCAL_USER",
+password_env = "LOCAL_PASSWORD" }` instead of an Authorization header mapping.
+`optional = true` omits authentication only when both values are empty;
+`trim = true` trims surrounding whitespace first. A partial pair always fails.
+Credentials must already be declared environment inputs; this feature does not
+read credential stores or run a credential command. Existing generation checks,
+probe ownership, deadlines and cancellation apply to native HTTP probes too.
 
 `restart` is `no`, `always`, or `on_failure`; `shutdown_seconds` bounds cleanup.
 Commands must stay in the foreground so the backend can own their lifetime.

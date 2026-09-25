@@ -39,14 +39,17 @@ TABLES = {
     "readiness": set(
         "command http_get period_seconds timeout_seconds failure_threshold".split()
     ),
-    "http_get": set("port path status_code".split()),
+    "http_get": set(
+        "port path status_code body trim_body headers_from_environment basic_auth".split()
+    ),
+    "basic_auth": set("username_env password_env optional trim".split()),
     "watch": set("task paths ignore debounce_ms startup_seconds".split()),
     "container": set("image command ports environment volumes read_only user".split()),
     "transport": set("ports mounts host_access display".split()),
     "resources": set("max_jobs memory_per_job_gib job_variables".split()),
 }
 BOOLEANS = set(
-    "pnpm compiler_cache cleanup_children wait_for_services exclusive exclusive_services read_only host_access".split()
+    "trim_body optional trim pnpm compiler_cache cleanup_children wait_for_services exclusive exclusive_services read_only host_access".split()
 )
 ARRAYS = set(
     "commands command depends_on setup services inputs exclude_inputs environment_inputs artifacts paths ignore ports mounts volumes job_variables entry_setup allowed_modes allowed_platforms".split()
@@ -76,7 +79,13 @@ def fields(value: object, allowed: Set[str], location: str) -> Table:
         path = f"{location}.{key}"
         if key in TABLES:
             fields(value, TABLES[key], path)
-        elif key in {"environment", "context_environment", "urls", "details"}:
+        elif key in {
+            "environment",
+            "context_environment",
+            "urls",
+            "details",
+            "headers_from_environment",
+        }:
             if not isinstance(value, dict) or any(
                 not isinstance(v, str) or "\0" in v for v in value.values()
             ):

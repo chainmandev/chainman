@@ -25,10 +25,10 @@ func TestHTTPReadinessRejectsInvalidPlans(t *testing.T) {
 	command := Command{Argv: []string{"/bin/true"}, Directory: root}
 	p := Plan{Schema: 1, Root: root, State: physicalTempDir(t), Backend: "/bin/true", Fingerprint: "fixture", Services: map[string]Service{}, Requested: []string{"web"}, Task: command}
 	for _, h := range []HTTPProbe{
-		{8080, "/health?ready=1", 204},
-		{0, "/", 200}, {65536, "/", 200},
-		{80, "//remote.example/", 200}, {80, "http://remote.example/", 200},
-		{80, "/health#fragment", 200}, {80, "/", 404},
+		{Port: 8080, Path: "/health?ready=1", StatusCode: 204},
+		{Port: 0, Path: "/", StatusCode: 200}, {Port: 65536, Path: "/", StatusCode: 200},
+		{Port: 80, Path: "//remote.example/", StatusCode: 200}, {Port: 80, Path: "http://remote.example/", StatusCode: 200},
+		{Port: 80, Path: "/health#fragment", StatusCode: 200}, {Port: 80, Path: "/", StatusCode: 404},
 	} {
 		p.Services["web"] = Service{Command: command, Restart: "no", Shutdown: 1, Readiness: &Probe{HTTPGet: &h, Period: 1, Timeout: 1, Failures: 2}}
 		err := validate(p)
@@ -37,7 +37,7 @@ func TestHTTPReadinessRejectsInvalidPlans(t *testing.T) {
 		}
 	}
 	s := p.Services["web"]
-	s.Readiness.HTTPGet = &HTTPProbe{8080, "/", 200}
+	s.Readiness.HTTPGet = &HTTPProbe{Port: 8080, Path: "/", StatusCode: 200}
 	s.Readiness.Command = command
 	p.Services["web"] = s
 	if validate(p) == nil {

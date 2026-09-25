@@ -1582,9 +1582,55 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
                 self.assertFalse(self.alive(self.pid()))
                 compose = json.loads((self.state / "compose.json").read_text())
                 probe = compose["processes"]["worker"]["readiness_probe"]
-                self.assertNotIn("exec", probe)
-                self.assertEqual(probe["http_get"]["host"], "127.0.0.1")
-                self.assertEqual(probe["timeout_seconds"], 1)
+                self.assertIn("exec", probe)
+                self.assertNotIn("http_get", probe)
+                self.assertIn(" probe ", probe["exec"]["command"])
+                self.assertEqual(probe["timeout_seconds"], 16)
+
+    def test_native_http_body_auth_and_diagnostics(self):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        worker = self.root / "http-worker.py"
+        worker.write_text("""import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.headers.get('Authorization') == 'Bearer private-fixture' else 401)
+        self.end_headers()
+        self.wfile.write(Path('http-body').read_bytes())
+Path('pid').write_text(str(os.getpid()))
+HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever()
+""")
+        service = self.plan["services"]["worker"]
+        service["command"] = self.command([sys.executable, str(worker), str(port)])
+        service["readiness"] = {
+            "http_get": {
+                "port": port,
+                "path": "/",
+                "status_code": 200,
+                "body": "OK",
+                "trim_body": True,
+                "headers": {"Authorization": "Bearer private-fixture"},
+            },
+            "period_seconds": 1,
+            "timeout_seconds": 1,
+            "failure_threshold": 2,
+        }
+        self.plan["task"] = self.command(
+            [sys.executable, "-c", "from pathlib import Path; Path('task-ran').touch()"]
+        )
+        for body in ("private-response", " OK\n"):
+            (self.root / "http-body").write_text(body)
+            self.run_control("run", check=0 if body.strip() == "OK" else 1)
+            self.assertEqual((self.root / "task-ran").exists(), body.strip() == "OK")
+            self.assertFalse(self.alive(self.pid()))
+            compose = (self.state / "compose.json").read_text()
+            self.assertNotIn("private-fixture", compose)
+            logs = (self.state / "services.log").read_text()
+            self.assertNotIn("private-response", logs)
+            self.assertNotIn("private-fixture", logs)
 
     def waiting_task(self, *, wait=True):
         self.plan.update(wait_for_services=wait, own_task=True, task_shutdown_seconds=1)

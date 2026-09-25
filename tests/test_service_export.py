@@ -95,9 +95,9 @@ services=["worker","database"]
 context_environment={APP_CONTEXT="different"}
 [services.worker]
 command=["true"]
-environment={PYTHONPATH="{root}/service-python"}
+environment={PYTHONPATH="{root}/service-python",PROBE_AUTH="{env:APP_CONTEXT}"}
 watch={task="build",paths=["chainman.toml"]}
-readiness={command=["true"]}
+readiness={http_get={port=8080,headers_from_environment={Authorization="PROBE_AUTH"}}}
 [services.database]
 container={image="example.invalid/database@sha256:AAAAAAAA",environment={DATA_CONTEXT="{env:APP_CONTEXT}"}}
 readiness={command=["true"]}
@@ -146,6 +146,10 @@ readiness={command=["true"]}
                         plans[task] = json.loads((output / "plan.json").read_text())
                 plan = plans["main"]
                 self.assertEqual(
+                    plan["services"]["worker"]["readiness"]["http_get"]["headers"],
+                    {"Authorization": "project"},
+                )
+                self.assertEqual(
                     plan["presentation"]["details"],
                     {
                         "Context": "project",
@@ -171,6 +175,7 @@ readiness={command=["true"]}
                             "NODE_OPTIONS",
                             "DOCKER_HOST",
                             "APP_CONTEXT",
+                            "PROBE_AUTH",
                             "UNPASSED_LABEL",
                         }
                     )
