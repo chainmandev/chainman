@@ -1391,10 +1391,9 @@ func owned(state, name string, probe bool, generation string) int {
 	if e = readJSON(filepath.Join(state, name+".command.json"), &current); e != nil || current.Generation != generation {
 		return exitCode(fmt.Errorf("service generation changed during admission"))
 	}
-	if e = cmd.Start(); e != nil {
+	if e = startAdmitted(cmd, signals); e != nil {
 		_ = os.Remove(path)
-		fmt.Fprintln(os.Stderr, e)
-		return 1
+		return exitCode(e)
 	}
 	admission.Close()
 	done := make(chan error, 1)
@@ -1533,6 +1532,9 @@ func exitCode(e error) int {
 	return 1
 }
 func mainAction(args []string) (result int) {
+	if len(args) > 0 && args[0] == "admitted" {
+		return admittedCommand(args[1:])
+	}
 	if len(args) > 0 && args[0] == "http-probe" {
 		if len(args) != 4 {
 			return 2

@@ -240,7 +240,10 @@ func taskCommand(action, path string) (result int) {
 				}
 			}
 			cmd.Env = env
-			e = cmd.Run()
+			e = startAdmitted(cmd, signals)
+			if e == nil {
+				e = cmd.Wait()
+			}
 			closeForwarded(cmd)
 			select {
 			case sig := <-signals:

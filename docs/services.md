@@ -152,6 +152,9 @@ services and readiness probes never acquire the caller's terminal.
 Cancellation waits for the current command's graceful shutdown before cleaning
 up remaining descendants; later commands in its sequence do not run. The
 declared shutdown deadline still bounds an unresponsive command.
+Each command waits for admission before executing the workload. Pending
+cancellation refuses that admission, including interrupts received while the
+command is being started.
 Foreground Ctrl-C reaches the command group once; chainman observes the terminal
 interrupt without relaying it again. Direct command cancellation and explicit
 stop still signal the workload and enforce the shutdown deadline.
