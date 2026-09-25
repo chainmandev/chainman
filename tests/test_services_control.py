@@ -1732,6 +1732,75 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
         self.run_control("stop", check=0)
         self.assertFalse(self.alive(pid))
 
+    def test_later_client_admits_http_credentials_without_replacing_live_service(self):
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        worker = self.root / "authenticated.py"
+        worker.write_text("""import os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.headers.get('Authorization') == 'Bearer fixture' else 401)
+        self.end_headers()
+Path('authenticated-pid').write_text(str(os.getpid()))
+HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
+""")
+        self.plan["services"]["authenticated"] = {
+            "command": self.command([sys.executable, str(worker), str(port)]),
+            "depends_on": [],
+            "restart": "no",
+            "shutdown_seconds": 1,
+            "readiness": {
+                "http_get": {
+                    "port": port,
+                    "path": "/",
+                    "status_code": 200,
+                    "pending_environment": True,
+                },
+                "period_seconds": 1,
+                "timeout_seconds": 1,
+                "failure_threshold": 2,
+            },
+        }
+        self.run_control("up", check=0)
+        original_pid = self.pid()
+        original_record = (self.state / "worker.command.json").read_bytes()
+        controller = (self.state / "controller.json").read_bytes()
+        self.plan["requested"] = ["authenticated"]
+        rejected = self.run_control("run")
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("environment is unresolved", rejected.stderr)
+        self.assertFalse((self.root / "authenticated-pid").exists())
+        probe = self.plan["services"]["authenticated"]["readiness"]["http_get"]
+        probe.pop("pending_environment")
+        probe["headers"] = {"Authorization": "Bearer fixture"}
+        # A persistent authenticated client joins the existing public service.
+        self.run_control("up", check=0)
+        authenticated_pid = int((self.root / "authenticated-pid").read_text())
+        authenticated_record = (self.state / "authenticated.command.json").read_bytes()
+        self.assertEqual(
+            (self.state / "worker.command.json").read_bytes(), original_record
+        )
+        self.assertEqual((self.state / "controller.json").read_bytes(), controller)
+        self.assertTrue(self.alive(original_pid))
+        # Public borrowers still export a deferred unused probe. They must not
+        # overwrite the authenticated client's frozen record or ownership.
+        probe.pop("headers")
+        probe["pending_environment"] = True
+        self.plan["requested"] = ["worker"]
+        self.run_control("run", check=7)
+        self.assertEqual(
+            (self.state / "authenticated.command.json").read_bytes(),
+            authenticated_record,
+        )
+        self.assertTrue(self.alive(authenticated_pid))
+        self.assertEqual(self.pid(), original_pid)
+        self.run_control("stop", check=0)
+        self.assertFalse(self.alive(original_pid))
+        self.assertFalse(self.alive(authenticated_pid))
+
     def test_controller_crash_can_be_recovered_without_project_config(self):
         self.run_control("up", check=0)
         pid = self.pid()

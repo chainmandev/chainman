@@ -461,7 +461,11 @@ headers_from_environment = { Authorization = "LOCAL_API_AUTHORIZATION" }
 Header values are resolved once from the service's effective declared project,
 profile and service environment, then stored in private controller state. They
 never become host execution environment overrides, command arguments or status
-output. Missing/empty header variables fail planning. At most 16 headers and 8 KiB
+output. Values are required only for the selected services and their dependencies;
+an unused service's profile and probe credentials are not resolved. A later
+compatible client resolves its newly selected probes before starting those
+services, preserving existing clients and their frozen probes. Missing/empty
+header variables in a selected service fail planning. At most 16 headers and 8 KiB
 of header names/values are allowed; routing, connection and compression overrides
 are rejected.
 

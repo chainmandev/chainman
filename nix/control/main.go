@@ -35,12 +35,13 @@ type Probe struct {
 	Failures int        `json:"failure_threshold"`
 }
 type HTTPProbe struct {
-	Port       int               `json:"port"`
-	Path       string            `json:"path"`
-	StatusCode int               `json:"status_code"`
-	Body       *string           `json:"body,omitempty"`
-	TrimBody   bool              `json:"trim_body,omitempty"`
-	Headers    map[string]string `json:"headers,omitempty"`
+	Port               int               `json:"port"`
+	Path               string            `json:"path"`
+	StatusCode         int               `json:"status_code"`
+	Body               *string           `json:"body,omitempty"`
+	TrimBody           bool              `json:"trim_body,omitempty"`
+	Headers            map[string]string `json:"headers,omitempty"`
+	PendingEnvironment bool              `json:"pending_environment,omitempty"`
 }
 type Service struct {
 	Command      Command  `json:"command"`
@@ -371,9 +372,15 @@ func validate(p Plan) error {
 			return e
 		}
 	}
-	_, e := ordered(p, p.Requested)
+	selected, e := ordered(p, p.Requested)
 	if e != nil {
 		return e
+	}
+	for _, name := range selected {
+		r := p.Services[name].Readiness
+		if r != nil && r.HTTPGet != nil && r.HTTPGet.PendingEnvironment {
+			return fmt.Errorf("HTTP readiness environment is unresolved for %s", name)
+		}
 	}
 	for name, s := range p.Services {
 		if !validName.MatchString(name) {
@@ -1140,6 +1147,9 @@ func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (
 	// An empty local selection can still have live repository users without a
 	// local controller. Retain their cleanup intent when adding another task.
 	if controller(p).alive() {
+		if e = admitHTTPProbes(&previous, p, selected, previousUsers); e != nil {
+			return cleanup(e)
+		}
 		previous.Resources = mergeResources(previous.Resources, p.Resources)
 		if e = atomic(filepath.Join(p.State, "plan.json"), previous); e != nil {
 			return cleanup(e)

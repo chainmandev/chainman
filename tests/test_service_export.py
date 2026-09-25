@@ -73,7 +73,7 @@ class ServiceExportTests(unittest.TestCase):
 default_profile="host"
 [environment]
 files=[{path="project.env",override=true}]
-pass=["HOST_SEED"]
+pass=["HOST_SEED","UNSET_EXTERNAL_URL","EXTERNAL_AUTH"]
 [environment.defaults]
 UNPASSED_LABEL="container default"
 [tasks.main]
@@ -93,12 +93,16 @@ context_environment={APP_CONTEXT="{env:HOST_SEED}"}
 commands=[["true"]]
 services=["worker","database"]
 context_environment={APP_CONTEXT="different"}
+[tasks.external-only]
+commands=[["true"]]
+services=["external"]
+context_environment={APP_CONTEXT="{env:HOST_SEED}"}
 [profiles.external]
 environment={EXTERNAL_URL="{env:UNSET_EXTERNAL_URL}"}
 [services.external]
 profile="external"
 command=["true"]
-readiness={http_get={port=8081,body="OK"}}
+readiness={http_get={port=8081,body="OK",headers_from_environment={Authorization="EXTERNAL_AUTH"}}}
 [services.worker]
 command=["true"]
 environment={PYTHONPATH="{root}/service-python",PROBE_AUTH="{env:APP_CONTEXT}"}
@@ -150,7 +154,48 @@ readiness={command=["true"]}
                             ],
                         )
                         plans[task] = json.loads((output / "plan.json").read_text())
+                    original_inputs = (output / "host-environment").read_bytes()
+                    arguments = [
+                        str(output),
+                        "linux-arm64",
+                        str(base / "state"),
+                        "/fixture/docker",
+                        str(launcher),
+                        "run",
+                        "external-only",
+                    ]
+                    try:
+                        for extra, missing in (
+                            (b"", "UNSET_EXTERNAL_URL"),
+                            (
+                                b"UNSET_EXTERNAL_URL=http://external.invalid\0",
+                                "EXTERNAL_AUTH",
+                            ),
+                        ):
+                            (output / "host-environment").write_bytes(
+                                original_inputs + extra
+                            )
+                            with self.assertRaisesRegex(ValueError, missing):
+                                services.export(root, arguments)
+                        (output / "host-environment").write_bytes(
+                            original_inputs
+                            + b"UNSET_EXTERNAL_URL=http://external.invalid\0EXTERNAL_AUTH=Bearer fixture\0"
+                        )
+                        services.export(root, arguments)
+                        selected = json.loads((output / "plan.json").read_text())
+                        probe = selected["services"]["external"]["readiness"][
+                            "http_get"
+                        ]
+                        self.assertEqual(
+                            probe["headers"], {"Authorization": "Bearer fixture"}
+                        )
+                        self.assertNotIn("pending_environment", probe)
+                    finally:
+                        (output / "host-environment").write_bytes(original_inputs)
                 plan = plans["main"]
+                deferred = plan["services"]["external"]["readiness"]["http_get"]
+                self.assertTrue(deferred["pending_environment"])
+                self.assertNotIn("headers", deferred)
                 self.assertEqual(
                     plan["services"]["worker"]["readiness"]["http_get"]["headers"],
                     {"Authorization": "project"},

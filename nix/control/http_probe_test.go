@@ -93,3 +93,13 @@ func TestHTTPProbeHeaderBounds(t *testing.T) {
 		}
 	}
 }
+
+func TestUnadmittedHTTPProbeNeverRequests(t *testing.T) {
+	var requests syncatomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1) }))
+	defer server.Close()
+	probe := &HTTPProbe{Port: server.Listener.Addr().(*net.TCPAddr).Port, Path: "/", StatusCode: 200, PendingEnvironment: true}
+	if checkHTTP(context.Background(), probe) == nil || requests.Load() != 0 {
+		t.Fatal("unadmitted probe made a request")
+	}
+}

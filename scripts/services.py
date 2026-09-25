@@ -49,6 +49,7 @@ class HTTPProbe(TypedDict):
     body: NotRequired[str]
     trim_body: NotRequired[bool]
     headers: NotRequired[dict[str, str]]
+    pending_environment: NotRequired[bool]
 
 
 class Probe(TypedDict):
@@ -915,6 +916,11 @@ def export(root: Path, arguments: list[str]) -> int:
                     or "basic_auth" in http_spec
                 ):
                     prepared_probe["http_get"] = http_readiness(http_spec)
+                elif name not in closure:
+                    # Keep the backend template for later clients, without
+                    # requiring an unused profile or its credentials now.
+                    prepared_probe["http_get"] = http_readiness(http_spec)
+                    prepared_probe["http_get"]["pending_environment"] = True
                 else:
                     if "container" in spec:
                         probe_env = literal_environment(

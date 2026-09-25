@@ -67,6 +67,9 @@ func httpProbeAction(state, name, generation string) error {
 	return checkHTTP(ctx, s.Readiness.HTTPGet)
 }
 func checkHTTP(ctx context.Context, h *HTTPProbe) error {
+	if h.PendingEnvironment {
+		return fmt.Errorf("HTTP readiness environment has not been admitted")
+	}
 	if err := validateHTTPProbe(h); err != nil {
 		return err
 	}
@@ -105,6 +108,46 @@ func checkHTTP(ctx context.Context, h *HTTPProbe) error {
 	}
 	if actual != *h.Body {
 		return fmt.Errorf("HTTP readiness body did not match")
+	}
+	return nil
+}
+
+// A compatible controller retains all service templates. A newly selected
+// service receives this operation's resolved probe before it can start. Keep
+// existing service/container identities and every live client's probe intact.
+// The caller holds the scope gate; the admission lock excludes in-flight probes.
+func admitHTTPProbes(saved *Plan, incoming Plan, selected []string, used map[string]bool) error {
+	for _, name := range selected {
+		next := incoming.Services[name].Readiness
+		if used[name] || next == nil || next.HTTPGet == nil {
+			continue
+		}
+		service, ok := saved.Services[name]
+		if !ok || service.Readiness == nil || service.Readiness.HTTPGet == nil || next.HTTPGet.PendingEnvironment {
+			return fmt.Errorf("HTTP readiness template changed for %s", name)
+		}
+		probe := *service.Readiness
+		probe.HTTPGet = next.HTTPGet
+		service.Readiness = &probe
+		admission, err := locked(filepath.Join(saved.State, name+".admission"), false)
+		if err != nil {
+			return err
+		}
+		var record Service
+		path := filepath.Join(saved.State, name+".command.json")
+		err = readJSON(path, &record)
+		if err == nil && record.Generation != saved.Generation {
+			err = fmt.Errorf("HTTP readiness generation changed before admission")
+		}
+		if err == nil {
+			record.Readiness = &probe
+			err = atomic(path, record)
+		}
+		admission.Close()
+		if err != nil {
+			return err
+		}
+		saved.Services[name] = service
 	}
 	return nil
 }
