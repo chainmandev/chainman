@@ -1424,7 +1424,12 @@ func owned(state, name string, probe bool, generation string) int {
 		if s.ForwardLeases {
 			fmt.Fprintln(os.Stderr, "chainman: stopping task…")
 		}
-		_ = syscall.Kill(-id.PID, sig.(syscall.Signal))
+		// The terminal has already interrupted every foreground member. Public
+		// command interrupts use that same group route; explicit stop remains a
+		// direct SIGTERM and must still be forwarded to the application's group.
+		if interrupted != syscall.SIGINT || !foregroundTask(id.PID) {
+			_ = syscall.Kill(-id.PID, interrupted)
+		}
 		_ = syscall.Kill(-id.PID, syscall.SIGCONT)
 		select {
 		case e = <-done:

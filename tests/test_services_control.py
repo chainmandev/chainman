@@ -83,15 +83,28 @@ while True:time.sleep(.1)
         return {"argv": argv, "directory": str(self.root)}
 
     def terminal_command(
-        self, code, *, interrupt=False, timeout=0, ignored_interrupt=False
+        self,
+        code,
+        *,
+        interrupt=False,
+        timeout=0,
+        ignored_interrupt=False,
+        direct_signal=None,
+        signal_owner=False,
+        subsequent_commands=(),
     ):
         """Use a controlling terminal, not killpg on a redirected subprocess."""
         task = self.base / "terminal-task.json"
         recovery = self.base / "terminal-owner"
+        client_pid = self.base / "terminal-client"
+        client_pid.unlink(missing_ok=True)
         task.write_text(
             json.dumps(
                 {
-                    "commands": [self.command([sys.executable, "-c", code])],
+                    "commands": [
+                        self.command([sys.executable, "-c", code]),
+                        *[self.command(argv) for argv in subsequent_commands],
+                    ],
                     "shutdown_seconds": 1,
                     "timeout_seconds": timeout,
                     "recovery_state": str(recovery),
@@ -100,11 +113,14 @@ while True:time.sleep(.1)
         )
         harness = (
             "import os,subprocess,sys,termios; "
+            "from pathlib import Path; "
             "before=termios.tcgetattr(0); "
-            "r=subprocess.run(sys.argv[1:]); "
+            "p=subprocess.Popen(sys.argv[1:]); "
+            f"Path({str(client_pid)!r}).write_text(str(p.pid)); "
+            "result=p.wait(); "
             "assert os.tcgetpgrp(0)==os.getpgrp(), 'foreground not restored'; "
             "assert termios.tcgetattr(0)==before, 'terminal settings not restored'; "
-            "print('RESTORED',r.returncode,flush=True)"
+            "print('RESTORED',result,flush=True)"
         )
         if ignored_interrupt:
             harness = (
@@ -133,6 +149,16 @@ while True:time.sleep(.1)
                 if interrupt and b"INTERRUPT READY" in output:
                     os.write(master, b"\x03")
                     interrupt = False
+                if direct_signal and b"INTERRUPT READY" in output and client_pid.exists():
+                    target = (
+                        json.loads((recovery / "task.owner.json").read_text())[
+                            "identity"
+                        ]["pid"]
+                        if signal_owner
+                        else int(client_pid.read_text())
+                    )
+                    os.kill(target, direct_signal)
+                    direct_signal = None
                 if b"RESTORED " in output:
                     break
             self.assertIn(b"RESTORED ", output, output.decode(errors="replace"))
@@ -177,6 +203,54 @@ while True:time.sleep(.1)
         output = self.terminal_command(code, interrupt=True)
         self.assertIn("RESTORED 130", output)
         self.assertIn("stopping task", output)
+
+    def test_owned_terminal_graceful_cancellation_receives_one_signal(self):
+        code = """import signal,time
+signals = []
+def stop(number, _):
+    signals.append(number)
+for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(number, stop)
+print('INTERRUPT READY', flush=True)
+while not signals: time.sleep(.01)
+time.sleep(.3)
+print('CLEANUP FINISHED', signals, flush=True)
+"""
+        for number, target in (
+            (signal.SIGINT, "terminal"),
+            (signal.SIGINT, "ignored-terminal"),
+            (signal.SIGINT, "client"),
+            (signal.SIGTERM, "client"),
+            (signal.SIGHUP, "client"),
+            (signal.SIGTERM, "owner"),
+        ):
+            with self.subTest(signal=number, target=target):
+                output = self.terminal_command(
+                    code,
+                    interrupt=target.endswith("terminal"),
+                    ignored_interrupt=target == "ignored-terminal",
+                    direct_signal=number if target in ("client", "owner") else None,
+                    signal_owner=target == "owner",
+                    subsequent_commands=[
+                        [
+                            sys.executable,
+                            "-c",
+                            "from pathlib import Path; Path('unexpected').touch()",
+                        ]
+                    ],
+                )
+                self.assertIn(f"CLEANUP FINISHED [{int(number)}]", output)
+                self.assertIn(f"RESTORED {128 + number}", output)
+                self.assertFalse((self.root / "unexpected").exists())
+
+    def test_owned_terminal_interrupt_bounds_unresponsive_command(self):
+        code = (
+            "import signal,time; "
+            "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+            "print('INTERRUPT READY',flush=True); time.sleep(120)"
+        )
+        output = self.terminal_command(code, interrupt=True)
+        self.assertIn("RESTORED 130", output)
 
     def test_owned_terminal_timeout_restores_raw_terminal(self):
         code = (

@@ -10,6 +10,23 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func foregroundTask(group int) bool {
+	foreground, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP)
+	return err == nil && foreground == group
+}
+
+// Foreground SIGINT is a group event, whether it comes from the terminal or a
+// direct interrupt of the public command. Its owner observes it without sending
+// it twice. Direct owner cancellation (including explicit stop) uses SIGTERM.
+func interruptTask(cmd *exec.Cmd, sig os.Signal) {
+	if sig == syscall.SIGINT && foregroundTask(cmd.Process.Pid) {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+	} else {
+		_ = cmd.Process.Signal(sig)
+	}
+	_ = cmd.Process.Signal(syscall.SIGCONT)
+}
+
 // Only a foreground command may lend its controlling terminal to its owned
 // group. Services and probes never use this path; pipes keep their original IO.
 func taskTerminal(cmd *exec.Cmd) (func() error, error) {

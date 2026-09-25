@@ -308,8 +308,7 @@ func taskCommand(action, path string) (result int) {
 	select {
 	case e = <-done:
 	case sig := <-signals:
-		_ = cmd.Process.Signal(sig)
-		_ = cmd.Process.Signal(syscall.SIGCONT)
+		interruptTask(cmd, sig)
 		e = <-done
 	}
 	return exitCode(e)
