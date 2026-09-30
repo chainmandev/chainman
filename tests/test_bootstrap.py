@@ -2791,6 +2791,15 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         candidate = self.root / "unique-runtime"
         shutil.copytree(self.tree, candidate)
         (candidate / "unique-source").write_text(str(self.root))
+        flake = candidate / "nix/flake.nix"
+        fixture_name = (
+            "bootstrap-gc-" + hashlib.sha256(str(self.root).encode()).hexdigest()[:16]
+        )
+        flake.write_text(
+            flake.read_text().replace(
+                'runtimeBase "bootstrap"', f'runtimeBase "{fixture_name}"'
+            )
+        )
         self.pin_runtime(candidate)
         cache = self.root / "private-cache"
         env = dict(self.env, XDG_CACHE_HOME=str(cache))
@@ -2809,6 +2818,19 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         )
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((runtime / "scripts/chainman.py").is_file())
+        # Source rooting alone does not retain the Python/Git environment used
+        # after bootstrap's nix-develop process has exec'd the runtime.
+        profile = root.with_name(root.name + "-bootstrap")
+        self.assertTrue(profile.is_symlink())
+        shell = profile.resolve()
+        roots = subprocess.check_output(
+            [nix_store, "--query", "--roots", str(shell)], text=True
+        )
+        self.assertIn(str(profile.parent), roots)
+        result = subprocess.run(
+            [nix_store, "--delete", str(shell)], capture_output=True, text=True
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         root_inode = root.lstat().st_ino
         self.run_bootstrap("second", env=env)
         self.assertEqual(root.lstat().st_ino, root_inode)

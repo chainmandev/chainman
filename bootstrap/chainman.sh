@@ -18,7 +18,13 @@ single_line() {
 develop_runtime() {
     develop_action=$1
     shift
-    set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file --command "$@"
+    # The source root does not retain this interpreter/Git closure. Nix's
+    # temporary develop root ends when it execs the runtime, which can refresh
+    # a consumer profile and trigger GC while still using this Python path.
+    # Keep the bootstrap environment alongside the verified revision's source.
+    bootstrap_profile=$runtime_root-bootstrap
+    [ ! -e "$bootstrap_profile" ] || [ -L "$bootstrap_profile" ] || fail 'Bootstrap profile GC root must be a symlink.'
+    set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file --profile "$bootstrap_profile" --command "$@"
     # The primary nixpkgs input no longer supplies Intel macOS Bash. Make the
     # compatibility input's Bash available before Nix executes its shell script.
     if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then

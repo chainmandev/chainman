@@ -108,8 +108,10 @@ requested Nix environment, package manager command, or network-dependent test ca
 still need downloads. Keep the relevant environments and project dependencies
 available if offline operation is required.
 
-Nix source roots live under the host chainman runtime-roots cache or the owned
-container store. Temporary environment roots remain while their managed operations
+Nix source roots and the matching bootstrap interpreter/Git environment live
+under the host chainman runtime-roots cache or the owned container store. The
+bootstrap profile stays rooted after Nix hands execution to Python, so a consumer
+profile refresh cannot collect the runtime's interpreter. Temporary environment roots remain while their managed operations
 need them. Runtime generations coexist across projects and updates. Cache cleanup
 must respect active operations and service ownership.
 
