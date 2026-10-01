@@ -175,11 +175,14 @@ Just can leave its recipe running without forwarding that signal. Terminal Ctrl-
 and hangup target foreground process groups; they are different from signalling
 only the command runner.
 
-Shell entry preserves inherited operation/service lease descriptors. It needs
-one unused descriptor from 3 through 9 to preserve stdin across portable POSIX
-background execution. If all seven are occupied, entry fails before launching
-the command; close unused inherited descriptors or start from a fresh host shell.
-It never closes a caller's lease to make room.
+Shell entry preserves inherited operation/service lease descriptors. It first uses
+an unused descriptor from 3 through 9 to preserve stdin across portable POSIX
+background execution. If all seven are occupied, a shell supporting Bash's dynamic
+descriptor allocation borrows another free descriptor. The pinned Bash supports
+this path. A POSIX-only shell without that syntax fails before launching the
+command; close unused inherited descriptors or use the pinned shell. Entry never
+closes a caller's lease to make room, and closes its own borrowed descriptor in
+both parent and child after restoring stdin.
 
 New service logs identify `stdout` and `stderr` explicitly. These are output
 streams, not severity levels: PostgreSQL and compilers write ordinary progress

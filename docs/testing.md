@@ -22,6 +22,8 @@ the remote transport is substituted when public code is not yet available. They
 check the consumer recipe's size, malformed pins, cold and offline-warm startup,
 corruption, replacement refs, concurrency, interrupted fetches, source checkout
 modifications, literal arguments, stdin, process status, and signals.
+The shell lifetime tests also occupy all descriptors 3–9 and require literal stdin,
+the child's exit status, and every caller-owned descriptor to survive execution.
 
 The Git source tests separately exercise runtime materialization. Files must match
 the selected tree's bytes and executable identity, independent of attributes,

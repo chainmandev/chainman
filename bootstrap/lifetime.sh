@@ -73,12 +73,20 @@ lifetime_run() {
         fi
     done
     if [ -z "$lifetime_input" ]; then
-        printf '%s\n' 'chainman: cannot preserve stdin: descriptors 3–9 are all occupied. Close unused inherited descriptors or start this command from a fresh host shell.' >&2
-        return 2
+        # Pinned Bash can allocate beyond POSIX sh's single-digit range. Probe
+        # that syntax in a subshell before using it: a POSIX-only host shell
+        # must still fail without overwriting any caller-owned descriptor.
+        if (eval 'exec {lifetime_probe}<&0') 2> /dev/null; then
+            eval 'exec {lifetime_input}<&0' || return 2
+        else
+            printf '%s\n' 'chainman: cannot preserve stdin: descriptors 3–9 are all occupied and this shell cannot allocate another descriptor. Close unused inherited descriptors or use the pinned shell.' >&2
+            return 2
+        fi
+    else
+        eval "exec $lifetime_input<&0"
     fi
-    # Only the fixed numeric selection enters eval; command arguments remain
+    # Only the shell-selected numeric descriptor enters eval; arguments remain
     # literal positional parameters. POSIX sh cannot expand the redirection LHS.
-    eval "exec $lifetime_input<&0"
     lifetime_starting=1
     eval '"$@" <&'"$lifetime_input $lifetime_input"'<&- &'
     lifetime_child=$!
