@@ -7,13 +7,13 @@ the installed consumer's lock/bootstrap entry; candidate ownership is shared.
 import os
 from pathlib import Path
 import sys
-import tempfile
 
 import chainman_updates
 import dependency_api
 import toolchain as tc
 import update_staging as staging
 import updates
+import update_cache
 from adapter_data import strings
 
 
@@ -47,13 +47,22 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
         / "chainman/updates"
     )
-    cache.mkdir(parents=True, exist_ok=True)
     resumed = len(arguments) == 1 and arguments[0].startswith("resume=")
+    legacy = resumed and Path(arguments[0].split("=", 1)[1]).parent == cache
+    if not os.environ.get("CHAINMAN_UPDATE_TRANSACTION") and not legacy:
+        # Validate before exporting tooling or allocating a disposable workspace.
+        if not resumed:
+            chainman_updates.options(
+                (["--format"] if action == "format" else []) + arguments
+            )
+        update_cache.run(root, action, arguments)
+        return
     if resumed:
         destination = staging.directory(Path(arguments[0].split("=", 1)[1]))
-        if destination.parent != cache.resolve() or not destination.name.startswith(
-            "candidate."
-        ):
+        if destination.parent not in {
+            cache.resolve(),
+            cache.resolve() / "v1",
+        } or not destination.name.startswith("candidate."):
             raise ValueError("Resume must select a retained update transaction")
     else:
         # Parse before allocating a transaction, including --help.
@@ -70,7 +79,7 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
             raise ValueError(
                 "The Chainman source repository does not pin its own runtime"
             )
-        destination = Path(tempfile.mkdtemp(prefix="candidate.", dir=cache)).resolve()
+        destination = staging.directory(Path(os.environ["CHAINMAN_UPDATE_TRANSACTION"]))
         for name in ("candidate", "control"):
             (destination / name).mkdir()
     try:
@@ -109,15 +118,17 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
                     )
         staging.finalize(root, destination)
     except BaseException:
-        print(
-            f"Chainman: candidate preserved at {destination}/candidate; resume with: just {action} resume={destination}",
-            file=sys.stderr,
-        )
+        if legacy:
+            print(
+                f"Chainman: legacy temporary candidate at {destination}/candidate; not a backup; resume with: just {action} resume={destination}",
+                file=sys.stderr,
+            )
         raise
     else:
-        import shutil
+        if legacy:
+            import shutil
 
-        shutil.rmtree(destination)
+            shutil.rmtree(destination)
 
 
 if __name__ == "__main__":

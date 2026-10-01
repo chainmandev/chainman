@@ -28,6 +28,8 @@ def validate_action(root: Path, action: str) -> None:
         "clean",
         "cache-prune",
         "cache-status",
+        "update-cache-status",
+        "update-cache-prune",
         "ci-prune",
         "sdk-doctor",
         "nix-update",

@@ -150,6 +150,8 @@ let
         "clean"
         "cache-prune"
         "cache-status"
+        "update-cache-status"
+        "update-cache-prune"
       ]
     then
       false

@@ -53,6 +53,12 @@ cache-status:
 cache-prune *args:
     @./scripts/enter.sh core python3 scripts/toolchain.py cache-prune "$@"
 
+update-cache-status:
+    @./scripts/enter.sh core python3 scripts/update_cache.py status
+
+update-cache-prune *args:
+    @./scripts/enter.sh core python3 scripts/update_cache.py prune "$@"
+
 clean:
     @./scripts/enter.sh core python3 scripts/toolchain.py clean
 

@@ -202,11 +202,46 @@ control_dispatch() {
     exit "$control_result"
 }
 update_dispatch() {
+    # Export the same small native supervisor used by hooks, including on a
+    # container-only host. Never require a host Python or an engine in a worker.
+    update_helper=$(mktemp -d "${TMPDIR:-/tmp}/chainman-update-export.XXXXXXXX")
+    lifetime_directory=$update_helper
+    case "$(uname -s):$(uname -m)" in
+        Linux:aarch64 | Linux:arm64) update_target=linux-arm64 ;;
+        Linux:x86_64) update_target=linux-amd64 ;;
+        Darwin:arm64) update_target=darwin-arm64 ;;
+        Darwin:x86_64) update_target=darwin-amd64 ;;
+        *) fail 'Unsupported native update platform.' ;;
+    esac
+    printf '%s\n%s\n' --mount "type=bind,src=$update_helper,dst=$update_helper" > "$update_helper/mounts"
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_helper/mounts \
+        lifetime_helper "$self" _consent-export "$update_helper" "$update_target" >&2
+    CHAINMAN_UPDATE_HELPER=$update_helper/chainman-control
+    export CHAINMAN_UPDATE_HELPER
+    update_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates
+    case "$CHAINMAN_REQUEST_ACTION" in
+        update-cache-status | update-cache-prune)
+            update_maintenance=${CHAINMAN_REQUEST_ACTION#update-cache-}
+            lifetime_supervise "$CHAINMAN_UPDATE_HELPER" update-cache "$update_maintenance" "$update_cache" "$@"
+            ;;
+        *)
+            update_resume_path=-
+            case "${1:-}" in resume=*) update_resume_path=${1#resume=} ;; esac
+            # Legacy transactions have no lifetime protocol; allow explicit
+            # resumption in place but never adopt them into automatic collection.
+            case "$update_resume_path" in
+                "$update_cache"/candidate.*) update_worker "$@" ;;
+                *) lifetime_supervise "$CHAINMAN_UPDATE_HELPER" update-cache run "$update_cache" "$update_resume_path" "$CHAINMAN_REQUEST_ACTION" "$self" _update-dispatch "$@" ;;
+            esac
+            ;;
+    esac
+    exit 0
+}
+update_worker() {
     # Fixed phases only. Host shell orchestration needs neither host Python nor
     # an engine socket in the resolver or verifier containers.
     umask 077
     update_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates
-    mkdir -p "$update_cache"
     update_resume=0
     case "${1:-}" in
         resume=*)
@@ -214,18 +249,36 @@ update_dispatch() {
             update_output=${1#resume=}
             [ -d "$update_output/control" ] && [ ! -L "$update_output" ] || fail 'Missing real update transaction.'
             update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
-            case "$update_output" in "$update_cache"/candidate.*) ;; *) fail 'Resume must select a retained update transaction.' ;; esac
+            case "$update_output" in "$update_cache"/candidate.* | "$update_cache"/v1/candidate.*) ;; *) fail 'Resume must select a retained update transaction.' ;; esac
             update_resume=1
             ;;
-        *) update_output=$(mktemp -d "$update_cache/candidate.XXXXXXXX") ;;
+        *) update_output=${CHAINMAN_UPDATE_TRANSACTION:?Missing update lifetime supervisor} ;;
     esac
     update_output=$(CDPATH='' cd -P -- "$update_output" && pwd)
-    trap 'printf "Chainman: candidate preserved at %s/candidate; resume with: just deps-update resume=%s\n" "$update_output" "$update_output" >&2' EXIT
+    if [ -z "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
+        trap 'printf "Chainman: legacy temporary candidate at %s; not a backup; resume with: just deps-update resume=%s\n" "$update_output" "$update_output" >&2' EXIT
+    fi
     if [ "$update_resume" = 0 ]; then
         mkdir "$update_output/candidate" "$update_output/control"
     fi
     printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
     : > "$update_output/control/candidate-mounts"
+    if [ "$mode" = container-nix ] && [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
+        update_engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
+        if [ -z "$update_engine" ]; then
+            for update_engine_candidate in docker podman; do
+                if command -v "$update_engine_candidate" > /dev/null 2>&1; then
+                    update_engine=$update_engine_candidate
+                    break
+                fi
+            done
+        fi
+        case "$update_engine" in docker | podman) ;; *) fail 'Container updates require Docker or Podman.' ;; esac
+        update_token=$("$CHAINMAN_UPDATE_HELPER" update-cache engine "$update_cache" "$update_output" "$(command -v "$update_engine")")
+        # Frozen/older launchers also understand these engine options.
+        printf '%s\n%s\n' --label "dev.chainman.update=$update_token" >> "$update_output/control/mounts"
+        printf '%s\n%s\n' --label "dev.chainman.update=$update_token" >> "$update_output/control/candidate-mounts"
+    fi
     if [ "$update_resume" = 1 ]; then
         CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
             "$self" _update-resume "$update_output" >&2
@@ -240,7 +293,7 @@ update_dispatch() {
             "$self" _update-prepare "$update_output" "$@" >&2
     fi
     if [ -f "$update_output/control/help" ]; then
-        rm -rf -- "$update_output"
+        if [ -z "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then rm -rf -- "$update_output"; fi
         trap - EXIT
         exit 0
     fi
@@ -278,7 +331,7 @@ update_dispatch() {
     fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-finalize "$update_output"
-    rm -rf -- "$update_output"
+    if [ -z "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then rm -rf -- "$update_output"; fi
     trap - EXIT
     exit 0
 }
@@ -382,6 +435,15 @@ case "$CHAINMAN_REQUEST_ACTION" in
 esac
 
 case "$CHAINMAN_REQUEST_ACTION" in
+    _update-dispatch)
+        [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ] || fail 'Missing update lifetime supervisor.'
+        shift
+        update_worker "$@"
+        ;;
+    update-cache-status | update-cache-prune)
+        shift
+        update_dispatch "$@"
+        ;;
     deps-update | chainman-update | format)
         [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || fail 'Start updates through the host launcher so candidate verification can control its own services.'
         [ -z "${CHAINMAN_UPDATE_ACTIVE:-}" ] || fail 'An update hook must not recursively start another update.'
@@ -573,6 +635,11 @@ if [ -z "$engine" ]; then
     done
 fi
 case "$engine" in docker | podman) ;; *) fail 'Container mode requires Docker or Podman.' ;; esac
+update_container_token=
+if [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
+    update_container_token=$("${CHAINMAN_UPDATE_HELPER:?Missing update supervisor}" update-cache engine \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates" "$CHAINMAN_UPDATE_TRANSACTION" "$(command -v "$engine")")
+fi
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
 lifetime_directory=$temporary
 image=docker.io/nixos/nix:2.33.3@sha256:c2f7db70a432d00c6759af108ff4fbc74a4c00e2d4517162e72338e7b9449c1f
@@ -1099,6 +1166,9 @@ if [ -n "${CHAINMAN_CONTAINER_NAME:-}" ]; then
     set -- --name "$CHAINMAN_CONTAINER_NAME" --label "dev.chainman.owner=$CHAINMAN_CONTAINER_OWNER" "$@"
 fi
 project_mount="type=bind,src=$root,dst=$root"
+if [ -n "$update_container_token" ]; then
+    set -- --label "dev.chainman.update=$update_container_token" "$@"
+fi
 case "$CHAINMAN_REQUEST_ACTION" in _control-export | _hook-export | _hooks-config | _consent-export) project_mount=$project_mount,readonly ;; esac
 set -- --rm --init --interactive --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
     --mount "type=volume,src=$volume,dst=/nix" --mount "$project_mount" \

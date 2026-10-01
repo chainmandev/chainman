@@ -718,8 +718,14 @@ def operation(
 def managed_options[Options: ProcessOptions](kwargs: Options) -> Options:
     """Retain every outstanding project lease through nested managed children."""
     options: ProcessOptions = kwargs
+    update_fds: tuple[int, ...] = ()
+    if update_value := os.environ.get("CHAINMAN_UPDATE_LEASE_FD"):
+        update_fd = int(update_value)
+        if update_fd < 3 or not stat.S_ISREG(os.fstat(update_fd).st_mode):
+            raise ValueError("Invalid update lifetime lease")
+        update_fds = (update_fd,)
     options["pass_fds"] = tuple(
-        dict.fromkeys((*options.get("pass_fds", ()), *_nix_root_fds))
+        dict.fromkeys((*options.get("pass_fds", ()), *_nix_root_fds, *update_fds))
     )
     descriptor, gate, identity, compat, ancestors = inherited_operation()
     if descriptor is not None:

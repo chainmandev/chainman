@@ -536,6 +536,13 @@ func hookExec(args []string) error {
 	}()
 	c := exec.Command(args[2], args[3:]...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if os.Getenv("CHAINMAN_UPDATE_LEASE_FD") != "" {
+		c.Env = os.Environ()
+		if err := forwardLeases(c); err != nil {
+			return err
+		}
+		defer closeForwarded(c)
+	}
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)

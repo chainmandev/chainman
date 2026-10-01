@@ -623,8 +623,10 @@ Corrupt Git objects and unavailable selected revisions fail explicitly. Ordinary
 launches remain pinned and do not discover updates.
 Consumer verification runs from refreshed environments under the selected runtime.
 Until verification passes, the original pin remains
-untouched in the original checkout. Failed candidate files remain available for
-diagnosis. Prior installed runtime generations remain available throughout the
+untouched in the original checkout. Failed candidate files are temporary diagnostics,
+subject to the [24-hour / 12 GiB update-cache policy](runtime.md#temporary-update-candidates).
+They may be discarded, including edits made inside them; export useful work yourself.
+Prior installed runtime generations remain available throughout the
 transaction. Partial runtime publication inside the candidate restores only
 still-identical managed outputs; concurrent edits are preserved. Final application
 assumes cooperating process locks, not filesystem compare-and-swap against a hostile

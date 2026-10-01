@@ -117,7 +117,7 @@ func forwardLeases(cmd *exec.Cmd) error {
 		}
 	}
 	vars := map[string]int{}
-	for _, name := range []string{"TOOLCHAIN_LOCK_FD", "TOOLCHAIN_GATE_FD", "TOOLCHAIN_COMPAT_FD", "CHAINMAN_SERVICE_CONTEXT_FD"} {
+	for _, name := range []string{"TOOLCHAIN_LOCK_FD", "TOOLCHAIN_GATE_FD", "TOOLCHAIN_COMPAT_FD", "CHAINMAN_SERVICE_CONTEXT_FD", "CHAINMAN_UPDATE_LEASE_FD"} {
 		if value := os.Getenv(name); value != "" {
 			fd, e := strconv.Atoi(value)
 			if e != nil {

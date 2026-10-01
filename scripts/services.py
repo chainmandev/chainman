@@ -718,6 +718,17 @@ def export(root: Path, arguments: list[str]) -> int:
     # the selected project lane. Carry the requesting task, not its environment,
     # so services and watched builds can reconstruct the same context there.
     forwarded["CHAINMAN_CONTEXT_TASK"] = task
+    # The host launcher must keep transaction ownership through native task
+    # supervision and label every workload container. Never source these from
+    # project configuration or pass host descriptors into containers.
+    if os.environ.get("CHAINMAN_UPDATE_TRANSACTION"):
+        for name in (
+            "CHAINMAN_UPDATE_TRANSACTION",
+            "CHAINMAN_UPDATE_HELPER",
+            "XDG_CACHE_HOME",
+        ):
+            if name in os.environ:
+                forwarded[name] = os.environ[name]
     declared = declarations(root, cfg)
     fingerprint = config_fingerprint(root, cfg, env=dict(os.environ, **planning_env))
     task_args = (

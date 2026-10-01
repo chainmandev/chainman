@@ -94,13 +94,14 @@ check every bound task and its dependencies before their first step, while keepi
 the declared sequential execution order. chainman does not
 silently disable those task contracts. Host mode does not prune managed caches.
 
-## Three separate caches
+## Caches and temporary transactions
 
 | Cache | Role |
 |---|---|
 | User-local bare Git objects | Downloaded source objects, keyed by canonical source and commit |
 | Nix store and lifetime roots | Verified runtime source and executable tool environments |
 | Project/download caches | Package downloads, setup artifacts, and build outputs |
+| Temporary update candidates | Disposable diagnostics with bounded retention |
 
 The Git cache is under `${XDG_CACHE_HOME:-$HOME/.cache}/chainman/git/`. It has no
 mutable “current” pointer. Concurrent first use publishes an initialized cache
@@ -136,6 +137,46 @@ just chainman cache-prune
 
 Use `cache.automatic_prune = false` if project cache pruning should be explicit.
 See the configuration reference for size, age, and compiler-cache settings.
+
+### Temporary update candidates
+
+New source and consumer update transactions live in
+`${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates/v1/`. These workspaces are
+**disposable diagnostics, not backups**. Copy useful edits elsewhere yourself;
+chainman does not preserve work merely because it happened inside a candidate.
+
+Successful candidates are removed once their owned processes have stopped.
+Inactive failed or interrupted candidates are kept for at most 24 hours, subject
+to a shared 12 GiB budget. Oldest candidates are removed first; an oversized
+candidate can disappear immediately after failure. Resume is best-effort, not a
+durability guarantee. Failure output reports whether a candidate remains.
+
+Maintenance runs at update entry and completion, or explicitly:
+
+```sh
+just chainman update-cache-status
+just chainman update-cache-prune
+just chainman update-cache-prune --all
+```
+
+In the chainman source checkout, omit `chainman` from these commands. Status emits
+JSON with transaction paths, sizes, active state, expiry timestamps and current
+collection eligibility. Pruning reports the paths actually removed. `--all`
+discards all recognized **inactive** candidates, including experimental edits.
+These commands do not change the existing project build-cache commands.
+
+Expiry is checked on the next maintenance invocation; no background timer is
+installed. The budget excludes active transactions and is not an in-build quota.
+Lifetime leases protect running work and surviving children. Container witnesses
+also prevent removal while an engine still retains a transaction's containers;
+an unavailable engine fails closed. Do not manually wipe a cache during active
+operations: disposable does not mean safe to remove concurrently.
+
+Legacy `updates/candidate.*` directories have no compatible lifetime protocol.
+They remain explicitly resumable but are never automatically adopted or deleted.
+Unknown, symlinked and foreign-owned entries are likewise not cleanup targets.
+Inspect legacy workspaces manually after their operations have stopped. Existing
+consumer pins must be updated to receive the bounded-retention behavior.
 
 ## Native SDKs and credentials
 

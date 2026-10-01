@@ -414,7 +414,7 @@ print('entry and Git authority are read-only')
         # owns its consumer and clears its transaction directory during cleanup.
         cache = Path(self.shared.name).resolve() / "lifecycle cache"
         self.env["XDG_CACHE_HOME"] = str(cache)
-        self.update_cache = cache / "chainman/updates"
+        self.update_cache = cache / "chainman/updates/v1"
         self.addCleanup(shutil.rmtree, self.update_cache, ignore_errors=True)
         (self.root / ".gitignore").write_text(".cache/\nreal-runtime/\n")
         (self.root / "chainman.toml").write_text("""schema=3
@@ -493,13 +493,13 @@ format-check=["format-check"]
         self.assertEqual((self.root / "dependency.lock").read_text(), "accepted\n")
         self.assertIn("fixture phase: resolve", result.stderr)
         self.assertIn("fixture phase: verify", result.stderr)
-        self.assertEqual(list(self.update_cache.iterdir()), [])
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
         unchanged = json.loads(
             self.run_bootstrap("deps-update", "--skip-chainman", "--json").stdout
         )
         self.assertEqual(unchanged["verification"], "no changes")
         self.assertIsNone(unchanged["commit"])
-        self.assertEqual(list(self.update_cache.iterdir()), [])
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
 
     def test_public_update_lifecycle_preserves_failure_and_reverifies_resume(self):
         before = self.update_lifecycle(reject=True)
@@ -523,7 +523,27 @@ format-check=["format-check"]
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
         self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
         self.assertEqual((self.root / "dependency.lock").read_text(), "accepted\n")
-        self.assertEqual(list(self.update_cache.iterdir()), [])
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+
+    def test_public_update_cache_status_and_explicit_discard(self):
+        before = self.update_lifecycle(reject=True)
+        result = self.run_bootstrap("deps-update", "--skip-chainman", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("disposable, not a backup", result.stderr)
+        report = json.loads(self.run_bootstrap("update-cache-status").stdout)
+        self.assertEqual(len(report["transactions"]), 1)
+        transaction = report["transactions"][0]
+        self.assertFalse(transaction["active"])
+        self.assertFalse(transaction["eligible"])
+        pruned = json.loads(self.run_bootstrap("update-cache-prune", "--all").stdout)
+        self.assertEqual(pruned["removed"], [transaction["path"]])
+        rejected = self.run_bootstrap(
+            "deps-update", "resume=" + transaction["path"], check=False
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("possibly expired", rejected.stderr)
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
 
     def test_public_update_lifecycle_interruption_can_resume(self):
         before = self.update_lifecycle(block=True)
@@ -588,7 +608,7 @@ format-check=["format-check"]
                 result = self.run_bootstrap("deps-update", f"resume={transaction}")
                 self.assertEqual(json.loads(result.stdout)["verification"], "passed")
                 self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
-                self.assertEqual(list(self.update_cache.iterdir()), [])
+                self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
             finally:
                 if command.poll() is None:
                     os.killpg(command.pid, signal.SIGKILL)
@@ -1645,7 +1665,7 @@ check=["true"]
         self.assertEqual((old_path / "VERSION").read_text(), "0.1.0\n")
         self.assertEqual((new_path / "VERSION").read_text(), "0.1.0\n")
         self.assertIn("fixture phase: verify", result.stderr)
-        self.assertEqual(list(self.update_cache.iterdir()), [])
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
 
     def schema_three_recovery(self, mode):
         self.use_real_runtime()

@@ -1532,6 +1532,9 @@ func exitCode(e error) int {
 	return 1
 }
 func mainAction(args []string) (result int) {
+	if len(args) > 0 && args[0] == "update-cache" {
+		return updateCacheAction(args[1:])
+	}
 	if len(args) > 0 && args[0] == "admitted" {
 		return admittedCommand(args[1:])
 	}

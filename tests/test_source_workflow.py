@@ -44,6 +44,21 @@ class SourceWorkflows(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
+        # Exercise the Python worker in process so resolver/verification mocks
+        # remain effective. The native supervisor's lifecycle is qualified in
+        # update_cache_test.go and through real bootstrap tests.
+        def supervise(root, action, arguments):
+            destination = self.base / "cache/chainman/updates/v1/candidate.fixture"
+            destination.mkdir(parents=True)
+            with patch.dict(os.environ, CHAINMAN_UPDATE_TRANSACTION=str(destination)):
+                source_workflow.run(root, action, arguments)
+
+        supervisor = patch.object(
+            source_workflow.update_cache, "run", side_effect=supervise
+        )
+        supervisor.start()
+        self.addCleanup(supervisor.stop)
+
     def resolve(self, root, *args):
         self.assertNotEqual(root, self.root)
         (root / "dependency.lock").write_text("new\n")
@@ -58,7 +73,7 @@ class SourceWorkflows(unittest.TestCase):
         self.assertEqual(updates.snapshot(self.root), self.before)
         self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
         candidates = list(
-            (self.base / "cache/chainman/updates").glob("candidate.*/candidate")
+            (self.base / "cache/chainman/updates/v1").glob("candidate.*/candidate")
         )
         self.assertEqual(len(candidates), 1)
         self.assertEqual((candidates[0] / "dependency.lock").read_text(), "new\n")
