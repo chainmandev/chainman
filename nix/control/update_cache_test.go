@@ -672,10 +672,6 @@ func TestUpdateCacheServicePreservesLegacyReceipt(t *testing.T) {
 	if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(filepath.Join(path, ".transaction.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err = syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
@@ -689,9 +685,9 @@ func TestUpdateCacheServicePreservesLegacyReceipt(t *testing.T) {
 		t.Fatalf("legacy supervisor prevented service ownership: %v", err)
 	}
 	defer closeForwarded(cmd)
-	after, err := os.ReadFile(filepath.Join(path, ".transaction.json"))
-	if err != nil || string(after) != string(before) {
-		t.Fatalf("service changed its supervisor's receipt: %s %v", after, err)
+	after, err := updateRead(path)
+	if err != nil || after.Schema != r.Schema || after.Token != r.Token || !after.Touched.Equal(r.Touched) || after.Complete != r.Complete || !slices.Equal(after.Engines, []string{updateLegacyGuard(path)}) {
+		t.Fatalf("service broke its supervisor's receipt: %+v %v", after, err)
 	}
 	lease.Close()
 	_, removed, err := updateCollect(base, true, true, time.Now(), 0)

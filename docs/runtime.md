@@ -181,11 +181,23 @@ skip them; use the updated commands for maintenance.
 
 An update already running under a schema-1 supervisor keeps that receipt format
 and its original update helper, even when candidate services use a newer runtime.
-Those services share the lifetime lease without migrating the supervisor's
-metadata. A newer supervisor migrates an older host-only receipt when explicitly
-resuming it, after verifying that all previous owners have stopped. Engine
-registration cannot migrate receipts; use the helper supplied by the supervisor.
-The older container receipts described above still require manual inspection.
+The newer helper, or an updated maintenance pass, adds a small collection guard
+using a field that the old writer preserves. Old collectors treat that guard as
+an active witness whenever real engines have been registered, including engines
+registered later. This prevents a context switch from making the old collector
+delete a candidate still used by another daemon. Updated status reports the
+missing daemon identity; these older container candidates require manual
+inspection even after successful updates. A current daemon identity cannot prove
+which daemon owned an earlier container.
+
+Host-only legacy updates retain normal completion, cleanup and resume behavior.
+A newer supervisor removes the guard from the engine list and migrates an older
+host-only receipt when explicitly resuming it, after verifying that all previous
+owners have stopped. Engine registration cannot migrate receipts; use the helper
+supplied by the supervisor. The guard uses only the host shell, stays inside the
+candidate, and is deleted with it. Status alone does not install guards. Updates
+started under the new supervisor use the normal identity checks and retention
+limits without this compatibility guard.
 Do not manually wipe a cache during active operations: disposable does not mean
 safe to remove concurrently.
 

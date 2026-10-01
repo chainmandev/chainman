@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,8 +103,67 @@ func updateRead(path string) (updateReceipt, error) {
 	return r, nil
 }
 
+func updateLegacyGuard(path string) string {
+	return filepath.Join(path, ".legacy-collector-guard")
+}
+
+// A schema-1 writer cannot retain daemon identities or understand new fields.
+// Its Engines list can, however, retain a synthetic container witness. Put that
+// witness first so an unbound real engine never authorizes legacy collection.
+// Called under the pool gate; preserve the lease inode and the old reader's
+// format while its original supervisor may still be using them.
+func updateProtectLegacy(path string, r updateReceipt) error {
+	guard := updateLegacyGuard(path)
+	encoded, err := json.Marshal([]string{guard})
+	if err != nil {
+		return err
+	}
+	// The frozen schema-1 writer emits compact JSON with Engines last. Accept
+	// only its exact, JSON-escaped singleton list as proof of host-only work.
+	// Anything else, including later registrations or unreadable/reformatted
+	// data, returns a positive witness. This is deliberately not a JSON parser.
+	// Shell builtins keep the guard independent of temporary native exports,
+	// Nix roots, host language runtimes and executable search paths.
+	body := "#!/bin/sh\nreceipt=\nIFS= read -r receipt < " + quote(filepath.Join(path, ".transaction.json")) + " || :\n" +
+		"case \"$receipt\" in\n    *" + quote(`,"engines":`+string(encoded)+"}") + ") exit 0 ;;\nesac\n" +
+		"printf '%s\\n' chainman-legacy-update-requires-inspection\n"
+	f, err := updateFile(guard, false)
+	missing := os.IsNotExist(err)
+	if err == nil {
+		st, statError := f.Stat()
+		data, readError := io.ReadAll(io.LimitReader(f, int64(len(body)+1)))
+		f.Close()
+		if statError != nil || readError != nil || st.Mode().Perm() != 0700 || string(data) != body {
+			return fmt.Errorf("invalid legacy update collection guard: %s", guard)
+		}
+	} else if !missing {
+		return err
+	}
+	engines := []string{guard}
+	for _, engine := range r.Engines {
+		if engine != guard {
+			engines = append(engines, engine)
+		}
+	}
+	if !slices.Equal(r.Engines, engines) {
+		r.Engines = engines
+		if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
+			return err
+		}
+	}
+	// Publish the reference first: interruption before the atomic script install
+	// leaves a missing engine, which makes old collectors refuse deletion too.
+	if missing {
+		return hookWrite(guard, []byte(body), 0700)
+	}
+	return nil
+}
+
 func updateContainers(r updateReceipt, path string) (bool, error) {
 	for _, engine := range r.Engines {
+		if r.Schema == 1 && engine == updateLegacyGuard(path) {
+			continue // Synthetic witness; all real engines still require identity.
+		}
 		if !filepath.IsAbs(engine) || r.EngineIdentities[engine] == "" {
 			return false, fmt.Errorf("update engine has no recorded daemon identity: %s", engine)
 		}
@@ -246,6 +307,11 @@ func updateCollect(base string, remove, all bool, now time.Time, limit int64) ([
 			continue
 		}
 		entry := updateEntry{Path: path, receipt: r, Expires: r.Touched.Add(updateAge)}
+		if remove && r.Schema == 1 {
+			if err = updateProtectLegacy(path, r); err != nil {
+				protect(&entry, err)
+			}
+		}
 		err = syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			entry.Active = true
@@ -334,6 +400,7 @@ func updateStart(base, resume string) (string, *os.File, updateReceipt, error) {
 	// Its predecessor and all surviving children have released ownership, and
 	// the new engine helper can now bind identities that old collectors ignore.
 	if r.Schema != updateSchema {
+		r.Engines = slices.DeleteFunc(r.Engines, func(engine string) bool { return engine == updateLegacyGuard(path) })
 		r.Schema = updateSchema
 		if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
 			f.Close()
@@ -406,6 +473,12 @@ func forwardUpdateLease(cmd *exec.Cmd) error {
 	// Sharing lifetime ownership does not transfer receipt ownership. A frozen
 	// supervisor and CHAINMAN_UPDATE_HELPER may still need to register engines,
 	// finalize or resume this operation using their original schema.
+	if r.Schema == 1 {
+		if err = updateProtectLegacy(path, r); err != nil {
+			lease.Close()
+			return err
+		}
+	}
 	cmd.Env = append(cmd.Env, "CHAINMAN_UPDATE_LEASE_FD="+strconv.Itoa(3+len(cmd.ExtraFiles)))
 	cmd.ExtraFiles = append(cmd.ExtraFiles, lease)
 	return nil
