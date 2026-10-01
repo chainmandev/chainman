@@ -20,13 +20,15 @@ import (
 
 const updateLimit int64 = 12 << 30
 const updateAge = 24 * time.Hour
+const updateSchema = 2
 
 type updateReceipt struct {
-	Schema   int       `json:"schema"`
-	Token    string    `json:"token"`
-	Touched  time.Time `json:"touched"`
-	Complete bool      `json:"complete"`
-	Engines  []string  `json:"engines,omitempty"`
+	Schema           int               `json:"schema"`
+	Token            string            `json:"token"`
+	Touched          time.Time         `json:"touched"`
+	Complete         bool              `json:"complete"`
+	Engines          []string          `json:"engines,omitempty"`
+	EngineIdentities map[string]string `json:"engine_identities,omitempty"`
 }
 
 type updateEntry struct {
@@ -35,6 +37,7 @@ type updateEntry struct {
 	Active   bool      `json:"active"`
 	Eligible bool      `json:"eligible"`
 	Expires  time.Time `json:"expires"`
+	Error    string    `json:"error,omitempty"`
 	receipt  updateReceipt
 }
 
@@ -92,7 +95,7 @@ func updateRead(path string) (updateReceipt, error) {
 	if err = readJSON(filepath.Join(path, ".transaction.json"), &r); err != nil {
 		return r, err
 	}
-	if r.Schema != 1 || !consentID.MatchString(r.Token) || r.Touched.IsZero() {
+	if (r.Schema != 1 && r.Schema != updateSchema) || !consentID.MatchString(r.Token) || r.Touched.IsZero() {
 		return r, fmt.Errorf("unknown update receipt")
 	}
 	return r, nil
@@ -100,11 +103,15 @@ func updateRead(path string) (updateReceipt, error) {
 
 func updateContainers(r updateReceipt, path string) (bool, error) {
 	for _, engine := range r.Engines {
-		if !filepath.IsAbs(engine) {
-			return false, fmt.Errorf("invalid update engine")
+		if !filepath.IsAbs(engine) || r.EngineIdentities[engine] == "" {
+			return false, fmt.Errorf("update engine has no recorded daemon identity: %s", engine)
+		}
+		owner := &Container{Engine: engine, EngineIdentity: r.EngineIdentities[engine], Name: path}
+		if err := checkEngine(owner); err != nil {
+			return false, err
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		out, err := exec.CommandContext(ctx, engine, "ps", "--all", "--quiet", "--filter", "label=dev.chainman.update="+r.Token).Output()
+		out, err := queryCommand(ctx, engine, "ps", "--all", "--quiet", "--filter", "label=dev.chainman.update="+r.Token).Output()
 		cancel()
 		// An unavailable engine cannot prove a workspace is idle. Even stopped
 		// containers retain mounts, so conservatively keep their candidates too.
@@ -117,17 +124,20 @@ func updateContainers(r updateReceipt, path string) (bool, error) {
 		// Frozen candidate runtimes can predate the label protocol. Check their
 		// actual mounts as well; never infer idleness just from a missing label.
 		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-		out, err = exec.CommandContext(ctx, engine, "ps", "--all", "--quiet").Output()
+		out, err = queryCommand(ctx, engine, "ps", "--all", "--quiet").Output()
 		cancel()
 		if err != nil {
 			return false, fmt.Errorf("cannot inventory update mounts: %w", err)
 		}
 		ids := strings.Fields(string(out))
 		if len(ids) == 0 {
+			if err = checkEngine(owner); err != nil {
+				return false, err
+			}
 			continue
 		}
 		ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
-		out, err = exec.CommandContext(ctx, engine, append([]string{"inspect"}, ids...)...).Output()
+		out, err = queryCommand(ctx, engine, append([]string{"inspect"}, ids...)...).Output()
 		cancel()
 		inspectionError := err
 		var containers []struct{ Mounts []struct{ Source string } }
@@ -147,6 +157,10 @@ func updateContainers(r updateReceipt, path string) (bool, error) {
 		// but incomplete negative evidence must never authorize collection.
 		if inspectionError != nil {
 			return false, fmt.Errorf("cannot inspect update mounts: %w", inspectionError)
+		}
+		// Reject a context change during inventory as well as before it.
+		if err = checkEngine(owner); err != nil {
+			return false, err
 		}
 	}
 	return false, nil
@@ -212,6 +226,11 @@ func updateCollect(base string, remove, all bool, now time.Time, limit int64) ([
 	}
 	entries := []updateEntry{}
 	removed := []string{}
+	var failures []error
+	protect := func(entry *updateEntry, err error) {
+		entry.Error = err.Error()
+		failures = append(failures, fmt.Errorf("%s: %w", entry.Path, err))
+	}
 	var idleBytes int64
 	for _, child := range children {
 		if !strings.HasPrefix(child.Name(), "candidate.") || !child.IsDir() {
@@ -231,14 +250,12 @@ func updateCollect(base string, remove, all bool, now time.Time, limit int64) ([
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			entry.Active = true
 		} else if err != nil {
-			lease.Close()
-			return nil, removed, err
+			protect(&entry, err)
 		}
-		if !entry.Active {
+		if !entry.Active && entry.Error == "" {
 			entry.Active, err = updateContainers(r, path)
 			if err != nil {
-				lease.Close()
-				return nil, removed, err
+				protect(&entry, err)
 			}
 		}
 		// Admission remains gated, so no new owner can acquire an idle entry.
@@ -247,9 +264,9 @@ func updateCollect(base string, remove, all bool, now time.Time, limit int64) ([
 		lease.Close()
 		entry.Bytes, err = updateSize(path)
 		if err != nil {
-			return nil, removed, err
+			protect(&entry, err)
 		}
-		if !entry.Active {
+		if !entry.Active && entry.Error == "" {
 			idleBytes += entry.Bytes
 		}
 		entries = append(entries, entry)
@@ -257,19 +274,21 @@ func updateCollect(base string, remove, all bool, now time.Time, limit int64) ([
 	sort.Slice(entries, func(i, j int) bool { return entries[i].receipt.Touched.Before(entries[j].receipt.Touched) })
 	for i := range entries {
 		e := &entries[i]
-		e.Eligible = !e.Active && (all || e.receipt.Complete || !now.Before(e.Expires) || idleBytes > limit)
+		e.Eligible = !e.Active && e.Error == "" && (all || e.receipt.Complete || !now.Before(e.Expires) || idleBytes > limit)
 		if !e.Eligible {
 			continue
 		}
 		if remove {
 			if err = updateRemove(e.Path); err != nil {
-				return entries, removed, err
+				protect(e, err)
+				e.Eligible = false
+				continue
 			}
 			removed = append(removed, e.Path)
 		}
 		idleBytes -= e.Bytes
 	}
-	return entries, removed, nil
+	return entries, removed, errors.Join(failures...)
 }
 
 func updateStart(base, resume string) (string, *os.File, updateReceipt, error) {
@@ -285,7 +304,7 @@ func updateStart(base, resume string) (string, *os.File, updateReceipt, error) {
 		if err != nil {
 			return "", nil, r, err
 		}
-		r = updateReceipt{Schema: 1, Token: token(), Touched: time.Now()}
+		r = updateReceipt{Schema: updateSchema, Token: token(), Touched: time.Now()}
 		if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
 			return "", nil, r, err
 		}
@@ -311,7 +330,88 @@ func updateStart(base, resume string) (string, *os.File, updateReceipt, error) {
 		f.Close()
 		return "", nil, r, fmt.Errorf("candidate has containers or cannot be inspected: %v", err)
 	}
+	// Old collectors must not authorize deletion without checking daemon identity.
+	// Upgrade resumable host-only receipts before starting new work in them.
+	if r.Schema != updateSchema {
+		r.Schema = updateSchema
+		if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
+			f.Close()
+			return "", nil, r, err
+		}
+	}
+	// Exclusive admission above prevents concurrent resumes. Active owners use
+	// shared locks so detached service owners can acquire independent witnesses.
+	// Conversion is protected by the same gate as collection and child admission.
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		f.Close()
+		return "", nil, r, err
+	}
 	return path, f, r, nil
+}
+
+// Process Compose and Watchexec may close inherited descriptors. Reacquire a
+// shared candidate lease at their native execution boundaries, under the pool
+// gate, and keep it in both the native owner and its launched child.
+func forwardUpdateLease(cmd *exec.Cmd) error {
+	path := ""
+	for _, value := range cmd.Environ() {
+		if strings.HasPrefix(value, "CHAINMAN_UPDATE_TRANSACTION=") {
+			path = strings.TrimPrefix(value, "CHAINMAN_UPDATE_TRANSACTION=")
+		}
+	}
+	env := cmd.Environ()
+	cmd.Env = nil
+	for _, value := range env {
+		if !strings.HasPrefix(value, "CHAINMAN_UPDATE_LEASE_FD=") {
+			cmd.Env = append(cmd.Env, value)
+		}
+	}
+	if path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || filepath.Base(filepath.Dir(path)) != "v1" || !strings.HasPrefix(filepath.Base(path), "candidate.") {
+		return fmt.Errorf("invalid update transaction path")
+	}
+	_, gate, err := updateGate(filepath.Dir(filepath.Dir(path)))
+	if err != nil {
+		return err
+	}
+	defer gate.Close()
+	r, err := updateRead(path)
+	if err != nil {
+		return err
+	}
+	lease, err := updateFile(filepath.Join(path, ".lease"), false)
+	if err != nil {
+		return err
+	}
+	// A frozen launcher from schema 1 holds an exclusive lease. Only a verified
+	// inherited description of this exact inode may convert that ownership to
+	// shared mode. Closed/reused backend descriptors must never be unlocked.
+	if r.Schema == 1 {
+		fd, parseError := strconv.Atoi(os.Getenv("CHAINMAN_UPDATE_LEASE_FD"))
+		var inherited, current syscall.Stat_t
+		if parseError == nil && fd >= 3 && syscall.Fstat(fd, &inherited) == nil && syscall.Fstat(int(lease.Fd()), &current) == nil && inherited.Dev == current.Dev && inherited.Ino == current.Ino {
+			if err = syscall.Flock(fd, syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+				lease.Close()
+				return err
+			}
+		}
+	}
+	if err = syscall.Flock(int(lease.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		lease.Close()
+		return fmt.Errorf("cannot acquire update lifetime lease: %w", err)
+	}
+	if r.Schema != updateSchema {
+		r.Schema = updateSchema
+		if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
+			lease.Close()
+			return err
+		}
+	}
+	cmd.Env = append(cmd.Env, "CHAINMAN_UPDATE_LEASE_FD="+strconv.Itoa(3+len(cmd.ExtraFiles)))
+	cmd.ExtraFiles = append(cmd.ExtraFiles, lease)
+	return nil
 }
 
 func updateRun(base, resume, action string, argv []string) int {
@@ -400,10 +500,23 @@ func updateCacheAction(args []string) int {
 			}
 		}
 		if !found {
+			identity, err := engineIdentity(engine)
+			if err != nil {
+				return exitCode(err)
+			}
+			if r.EngineIdentities == nil {
+				r.EngineIdentities = map[string]string{}
+			}
+			r.EngineIdentities[engine] = identity
 			r.Engines = append(r.Engines, engine)
+			r.Schema = updateSchema
 			if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
 				return exitCode(err)
 			}
+		} else if r.EngineIdentities[engine] == "" {
+			return exitCode(fmt.Errorf("update engine has no recorded daemon identity; cannot adopt its current context"))
+		} else if err = checkEngine(&Container{Engine: engine, EngineIdentity: r.EngineIdentities[engine], Name: path}); err != nil {
+			return exitCode(err)
 		}
 		fmt.Println(r.Token)
 		return 0
@@ -412,13 +525,11 @@ func updateCacheAction(args []string) int {
 			return 2
 		}
 		entries, removed, err := updateCollect(base, action == "prune", len(args) == 3, time.Now(), updateLimit)
-		if err != nil {
-			return exitCode(err)
-		}
-		return exitCode(json.NewEncoder(os.Stdout).Encode(struct {
+		outputError := json.NewEncoder(os.Stdout).Encode(struct {
 			Transactions []updateEntry `json:"transactions"`
 			Removed      []string      `json:"removed"`
-		}{entries, removed}))
+		}{entries, removed})
+		return exitCode(errors.Join(err, outputError))
 	}
 	return 2
 }

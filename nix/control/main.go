@@ -251,7 +251,7 @@ func child(c Command) (*exec.Cmd, error) {
 	filtered := cmd.Env[:0]
 	for _, v := range cmd.Env {
 		k, _, _ := strings.Cut(v, "=")
-		stale := map[string]bool{"TOOLCHAIN_LOCK_FD": true, "TOOLCHAIN_GATE_FD": true, "TOOLCHAIN_COMPAT_FD": true, "TOOLCHAIN_OPERATION_ID": true, "TOOLCHAIN_ANCESTOR_FDS": true, "CHAINMAN_COMPILER_OWNER": true}
+		stale := map[string]bool{"TOOLCHAIN_LOCK_FD": true, "TOOLCHAIN_GATE_FD": true, "TOOLCHAIN_COMPAT_FD": true, "TOOLCHAIN_OPERATION_ID": true, "TOOLCHAIN_ANCESTOR_FDS": true, "CHAINMAN_COMPILER_OWNER": true, "CHAINMAN_UPDATE_LEASE_FD": true}
 		if !stale[k] && !strings.HasPrefix(k, "CHAINMAN_OPERATION_") {
 			filtered = append(filtered, v)
 		}
@@ -530,6 +530,10 @@ func start(p Plan, self string) error {
 	cmd := exec.Command(self, "controller", filepath.Join(p.State, "plan.json"), p.Generation)
 	cmd.Dir = p.State
 	cmd.Env = append(os.Environ(), "CHAINMAN_CONTROL_EXECUTABLE="+self, "CHAINMAN_CONTROL_STATE="+p.State)
+	if e = forwardUpdateLease(cmd); e != nil {
+		return e
+	}
+	defer closeForwarded(cmd)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -1341,8 +1345,10 @@ func owned(state, name string, probe bool, generation string) int {
 		if e = forwardLeases(cmd); e != nil {
 			return exitCode(e)
 		}
-		defer closeForwarded(cmd)
+	} else if e = forwardUpdateLease(cmd); e != nil {
+		return exitCode(e)
 	}
+	defer closeForwarded(cmd)
 	if probe {
 		// Probes have the same process-group ownership as services, with a
 		// distinct receipt so timeout or recovery cannot stop the application.
@@ -1837,8 +1843,13 @@ func mainAction(args []string) (result int) {
 		return exitCode(e)
 	}
 	// A task that survives its caller retains this resource lease. Process Compose
-	// deliberately receives no client lease, so dead clients cannot pin services.
+	// deliberately receives no resource-client lease, so dead clients cannot pin
+	// services. Its independent update lease only protects the candidate directory.
 	cmd.ExtraFiles = []*os.File{lease}
+	if e = forwardUpdateLease(cmd); e != nil {
+		return exitCode(e)
+	}
+	defer closeForwarded(cmd)
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
 	}

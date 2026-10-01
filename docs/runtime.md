@@ -160,17 +160,25 @@ just chainman update-cache-prune --all
 ```
 
 In the chainman source checkout, omit `chainman` from these commands. Status emits
-JSON with transaction paths, sizes, active state, expiry timestamps and current
-collection eligibility. Pruning reports the paths actually removed. `--all`
+JSON with transaction paths, sizes, active state, expiry timestamps, current
+collection eligibility and per-entry inspection errors. Pruning reports the paths
+actually removed even when another entry cannot be inspected; the command exits
+nonzero if any inspection or removal failed. `--all`
 discards all recognized **inactive** candidates, including experimental edits.
 These commands do not change the existing project build-cache commands.
 
 Expiry is checked on the next maintenance invocation; no background timer is
 installed. The budget excludes active transactions and is not an in-build quota.
-Lifetime leases protect running work and surviving children. Container witnesses
-also prevent removal while an engine still retains a transaction's containers;
-an unavailable engine fails closed. Do not manually wipe a cache during active
-operations: disposable does not mean safe to remove concurrently.
+Lifetime leases protect running work and surviving children, including detached
+service owners. Container witnesses also prevent removal while an engine still
+retains a transaction's containers. Receipts bind each engine to its daemon
+identity: an unavailable or changed daemon protects that candidate while cleanup
+continues for other independently verified idle candidates. Restore the original
+engine context to collect a protected candidate. Older container receipts without
+a recorded daemon identity require manual inspection and are never automatically
+adopted into the current context. New receipts use schema 2 so older collectors
+skip them; use the updated commands for maintenance. Do not manually wipe a cache
+during active operations: disposable does not mean safe to remove concurrently.
 
 Legacy `updates/candidate.*` directories have no compatible lifetime protocol.
 They remain explicitly resumable but are never automatically adopted or deleted.

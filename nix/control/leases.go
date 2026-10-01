@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // The lease inode is also the inherited flock witness. Never rewrite or replace
@@ -96,6 +98,20 @@ func leasedTask(path string) error {
 	defer lease.Close()
 	if err = publishLeaseTask(path, lease); err != nil {
 		return err
+	}
+	// Unlike an os/exec child, this exec preserves descriptor numbers. Reacquire
+	// ownership independently of the resource lease at descriptor 3, then expose
+	// the actual open descriptor rather than ExtraFiles' spawn-time remapping.
+	if err = forwardUpdateLease(cmd); err != nil {
+		return err
+	}
+	defer closeForwarded(cmd)
+	if len(cmd.ExtraFiles) > 0 {
+		update := cmd.ExtraFiles[len(cmd.ExtraFiles)-1]
+		cmd.Env = append(cmd.Env, fmt.Sprintf("CHAINMAN_UPDATE_LEASE_FD=%d", update.Fd()))
+		if _, err = unix.FcntlInt(update.Fd(), unix.F_SETFD, 0); err != nil {
+			return err
+		}
 	}
 	if cmd.Dir != "" {
 		if err = os.Chdir(cmd.Dir); err != nil {

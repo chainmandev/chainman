@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -181,8 +183,8 @@ func TestUpdateCacheContainerWitness(t *testing.T) {
 	base := t.TempDir()
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
-	engine := filepath.Join(t.TempDir(), "engine")
-	if err := os.WriteFile(engine, []byte("#!/bin/sh\necho running-container\n"), 0700); err != nil {
+	engine := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(engine, []byte("#!/bin/sh\nif [ \"$1\" = info ]; then echo daemon; else echo running-container; fi\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	r, err := updateRead(path)
@@ -190,6 +192,7 @@ func TestUpdateCacheContainerWitness(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Engines = []string{engine}
+	r.EngineIdentities = map[string]string{engine: "daemon"}
 	if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +388,11 @@ func TestUpdateCacheRealContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.Engines = []string{engine}
+	identity, err := engineIdentity(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.EngineIdentities = map[string]string{engine: identity}
 	if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +421,12 @@ func TestUpdateCacheRealContainer(t *testing.T) {
 
 func TestUpdateCacheMaintenanceDoesNotMaskFailure(t *testing.T) {
 	base := t.TempDir()
-	script := quote(os.Args[0]) + " update-cache engine " + quote(base) + " \"$CHAINMAN_UPDATE_TRANSACTION\" /nonexistent/engine >/dev/null; exit 23"
+	engine := filepath.Join(t.TempDir(), "docker")
+	offline := filepath.Join(t.TempDir(), "offline")
+	if err := os.WriteFile(engine, []byte("#!/bin/sh\n[ ! -f "+quote(offline)+" ] || exit 1\necho daemon\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	script := quote(os.Args[0]) + " update-cache engine " + quote(base) + " \"$CHAINMAN_UPDATE_TRANSACTION\" " + quote(engine) + " >/dev/null; touch " + quote(offline) + "; exit 23"
 	out, err := updateTestCommand(t, base, script).CombinedOutput()
 	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 23 {
 		t.Fatalf("original failure masked: %v %s", err, out)
@@ -431,12 +444,13 @@ func TestUpdateCachePartialEngineInventory(t *testing.T) {
 	base := t.TempDir()
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
-	engine := filepath.Join(t.TempDir(), "engine")
+	engine := filepath.Join(t.TempDir(), "docker")
 	receipt, err := updateRead(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	receipt.Engines = []string{engine}
+	receipt.EngineIdentities = map[string]string{engine: "daemon"}
 	for _, mounted := range []bool{true, false} {
 		body := "[]"
 		if mounted {
@@ -446,7 +460,7 @@ func TestUpdateCachePartialEngineInventory(t *testing.T) {
 			}
 			body = string(data)
 		}
-		script := "#!/bin/sh\nif [ \"$1\" = inspect ]; then printf '%s' " + quote(body) + "; exit 1; fi\nif [ \"$#\" = 3 ]; then echo transient; fi\n"
+		script := "#!/bin/sh\nif [ \"$1\" = info ]; then echo daemon; exit; fi\nif [ \"$1\" = inspect ]; then printf '%s' " + quote(body) + "; exit 1; fi\nif [ \"$#\" = 3 ]; then echo transient; fi\n"
 		if err = os.WriteFile(engine, []byte(script), 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -457,5 +471,246 @@ func TestUpdateCachePartialEngineInventory(t *testing.T) {
 		if !mounted && e == nil {
 			t.Fatal("partial negative inventory authorized deletion")
 		}
+	}
+}
+
+func TestUpdateCacheBindsDaemonBeforeRegistrationAndCollection(t *testing.T) {
+	base := t.TempDir()
+	path, lease := updateFixture(t, base, 25*time.Hour, 10)
+	lease.Close()
+	engine := filepath.Join(t.TempDir(), "docker")
+	queried := filepath.Join(t.TempDir(), "queried")
+	body := "#!/bin/sh\nif [ \"$1\" = info ]; then echo \"$DOCKER_HOST\"; else touch " + quote(queried) + "; fi\n"
+	if err := os.WriteFile(engine, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DOCKER_HOST", "original")
+	if got := updateCacheAction([]string{"engine", base, path, engine}); got != 0 {
+		t.Fatalf("registration: %d", got)
+	}
+	r, err := updateRead(path)
+	if err != nil || r.EngineIdentities[engine] != "original" || r.Schema != 2 {
+		t.Fatalf("daemon identity not recorded: %+v %v", r, err)
+	}
+	t.Setenv("DOCKER_HOST", "different")
+	if got := updateCacheAction([]string{"engine", base, path, engine}); got == 0 {
+		t.Fatal("registration silently rebound the daemon")
+	}
+	if _, _, _, err = updateStart(base, path); err == nil {
+		t.Fatal("resumed against a different daemon")
+	}
+	entries, removed, err := updateCollect(base, true, true, time.Now(), 0)
+	if err == nil || len(removed) != 0 || len(entries) != 1 || entries[0].Error == "" || entries[0].Eligible {
+		t.Fatalf("changed daemon authorized removal: %+v %v %v", entries, removed, err)
+	}
+	if _, err := os.Stat(queried); !os.IsNotExist(err) {
+		t.Fatal("queried containers on the wrong daemon")
+	}
+	t.Setenv("DOCKER_HOST", "original")
+	_, removed, err = updateCollect(base, true, true, time.Now(), 0)
+	if err != nil || len(removed) != 1 {
+		t.Fatalf("restored daemon cannot collect idle candidate: %v %v", removed, err)
+	}
+}
+
+func TestUpdateCacheMissingIdentityDoesNotAdoptCurrentDaemon(t *testing.T) {
+	base := t.TempDir()
+	path, lease := updateFixture(t, base, 25*time.Hour, 10)
+	lease.Close()
+	r, err := updateRead(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Engines = []string{"/missing/docker"}
+	r.Schema = 1
+	if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if got := updateCacheAction([]string{"engine", base, path, r.Engines[0]}); got == 0 {
+		t.Fatal("adopted an unbound old receipt")
+	}
+	_, removed, err := updateCollect(base, true, true, time.Now(), 0)
+	if err == nil || len(removed) != 0 {
+		t.Fatalf("unbound receipt collected: %v %v", removed, err)
+	}
+}
+
+func TestUpdateCacheUnavailableEngineDoesNotBlockIndependentCleanup(t *testing.T) {
+	base := t.TempDir()
+	blocked, lease := updateFixture(t, base, 25*time.Hour, 10)
+	lease.Close()
+	r, err := updateRead(blocked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Engines = []string{"/missing/docker"}
+	r.EngineIdentities = map[string]string{r.Engines[0]: "original"}
+	if err = atomic(filepath.Join(blocked, ".transaction.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	oversize, lease := updateFixture(t, base, time.Hour, 13<<30)
+	lease.Close()
+	expired, lease := updateFixture(t, base, 25*time.Hour, 10)
+	lease.Close()
+	cmd := exec.Command(os.Args[0], "update-cache", "prune", base)
+	out, err := cmd.Output()
+	var report struct {
+		Transactions []updateEntry `json:"transactions"`
+		Removed      []string      `json:"removed"`
+	}
+	if err == nil {
+		t.Fatal("unavailable engine not reported")
+	}
+	if err = json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("partial result missing: %s %v", out, err)
+	}
+	if len(report.Removed) != 2 || !slices.Contains(report.Removed, oversize) || !slices.Contains(report.Removed, expired) {
+		t.Fatalf("independent cleanup blocked: %s", out)
+	}
+	if _, err = os.Stat(blocked); err != nil {
+		t.Fatal("uncertain candidate removed")
+	}
+	// A subsequent successful update must still be collected immediately.
+	if out, err = updateTestCommand(t, base, "exit 0").CombinedOutput(); err != nil {
+		t.Fatalf("independent update failed: %s %v", out, err)
+	}
+	paths, _ := filepath.Glob(filepath.Join(base, "v1/candidate.*"))
+	if len(paths) != 1 || paths[0] != blocked {
+		t.Fatalf("successful candidate leaked: %v", paths)
+	}
+}
+
+func TestUpdateCacheIndependentServiceLeaseProtectsCandidate(t *testing.T) {
+	base := t.TempDir()
+	path, lease := updateFixture(t, base, 25*time.Hour, 10)
+	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", path)
+	// A detached backend can advertise a descriptor it no longer inherited.
+	t.Setenv("CHAINMAN_UPDATE_LEASE_FD", "999")
+	cmd, err := child(Command{Argv: []string{"/bin/sh", "-c", "read ignored"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = forwardUpdateLease(cmd); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	cmd.Stdin = reader
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	defer func() { writer.Close(); cmd.Wait() }()
+	lease.Close()
+	closeForwarded(cmd)
+	if _, _, _, err = updateStart(base, path); err == nil {
+		t.Fatal("resumed while a detached child still owns the candidate")
+	}
+	_, removed, err := updateCollect(base, true, true, time.Now(), 0)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("detached child lost ownership: %v %v", removed, err)
+	}
+	writer.Close()
+	cmd.Wait()
+	_, removed, err = updateCollect(base, true, true, time.Now(), 0)
+	if err != nil || len(removed) != 1 {
+		t.Fatalf("finished child retained candidate: %v %v", removed, err)
+	}
+	// A stale service plan cannot recreate a collected transaction.
+	if err = forwardUpdateLease(cmd); err == nil {
+		t.Fatal("recreated a collected candidate")
+	}
+}
+
+func TestUpdateCacheLeasedTaskRemapsAroundResourceDescriptor(t *testing.T) {
+	base := t.TempDir()
+	candidate, update := updateFixture(t, base, 0, 10)
+	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", candidate)
+	t.Setenv("CHAINMAN_UPDATE_LEASE_FD", strconv.Itoa(int(update.Fd())))
+	path := filepath.Join(leaseTestState(t), "client.lease")
+	if err := atomic(path, Lease{TaskReceipt: true}); err != nil {
+		t.Fatal(err)
+	}
+	resource, err := locked(path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resource.Close()
+	// /bin/sh has only single-digit redirections, so compare file identities in
+	// the Go subprocess instead of assuming an inherited descriptor number.
+	command := Command{Argv: []string{os.Args[0], "-test.run=^TestUpdateCacheDescriptorHelper$"}}
+	if err = atomic(path+".command.json", command); err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := child(Command{Argv: []string{os.Args[0], "-test.run=^TestLeaseEntryHelper$"}, Environment: map[string]string{"CHAINMAN_TEST_LEASE_ENTRY": path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stdout, cmd.Stderr = nil, nil
+	cmd.ExtraFiles = []*os.File{resource}
+	if err = forwardUpdateLease(cmd); err != nil {
+		t.Fatal(err)
+	}
+	defer closeForwarded(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("leased task failed: %s %v", out, err)
+	}
+}
+
+func TestUpdateCacheServiceUpgradesInheritedLegacyExclusiveLease(t *testing.T) {
+	base := t.TempDir()
+	path, lease := updateFixture(t, base, 25*time.Hour, 10)
+	r, err := updateRead(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Schema = 1
+	if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	if err = syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", path)
+	t.Setenv("CHAINMAN_UPDATE_LEASE_FD", strconv.Itoa(int(lease.Fd())))
+	cmd, err := child(Command{Argv: []string{"/bin/true"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = forwardUpdateLease(cmd); err != nil {
+		t.Fatalf("legacy supervisor prevented service ownership: %v", err)
+	}
+	defer closeForwarded(cmd)
+	r, err = updateRead(path)
+	if err != nil || r.Schema != 2 {
+		t.Fatalf("old collector can still adopt the upgraded receipt: %+v %v", r, err)
+	}
+	lease.Close()
+	_, removed, err := updateCollect(base, true, true, time.Now(), 0)
+	if err != nil || len(removed) != 0 {
+		t.Fatalf("legacy supervisor exit released live service: %v %v", removed, err)
+	}
+}
+
+func TestUpdateCacheDescriptorHelper(t *testing.T) {
+	if os.Getenv("CHAINMAN_TEST_LEASE_ENTRY") == "" {
+		return
+	}
+	fd, err := strconv.Atoi(os.Getenv("CHAINMAN_UPDATE_LEASE_FD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := os.NewFile(uintptr(fd), "update")
+	defer file.Close()
+	actual, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(filepath.Join(os.Getenv("CHAINMAN_UPDATE_TRANSACTION"), ".lease"))
+	if err != nil || !os.SameFile(actual, want) {
+		t.Fatalf("update descriptor refers to the resource lease: %v", err)
 	}
 }

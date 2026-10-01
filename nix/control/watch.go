@@ -115,6 +115,10 @@ func watchAction(action, state, name string) int {
 	if e != nil {
 		return exitCode(e)
 	}
+	if e = forwardUpdateLease(cmd); e != nil {
+		return exitCode(e)
+	}
+	defer closeForwarded(cmd)
 	fmt.Fprintln(os.Stderr, "Building:", name)
 	e = cmd.Run()
 	if cleanup := stopContainer(w.Container, s.Shutdown); cleanup != nil {

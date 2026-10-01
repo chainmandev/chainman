@@ -82,6 +82,83 @@ while True:time.sleep(.1)
     def command(self, argv):
         return {"argv": argv, "directory": str(self.root)}
 
+    def run_update_control(self, action):
+        self.path.write_text(json.dumps(self.plan))
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+        }
+        return subprocess.run(
+            [
+                CONTROL,
+                "update-cache",
+                "run",
+                str(self.base / "updates"),
+                "-",
+                "deps-update",
+                CONTROL,
+                action,
+                str(self.path),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def update_lease_check(self):
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        return (
+            "import os,sys; from pathlib import Path; "
+            f"sys.path.insert(0,{str(scripts)!r}); import toolchain; "
+            "fd=int(os.environ['CHAINMAN_UPDATE_LEASE_FD']); "
+            "assert os.path.samestat(os.fstat(fd), "
+            "os.stat(Path(os.environ['CHAINMAN_UPDATE_TRANSACTION'])/'.lease')); "
+            "toolchain.managed_run([sys.executable,'-c','pass'],check=True); "
+        )
+
+    def test_update_candidate_survives_detached_services_and_is_then_collected(self):
+        worker = self.root / "worker.py"
+        worker.write_text(self.update_lease_check() + "\n" + worker.read_text())
+        result = self.run_update_control("up")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        candidates = list((self.base / "updates/v1").glob("candidate.*"))
+        self.assertEqual(len(candidates), 1)
+        # The successful allocating supervisor has exited. Backend/service owners
+        # must protect its candidate independently, including under explicit prune.
+        result = subprocess.run(
+            [CONTROL, "update-cache", "prune", str(self.base / "updates"), "--all"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["removed"], [])
+        self.assertTrue(candidates[0].exists())
+        self.run_control("stop", check=0)
+        result = subprocess.run(
+            [CONTROL, "update-cache", "prune", str(self.base / "updates")],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["removed"], [str(candidates[0])])
+
+    def test_update_task_and_services_keep_correct_lease_through_exec(self):
+        worker = self.root / "worker.py"
+        worker.write_text(self.update_lease_check() + "\n" + worker.read_text())
+        self.plan["task"] = self.command(
+            [sys.executable, "-c", self.update_lease_check() + "raise SystemExit(7)"]
+        )
+        for owned in (False, True):
+            with self.subTest(owned=owned):
+                self.plan.update(own_task=owned, task_shutdown_seconds=1)
+                result = self.run_update_control("run")
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.run_control("stop", check=0)
+
     def terminal_command(
         self,
         code,
@@ -149,7 +226,11 @@ while True:time.sleep(.1)
                 if interrupt and b"INTERRUPT READY" in output:
                     os.write(master, b"\x03")
                     interrupt = False
-                if direct_signal and b"INTERRUPT READY" in output and client_pid.exists():
+                if (
+                    direct_signal
+                    and b"INTERRUPT READY" in output
+                    and client_pid.exists()
+                ):
                     target = (
                         json.loads((recovery / "task.owner.json").read_text())[
                             "identity"
