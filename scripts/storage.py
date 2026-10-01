@@ -19,6 +19,7 @@ import termios
 import time
 import uuid
 from typing import TypedDict
+from urllib.parse import unquote, urljoin, urlsplit
 
 import toolchain as tc
 
@@ -35,6 +36,7 @@ PAYLOADS = (
     "gradle/wrapper/dists",
     "pub/hosted",
     "pub/hosted-hashes",
+    "pub/git",
     "uv",
     "pip",
     "pnpm",
@@ -54,6 +56,7 @@ class Receipt(TypedDict):
 class Entry(TypedDict):
     path: str
     bytes: int
+    protected_bytes: int
     active: bool
     eligible: bool
     reason: str
@@ -152,6 +155,130 @@ def payloads(entry: Path, kind: str) -> list[Path]:
     return result
 
 
+def pub_references(entry: Path) -> set[Path]:
+    """Read activation metadata, including the one legacy link we create."""
+    pub = tc.contained(entry, "data/pub")
+    activations = pub / "global_packages"
+    if activations.is_symlink():
+        legacy = tc.contained(entry.parent.parent, "pub/global_packages")
+        if activations.readlink() != legacy:
+            raise ValueError("unrecognized global_packages link")
+        activations = legacy
+    if not activations.exists():
+        return set()
+    if not activations.is_dir() or activations.stat().st_uid != os.getuid():
+        raise ValueError("invalid global_packages directory")
+    refs: set[Path] = set()
+    for activation in activations.iterdir():
+        path = tc.contained(
+            activations, activation.name + "/.dart_tool/package_config.json"
+        )
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd) as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_size > 4 * 1024**2
+            ):
+                raise ValueError("invalid global package configuration")
+            config = json.load(stream)
+        if (
+            not isinstance(config, dict)
+            or config.get("configVersion") != 2
+            or not isinstance(config.get("packages"), list)
+            or not config["packages"]
+        ):
+            raise ValueError("unrecognized global package configuration")
+        for package in config["packages"]:
+            if (
+                not isinstance(package, dict)
+                or not isinstance(package.get("rootUri"), str)
+                or not package["rootUri"]
+            ):
+                raise ValueError("invalid global package reference")
+            # A migrated global_packages directory has both a legacy location
+            # and a managed-home alias. Pub versions/callers can resolve relative
+            # URIs through either spelling; preserve the union of existing roots.
+            origins = {
+                path.as_uri(),
+                (
+                    pub
+                    / "global_packages"
+                    / activation.name
+                    / ".dart_tool/package_config.json"
+                ).as_uri(),
+            }
+            found = False
+            for target in {urljoin(origin, package["rootUri"]) for origin in origins}:
+                uri = urlsplit(target)
+                if (
+                    uri.scheme != "file"
+                    or uri.netloc not in ("", "localhost")
+                    or uri.query
+                    or uri.fragment
+                ):
+                    raise ValueError("unsupported global package reference")
+                lexical = Path(os.path.normpath(unquote(uri.path, errors="strict")))
+                if lexical.is_relative_to(pub):
+                    tc.contained(entry, str(lexical.relative_to(entry)))
+                try:
+                    root = lexical.resolve(strict=True)
+                except FileNotFoundError:
+                    continue
+                if not root.is_dir():
+                    raise ValueError("invalid global package directory")
+                found = True
+                if not root.is_relative_to(pub):
+                    # Path/SDK packages and legacy caches are never deletion targets.
+                    continue
+                parts = root.relative_to(pub).parts
+                if len(parts) >= 2 and parts[0] == "git":
+                    # A monorepo subpackage still needs its enclosing checkout.
+                    refs.add(pub.joinpath(*parts[:2]))
+                elif len(parts) >= 3 and parts[0] == "hosted":
+                    refs.add(pub.joinpath(*parts[:3]))
+                    refs.add(pub / "hosted-hashes")
+                else:
+                    raise ValueError("unrecognized global package cache layout")
+            if not found:
+                raise ValueError("missing global package directory")
+    return refs
+
+
+def protect_pub(entry: Path, paths: list[Path]) -> tuple[list[Path], list[Path], str]:
+    pub = entry / "data/pub"
+    families = [path for path in paths if path.is_relative_to(pub)]
+    if not families:
+        return paths, [], ""
+    other = [path for path in paths if path not in families]
+    try:
+        refs = pub_references(entry)
+    except (OSError, ValueError) as error:
+        return other, families, f"Pub payloads preserved: {error}"
+    disposable: list[Path] = []
+    protected: list[Path] = []
+
+    def partition(path: Path) -> None:
+        if any(path.is_relative_to(ref) for ref in refs):
+            protected.append(path)
+        elif any(ref.is_relative_to(path) for ref in refs):
+            # Split only families containing installed dependencies. All paths
+            # remain under the managed home, without following directory links.
+            for child in sorted(path.iterdir()):
+                partition(tc.contained(entry, str(child.relative_to(entry))))
+        else:
+            disposable.append(path)
+
+    for path in families:
+        partition(path)
+    return (
+        other + disposable,
+        protected,
+        "dependencies of globally activated Pub tools" if protected else "",
+    )
+
+
 def prepare_removal(path: Path) -> None:
     # Go's module cache deliberately makes package directories read-only.
     # Only adjust owned directories reached without following links; changing
@@ -185,6 +312,7 @@ def collect(
             row = Entry(
                 path=str(entry),
                 bytes=0,
+                protected_bytes=0,
                 active=False,
                 eligible=False,
                 reason="unrecognized storage",
@@ -201,16 +329,21 @@ def collect(
                     row.update({"active": True, "reason": "active lifetime lease"})
                     continue
                 paths = payloads(entry, saved["kind"])
+                protected: list[Path] = []
+                protection = ""
+                if saved["kind"] == "downloads":
+                    paths, protected, protection = protect_pub(entry, paths)
                 # Runtime symlinks count only the roots, not their shared Nix
                 # closure. Ordinary Nix GC decides which store objects survive.
                 sizes = {
                     p: tc.size(p, allow_external_links=True)
                     if p.is_dir() and not p.is_symlink()
                     else p.lstat().st_size
-                    for p in paths
+                    for p in [*paths, *protected]
                     if p.exists() or p.is_symlink()
                 }
                 row["bytes"] = sum(sizes.values())
+                row["protected_bytes"] = sum(sizes[p] for p in protected)
                 row["eligible"] = (
                     all_idle
                     or now - saved["touched"] >= AGE
@@ -229,14 +362,18 @@ def collect(
                     # Evict cache families oldest-first, stopping at the budget.
                     # Package-manager homes themselves never participate.
                     remaining = row["bytes"]
-                    paths = []
+                    candidates, paths = paths, []
                     for path in sorted(
-                        sizes, key=lambda p: (p.lstat().st_mtime_ns, str(p))
+                        candidates, key=lambda p: (p.lstat().st_mtime_ns, str(p))
                     ):
                         if remaining <= limit:
                             break
                         paths.append(path)
                         remaining -= sizes[path]
+                if saved["kind"] == "downloads" and not paths:
+                    row["eligible"] = False
+                if protection:
+                    row["reason"] += "; " + protection
                 if apply and row["eligible"]:
                     # Invalidate setup evidence before the first unlink. A
                     # partial cleanup must never leave apparently valid stamps.
@@ -714,6 +851,7 @@ def run(action: str, arguments: list[str]) -> int:
                 Entry(
                     path=str(base / POOL),
                     bytes=0,
+                    protected_bytes=0,
                     active=False,
                     eligible=False,
                     reason="inspection failed",

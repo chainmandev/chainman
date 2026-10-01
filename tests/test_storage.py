@@ -437,6 +437,221 @@ class StorageTests(unittest.TestCase):
         self.assertTrue((legacy / "credentials.toml").exists())
         self.assertTrue((home / "bin/tool").exists())
 
+    def pub_fixture(self):
+        with storage.use(self.pool, "downloads", "downloads") as entry:
+            pub = entry / "data/pub"
+            for relative in (
+                "git/cache/mirror",
+                "git/tool-revision/packages/tool",
+                "git/obsolete-revision",
+                "hosted/pub.dev/dependency-1.0.0",
+                "hosted/pub.dev/obsolete-1.0.0",
+                "hosted-hashes/pub.dev",
+            ):
+                path = pub / relative
+                path.mkdir(parents=True, exist_ok=True)
+                (path / "payload").write_bytes(b"x" * 128)
+        return entry, pub
+
+    def activate_pub(self, pub, *, absolute=False):
+        config = pub / "global_packages/tool/.dart_tool/package_config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        dependencies = [
+            pub / "git/tool-revision/packages/tool",
+            pub / "hosted/pub.dev/dependency-1.0.0",
+        ]
+        tc.atomic_json(
+            config,
+            {
+                "configVersion": 2,
+                "packages": [
+                    {
+                        "name": f"package{index}",
+                        "rootUri": path.as_uri()
+                        if absolute
+                        else os.path.relpath(path, config.parent) + "/",
+                    }
+                    for index, path in enumerate(dependencies)
+                ],
+            },
+        )
+        return config
+
+    def test_pub_git_is_accounted_and_collected_by_budget_age_and_all(self):
+        for options in (
+            {"limit": 1},
+            {"all_idle": True},
+            {"now": time.time() + storage.AGE + 1},
+        ):
+            with self.subTest(options=options):
+                entry, pub = self.pub_fixture()
+                epoch = storage.receipt(entry)["epoch"]
+                before = (entry / ".receipt.json").read_bytes()
+                rows, removed = storage.collect(self.pool, **options)
+                self.assertEqual(rows[0]["bytes"], 6 * 128)
+                self.assertTrue(rows[0]["eligible"])
+                self.assertFalse(removed)
+                self.assertEqual((entry / ".receipt.json").read_bytes(), before)
+                rows, removed = storage.collect(self.pool, apply=True, **options)
+                self.assertIn(str(pub / "git"), removed)
+                self.assertFalse(rows[0]["error"])
+                self.assertNotEqual(storage.receipt(entry)["epoch"], epoch)
+
+    def test_pub_active_lease_prevents_git_collection(self):
+        entry, pub = self.pub_fixture()
+        with storage.use(self.pool, "downloads", "downloads"):
+            rows, removed = storage.collect(
+                self.pool, apply=True, all_idle=True, limit=1
+            )
+            self.assertTrue(rows[0]["active"])
+            self.assertFalse(removed)
+            self.assertTrue((pub / "git/obsolete-revision").exists())
+
+    def test_pub_budget_counts_protected_dependencies_and_stops_after_enough_eviction(
+        self,
+    ):
+        entry, pub = self.pub_fixture()
+        self.activate_pub(pub)
+        for age, relative in enumerate(
+            ("git/cache", "git/obsolete-revision", "hosted/pub.dev/obsolete-1.0.0"), 1
+        ):
+            os.utime(pub / relative, (age, age))
+        rows, removed = storage.collect(self.pool, apply=True, limit=5 * 128)
+        self.assertEqual(rows[0]["bytes"], 6 * 128)
+        self.assertEqual(rows[0]["protected_bytes"], 3 * 128)
+        self.assertEqual(removed, [str(pub / "git/cache")])
+        self.assertTrue((pub / "git/tool-revision/packages/tool/payload").exists())
+        self.assertTrue((pub / "git/obsolete-revision/payload").exists())
+
+    def test_pub_global_dependencies_survive_while_unreferenced_payloads_expire(self):
+        for absolute in (False, True):
+            with self.subTest(absolute=absolute):
+                entry, pub = self.pub_fixture()
+                config = self.activate_pub(pub, absolute=absolute)
+                before = config.read_bytes()
+                (pub / "bin").mkdir(exist_ok=True)
+                (pub / "bin/tool").write_text("installed tool")
+                (pub / "credentials.json").write_text("fixture credentials")
+                rows, removed = storage.collect(
+                    self.pool, apply=True, all_idle=True, limit=1
+                )
+                self.assertFalse(rows[0]["error"])
+                self.assertEqual(rows[0]["bytes"], 6 * 128)
+                self.assertEqual(rows[0]["protected_bytes"], 3 * 128)
+                self.assertIn("globally activated", rows[0]["reason"])
+                for relative in (
+                    "git/cache",
+                    "git/obsolete-revision",
+                    "hosted/pub.dev/obsolete-1.0.0",
+                ):
+                    self.assertIn(str(pub / relative), removed)
+                    self.assertFalse((pub / relative).exists())
+                for relative in (
+                    "git/tool-revision/packages/tool/payload",
+                    "hosted/pub.dev/dependency-1.0.0/payload",
+                    "hosted-hashes/pub.dev/payload",
+                    "bin/tool",
+                    "credentials.json",
+                ):
+                    self.assertTrue((pub / relative).is_file())
+                self.assertEqual(config.read_bytes(), before)
+                epoch = storage.receipt(entry)["epoch"]
+                rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+                self.assertFalse(removed)
+                self.assertFalse(rows[0]["eligible"])
+                self.assertEqual(storage.receipt(entry)["epoch"], epoch)
+
+    def test_pub_legacy_activation_link_protects_new_home_dependencies(self):
+        legacy = self.pool.parent / "pub/global_packages"
+        legacy.mkdir(parents=True)
+        entry, pub = self.pub_fixture()
+        self.assertTrue((pub / "global_packages").is_symlink())
+        self.activate_pub(pub, absolute=True)
+        rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+        self.assertFalse(rows[0]["error"])
+        self.assertEqual(rows[0]["protected_bytes"], 3 * 128)
+        self.assertTrue(removed)
+        self.assertTrue((legacy / "tool/.dart_tool/package_config.json").exists())
+
+    def test_pub_relative_legacy_activations_preserve_both_possible_locations(self):
+        legacy = self.pool.parent / "pub/global_packages"
+        legacy.mkdir(parents=True)
+        for relative in (
+            "git/tool-revision/packages/tool",
+            "hosted/pub.dev/dependency-1.0.0",
+        ):
+            (legacy.parent / relative).mkdir(parents=True)
+        entry, pub = self.pub_fixture()
+        self.activate_pub(pub)
+        rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+        self.assertEqual(rows[0]["protected_bytes"], 3 * 128)
+        self.assertIn(str(pub / "git/obsolete-revision"), removed)
+        self.assertTrue((pub / "git/tool-revision/packages/tool/payload").exists())
+        self.assertTrue((legacy.parent / "git/tool-revision/packages/tool").exists())
+
+    def test_pub_external_package_references_never_authorize_external_removal(self):
+        entry, pub = self.pub_fixture()
+        external = self.root / "external package"
+        external.mkdir()
+        (external / "payload").write_text("keep")
+        config = self.activate_pub(pub)
+        saved = json.loads(config.read_bytes())
+        saved["packages"].append({"name": "external", "rootUri": external.as_uri()})
+        tc.atomic_json(config, saved)
+        rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+        self.assertFalse(rows[0]["error"])
+        self.assertEqual(rows[0]["protected_bytes"], 3 * 128)
+        self.assertTrue(removed)
+        self.assertEqual((external / "payload").read_text(), "keep")
+
+    def test_pub_unknown_global_directory_link_preserves_pub_payloads(self):
+        entry, pub = self.pub_fixture()
+        external = self.root / "external-activations"
+        external.mkdir()
+        (pub / "global_packages").symlink_to(external, target_is_directory=True)
+        rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+        self.assertFalse(removed)
+        self.assertEqual(rows[0]["protected_bytes"], 6 * 128)
+        self.assertIn("unrecognized global_packages link", rows[0]["reason"])
+
+    def test_pub_uncertain_activation_metadata_preserves_only_pub_families(self):
+        entry, pub = self.pub_fixture()
+        config = self.activate_pub(pub)
+        corruptions = (
+            None,
+            "not json",
+            '{"configVersion":99,"packages":[]}',
+            '{"configVersion":2,"packages":[{"rootUri":"https://example.invalid/package"}]}',
+            '{"configVersion":2,"packages":[{"rootUri":"file:///missing-fixture-package"}]}',
+        )
+        for body in corruptions:
+            with self.subTest(body=body):
+                if body is None:
+                    config.unlink()
+                else:
+                    config.write_text(body)
+                other = entry / "data/uv"
+                other.mkdir()
+                (other / "payload").write_bytes(b"disposable")
+                rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+                self.assertEqual(removed, [str(other)])
+                self.assertEqual(rows[0]["protected_bytes"], 6 * 128)
+                self.assertIn("Pub payloads preserved", rows[0]["reason"])
+                self.assertTrue((pub / "git/obsolete-revision/payload").exists())
+
+    def test_pub_symlink_metadata_is_preserved_without_following_unknown_links(self):
+        entry, pub = self.pub_fixture()
+        config = self.activate_pub(pub)
+        external = self.root / "outside.json"
+        external.write_bytes(config.read_bytes())
+        config.unlink()
+        config.symlink_to(external)
+        rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+        self.assertFalse(removed)
+        self.assertEqual(rows[0]["protected_bytes"], 6 * 128)
+        self.assertIn("Pub payloads preserved", rows[0]["reason"])
+        self.assertTrue(external.exists())
+
     def test_runtime_collection_unlinks_owned_roots_only(self):
         pool = self.root / "runtimes" / storage.POOL
         with storage.use(pool, "a" * 40, "runtime") as entry:

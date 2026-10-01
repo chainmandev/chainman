@@ -166,6 +166,14 @@ private new homes and links existing installed-tool directories; the legacy
 originals stay in place. Subsequent configuration edits belong to the selected
 home. Indirect or unusual legacy configuration requires explicit migration.
 
+Pub Git mirrors and revision checkouts participate in the same budget. Saved
+package configurations protect Git checkouts and hosted packages required by
+globally activated tools; unreferenced packages remain collectible. Inventory
+includes protected payloads in `bytes` and reports their share as
+`protected_bytes`. These installed dependencies may keep storage above budget,
+even with `--all`. Missing, malformed, or unsupported activation metadata preserves
+the Pub payloads and records the reason while other cache families remain eligible.
+
 Admission and completion perform maintenance. A shared admission gate and
 inherited lifetime leases protect all users of each managed download root,
 including native service/task children. Active caches can exceed the budget.
