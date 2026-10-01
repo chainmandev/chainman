@@ -56,12 +56,31 @@ def flake_reference(root: Path, location: Path, attribute: str) -> str:
                 capture_output=True,
             )
             if tracked.returncode == 0:
-                directory = (
-                    ""
-                    if str(relative) == "."
-                    else "?dir=" + quote(str(relative), safe="")
+                shallow = subprocess.run(
+                    [
+                        "git",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-C",
+                        str(root),
+                        "rev-parse",
+                        "--is-shallow-repository",
+                    ],
+                    capture_output=True,
+                    text=True,
                 )
-                return f"git+file://{quote(str(root), safe='/')}{directory}#{attribute}"
+                depth = shallow.stdout.strip()
+                if shallow.returncode != 0 or depth not in {"true", "false"}:
+                    raise ValueError(
+                        "Cannot determine Git history depth for the project profile"
+                    )
+                parameters = []
+                if str(relative) != ".":
+                    parameters.append("dir=" + quote(str(relative), safe=""))
+                if depth == "true":
+                    parameters.append("shallow=1")
+                query = "?" + "&".join(parameters) if parameters else ""
+                return f"git+file://{quote(str(root), safe='/')}{query}#{attribute}"
     return f"path:{quote(str(location), safe='/')}#{attribute}"
 
 

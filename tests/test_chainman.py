@@ -12,7 +12,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
-from urllib.parse import quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import chainman
@@ -267,6 +267,53 @@ class ExecutionTests(ConsumerFixture):
             chainman.flake_reference(nested, nested, "core"),
             "path:" + quote(str(nested), safe="/") + "#core",
         )
+
+    def test_shallow_git_profile_keeps_tracked_edits_and_excludes_caches(self):
+        self.write(
+            "nix profile/flake.nix",
+            "{ outputs = { self }: { marker = builtins.readFile ./marker; cacheVisible = builtins.pathExists ./.cache; }; }",
+        )
+        self.write("nix profile/marker", "original")
+        self.write(
+            "chainman.toml",
+            'schema=1\n[profiles.native]\nflake="nix profile/flake.nix#default"\n',
+        )
+        self.init_git()
+        self.write("nix profile/marker", "second commit")
+        self.git("add", ".")
+        self.git("commit", "-qm", "Second revision")
+        clone = self.base / "shallow project with spaces"
+        subprocess.run(
+            ["git", "clone", "--quiet", "--depth=1", self.root.as_uri(), str(clone)],
+            check=True,
+        )
+        self.root = clone
+        self.assertEqual(self.git("rev-parse", "--is-shallow-repository"), "true")
+        self.write("nix profile/marker", "edited")
+        self.write("nix profile/.cache/download", "not source")
+        ref, _ = chainman.profile(self.root, "native")
+        self.assertEqual(
+            parse_qs(urlsplit(ref).query),
+            {"dir": ["nix profile"], "shallow": ["1"]},
+        )
+        self.assertIn(
+            "nix profile/flake.nix", chainman.profile_inputs(self.root, "native", ref)
+        )
+        for attribute, expected in (("marker", "edited"), ("cacheVisible", False)):
+            output = subprocess.check_output(
+                [
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command flakes",
+                    "eval",
+                    "--json",
+                    "--no-write-lock-file",
+                    ref.rsplit("#", 1)[0] + "#" + attribute,
+                ],
+                cwd=self.root,
+                text=True,
+            )
+            self.assertEqual(json.loads(output), expected)
 
     def test_untracked_bracket_directory_is_not_a_tracked_git_pathspec_match(self):
         self.write("nix x/flake.nix", "{}")

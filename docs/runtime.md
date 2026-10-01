@@ -13,6 +13,11 @@ update transactions. See [release trust](release-trust.md) for the integrity bou
 The source checkout used during initialization is disposable. Project flakes and
 locks remain independently owned; they do not import chainman.
 
+Tracked project flakes use a Git source reference so untracked package caches do
+not enter the Nix store. A shallow checkout explicitly sets `shallow=1` on that
+reference, including when the flake lives in a subdirectory. It remains a shallow
+source snapshot; Chainman does not invent a revision count or complete history.
+
 ## Container Nix is the default
 
 ```sh

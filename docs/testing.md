@@ -24,6 +24,9 @@ corruption, replacement refs, concurrency, interrupted fetches, source checkout
 modifications, literal arguments, stdin, process status, and signals.
 The shell lifetime tests also occupy all descriptors 3–9 and require literal stdin,
 the child's exit status, and every caller-owned descriptor to survive execution.
+Consumer profile tests evaluate a real shallow Git checkout with a nested flake,
+tracked edits and untracked caches, requiring the edits to survive and caches to
+stay outside the Nix source.
 
 The Git source tests separately exercise runtime materialization. Files must match
 the selected tree's bytes and executable identity, independent of attributes,
