@@ -12,7 +12,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && (os.Args[1] == "update-cache" || os.Args[1] == "hook-exec") {
+	if len(os.Args) > 1 && (os.Args[1] == "update-cache" || os.Args[1] == "hook-exec" || os.Args[1] == "build") {
 		os.Exit(mainAction(os.Args[1:]))
 	}
 	// Exercise the actual admission entrypoint in a subprocess of the test

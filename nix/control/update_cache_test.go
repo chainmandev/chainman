@@ -660,7 +660,8 @@ func TestUpdateCacheLeasedTaskRemapsAroundResourceDescriptor(t *testing.T) {
 	}
 }
 
-func TestUpdateCacheServiceUpgradesInheritedLegacyExclusiveLease(t *testing.T) {
+func TestUpdateCacheServicePreservesLegacyReceipt(t *testing.T) {
+	legacy := legacyUpdateControl(t)
 	base := t.TempDir()
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	r, err := updateRead(path)
@@ -669,6 +670,10 @@ func TestUpdateCacheServiceUpgradesInheritedLegacyExclusiveLease(t *testing.T) {
 	}
 	r.Schema = 1
 	if err = atomic(filepath.Join(path, ".transaction.json"), r); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(path, ".transaction.json"))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err = syscall.Flock(int(lease.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
@@ -684,14 +689,35 @@ func TestUpdateCacheServiceUpgradesInheritedLegacyExclusiveLease(t *testing.T) {
 		t.Fatalf("legacy supervisor prevented service ownership: %v", err)
 	}
 	defer closeForwarded(cmd)
-	r, err = updateRead(path)
-	if err != nil || r.Schema != 2 {
-		t.Fatalf("old collector can still adopt the upgraded receipt: %+v %v", r, err)
+	after, err := os.ReadFile(filepath.Join(path, ".transaction.json"))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("service changed its supervisor's receipt: %s %v", after, err)
 	}
 	lease.Close()
 	_, removed, err := updateCollect(base, true, true, time.Now(), 0)
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("legacy supervisor exit released live service: %v %v", removed, err)
+	}
+	// The original collector must honor independent shared service ownership
+	// too, including after its own supervisor has released the exclusive lease.
+	prune := func() []string {
+		t.Helper()
+		out, err := exec.Command(legacy, "update-cache", "prune", base, "--all").CombinedOutput()
+		if err != nil {
+			t.Fatalf("legacy prune: %s %v", out, err)
+		}
+		var report struct{ Removed []string }
+		if err = json.Unmarshal(out, &report); err != nil {
+			t.Fatal(err)
+		}
+		return report.Removed
+	}
+	if removed := prune(); len(removed) != 0 {
+		t.Fatalf("old collector ignored surviving service: %v", removed)
+	}
+	closeForwarded(cmd)
+	if removed := prune(); len(removed) != 1 || removed[0] != path {
+		t.Fatalf("old collector retained finished service: %v", removed)
 	}
 }
 

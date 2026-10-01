@@ -177,8 +177,17 @@ continues for other independently verified idle candidates. Restore the original
 engine context to collect a protected candidate. Older container receipts without
 a recorded daemon identity require manual inspection and are never automatically
 adopted into the current context. New receipts use schema 2 so older collectors
-skip them; use the updated commands for maintenance. Do not manually wipe a cache
-during active operations: disposable does not mean safe to remove concurrently.
+skip them; use the updated commands for maintenance.
+
+An update already running under a schema-1 supervisor keeps that receipt format
+and its original update helper, even when candidate services use a newer runtime.
+Those services share the lifetime lease without migrating the supervisor's
+metadata. A newer supervisor migrates an older host-only receipt when explicitly
+resuming it, after verifying that all previous owners have stopped. Engine
+registration cannot migrate receipts; use the helper supplied by the supervisor.
+The older container receipts described above still require manual inspection.
+Do not manually wipe a cache during active operations: disposable does not mean
+safe to remove concurrently.
 
 Legacy `updates/candidate.*` directories have no compatible lifetime protocol.
 They remain explicitly resumable but are never automatically adopted or deleted.
