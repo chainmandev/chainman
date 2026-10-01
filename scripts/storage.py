@@ -15,6 +15,7 @@ import signal
 import stat
 import subprocess
 import sys
+import termios
 import time
 import uuid
 from typing import TypedDict
@@ -470,14 +471,17 @@ def runtime_child(argv: list[str], env: dict[str, str]) -> int:
     process: subprocess.Popen[bytes] | None = None
     pending: list[int] = []
     forwarded = False
-    terminal = None
+    terminal: int | None = None
     foreground = None
+    settings: list[int | list[bytes | int]] | None = None
+    child_settings: list[int | list[bytes | int]] | None = None
 
     def forward(number: int) -> None:
         nonlocal forwarded
-        if not forwarded and process is not None and process.poll() is None:
+        if not forwarded and process is not None and process.returncode is None:
             try:
                 os.killpg(process.pid, number)
+                os.killpg(process.pid, signal.SIGCONT)
                 forwarded = True
             except ProcessLookupError:
                 pass
@@ -488,16 +492,32 @@ def runtime_child(argv: list[str], env: dict[str, str]) -> int:
         pending.append(number)
         forward(number)
 
+    def continued(_number: int, _frame: object) -> None:
+        nonlocal settings
+        if process is None or process.returncode is not None:
+            return
+        try:
+            # fg first gives the terminal back to our calling job. bg does not.
+            if terminal is not None and os.tcgetpgrp(terminal) == os.getpgrp():
+                if settings is None:
+                    settings = termios.tcgetattr(terminal)
+                os.tcsetpgrp(terminal, process.pid)
+                if child_settings is not None:
+                    termios.tcsetattr(terminal, termios.TCSADRAIN, child_settings)
+            os.killpg(process.pid, signal.SIGCONT)
+        except ProcessLookupError:
+            pass
+
     signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
     previous = {number: signal.signal(number, interrupted) for number in signals}
+    previous_cont = signal.signal(signal.SIGCONT, continued)
     previous_ttou = signal.getsignal(signal.SIGTTOU)
     try:
         try:
             terminal = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
             foreground = os.tcgetpgrp(terminal)
-            if foreground != os.getpgrp():
-                os.close(terminal)
-                terminal = None
+            if foreground == os.getpgrp():
+                settings = termios.tcgetattr(terminal)
         except OSError as error:
             if error.errno not in (errno.ENXIO, errno.ENODEV, errno.ENOTTY):
                 raise
@@ -518,26 +538,66 @@ def runtime_child(argv: list[str], env: dict[str, str]) -> int:
                 os.set_inheritable(fd, flag)
         if terminal is not None:
             signal.signal(signal.SIGTTOU, signal.SIG_IGN)
-            try:
-                os.tcsetpgrp(terminal, process.pid)
-                os.killpg(process.pid, signal.SIGCONT)
-            except OSError:
-                if process.poll() is None:
-                    raise
+            if foreground == os.getpgrp():
+                try:
+                    os.tcsetpgrp(terminal, process.pid)
+                except OSError as error:
+                    if error.errno != errno.ESRCH:
+                        raise
+            # The child may have attempted a terminal read before the handoff.
+            continued(signal.SIGCONT, None)
         for number in pending:
             forward(number)
-        result = process.wait()
+        # Only this loop consumes child status: poll()/wait() in signal handlers
+        # could otherwise reap an exit between waitpid and return-code recording.
+        while True:
+            _, status = os.waitpid(process.pid, os.WUNTRACED | os.WCONTINUED)
+            if os.WIFSTOPPED(status):
+                if pending:
+                    os.killpg(process.pid, signal.SIGCONT)
+                    continue
+                if terminal is not None:
+                    if os.tcgetpgrp(terminal) == process.pid:
+                        child_settings = termios.tcgetattr(terminal)
+                        os.tcsetpgrp(terminal, os.getpgrp())
+                        if settings is not None:
+                            termios.tcsetattr(terminal, termios.TCSADRAIN, settings)
+                    # The public bootstrap can have waiting shell ancestors in
+                    # this group. Suspend them too so the user's shell sees the
+                    # whole job stop, while every runtime lease remains open.
+                    os.killpg(os.getpgrp(), signal.SIGSTOP)
+                else:
+                    os.kill(os.getpid(), signal.SIGSTOP)
+            elif os.WIFEXITED(status) or os.WIFSIGNALED(status):
+                process.returncode = os.waitstatus_to_exitcode(status)
+                break
+        result = process.returncode
         return 128 + pending[0] if pending else (128 - result if result < 0 else result)
+    except BaseException:
+        if process is not None and process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                os.killpg(process.pid, signal.SIGCONT)
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+            except ProcessLookupError:
+                process.wait()
+        raise
     finally:
         try:
             if terminal is not None:
                 try:
-                    if foreground is not None:
-                        os.tcsetpgrp(terminal, foreground)
+                    if process is not None and os.tcgetpgrp(terminal) == process.pid:
+                        os.tcsetpgrp(terminal, os.getpgrp())
+                        if settings is not None:
+                            termios.tcsetattr(terminal, termios.TCSADRAIN, settings)
                 finally:
                     os.close(terminal)
         finally:
             signal.signal(signal.SIGTTOU, previous_ttou)
+            signal.signal(signal.SIGCONT, previous_cont)
             for number, handler in previous.items():
                 signal.signal(number, handler)
 

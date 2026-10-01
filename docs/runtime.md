@@ -177,8 +177,11 @@ project build outputs; shared storage has its own fixed retention policy.
 Runtime source and bootstrap-interpreter roots use a versioned, leased pool under
 `chainman/runtime-roots/` (or the owned container's Nix state). Temporary roots
 protect cold registration and lifetime leases protect execution. Generations
-unused for 30 days lose their Chainman GC roots; ordinary Nix GC decides whether
-their store objects are still reachable elsewhere. Root inventory counts link
+remain leased while an interactive job is suspended. Ctrl-Z returns control to
+the calling shell; `fg` resumes with terminal ownership and `bg` leaves ownership
+with the shell. Cancellation and completion restore borrowed terminal settings.
+Generations unused for 30 days lose their Chainman GC roots; ordinary Nix GC
+decides whether their store objects are still reachable elsewhere. Root inventory counts link
 bytes, not closure size, and never runs global host Nix GC.
 
 Native service binaries share verified content-addressed files through stable

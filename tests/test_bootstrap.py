@@ -23,6 +23,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 NIX = shutil.which("nix")
 sys.path.insert(0, str(SOURCE / "scripts"))
 import storage
+from test_storage import TERMINAL_BODY, exercise_job_control
 
 
 def run_captured(command, *, env, cwd=None, timeout=180):
@@ -142,6 +143,7 @@ class BootstrapTests(unittest.TestCase):
             " while not (root / 'release-profile').exists() and time.monotonic() < deadline: time.sleep(0.1)\n"
             " held.cleanup()\n"
             "if '--wait' in sys.argv: time.sleep(60)\n"
+            f"if '--terminal-job' in sys.argv: exec({TERMINAL_BODY!r})\n"
             "if '--resolve-service' in sys.argv: print(socket.gethostbyname(os.environ['DEMO_SERVICE_ALIAS']))\n"
         )
         shutil.copytree(SOURCE / "bootstrap", cls.tree / "bootstrap")
@@ -218,6 +220,11 @@ class BootstrapTests(unittest.TestCase):
         return [
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
         ]
+
+    def test_runtime_job_control_through_public_bootstrap(self):
+        exercise_job_control(
+            self, [str(self.launcher), "exec", "--terminal-job"], self.env, self.root
+        )
 
     def preserve_container_helpers(self, tools):
         # Rootless Podman invokes its installed UID, networking and OCI helpers

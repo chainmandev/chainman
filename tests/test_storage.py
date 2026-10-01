@@ -5,6 +5,9 @@ import os
 import pty
 import select
 import signal
+import shlex
+import shutil
+import termios
 from pathlib import Path
 import subprocess
 import sys
@@ -16,6 +19,89 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import storage
 import toolchain as tc
+
+
+TERMINAL_BODY = """import os, termios
+settings = termios.tcgetattr(0)
+settings[3] &= ~termios.ECHO
+termios.tcsetattr(0, termios.TCSANOW, settings)
+while True:
+    print('CHILD-READY', flush=True)
+    if input() == 'finish':
+        break
+raise SystemExit(7)
+"""
+
+
+def exercise_job_control(test, argv, env, cwd, stopped=lambda: None, *, cancel=False):
+    """A real interactive shell owns the job, including waiting bootstrap shells."""
+    shell = shutil.which("bash")
+    test.assertIsNotNone(shell)
+    pid, master = pty.fork()
+    if pid == 0:
+        os.chdir(cwd)
+        os.execve(
+            shell,
+            [shell, "--noprofile", "--norc", "-i"],
+            dict(env, PS1="PROMPT> ", PS2=""),
+        )
+    output = b""
+    timeout = 180
+
+    def expect(marker):
+        nonlocal output
+        deadline = time.monotonic() + timeout
+        while marker not in output:
+            test.assertLess(time.monotonic(), deadline, output.decode(errors="replace"))
+            if select.select([master], [], [], 0.1)[0]:
+                output += os.read(master, 65536)
+        before, output = output.split(marker, 1)
+        return before
+
+    def send(value):
+        os.write(master, value)
+
+    try:
+        expect(b"PROMPT> ")
+        body = shlex.join(argv) + "; printf 'RESULT:%s\\n' \"$?\""
+        send((shlex.join([shell, "-c", body]) + "\n").encode())
+        expect(b"CHILD-READY\r\n")
+        timeout = 10
+        for _ in range(2):
+            send(b"\x1a")
+            expect(b"PROMPT> ")
+            test.assertEqual(os.tcgetpgrp(master), pid)
+            stopped()
+            send(b"bg\nsleep 0.2; jobs\n")
+            expect(b"PROMPT> ")
+            background = expect(b"PROMPT> ")
+            test.assertIn(b"Stopped", background)
+            test.assertEqual(os.tcgetpgrp(master), pid)
+            stopped()
+            send(b"fg\ncontinue\n")
+            expect(b"CHILD-READY\r\n")
+        send(b"\x03" if cancel else b"finish\n")
+        expect(b"RESULT:130\r\n" if cancel else b"RESULT:7\r\n")
+        expect(b"PROMPT> ")
+        test.assertEqual(os.tcgetpgrp(master), pid)
+    finally:
+        # Only groups belonging to this disposable PTY session are addressed.
+        foreground = os.tcgetpgrp(master)
+        if foreground != pid:
+            try:
+                os.killpg(foreground, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        send(b"kill -KILL $(jobs -p) 2>/dev/null; exit\n")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if os.waitpid(pid, os.WNOHANG)[0]:
+                break
+            time.sleep(0.01)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        os.close(master)
 
 
 class StorageTests(unittest.TestCase):
@@ -192,16 +278,21 @@ class StorageTests(unittest.TestCase):
         pid, master = pty.fork()
         if pid == 0:
             try:
+                before = termios.tcgetattr(0)
                 status = storage.runtime_child(
                     [
                         sys.executable,
                         "-c",
-                        "import os; assert os.tcgetpgrp(0)==os.getpgrp(); "
+                        "import os,termios; assert os.tcgetpgrp(0)==os.getpgrp(); "
+                        "settings=termios.tcgetattr(0); settings[3] &= ~termios.ECHO; "
+                        "termios.tcsetattr(0,termios.TCSANOW,settings); "
                         "print('ready', flush=True); input()",
                     ],
                     dict(os.environ),
                 )
-                result.write_text(f"{status}:{os.tcgetpgrp(0) == os.getpgrp()}")
+                result.write_text(
+                    f"{status}:{os.tcgetpgrp(0) == os.getpgrp()}:{termios.tcgetattr(0) == before}"
+                )
                 os._exit(0)
             except BaseException:
                 os._exit(1)
@@ -216,7 +307,7 @@ class StorageTests(unittest.TestCase):
             while not result.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
             self.assertTrue(result.exists())
-            self.assertEqual(result.read_text(), "130:True")
+            self.assertEqual(result.read_text(), "130:True:True")
             self.assertEqual(os.waitpid(pid, 0)[1], 0)
         finally:
             if not result.exists():
@@ -237,6 +328,40 @@ class StorageTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     storage.runtime_check(args)
         self.assertEqual(storage.runtime_check(args), 3)
+
+    def test_runtime_job_control_keeps_leases_across_stop_and_resume(self):
+        entry = self.populated()
+        wrapper = (
+            f"import sys,os; from pathlib import Path; sys.path.insert(0,{str(tc.RUNTIME / 'scripts')!r}); "
+            "import storage\n"
+            f"with storage.use(Path({str(self.pool)!r}), 'downloads', 'downloads'):\n"
+            f" raise SystemExit(storage.runtime_child({[sys.executable, '-c', TERMINAL_BODY]!r}, dict(os.environ)))\n"
+        )
+
+        def stopped():
+            rows, removed = storage.collect(self.pool, apply=True, all_idle=True)
+            self.assertTrue(rows[0]["active"])
+            self.assertFalse(removed)
+
+        exercise_job_control(
+            self, [sys.executable, "-c", wrapper], dict(os.environ), self.root, stopped
+        )
+        self.assertTrue(storage.collect(self.pool, apply=True, all_idle=True)[1])
+        self.assertFalse((entry / "data/cargo/registry").exists())
+
+    def test_runtime_job_control_cancellation_after_resume(self):
+        wrapper = (
+            f"import sys,os; sys.path.insert(0,{str(tc.RUNTIME / 'scripts')!r}); "
+            "import storage; "
+            f"sys.exit(storage.runtime_child({[sys.executable, '-c', TERMINAL_BODY]!r}, dict(os.environ)))"
+        )
+        exercise_job_control(
+            self,
+            [sys.executable, "-c", wrapper],
+            dict(os.environ),
+            self.root,
+            cancel=True,
+        )
 
     def test_corrupt_and_unknown_receipts_are_preserved(self):
         entry = self.populated()
