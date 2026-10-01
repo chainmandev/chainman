@@ -421,6 +421,9 @@ func updateStart(base, resume string) (string, *os.File, updateReceipt, error) {
 // shared candidate lease at their native execution boundaries, under the pool
 // gate, and keep it in both the native owner and its launched child.
 func forwardUpdateLease(cmd *exec.Cmd) error {
+	if err := forwardStorageLeases(cmd); err != nil {
+		return err
+	}
 	path := ""
 	for _, value := range cmd.Environ() {
 		if strings.HasPrefix(value, "CHAINMAN_UPDATE_TRANSACTION=") {

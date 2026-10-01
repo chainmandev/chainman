@@ -193,7 +193,7 @@ func forwardLeases(cmd *exec.Cmd) error {
 			cmd.Env = append(cmd.Env, "CHAINMAN_COMPILER_OWNER="+owner)
 		}
 	}
-	return nil
+	return forwardStorageLeases(cmd)
 }
 
 func closeForwarded(cmd *exec.Cmd) {

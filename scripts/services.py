@@ -718,6 +718,10 @@ def export(root: Path, arguments: list[str]) -> int:
     # the selected project lane. Carry the requesting task, not its environment,
     # so services and watched builds can reconstruct the same context there.
     forwarded["CHAINMAN_CONTEXT_TASK"] = task
+    if os.environ.get("TOOLCHAIN_CONTAINER") != "1" and os.environ.get(
+        "CHAINMAN_STORAGE_PATHS"
+    ):
+        forwarded["CHAINMAN_STORAGE_PATHS"] = os.environ["CHAINMAN_STORAGE_PATHS"]
     # The host launcher must keep transaction ownership through native task
     # supervision and label every workload container. Never source these from
     # project configuration or pass host descriptors into containers.

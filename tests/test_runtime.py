@@ -99,6 +99,10 @@ class NixReferenceTests(unittest.TestCase):
                 runtime = root / "runtime"
                 shutil.copytree(root / "nix", runtime / "nix")
                 (runtime / "scripts").mkdir()
+                for name in ("toolchain.py", "adapter_data.py", "storage.py"):
+                    shutil.copy2(
+                        toolchain.RUNTIME / "scripts" / name, runtime / "scripts" / name
+                    )
                 (runtime / "scripts/chainman.py").write_text(
                     "import sys; print(sys.argv[-1]); raise SystemExit(7)\n"
                 )
@@ -282,6 +286,12 @@ class RuntimeTests(unittest.TestCase):
         # advertise the outer test runner's FD without inheriting that descriptor.
         fixture_env = dict(os.environ)
         fixture_env.pop("TOOLCHAIN_LOCK_FD", None)
+        for name in (
+            "CHAINMAN_STORAGE_PATHS",
+            "CHAINMAN_STORAGE_FDS",
+            "CHAINMAN_DOWNLOAD_EPOCH",
+        ):
+            fixture_env.pop(name, None)
         isolated = patch.dict(os.environ, fixture_env, clear=True)
         isolated.start()
         self.addCleanup(isolated.stop)

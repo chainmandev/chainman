@@ -138,6 +138,64 @@ just chainman cache-prune
 Use `cache.automatic_prune = false` if project cache pruning should be explicit.
 See the configuration reference for size, age, and compiler-cache settings.
 
+### Shared storage retention
+
+```sh
+just chainman storage-status
+just chainman storage-prune
+just chainman storage-prune --all
+```
+
+In the source checkout, omit `chainman`. These commands report JSON inventories,
+collection eligibility, ownership/retention reasons, paths actually removed, and
+per-entry errors. Inspection failures preserve the affected entry; successful
+removals elsewhere are still reported and errors produce a nonzero exit status.
+`--all` bypasses age/size thresholds, never ownership or recovery checks. Existing
+project-cache and update-candidate commands keep their separate meanings.
+
+New managed package homes live under the download root's
+`.chainman-storage-v1/downloads/data/`. Recognized Cargo, Go, Gradle, Pub, pnpm,
+uv and pip download payloads share a **16 GiB** budget and **30-day** idle age.
+Over-budget maintenance removes oldest cache families until under budget. It
+does not delete enclosing package-manager homes, credentials, configuration,
+installed tools, or arbitrary SDK directories. Compiler caching retains its
+separate configured budget (8 GiB by default). Custom download-root overrides
+remain caller-managed; host and owned-container download stores are independent.
+First use copies recognized regular legacy configuration/credential files into
+private new homes and links existing installed-tool directories; the legacy
+originals stay in place. Subsequent configuration edits belong to the selected
+home. Indirect or unusual legacy configuration requires explicit migration.
+
+Admission and completion perform maintenance. A shared admission gate and
+inherited lifetime leases protect all users of each managed download root,
+including native service/task children. Active caches can exceed the budget.
+Eviction changes the cache epoch before deleting any payload, invalidating setup
+evidence even after a partial failure; the ordinary setup policy controls repair.
+There is no background collector. `cache.automatic_prune` continues to control
+project build outputs; shared storage has its own fixed retention policy.
+
+Runtime source and bootstrap-interpreter roots use a versioned, leased pool under
+`chainman/runtime-roots/` (or the owned container's Nix state). Temporary roots
+protect cold registration and lifetime leases protect execution. Generations
+unused for 30 days lose their Chainman GC roots; ordinary Nix GC decides whether
+their store objects are still reachable elsewhere. Root inventory counts link
+bytes, not closure size, and never runs global host Nix GC.
+
+Native service binaries share verified content-addressed files through stable
+scope-local hardlinks, with a copy fallback where hardlinks are unsupported.
+Unreferenced executable generations expire after 30 days. Current plans and
+ownership/recovery receipts protect their assets; missing worktrees alone never
+authorize discarding database, volume, network or resource identities. Abandoned
+plans without those obligations may expire after 30 days. Admission lock inodes
+remain stable. Service commands attempt maintenance at most once per day; explicit
+maintenance is immediate. Container maintenance reports that service state belongs
+to the host; inspect it using a host-Nix entry.
+
+Legacy download directories and runtime roots remain untouched. Older pinned
+runtimes do not provide the new lifetime protocol, so updating a pin enables
+future retention without making old state automatically collectible. Inspect and
+remove obsolete legacy artifacts separately when their consumers are idle.
+
 ### Temporary update candidates
 
 New source and consumer update transactions live in

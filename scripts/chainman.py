@@ -911,6 +911,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if action != "setup":
                     for spec in specs:
                         tc.run_commands(spec, action, env, root)
+        elif args.action in {"storage-status", "storage-prune"}:
+            import storage
+
+            return storage.run(args.action.removeprefix("storage-"), rest)
         elif args.action in {"clean", "cache-prune"}:
             if any(a != "--all" for a in rest):
                 raise ValueError("cleanup accepts only --all")

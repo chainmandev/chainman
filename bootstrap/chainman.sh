@@ -23,8 +23,16 @@ develop_runtime() {
     # a consumer profile and trigger GC while still using this Python path.
     # Keep the bootstrap environment alongside the verified revision's source.
     bootstrap_profile=$runtime_root-bootstrap
+    if [ "${runtime_storage_verified:-0}" = 1 ]; then
+        bootstrap_profile=$(dirname -- "$runtime_root")/bootstrap
+    fi
     [ ! -e "$bootstrap_profile" ] || [ -L "$bootstrap_profile" ] || fail 'Bootstrap profile GC root must be a symlink.'
-    set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file --profile "$bootstrap_profile" --command "$@"
+    if [ "${runtime_storage_verified:-0}" = 1 ]; then
+        set -- --command "$@"
+    else
+        set -- --profile "$bootstrap_profile" --command "$@"
+    fi
+    set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file "$@"
     # The primary nixpkgs input no longer supplies Intel macOS Bash. Make the
     # compatibility input's Bash available before Nix executes its shell script.
     if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
@@ -557,7 +565,10 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
         umask 077
         mkdir -p "$runtime_roots"
     )
-    runtime_root=$runtime_roots/$revision
+    # Even reentry starts with temporary roots: an inherited environment marker
+    # alone is not proof that its lifetime descriptor survived the handoff.
+    runtime_storage_verified=0
+    runtime_root=$host_temporary/runtime
     [ ! -e "$runtime_root" ] || [ -L "$runtime_root" ] || fail 'Runtime GC root must be a symlink.'
     fetch_runtime() {
         CHAINMAN_BOOTSTRAP_HELPER=$helper CHAINMAN_PROJECT_ROOT=$root CHAINMAN_BOOTSTRAP_ACTION=fetch \
@@ -596,6 +607,21 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     lifetime_run "$nix_bin" --extra-experimental-features nix-command hash path "$store" > "$host_temporary/hash"
     actual=$(cat "$host_temporary/hash")
     [ "$actual" = "$expected" ] || fail 'Runtime store differs from the verified Git source.'
+    runtime_handoff=3
+    if [ "${CHAINMAN_RUNTIME_STORAGE_ACTIVE:-}" = "$revision" ]; then
+        runtime_handoff=0
+        develop_runtime run python3 -B "$store/scripts/storage.py" runtime-check \
+            "$runtime_roots" "$revision" "$store" || runtime_handoff=$?
+    fi
+    case "$runtime_handoff" in 0 | 3) ;; *) exit "$runtime_handoff" ;; esac
+    if [ "$runtime_handoff" = 3 ]; then
+        lifetime_wait_for_child=1
+        develop_runtime run python3 -B "$store/scripts/storage.py" runtime-run \
+            "$runtime_roots" "$revision" "$store" "$runtime_root-bootstrap" "$self" "$@"
+        exit $?
+    fi
+    runtime_storage_verified=1
+    runtime_root=$runtime_roots/.chainman-storage-v1/$revision/source
     if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
         nix_eval schema > "$host_temporary/schema"
         if [ "$(cat "$host_temporary/schema")" = 3 ]; then

@@ -296,9 +296,12 @@ def fingerprint(
     *,
     inputs: dict[str, str] | None = None,
 ) -> str:
+    import storage
+
     digest = hashlib.sha256(
         json.dumps([1, tc.context_id(), spec], sort_keys=True).encode()
     )
+    digest.update(storage.download_epoch(env).encode())
     profile_name = text(spec["profile"], "Setup profile")
     ref, profile = chainman.profile(root, profile_name)
     if spec.get("environment_inputs"):

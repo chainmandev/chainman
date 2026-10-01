@@ -49,6 +49,8 @@ INTERNAL = {
     "cache-status",
     "update-cache-status",
     "update-cache-prune",
+    "storage-status",
+    "storage-prune",
 }
 CONTROLLER = {
     "services-logs",

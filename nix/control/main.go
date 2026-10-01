@@ -252,6 +252,7 @@ func child(c Command) (*exec.Cmd, error) {
 	for _, v := range cmd.Env {
 		k, _, _ := strings.Cut(v, "=")
 		stale := map[string]bool{"TOOLCHAIN_LOCK_FD": true, "TOOLCHAIN_GATE_FD": true, "TOOLCHAIN_COMPAT_FD": true, "TOOLCHAIN_OPERATION_ID": true, "TOOLCHAIN_ANCESTOR_FDS": true, "CHAINMAN_COMPILER_OWNER": true, "CHAINMAN_UPDATE_LEASE_FD": true}
+		stale["CHAINMAN_STORAGE_FDS"] = true
 		if !stale[k] && !strings.HasPrefix(k, "CHAINMAN_OPERATION_") {
 			filtered = append(filtered, v)
 		}
@@ -1246,33 +1247,8 @@ func persistTools(p *Plan) (string, error) {
 			return "", e
 		}
 		digest := sha256.Sum256(data)
-		destination := filepath.Join(assets, hex.EncodeToString(digest[:]))
-		f, e = os.OpenFile(destination, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-		if e == nil {
-			existing, err := io.ReadAll(io.LimitReader(f, 100<<20))
-			f.Close()
-			if err != nil {
-				return "", err
-			}
-			if sha256.Sum256(existing) != digest {
-				return "", fmt.Errorf("cached controller executable failed integrity check")
-			}
-		}
-		if os.IsNotExist(e) {
-			f, e = os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0700)
-			if e != nil {
-				return "", e
-			}
-			_, e = f.Write(data)
-			closeError := f.Close()
-			if e != nil {
-				os.Remove(destination)
-				return "", e
-			}
-			if closeError != nil {
-				return "", closeError
-			}
-		} else if e != nil {
+		destination, e := installServiceAsset(assets, hex.EncodeToString(digest[:]), data)
+		if e != nil {
 			return "", e
 		}
 		installed = append(installed, destination)
@@ -1538,6 +1514,23 @@ func exitCode(e error) int {
 	return 1
 }
 func mainAction(args []string) (result int) {
+	if len(args) == 2 && (args[0] == "run" || args[0] == "up" || args[0] == "stop") {
+		state := args[1]
+		if args[0] != "stop" {
+			var plan Plan
+			if readJSON(args[1], &plan) == nil {
+				state = plan.State
+			} else {
+				state = ""
+			}
+		}
+		if state != "" {
+			defer serviceStorageMaintenance(filepath.Dir(state))
+		}
+	}
+	if len(args) > 0 && args[0] == "storage-services" {
+		return serviceStorageAction(args[1:])
+	}
 	if len(args) > 0 && args[0] == "update-cache" {
 		return updateCacheAction(args[1:])
 	}

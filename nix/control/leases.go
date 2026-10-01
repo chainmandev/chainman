@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -106,13 +107,24 @@ func leasedTask(path string) error {
 		return err
 	}
 	defer closeForwarded(cmd)
-	if len(cmd.ExtraFiles) > 0 {
+	if os.Getenv("CHAINMAN_UPDATE_TRANSACTION") != "" && len(cmd.ExtraFiles) > 0 {
 		update := cmd.ExtraFiles[len(cmd.ExtraFiles)-1]
 		cmd.Env = append(cmd.Env, fmt.Sprintf("CHAINMAN_UPDATE_LEASE_FD=%d", update.Fd()))
 		if _, err = unix.FcntlInt(update.Fd(), unix.F_SETFD, 0); err != nil {
 			return err
 		}
 	}
+	storageFDs := []int{}
+	for _, file := range cmd.ExtraFiles {
+		if _, err = unix.FcntlInt(file.Fd(), unix.F_SETFD, 0); err != nil {
+			return err
+		}
+		if os.Getenv("CHAINMAN_UPDATE_TRANSACTION") == "" || file != cmd.ExtraFiles[len(cmd.ExtraFiles)-1] {
+			storageFDs = append(storageFDs, int(file.Fd()))
+		}
+	}
+	encodedStorage, _ := json.Marshal(storageFDs)
+	cmd.Env = append(cmd.Env, "CHAINMAN_STORAGE_FDS="+string(encodedStorage))
 	if cmd.Dir != "" {
 		if err = os.Chdir(cmd.Dir); err != nil {
 			return err

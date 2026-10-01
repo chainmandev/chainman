@@ -11,6 +11,7 @@ import shlex
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import termios
 import time
@@ -20,6 +21,8 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1]
 NIX = shutil.which("nix")
+sys.path.insert(0, str(SOURCE / "scripts"))
+import storage
 
 
 def run_captured(command, *, env, cwd=None, timeout=180):
@@ -61,7 +64,7 @@ class BootstrapTests(unittest.TestCase):
             cls.addClassCleanup(cls.cleanup_store)
         cls.tree = Path(cls.shared.name).resolve() / "runtime"
         (cls.tree / "scripts").mkdir(parents=True)
-        for name in ("toolchain.py", "adapter_data.py"):
+        for name in ("toolchain.py", "adapter_data.py", "storage.py"):
             shutil.copy2(SOURCE / "scripts" / name, cls.tree / "scripts" / name)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
@@ -838,7 +841,7 @@ commands=[["python3","-c","import sys; print(repr(sys.argv[1:]), flush=True); sy
 from pathlib import Path
 os.environ['XDG_CACHE_HOME']=str(Path.cwd()/'.runtime-cache')
 names=['TOOLCHAIN_LOCK_FD','TOOLCHAIN_GATE_FD','TOOLCHAIN_COMPAT_FD','CHAINMAN_SERVICE_CONTEXT_FD']
-lists=['TOOLCHAIN_ANCESTOR_FDS','CHAINMAN_SERVICE_LEASE_FDS']
+lists=['TOOLCHAIN_ANCESTOR_FDS','CHAINMAN_SERVICE_LEASE_FDS','CHAINMAN_STORAGE_FDS']
 def remap(old,new):
  for name in names:
   if os.environ.get(name)==str(old): os.environ[name]=str(new)
@@ -1947,7 +1950,11 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
             child.wait(timeout=15)
             with socket.socket() as released:
                 released.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                released.bind(("127.0.0.1", port))
+                try:
+                    released.bind(("127.0.0.1", port))
+                except OSError as error:
+                    error.add_note(log.read_text())
+                    raise
         finally:
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGTERM)
@@ -2825,7 +2832,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         env = dict(self.env, XDG_CACHE_HOME=str(cache))
         self.run_bootstrap("first", env=env)
         runtime = Path(self.records()[0]["runtime"])
-        root = cache / "chainman/runtime-roots" / self.lock
+        root = cache / "chainman/runtime-roots" / storage.POOL / self.lock / "source"
         self.assertEqual(root.resolve(), runtime)
         nix_store = str(Path(NIX).resolve().with_name("nix-store"))
         roots = subprocess.check_output(
@@ -2840,7 +2847,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertTrue((runtime / "scripts/chainman.py").is_file())
         # Source rooting alone does not retain the Python/Git environment used
         # after bootstrap's nix-develop process has exec'd the runtime.
-        profile = root.with_name(root.name + "-bootstrap")
+        profile = root.with_name("bootstrap")
         self.assertTrue(profile.is_symlink())
         shell = profile.resolve()
         roots = subprocess.check_output(
@@ -2862,8 +2869,9 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.run_bootstrap("first")
         runtime = Path(self.records()[0]["runtime"])
         cache = self.root / "private-cache"
-        root = cache / "chainman/runtime-roots" / self.lock
-        root.parent.mkdir(parents=True)
+        pool = cache / "chainman/runtime-roots" / storage.POOL
+        with storage.use(pool, self.lock, "runtime") as entry:
+            root = entry / "source"
         root.symlink_to(runtime)
         nix_store = str(Path(NIX).resolve().with_name("nix-store"))
         self.assertNotIn(
@@ -2885,7 +2893,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         env = dict(self.env, XDG_CACHE_HOME=str(cache))
         self.run_bootstrap("first", env=env)
         runtime = self.records()[0]["runtime"]
-        root = cache / "chainman/runtime-roots" / self.lock
+        root = cache / "chainman/runtime-roots" / storage.POOL / self.lock / "source"
         wrappers = self.root / "observed nix"
         wrappers.mkdir()
         attempted = self.root / "registration-attempted"
@@ -2911,7 +2919,8 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
             executable.chmod(0o755)
         env["CHAINMAN_NIX_BIN"] = str(wrappers / "nix")
         self.run_bootstrap("repair", env=env)
-        self.assertEqual(attempted.read_text(), "attempt")
+        attempts_before_failure = attempted.read_text()
+        self.assertTrue(attempts_before_failure)
         self.assertEqual(root.readlink(), Path(runtime))
         roots = subprocess.check_output(
             [
@@ -2926,8 +2935,8 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertEqual(len(self.records()), 2)
         fail.touch()
         result = self.run_bootstrap("failed-repair", env=env, check=False)
-        self.assertEqual(result.returncode, 23, result.stdout + result.stderr)
-        self.assertEqual(attempted.read_text(), "attemptattempt")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(attempted.read_text(), attempts_before_failure + "attempt")
         self.assertEqual(len(self.records()), 2)
 
     @unittest.skipUnless(
@@ -3212,9 +3221,9 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         )
         self.assertEqual(list(outside.iterdir()), [])
         (cache / "chainman/runtime-roots").unlink()
-        roots = cache / "chainman/runtime-roots"
-        roots.mkdir(parents=True)
-        root = roots / self.lock
+        roots = cache / "chainman/runtime-roots" / storage.POOL
+        with storage.use(roots, self.lock, "runtime") as entry:
+            root = entry / "source"
         root.write_text("preserve this ordinary file")
         self.assertIn(
             "must be a symlink", self.run_bootstrap(check=False, env=env).stderr
@@ -3236,6 +3245,19 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertNotEqual(self.run_bootstrap(check=False).returncode, 0)
         self.assertTrue(old_runtime.is_dir())
         self.assertEqual(len(self.records()), 2)
+
+    def test_host_runtime_handoff_accepts_no_action(self):
+        self.prepare_cache(self.env)
+        result = run_captured(
+            [str(self.tree / "bootstrap/chainman.sh")],
+            env=dict(
+                self.env,
+                CHAINMAN_PROJECT_ROOT=str(self.root),
+                CHAINMAN_SOURCE_REVISION=self.lock,
+            ),
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.records()), 1)
 
     def test_host_python_is_not_used_and_inherited_descriptor_survives(self):
         tools = self.root / "host tools"

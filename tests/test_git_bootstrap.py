@@ -88,6 +88,14 @@ class GitBootstrapTests(unittest.TestCase):
             XDG_CACHE_HOME=str(self.home / "cache"),
             BOOTSTRAP_TEST_LOG=str(self.root / "fetches"),
         )
+        # These are independent callers, not children retaining the test
+        # runner's managed download lease. run_entry closes inherited FDs.
+        for name in (
+            "CHAINMAN_STORAGE_PATHS",
+            "CHAINMAN_STORAGE_FDS",
+            "CHAINMAN_DOWNLOAD_EPOCH",
+        ):
+            self.env.pop(name, None)
         self.cache = (
             self.home
             / "cache/chainman/git/github.com-chainmandev-chainman"

@@ -177,11 +177,18 @@ func TestNewChildDoesNotAdvertiseClosedOperationDescriptors(t *testing.T) {
 }
 func TestCachedExecutableTamperingIsRejected(t *testing.T) {
 	base := physicalTempDir(t)
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
 	backend := filepath.Join(base, "backend")
 	if err := os.WriteFile(backend, []byte("fixture backend"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	p := Plan{State: base, Backend: backend}
+	state := filepath.Join(base, "state")
+	if err := private(state); err != nil {
+		t.Fatal(err)
+	}
+	p := Plan{State: state, Backend: backend}
 	if _, err := persistTools(&p); err != nil {
 		t.Fatal(err)
 	}

@@ -712,7 +712,10 @@ def operation(
         with operation_state(
             lease.fileno(), gate_descriptor, identity, compat_descriptor, owners
         ):
-            yield not nested_project
+            import storage
+
+            with storage.downloads():
+                yield not nested_project
 
 
 def managed_options[Options: ProcessOptions](kwargs: Options) -> Options:
@@ -724,8 +727,13 @@ def managed_options[Options: ProcessOptions](kwargs: Options) -> Options:
         if update_fd < 3 or not stat.S_ISREG(os.fstat(update_fd).st_mode):
             raise ValueError("Invalid update lifetime lease")
         update_fds = (update_fd,)
+    import storage
+
+    _, storage_fds = storage.inherited()
     options["pass_fds"] = tuple(
-        dict.fromkeys((*options.get("pass_fds", ()), *_nix_root_fds, *update_fds))
+        dict.fromkeys(
+            (*options.get("pass_fds", ()), *_nix_root_fds, *update_fds, *storage_fds)
+        )
     )
     descriptor, gate, identity, compat, ancestors = inherited_operation()
     if descriptor is not None:
@@ -868,21 +876,23 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
     work = contained(root, f".cache/toolchain/work/{context_id()}")
     if create:
         work.mkdir(parents=True, exist_ok=True)
-    downloads = Path(
-        env.get(
-            "TOOLCHAIN_DOWNLOAD_CACHE",
-            str(
-                Path(env.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
-                / "nix-just-downloads"
-            ),
-        )
-    )
+    import storage
+
+    downloads = storage.download_path(env)
+    download_base = storage.download_base(env)
     if not downloads.is_absolute():
         raise ValueError("Download-cache overrides must select an absolute path")
     # Shared package caches and sccache are separate from project build outputs;
     # package managers own their cache locking.
     if create:
-        downloads.mkdir(parents=True, exist_ok=True)
+        if storage.managed_downloads(env):
+            # Environment inspection can precede operation admission. Initialize
+            # through the same private protocol rather than making unreceipted
+            # intermediate directories with the caller's default permissions.
+            with storage.use(download_base / storage.POOL, "downloads", "downloads"):
+                storage.private(downloads, create=True)
+        else:
+            downloads.mkdir(parents=True, exist_ok=True)
     socket_directory = Path("/tmp").resolve() / f"nix-just-sockets-{os.getuid()}"
     if socket_directory.is_symlink():
         raise ValueError("compiler socket directory must not be a symlink")
@@ -910,7 +920,7 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
     env.update(
         CARGO_HOME=str(downloads / "cargo"),
         CARGO_TARGET_DIR=str(work / "cargo"),
-        SCCACHE_DIR=str(downloads / "sccache"),
+        SCCACHE_DIR=str(download_base / "sccache"),
         SCCACHE_CACHE_SIZE=str(int(cache_policy.compiler_limit_gib * 1024**3)),
         SCCACHE_SERVER_UDS=str(socket_directory / socket_name),
         RUSTC_WRAPPER="",
@@ -925,7 +935,7 @@ def environment(root: Path = ROOT, *, create: bool = True) -> dict[str, str]:
         PYTHONDONTWRITEBYTECODE="1",
         GOTOOLCHAIN="local",
         TOOLCHAIN_WORK=str(work),
-        TOOLCHAIN_DOWNLOAD_CACHE=str(downloads),
+        TOOLCHAIN_DOWNLOAD_CACHE=str(download_base),
     )
     pnpm_environment(
         env,
@@ -1223,8 +1233,11 @@ def release_compiler_lifetime(
 
 
 def fingerprint(spec: Mapping[str, object], root: Path = ROOT) -> str:
+    import storage
+
     digest = hashlib.sha256()
     digest.update(json.dumps([2, context_id(), spec], sort_keys=True).encode())
+    digest.update(storage.download_epoch().encode())
     paths = {root / "toolchain.toml", root / "chainman.toml", root / "chainman.lock"}
     digest.update(str(RUNTIME).encode())
     if (root / "chainman.toml").exists():
