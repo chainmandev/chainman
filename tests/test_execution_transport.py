@@ -186,7 +186,12 @@ commands=[["true"]]
                 )
                 + '[tasks.other]\ncommands=[["true"]]\n'
             )
-            with self.assertRaisesRegex(ValueError, "identical transport"):
+            with patch.dict(os.environ, CHAINMAN_MODE="host-nix"):
+                bootstrap_plan.plan(root, "run", "work")
+            with (
+                patch.dict(os.environ, CHAINMAN_MODE="container-nix"),
+                self.assertRaisesRegex(ValueError, "identical transport"),
+            ):
                 bootstrap_plan.plan(root, "run", "work")
 
     def test_nested_entry_cannot_change_mount_scope(self):
