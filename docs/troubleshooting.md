@@ -82,6 +82,9 @@ configuration is broken. Destructive data reset requires its explicit reset opti
 Use `just chainman deps-update --skip-chainman` for project-only updates.
 Runtime selection needs an available advertised default branch, without an age delay.
 Missing project dependency age/provenance evidence is an error, not an implicit waiver.
+Crates.io metadata HTTP failures identify the crate when its name is an ordinary
+bounded package identifier. HTTP status and retry-limit diagnostics are retained;
+URL-like inputs, request URLs and query strings stay out of that diagnostic.
 
 Updates prepare isolated candidates and preserve failures. Use the transaction path
 printed by the failure message:

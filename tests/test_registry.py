@@ -166,6 +166,49 @@ class RegistryTransportTests(unittest.TestCase):
         registry.fetch.cache_clear()
         self.addCleanup(registry.fetch.cache_clear)
 
+    def test_crate_metadata_http_failure_names_the_package_and_preserves_status(self):
+        error = registry.RegistryHTTPError(404, "crates.io")
+        with (
+            patch.object(registry, "data", side_effect=error) as metadata,
+            self.assertRaises(registry.RegistryHTTPError) as caught,
+        ):
+            registry.releases("crates", "missing-crate")
+        self.assertIs(caught.exception, error)
+        self.assertEqual(error.status, 404)
+        self.assertEqual(
+            str(error), "Registry HTTP 404 from crates.io (crates:missing-crate)"
+        )
+        metadata.assert_called_once_with(
+            "https://crates.io/api/v1/crates/missing-crate"
+        )
+
+    def test_crate_metadata_context_preserves_excessive_retry_wait_diagnostic(self):
+        error = registry.RegistryHTTPError(429, "crates.io", excessive_wait=True)
+        original = str(error)
+        with (
+            patch.object(registry, "data", side_effect=error),
+            self.assertRaises(registry.RegistryHTTPError) as caught,
+        ):
+            registry.releases("crates", "rate_limited")
+        self.assertIs(caught.exception, error)
+        self.assertEqual(error.status, 429)
+        self.assertEqual(str(error), original + " (crates:rate_limited)")
+
+    def test_crate_metadata_context_does_not_echo_url_like_or_unbounded_inputs(self):
+        for package in (
+            "https://user:secret@example.invalid/private?token=hidden",
+            "private?secret=hidden",
+            "x" * 129,
+        ):
+            error = registry.RegistryHTTPError(404, "crates.io")
+            with (
+                self.subTest(package=package),
+                patch.object(registry, "data", side_effect=error),
+                self.assertRaises(registry.RegistryHTTPError),
+            ):
+                registry.releases("crates", package)
+            self.assertEqual(str(error), "Registry HTTP 404 from crates.io")
+
     def test_large_package_history_keeps_exact_maturity_and_artifact_evidence(self):
         metadata = {
             "versions": {
