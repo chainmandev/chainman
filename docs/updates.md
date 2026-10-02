@@ -774,7 +774,10 @@ administration are rejected. The candidate version must satisfy the existing
 public dependency requirement and configured version/security constraints.
 Public version-only manifest declarations remain unchanged. The binding adds a
 literal native Cargo configuration argument to every resolution/repair and to
-locked, offline metadata inspection. Missing, ambiguous, unused, registry-backed
+locked metadata inspection. Inspection can download the exact locked registry
+artifacts: native resolution obtains index evidence but does not populate every
+crate archive in a cold cache. It cannot select new versions or rewrite locks.
+Missing, ambiguous, unused, registry-backed
 or differently located native candidate identities fail; inspection must preserve
 all guarded sources and locks, including in projects without Git.
 

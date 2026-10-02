@@ -174,6 +174,17 @@ class NativeCargoTests(unittest.TestCase):
     def execute(self, root, profile, argv, **kwargs):
         self.assertEqual((root, profile, kwargs["cwd"]), (self.root, "rust", self.root))
         self.calls.append((list(argv), self.manifest.read_bytes()))
+        if argv[1] == "metadata":
+            return tc.managed_run(
+                argv,
+                cwd=self.root,
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+                timeout=45,
+            )
         return self.cargo(*argv[1:])
 
     def resolve(self):
@@ -195,6 +206,46 @@ class NativeCargoTests(unittest.TestCase):
         self.assertTrue(self.manifest.read_text().startswith("# public comment\n"))
         self.assertEqual(self.manifest.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.source.read_bytes(), b"// unchanged application source\n")
+
+    def test_candidate_inspection_downloads_locked_transitives_from_cold_cache(self):
+        self.put(
+            "owned crate/Cargo.toml",
+            '[package]\nname="local_pkg"\nversion="1.2.3"\nedition="2021"\n',
+        )
+        self.put("owned crate/src/lib.rs", "// bound source\n")
+        self.manifest.write_text(self.manifest.read_text() + 'local_pkg="1.2.3"\n')
+        spec = {**self.spec, "cargo_sources": {"local_pkg": "owned crate/Cargo.toml"}}
+        arguments = native.cargo_sources.arguments(
+            self.root, native.cargo_sources.read(self.root, spec)
+        )
+        self.cargo("update", *arguments)
+        before = native.cargo_file_state(self.root, "Cargo.lock")
+        # Native resolution only obtains registry metadata, leaving crate
+        # archives absent. Full metadata inspection must download these exact
+        # locked objects rather than requiring a warm cache from a prior build.
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            self.cargo(
+                "metadata", "--format-version=1", "--locked", "--offline", *arguments
+            )
+        self.assertIn("attempting to make an HTTP request", caught.exception.stdout)
+        self.assertEqual(native.cargo_file_state(self.root, "Cargo.lock"), before)
+        with patch.object(native.chainman, "execute", side_effect=self.execute):
+            result = native.cargo_candidate_identities(
+                self.root, spec, native.specifications(self.root, spec)
+            )
+        self.assertEqual(
+            result["rust-0"],
+            [
+                {
+                    "name": "local_pkg",
+                    "version": "1.2.3",
+                    "manifest": "owned crate/Cargo.toml",
+                }
+            ],
+        )
+        self.assertEqual(native.cargo_file_state(self.root, "Cargo.lock"), before)
+        self.assertIn("--locked", self.calls[-1][0])
+        self.assertNotIn("--offline", self.calls[-1][0])
 
     def test_real_security_fix_then_mature_update_removes_exception(self):
         config = self.root / "chainman.toml"

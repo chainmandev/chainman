@@ -1408,7 +1408,6 @@ def cargo_candidate_identities(root: Path, spec: Config, specs: Specs) -> ad.Tab
                     "metadata",
                     "--format-version=1",
                     "--locked",
-                    "--offline",
                     *arguments,
                 ],
                 cwd=tc.contained(root, ad.text(member["directory"], "Cargo directory")),
