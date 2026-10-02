@@ -27,6 +27,7 @@ import tomllib
 from packaging.requirements import Requirement
 from packaging.version import Version
 import chainman
+import cargo_sources
 import lock_adapters
 import manifests
 import registry
@@ -98,6 +99,7 @@ def members(root: Path, directory: Path, kind: str) -> list[str]:
 
 
 def specifications(root: Path, spec: Config) -> dict[str, ad.Table]:
+    cargo_sources.read(root, spec)
     kind = ad.text(spec["adapter"], "Adapter kind")
     ecosystem, _ = KINDS[kind]
     directories = spec.get("directories", [spec.get("directory", ".")])
@@ -418,6 +420,21 @@ def choose(
         ad.text(pin["name"], "Pin name"),
     )
     requirement = old_requirement(root, pin)
+    sources = cargo_sources.read(root, spec)
+    if provider == "crates" and package in sources:
+        value = sources[package].version
+        safe = registry.minimum_safe(provider, policy, package)
+        if (
+            not accepts(provider, value, requirement)
+            or not registry.compatible(
+                provider, value, registry.constraint(provider, policy, package)
+            )
+            or (safe is not None and registry.stable_version(provider, value) < safe)
+        ):
+            raise ValueError(
+                "Cargo candidate source version violates its dependency requirement or policy"
+            )
+        return None
     coordinates = ad.strings(pin.get("coordinated", [package]), "Coordinated packages")
     inventories = []
     for coordinate in coordinates:
@@ -1103,6 +1120,8 @@ def cargo_input_state(root: Path, specs: Specs, lock_names: set[str]) -> ad.Tabl
     names = set()
     pending = []
     for member in specs.values():
+        for binding in cargo_sources.read(root, member).values():
+            pending.extend([binding.manifest, binding.version_manifest])
         pending.append(
             str(
                 Path(ad.text(member["directory"], "Workspace directory")) / "Cargo.toml"
@@ -1352,6 +1371,91 @@ def cargo_repair_peers(identity: Identity, body: bytes) -> list[CargoNode]:
     )
 
 
+def cargo_candidate_identities(root: Path, spec: Config, specs: Specs) -> ad.Table:
+    """Inspect candidate package paths with the same explicit native projection."""
+    bindings = cargo_sources.read(root, spec)
+    if not bindings:
+        return {}
+    arguments = cargo_sources.arguments(root, bindings)
+    locks = {
+        str(Path(ad.text(member["directory"], "Cargo directory")) / "Cargo.lock")
+        for member in specs.values()
+    }
+    before = cargo_input_state(root, specs, locks)
+    lock_images = {name: cargo_file_state(root, name) for name in locks}
+    result: ad.Table = {}
+    seen: set[str] = set()
+    for name, member in specs.items():
+        owned = {
+            str(path.relative_to(root))
+            for pattern in ad.strings(member["inputs"], "Cargo inputs")
+            for path in root.glob(pattern)
+        }
+        required = {
+            ad.text(pin["name"], "Cargo pin name")
+            for pin in pins(root, spec, {name: member})
+            if pin["provider"] == "crates"
+            and pin["name"] in bindings
+            and pin["file"] in owned
+        }
+        original: BaseException | None = None
+        try:
+            output = chainman.execute(
+                root,
+                ad.text(spec.get("profile", "rust"), "Cargo profile"),
+                [
+                    "cargo",
+                    "metadata",
+                    "--format-version=1",
+                    "--locked",
+                    "--offline",
+                    *arguments,
+                ],
+                cwd=tc.contained(root, ad.text(member["directory"], "Cargo directory")),
+                env={**tc.environment(root), "TOOLCHAIN_FRESH": "1"},
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+        except BaseException as error:
+            original = error
+            raise
+        finally:
+            message = ""
+            try:
+                changed = (
+                    cargo_input_state(root, specs, locks) != before
+                    or {path: cargo_file_state(root, path) for path in locks}
+                    != lock_images
+                )
+            except (OSError, ValueError) as error:
+                message = (
+                    "Cargo candidate inspection could not recheck guarded inputs; changes preserved: "
+                    + str(error)
+                )
+            else:
+                if changed:
+                    message = "Cargo candidate inspection changed guarded inputs or locks; changes preserved"
+            if message:
+                if original is None:
+                    raise ValueError(message)
+                original.add_note(message)
+                print(message, file=sys.stderr)
+        if output is None:
+            raise ValueError("Cargo candidate inspection returned no native metadata")
+        records = cargo_sources.materialized(
+            root, bindings, json.loads(output.stdout), required
+        )
+        result[name] = records
+        seen.update(
+            ad.text(record["name"], "Cargo candidate name") for record in records
+        )
+    if seen != set(bindings):
+        raise ValueError(
+            "Cargo candidate source binding is unused by the selected workspaces"
+        )
+    return result
+
+
 def cargo_resolve(
     root: Path,
     spec: Config,
@@ -1367,6 +1471,7 @@ def cargo_resolve(
         ad.array(spec.get("resolve", [["cargo", "update"]]), "Cargo commands")[0],
         "Cargo command",
     )
+    source_arguments = cargo_sources.arguments(root, cargo_sources.read(root, spec))
     lock_names = {
         name: str(
             Path(ad.text(member["directory"], "Workspace directory")) / "Cargo.lock"
@@ -1475,7 +1580,7 @@ def cargo_resolve(
             result = chainman.execute(
                 root,
                 ad.text(spec.get("profile", "rust"), "Adapter profile"),
-                argv,
+                [*argv, *source_arguments],
                 cwd=tc.contained(
                     root, ad.text(specs[name]["directory"], "Workspace directory")
                 ),
@@ -1737,6 +1842,7 @@ def resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table
         if repair_cargo
         else None
     )
+    cargo_candidates = cargo_candidate_identities(root, spec, specs)
     swift_resolution: ad.Table = {}
     swift_selected: dict[str, dict[str, str]] = {}
     if ad.text(spec["adapter"], "Adapter kind") == "swift":
@@ -1845,6 +1951,7 @@ def resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table
             if cargo_identities is not None
             else {}
         ),
+        **({"cargo_candidates": cargo_candidates} if cargo_candidates else {}),
         "changed_manifests": sorted(set(changed)),
         "project_graphs": project_graphs,
         "pins": [
@@ -1858,6 +1965,14 @@ def audit(
 ) -> None:
     specs = specifications(root, spec)
     resolution = ad.table(before.get("resolution", {}), "Native resolution")
+    candidates = cargo_candidate_identities(root, spec, specs)
+    if (
+        "cargo_candidates" in resolution
+        and candidates != resolution["cargo_candidates"]
+    ):
+        raise ValueError(
+            "A project hook changed the selected Cargo candidate source graph"
+        )
     if ad.text(spec["adapter"], "Adapter kind") == "swift":
         if (
             "swift_inputs" in resolution

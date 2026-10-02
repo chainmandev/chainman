@@ -764,3 +764,24 @@ remain owned by their project or generator.
 
 See [standard recipes](recipes.md) for formatting, staged hooks, candidate resumption,
 coverage and vulnerability audits.
+
+A Rust adapter may explicitly declare `cargo_sources = { owned_package =
+"packages/owned/Cargo.toml" }` for a project-owned, prepublication dependency.
+This is supported only with ordinary `cargo update`. Names, stable package
+versions (including workspace inheritance), regular manifests and every parent
+path are validated inside the project; absolute paths, symlinks and Git
+administration are rejected. The candidate version must satisfy the existing
+public dependency requirement and configured version/security constraints.
+Public version-only manifest declarations remain unchanged. The binding adds a
+literal native Cargo configuration argument to every resolution/repair and to
+locked, offline metadata inspection. Missing, ambiguous, unused, registry-backed
+or differently located native candidate identities fail; inspection must preserve
+all guarded sources and locks, including in projects without Git.
+
+Candidate sources have no registry publication date and are not registry release
+selections. All third-party registry artifacts retain their normal checksum,
+publication-age, security and graph audit. Final reconciliation rechecks the
+selected native candidate package identities. This update projection qualifies
+project sources only: it is not immutable release-artifact staging, public
+publication, cold public acquisition or release-consumer acceptance. Keep those
+proof lanes separate and run public consumers without the projection.
