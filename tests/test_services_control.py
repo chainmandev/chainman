@@ -18,9 +18,12 @@ import time
 import unittest
 from unittest.mock import patch
 
+from test_storage import TERMINAL_BODY, exercise_job_control
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import native_tasks
 import services
+import storage
 
 CONTROL = os.environ.get("CHAINMAN_TEST_CONTROL")
 BACKEND = os.environ.get("CHAINMAN_TEST_PROCESS_COMPOSE")
@@ -169,6 +172,7 @@ while True:time.sleep(.1)
         direct_signal=None,
         signal_owner=False,
         subsequent_commands=(),
+        suspend_for=None,
     ):
         """Use a controlling terminal, not killpg on a redirected subprocess."""
         task = self.base / "terminal-task.json"
@@ -226,6 +230,19 @@ while True:time.sleep(.1)
                 if interrupt and b"INTERRUPT READY" in output:
                     os.write(master, b"\x03")
                     interrupt = False
+                if suspend_for is not None and b"SUSPEND READY" in output:
+                    os.write(master, b"\x1a")
+                    while True:
+                        self.assertLess(time.monotonic(), deadline, output)
+                        stopped, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+                        if stopped:
+                            self.assertTrue(os.WIFSTOPPED(status), output)
+                            break
+                        time.sleep(0.01)
+                    self.assertEqual(os.tcgetpgrp(master), pid)
+                    time.sleep(suspend_for)
+                    os.killpg(pid, signal.SIGCONT)
+                    suspend_for = None
                 if (
                     direct_signal
                     and b"INTERRUPT READY" in output
@@ -256,7 +273,7 @@ while True:time.sleep(.1)
                         os.killpg(group, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                os.kill(pid, signal.SIGKILL)
+                os.killpg(pid, signal.SIGKILL)
                 os.waitpid(pid, 0)
             os.close(master)
 
@@ -273,6 +290,45 @@ while True:time.sleep(.1)
         output = self.terminal_command(code)
         self.assertIn("APPLICATION READY", output)
         self.assertIn("RESTORED 7", output)
+
+    def test_owned_terminal_job_control_preserves_storage_lease(self):
+        pool = self.base / "downloads" / storage.POOL
+        with storage.use(pool, "downloads", "downloads") as entry:
+            payload = entry / "data/cargo/registry"
+            payload.mkdir(parents=True)
+            (payload / "fixture").write_text("disposable cache")
+        task = self.base / "terminal-job.json"
+        task.write_text(
+            json.dumps(
+                {
+                    "commands": [self.command([sys.executable, "-c", TERMINAL_BODY])],
+                    "shutdown_seconds": 2,
+                }
+            )
+        )
+        wrapper = (
+            f"import os,sys; from pathlib import Path; sys.path.insert(0,{str(Path(__file__).resolve().parents[1] / 'scripts')!r}); "
+            "import storage\n"
+            f"with storage.use(Path({str(pool)!r}), 'downloads', 'downloads'):\n"
+            f" raise SystemExit(storage.runtime_child({[CONTROL, 'command', str(task)]!r}, dict(os.environ)))\n"
+        )
+
+        def stopped():
+            rows, removed = storage.collect(pool, apply=True, all_idle=True)
+            self.assertTrue(rows[0]["active"])
+            self.assertEqual(removed, [])
+            self.assertTrue(payload.exists())
+
+        exercise_job_control(
+            self,
+            [sys.executable, "-c", wrapper],
+            dict(os.environ),
+            self.root,
+            stopped,
+            background=True,
+        )
+        self.assertTrue(storage.collect(pool, apply=True, all_idle=True)[1])
+        self.assertFalse(payload.exists())
 
     def test_owned_terminal_ctrl_c_and_restore(self):
         code = (
@@ -341,6 +397,11 @@ print('CLEANUP FINISHED', signals, flush=True)
         )
         output = self.terminal_command(code, timeout=1)
         self.assertIn("RAW READY", output)
+        self.assertIn("RESTORED 124", output)
+
+    def test_owned_terminal_timeout_includes_time_suspended(self):
+        code = "import time; print('SUSPEND READY',flush=True); time.sleep(120)"
+        output = self.terminal_command(code, timeout=2, suspend_for=2.2)
         self.assertIn("RESTORED 124", output)
 
     def test_owned_terminal_interrupt_cannot_become_successful_preparation(self):

@@ -149,6 +149,12 @@ the caller restores its foreground group and terminal settings afterward. Ctrl-C
 cancels the task and releases its services, retaining resources used by another
 client and preserving persistent volumes. Piped input remains a pipe. Background
 services and readiness probes never acquire the caller's terminal.
+Ctrl-Z suspends an owned task and its waiting callers, returning the terminal to
+the shell without releasing runtime or service leases. `fg` restores the task's
+terminal settings; `bg` resumes it without taking the terminal from the shell
+(a background terminal read stops it again). This also applies to tasks with
+`cleanup_children = true` or `timeout_seconds`; time spent suspended counts
+toward the timeout, which is enforced when the owner resumes.
 Cancellation waits for the current command's graceful shutdown before cleaning
 up remaining descendants; later commands in its sequence do not run. The
 declared shutdown deadline still bounds an unresponsive command.

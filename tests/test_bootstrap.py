@@ -226,6 +226,27 @@ class BootstrapTests(unittest.TestCase):
             self, [str(self.launcher), "exec", "--terminal-job"], self.env, self.root
         )
 
+    def test_runtime_job_control_through_native_task(self):
+        self.use_real_runtime()
+        for lifetime, cancel in (
+            ("cleanup_children = true", False),
+            ("timeout_seconds = 180", True),
+        ):
+            with self.subTest(lifetime=lifetime):
+                (self.root / "chainman.toml").write_text(
+                    'schema = 3\n[project]\ndefault_profile = "host"\n'
+                    "[tasks.terminal]\n"
+                    f"commands = {json.dumps([[sys.executable, '-c', TERMINAL_BODY]])}\n"
+                    f"{lifetime}\nshutdown_seconds = 2\n"
+                )
+                exercise_job_control(
+                    self,
+                    [str(self.launcher), "run", "terminal"],
+                    self.env,
+                    self.root,
+                    cancel=cancel,
+                )
+
     def preserve_container_helpers(self, tools):
         # Rootless Podman invokes its installed UID, networking and OCI helpers
         # through PATH. Keep that engine installation usable without exposing

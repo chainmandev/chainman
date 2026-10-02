@@ -26,6 +26,7 @@ settings = termios.tcgetattr(0)
 settings[3] &= ~termios.ECHO
 termios.tcsetattr(0, termios.TCSANOW, settings)
 while True:
+    assert not termios.tcgetattr(0)[3] & termios.ECHO
     print('CHILD-READY', flush=True)
     if input() == 'finish':
         break
@@ -33,7 +34,9 @@ raise SystemExit(7)
 """
 
 
-def exercise_job_control(test, argv, env, cwd, stopped=lambda: None, *, cancel=False):
+def exercise_job_control(
+    test, argv, env, cwd, stopped=lambda: None, *, cancel=False, background=False
+):
     """A real interactive shell owns the job, including waiting bootstrap shells."""
     shell = shutil.which("bash")
     test.assertIsNotNone(shell)
@@ -64,7 +67,23 @@ def exercise_job_control(test, argv, env, cwd, stopped=lambda: None, *, cancel=F
     try:
         expect(b"PROMPT> ")
         body = shlex.join(argv) + "; printf 'RESULT:%s\\n' \"$?\""
-        send((shlex.join([shell, "-c", body]) + "\n").encode())
+        send(
+            (
+                shlex.join([shell, "-c", body]) + (" &\n" if background else "\n")
+            ).encode()
+        )
+        if background:
+            expect(b"PROMPT> ")
+            deadline = time.monotonic() + timeout
+            while True:
+                send(b"jobs\n")
+                if b"Stopped" in expect(b"PROMPT> "):
+                    break
+                test.assertLess(time.monotonic(), deadline)
+                time.sleep(0.05)
+            test.assertEqual(os.tcgetpgrp(master), pid)
+            stopped()
+            send(b"fg\n")
         expect(b"CHILD-READY\r\n")
         timeout = 10
         for _ in range(2):

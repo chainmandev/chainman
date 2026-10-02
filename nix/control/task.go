@@ -288,12 +288,12 @@ func taskCommand(action, path string) (result int) {
 		return exitCode(e)
 	}
 	defer closeForwarded(cmd)
-	restore, e := taskTerminal(cmd)
+	terminal, e := taskTerminal(cmd)
 	if e != nil {
 		return exitCode(e)
 	}
 	defer func() {
-		if err := restore(); err != nil {
+		if err := terminal.close(cmd); err != nil {
 			fmt.Fprintln(os.Stderr, "Restore task terminal:", err)
 			if result == 0 {
 				result = 1
@@ -303,16 +303,14 @@ func taskCommand(action, path string) (result int) {
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
+	changed := make(chan os.Signal, 1)
+	signal.Notify(changed, syscall.SIGCHLD)
+	defer signal.Stop(changed)
+	resumed := make(chan os.Signal, 1)
+	signal.Notify(resumed, syscall.SIGCONT)
+	defer signal.Stop(resumed)
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
 	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	select {
-	case e = <-done:
-	case sig := <-signals:
-		interruptTask(cmd, sig)
-		e = <-done
-	}
-	return exitCode(e)
+	return waitTask(cmd, terminal, signals, changed, resumed)
 }
