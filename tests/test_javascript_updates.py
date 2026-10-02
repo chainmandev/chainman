@@ -12,6 +12,7 @@ import tempfile
 import tarfile
 import unittest
 import weakref
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -1828,6 +1829,76 @@ class JavaScriptTests(unittest.TestCase):
         js.audit(self.root, self.spec, before, self.policy, self.now)
         self.assertEqual(
             list((self.root / ".cache/toolchain/work").glob("javascript-update-*")), []
+        )
+
+    def test_normalization_projects_only_proven_override_peer_restoration(self):
+        resolved = {
+            "overrides": {"matcher": "4.0.7"},
+            "packages": {
+                "walker@6.5.0": {
+                    "resolution": {"integrity": "unchanged"},
+                    "peerDependencies": {"matcher": "4.0.7"},
+                    "peerDependenciesMeta": {"matcher": {"optional": True}},
+                }
+            },
+            "snapshots": {
+                "walker@6.5.0(matcher@4.0.7)": {
+                    "optionalDependencies": {"matcher": "4.0.7"}
+                }
+            },
+        }
+        restored = deepcopy(resolved)
+        restored["overrides"]["matcher"] = "^4.0.4"
+        restored["packages"]["walker@6.5.0"]["peerDependencies"]["matcher"] = "^4.0.4"
+        projected = js.normalization_graph(
+            resolved, override_peers={"matcher": ("4.0.7", "^4.0.4")}
+        )
+        self.assertEqual(projected, js.normalization_graph(restored))
+        self.assertEqual(
+            resolved["packages"]["walker@6.5.0"]["peerDependencies"]["matcher"],
+            "4.0.7",
+        )
+        for field, replacement in [
+            ("peerDependencies", {"matcher": "^5.0.0"}),
+            ("peerDependenciesMeta", {"matcher": {"optional": False}}),
+            ("resolution", {"integrity": "changed"}),
+        ]:
+            with self.subTest(field=field):
+                drift = deepcopy(restored)
+                drift["packages"]["walker@6.5.0"][field] = replacement
+                self.assertNotEqual(projected, js.normalization_graph(drift))
+        drift = deepcopy(restored)
+        drift["snapshots"]["walker@6.5.0(matcher@4.0.7)"]["optionalDependencies"] = {
+            "matcher": "4.0.8"
+        }
+        self.assertNotEqual(projected, js.normalization_graph(drift))
+        unproven = deepcopy(resolved)
+        unproven["overrides"]["matcher"] = "4.0.8"
+        self.assertNotEqual(
+            js.normalization_graph(
+                unproven, override_peers={"matcher": ("4.0.7", "^4.0.4")}
+            ),
+            js.normalization_graph(restored),
+        )
+
+    def test_override_peer_restoration_excludes_scoped_alias_and_simple_pins(self):
+        self.manifest(
+            "package.json",
+            {},
+            pnpm={
+                "overrides": {
+                    "utility": ">=6.0.0 <7.0.0",
+                    "parent>nested": ">=6.0.0 <7.0.0",
+                    "versioned@^6": ">=6.0.0 <7.0.0",
+                    "aliased": "npm:actual@>=6.0.0 <7.0.0",
+                    "simple": "^6.0.0",
+                }
+            },
+        )
+        workspace = js.Workspace(self.root, self.spec)
+        self.assertEqual(
+            js.override_peer_restorations(workspace, ["6.1.0"] * len(workspace.pins)),
+            {"utility": ("6.1.0", ">=6.0.0 <7.0.0")},
         )
 
     def native_override_normalization_fixture(self, fault=None):

@@ -1993,10 +1993,47 @@ def fallback(
     return tuple(revised)
 
 
-def normalization_graph(lock: Mapping[str, object]) -> inputs.Table:
+def override_peer_restorations(
+    workspace: Workspace, selected: Sequence[str]
+) -> dict[str, tuple[str, str]]:
+    """Only bare, same-package overrides receive temporary resolver pins."""
+    return {
+        pin.alias: (version, pin.replacement(version))
+        for pin, version in zip(workspace.pins, selected, strict=True)
+        if pin.operator is None
+        and not pin.prefix
+        and pin.alias == pin.name
+        and (
+            (
+                pin.file == workspace.workspace
+                and pin.pointer == ("overrides", pin.alias)
+            )
+            or (
+                pin.file == "package.json"
+                and pin.pointer == ("pnpm", "overrides", pin.alias)
+            )
+        )
+    }
+
+
+def normalization_graph(
+    lock: Mapping[str, object],
+    *,
+    override_peers: Mapping[str, tuple[str, str]] | None = None,
+) -> inputs.Table:
     """Retain every graph field while excluding native declaration metadata."""
     graph = deepcopy(dict(lock))
-    graph.pop("overrides", None)
+    overrides = inputs.table(graph.pop("overrides", {}), "pnpm overrides")
+    if override_peers:
+        for raw in inputs.table(graph.get("packages", {}), "pnpm packages").values():
+            package = mutable_table(raw)
+            peers = mutable_table(package.get("peerDependencies", {}))
+            for name, (exact, restored) in override_peers.items():
+                # pnpm records a global override in the package's peer range.
+                # Project only the exact planned restoration; other peer fields,
+                # peer contexts, artifacts and resolved edges remain compared.
+                if overrides.get(name) == exact and peers.get(name) == exact:
+                    peers[name] = restored
     for raw in inputs.table(graph.get("importers", {}), "pnpm importers").values():
         importer = inputs.table(raw, "pnpm importer")
         for section in SECTIONS:
@@ -2165,7 +2202,10 @@ def resolve(
             lock_path, tc.regular_input(temporary, workspace.lock).decode()
         )[0]
         inputs.pnpm_lock(normalized_lock)
-        if normalization_graph(resolved_lock) != normalization_graph(normalized_lock):
+        if normalization_graph(
+            resolved_lock,
+            override_peers=override_peer_restorations(workspace, selected),
+        ) != normalization_graph(normalized_lock):
             raise ValueError(
                 "pnpm lock normalization changed the selected dependency graph"
             )

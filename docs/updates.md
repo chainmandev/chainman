@@ -498,6 +498,11 @@ even when the current lock still falls inside the original range.
 After exact resolution, pnpm normalizes the restored declarations before the
 candidate is frozen. Only importer/catalog specifiers and override metadata may
 change; every selected identity, artifact and dependency edge must stay unchanged.
+A package's peer requirement may also restore a declared bare, same-package
+global override from its temporary exact resolver pin. The comparison requires
+that exact pin in both the original override and peer field, and substitutes
+only the planned restored declaration. Unrelated peer changes, parent/version
+selectors, aliases and peer contexts remain strict graph inputs.
 Normalization failure or input drift aborts the update. The subsequent frozen
 lock check and full audits never regenerate files or retry verification.
 pnpm's frozen check alone does not prove that transitive versions satisfy their
