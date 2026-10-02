@@ -40,15 +40,15 @@ Add short project-owned recipes alongside the complete bootstrap:
 [positional-arguments]
 setup *args:
     #!/bin/sh
-    exec just chainman setup "$@"
+    exec {{quote(just_executable())}} chainman setup "$@"
 
 format-staged:
-    @just chainman format-staged
+    @{{quote(just_executable())}} chainman format-staged
 
 [positional-arguments]
 hooks +args:
     #!/bin/sh
-    exec just chainman hooks "$@"
+    exec {{quote(just_executable())}} chainman hooks "$@"
 ```
 
 ## Setup and ownership

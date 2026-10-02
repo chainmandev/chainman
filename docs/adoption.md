@@ -65,7 +65,7 @@ an optional forwarding recipe after its underlying operation is separate:
 [positional-arguments]
 check *args:
     #!/bin/sh
-    exec just chainman run check -- "$@"
+    exec {{quote(just_executable())}} chainman run check -- "$@"
 ```
 
 Do not configure the `check` task to call this same `just check` recipe: that would

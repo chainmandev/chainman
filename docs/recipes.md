@@ -12,8 +12,12 @@ Projects can keep familiar commands with their own short forwarding recipes:
 [positional-arguments]
 verify *args:
     #!/bin/sh
-    exec just chainman recipe verify "$@"
+    exec {{quote(just_executable())}} chainman recipe verify "$@"
 ```
+
+Use the current Just executable's absolute path for recursive calls. An entry
+such as `nix run nixpkgs#just -- verify` can start Just without adding it to
+`PATH`; resolving a second bare `just` would then fail.
 
 Ordinary runtime updates change the pin
 and declared pin copies; they leave these project-owned recipes unchanged.

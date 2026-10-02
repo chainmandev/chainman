@@ -1,7 +1,9 @@
 """Published consumer examples must match the actual entrypoint and local guides."""
 
 from pathlib import Path
+import os
 import re
+import shutil
 import sys
 import subprocess
 import tempfile
@@ -16,6 +18,68 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_published_forwarders_work_without_just_on_path(self):
+        just = str(Path(shutil.which("just")).resolve())
+        arguments = ["space argument", "", "$(literal)", "semi;colon", "Unicode ☃"]
+        examples = [
+            (
+                "template/justfile",
+                (ROOT / "template/justfile").read_text(),
+                [
+                    ("verify", ["recipe", "verify"], arguments),
+                    ("setup", ["setup"], arguments),
+                    ("format-staged", ["format-staged"], []),
+                    ("hooks", ["hooks"], arguments),
+                ],
+            )
+        ]
+        for guide, recipes in [
+            ("docs/adoption.md", [("check", ["run", "check", "--"], arguments)]),
+            ("docs/recipes.md", [("verify", ["recipe", "verify"], arguments)]),
+            (
+                "docs/hooks.md",
+                [
+                    ("setup", ["setup"], arguments),
+                    ("format-staged", ["format-staged"], []),
+                    ("hooks", ["hooks"], arguments),
+                ],
+            ),
+        ]:
+            block = re.findall(r"```just\n(.*?)```", (ROOT / guide).read_text(), re.S)[
+                0
+            ]
+            examples.append((guide, block, recipes))
+        with tempfile.TemporaryDirectory(prefix="chainman clean PATH ") as temporary:
+            root = Path(temporary)
+            binary_directory = root / "bin"
+            binary_directory.mkdir()
+            (binary_directory / "sh").symlink_to(Path(shutil.which("sh")).resolve())
+            self.assertIsNone(shutil.which("just", path=str(binary_directory)))
+            for source, forwarders, recipes in examples:
+                (root / "justfile").write_text(
+                    forwarders + "\n[positional-arguments]\nchainman +args:\n"
+                    '    #!/bin/sh\n    printf "%s\\0" "$@"\n'
+                    '    exit "$RECORDED_EXIT_CODE"\n'
+                )
+                for recipe, prefix, args in recipes:
+                    for status in (0, 41):
+                        with self.subTest(source=source, recipe=recipe, status=status):
+                            result = subprocess.run(
+                                [just, recipe, *args],
+                                cwd=root,
+                                env={
+                                    **os.environ,
+                                    "PATH": str(binary_directory),
+                                    "RECORDED_EXIT_CODE": str(status),
+                                },
+                                capture_output=True,
+                            )
+                            self.assertEqual(result.returncode, status, result.stderr)
+                            self.assertEqual(
+                                result.stdout.split(b"\0")[:-1],
+                                [value.encode() for value in [*prefix, *args]],
+                            )
+
     def test_adoption_forwarder_bypasses_global_shell_and_preserves_arguments(self):
         guide = (ROOT / "docs/adoption.md").read_text()
         forwarder = re.findall(r"```just\n(.*?)```", guide, re.S)[0]
