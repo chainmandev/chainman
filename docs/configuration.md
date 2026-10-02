@@ -423,6 +423,9 @@ Service workflows in schemas 2 and 3 use host orchestration from the verified Gi
 array selects services and their declared dependencies. Each service declares one
 argument-array `command` with a `profile`, or a digest-pinned `container`. Optional
 `setup` groups hold shared artifact leases for the entire service lifetime.
+`container.image` must include a SHA-256 digest and cannot start with `-`.
+The image follows an explicit end-of-options boundary in the engine command;
+`container.command` supplies literal image-command arguments, not engine options.
 Readiness selects exactly one of `command` or `http_get`. `readiness.command`
 runs in that service's execution context; its positive
 `period_seconds`, `timeout_seconds`, and `failure_threshold` bound startup.

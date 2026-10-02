@@ -134,3 +134,78 @@ Recommended regression coverage:
 "No separate issue found" means the static review did not validate another
 reportable vulnerability; it is not a guarantee that the surface is
 vulnerability-free.
+
+## Remediation follow-up
+
+The historical finding above describes revision
+`a3d0099e434edb3dcf2f869e9e21be3c5d0ee853`. The follow-up patch changes the shared
+service-declaration validator to reject image values beginning with `-`, after
+the existing digest check. Plan export now inserts `--` immediately before the
+image. This establishes the invariant that a project-controlled image cannot
+occupy the container engine's option region.
+
+The fix deliberately retains the existing digest-pinned reference grammar and
+its error behavior instead of adding a new OCI parser. Short names, registry
+ports and paths, tags with digests, and bracketed IPv6 prefixes retain their
+existing treatment; final image-reference interpretation remains the engine's
+responsibility. Service-command arguments remain literal, including leading
+dashes, a standalone `--`, spaces, and empty strings.
+
+Changed implementation and coverage:
+
+- `scripts/services.py`: shared declaration validation and exported image boundary.
+- `tests/test_service_export.py`: malformed-digest checks, short/long option
+  rejection in both scopes, positive image-reference controls, and exported-plan
+  checks across host-Nix/container-Nix, worktree/repository scopes, and Docker/Podman
+  executable selections. Fixtures never execute the engine.
+- `docs/configuration.md`: documents the image and service-command contract.
+
+The export regressions failed against the original implementation: it accepted
+the malicious image and omitted the image boundary. They pass with the patch.
+An independent read-only investigator and a separate candidate reviewer traced
+the declaration, export, native execution, network-borrowing, and saved-plan
+paths. Neither found a surviving route through patched public entry points or
+a concrete compatibility regression.
+
+Existing installed runtimes and already running services are not modified in
+place. Newly selected runtime paths participate in service fingerprints; callers
+must select the patched runtime to receive the fix. Saved plans are not
+retroactively sanitized. This patch does not turn container execution into a
+hostile-code sandbox.
+
+### Verification outcome
+
+Outcome: **blocked at full native qualification**. The patch is implemented and
+the original injection no longer reproduces, but it is not classified as fully
+verified while `just control-test` remains unsuccessful. No native Go source was
+changed, and no unrelated signal-handling fix is included.
+
+Ordered checks on Linux/aarch64:
+
+| Gate | Command / check | Result |
+| --- | --- | --- |
+| Diff and syntax/style | `git diff --check`; `just exec ruff --isolated format --no-cache -- scripts/services.py tests/test_service_export.py` | Passed; focused imports also exercised by tests |
+| Original trigger before patch | `just exec python3 -B -m unittest discover -s tests -p test_service_export.py -v` | Expected failure: malicious images accepted and image boundary absent; positive controls passed |
+| Trigger, alternate forms, legitimate controls, neighboring tests | `CHAINMAN_SETUP=auto just exec python3 -B -m unittest discover -s tests -p 'test_service*.py' -v` | Passed: 91 tests, 78 native opt-in skips |
+| Required source gate | `CHAINMAN_SETUP=auto just verify` | Passed: formatting/lint, strict Linux and Darwin typing, generated-file checks, 2 example tests, 1,305 repository tests (194 skips), and example build |
+| Native network path | `just exec-in control go -C nix/control test -race -mod=readonly -count=1 -v -run '^TestNetworkBorrowing' ./...` | Passed both tests |
+| Native signal diagnostic | `just exec-in control go -C nix/control test -race -mod=readonly -count=1 -v -run '^TestPendingSignalVetoesSpawnedHelper$' ./...` | Passed, including interrupt, termination, and hangup subtests |
+| Full Go diagnostic | `just exec-in control go -C nix/control test -race -mod=readonly -count=1 -v ./...` | Passed; does not replace the native qualification command |
+| Full native gate | `CHAINMAN_SETUP=auto just control-test` | Failed three attempts, including a sequential retry: the Go test process exited with `signal: interrupt` or `signal: terminated` |
+
+The full native gate passed its formatting and vet steps, but stopped at
+`go test -race -mod=readonly ./...`; native hook/service integration tests and
+cross-builds in that command were not reached. The isolated and verbose Go runs
+did not reproduce that termination. Its cause remains unresolved, so those
+passes do not erase the failed qualification attempts.
+
+The first focused-suite and plain `just verify` invocations stopped because
+setup was not authorized or its receipt was stale. Explicit `CHAINMAN_SETUP=auto`
+allowed the declared setup and disposable test fixtures, after which both
+passed. A diagnostic attempted while verification held the managed-operation
+lock was refused; diagnostics above were subsequently run sequentially.
+
+No live Docker/Podman workload, host mount, or external migration worktree was
+used. Engine-name combinations test exported vectors, not live engine behavior.
+Darwin execution, other CPU architectures, and the remaining opt-in platform or
+language-adapter lanes were not qualified by this follow-up.
