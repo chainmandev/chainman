@@ -149,7 +149,11 @@ while True:time.sleep(.1)
                 if interrupt and b"INTERRUPT READY" in output:
                     os.write(master, b"\x03")
                     interrupt = False
-                if direct_signal and b"INTERRUPT READY" in output and client_pid.exists():
+                if (
+                    direct_signal
+                    and b"INTERRUPT READY" in output
+                    and client_pid.exists()
+                ):
                     target = (
                         json.loads((recovery / "task.owner.json").read_text())[
                             "identity"
