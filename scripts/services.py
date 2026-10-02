@@ -366,6 +366,8 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
                 r"[^\s@]+@sha256:[a-f0-9]{64}", image
             ):
                 raise ValueError("Service container images require a SHA256 digest")
+            if image.startswith("-"):
+                raise ValueError("Service container images cannot start with '-'")
             if item.get("command"):
                 workflows.commands([item["command"]])
         tc.contained(root, text(spec.get("directory", "."), "Service directory"))
@@ -868,6 +870,7 @@ def export(root: Path, arguments: list[str]) -> int:
                         "services": [name],
                     }
             argv += [
+                "--",
                 text(item["image"], "Container image"),
                 *strings(item.get("command", []), "Container command"),
             ]

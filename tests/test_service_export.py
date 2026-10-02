@@ -15,6 +15,69 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import services
 
 
+class ServiceImageTests(unittest.TestCase):
+    def test_container_images_still_require_a_sha256_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for image in (
+                None,
+                "",
+                "database:latest",
+                "database@sha256:" + "a" * 63,
+                "database@sha256:" + "A" * 64,
+                " database@sha256:" + "a" * 64,
+            ):
+                with self.subTest(image=image):
+                    cfg = {"services": {"database": {"container": {"image": image}}}}
+                    with self.assertRaisesRegex(ValueError, "require a SHA256 digest"):
+                        services.declarations(root, cfg)
+
+    def test_container_images_reject_engine_options_in_both_scopes(self):
+        digest = "@sha256:" + "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for scope in ("worktree", "repository"):
+                for prefix in (
+                    "--mount=type=bind,src=/,dst=/host",
+                    "-v/:/host",
+                    "--env-file=/host/secrets",
+                    "--",
+                ):
+                    with self.subTest(scope=scope, prefix=prefix):
+                        cfg = {
+                            "services": {
+                                "database": {
+                                    "scope": scope,
+                                    "container": {
+                                        "image": prefix + digest,
+                                        "command": [
+                                            "example.invalid/database" + digest
+                                        ],
+                                    },
+                                }
+                            }
+                        }
+                        with self.assertRaisesRegex(ValueError, "cannot start with"):
+                            services.declarations(root, cfg)
+
+    def test_digest_pinned_image_formats_remain_literal(self):
+        digest = "@sha256:" + "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            for prefix in (
+                "database",
+                "library/database:1.0",
+                "registry.example.invalid:5000/team/database:1.0-rc_1",
+                "localhost:5000/team/database",
+                "[2001:db8::1]:5000/team/database",
+            ):
+                with self.subTest(prefix=prefix):
+                    image = prefix + digest
+                    cfg = {"services": {"database": {"container": {"image": image}}}}
+                    result = services.declarations(root, cfg)
+                    self.assertEqual(result["database"]["container"]["image"], image)
+
+
 @unittest.skipUnless(shutil.which("nix"), "requires a rooted Nix fixture")
 class ServiceExportTests(unittest.TestCase):
     @classmethod
@@ -42,6 +105,83 @@ class ServiceExportTests(unittest.TestCase):
             env=dict(os.environ, CHAINMAN_TEST_PACKAGE=str(package)),
             text=True,
         ).strip()
+
+    def test_service_image_is_separated_from_engine_options(self):
+        digest = "@sha256:" + "a" * 64
+        image = "registry.example.invalid:5000/team/database:1.0" + digest
+        injected = "--mount=type=bind,src=/,dst=/host" + digest
+        command = ["--mount=type=bind,src=/,dst=/literal", "--", "two words", ""]
+        with tempfile.TemporaryDirectory(prefix="chainman image ") as temporary:
+            base = Path(temporary).resolve()
+            root = base / "project"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            real_run = subprocess.run
+
+            def run(argv, **kwargs):
+                if "--out-link" in argv:
+                    return subprocess.CompletedProcess(argv, 0, self.package + "\n")
+                return real_run(argv, **kwargs)
+
+            for mode in ("host-nix", "container-nix"):
+                for scope in ("worktree", "repository"):
+                    for engine in ("docker", "podman"):
+                        for invalid in (False, True):
+                            with (
+                                self.subTest(
+                                    mode=mode,
+                                    scope=scope,
+                                    engine=engine,
+                                    invalid=invalid,
+                                ),
+                                patch.dict(os.environ, CHAINMAN_MODE=mode),
+                                patch.object(
+                                    services.subprocess, "run", side_effect=run
+                                ),
+                            ):
+                                output = base / f"{mode}-{scope}-{engine}-{invalid}"
+                                output.mkdir()
+                                (output / "host-environment").write_bytes(b"")
+                                (root / "chainman.toml").write_text(
+                                    'schema=3\n[project]\ndefault_profile="host"\n'
+                                    '[tasks.main]\ncommands=[["true"]]\nservices=["database"]\n'
+                                    f'[services.database]\nscope="{scope}"\n'
+                                    "[services.database.container]\n"
+                                    f"image={json.dumps(injected if invalid else image)}\n"
+                                    f"command={json.dumps([image, *command] if invalid else command)}\n"
+                                )
+                                arguments = [
+                                    str(output),
+                                    "linux-arm64",
+                                    str(base / "state"),
+                                    "/fixture/" + engine,
+                                    str(root / "launcher"),
+                                    "run",
+                                    "main",
+                                ]
+                                if invalid:
+                                    with self.assertRaisesRegex(
+                                        ValueError, "cannot start with"
+                                    ):
+                                        services.export(root, arguments)
+                                    self.assertFalse((output / "plan.json").exists())
+                                    continue
+                                services.export(root, arguments)
+                                plan = json.loads((output / "plan.json").read_text())
+                                scopes = [plan, *plan.get("resources", [])]
+                                service = next(
+                                    value["services"]["database"]
+                                    for value in scopes
+                                    if "database" in value["services"]
+                                )
+                                argv = service["command"]["argv"]
+                                self.assertEqual(
+                                    argv[:2], ["/fixture/" + engine, "run"]
+                                )
+                                boundary = argv.index("--")
+                                self.assertEqual(
+                                    argv[boundary:], ["--", image, *command]
+                                )
 
     def test_project_values_stay_out_of_all_host_command_environments(self):
         with tempfile.TemporaryDirectory(prefix="chainman candidate ") as temporary:
