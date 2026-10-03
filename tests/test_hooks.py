@@ -78,22 +78,29 @@ class HookDeclarations(unittest.TestCase):
 
     def test_config_reentry_skips_setup_and_profile_transport(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            with (
-                patch.object(reentry, "validate") as validate,
-                patch.object(reentry.chainman, "main", return_value=0) as main,
-                patch.object(
-                    reentry.workflows,
-                    "configuration",
-                    side_effect=AssertionError("transport admission"),
-                ),
-                patch.dict(os.environ, {"CHAINMAN_ACTIVE_MODE": "container-nix"}),
-            ):
-                self.assertEqual(
-                    reentry.main([str(root), "--entry", "hooks", "config"]), 0
-                )
-                validate.assert_called_once_with(root)
-                main.assert_called_once_with(["--root", str(root), "_hooks-config"])
+            root = Path(temporary) / "project"
+            root.mkdir()
+            alias = Path(temporary) / "project-link"
+            alias.symlink_to(root, target_is_directory=True)
+            for selected in (root, alias):
+                with (
+                    self.subTest(root=selected),
+                    patch.object(reentry, "validate") as validate,
+                    patch.object(reentry.chainman, "main", return_value=0) as main,
+                    patch.object(
+                        reentry.workflows,
+                        "configuration",
+                        side_effect=AssertionError("transport admission"),
+                    ),
+                    patch.dict(os.environ, {"CHAINMAN_ACTIVE_MODE": "container-nix"}),
+                ):
+                    self.assertEqual(
+                        reentry.main([str(selected), "--entry", "hooks", "config"]), 0
+                    )
+                    validate.assert_called_once_with(root.resolve())
+                    main.assert_called_once_with(
+                        ["--root", str(root.resolve()), "_hooks-config"]
+                    )
 
     def test_config_requires_enabled_hooks_and_exact_arguments(self):
         with tempfile.TemporaryDirectory() as temporary:
