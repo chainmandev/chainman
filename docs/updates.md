@@ -673,6 +673,8 @@ using the candidate runtime; they do not run chainman's development test suite.
 Git supplies the complete revision, but project acceptance does not invoke the
 chainman development suite.
 
+Compatible Cargo audits support aliases that deliberately retain different major-version families of the same registry crate. Each locked version must match at least one original declared family. Cargo enforces the individual manifest requirements, and the audit still rejects changed selected pins or artifact identities. Other native ecosystems retain their existing requirement checks.
+
 ## Temporary security exceptions
 
 An age exception lets a project take an exact security fix before the normal
