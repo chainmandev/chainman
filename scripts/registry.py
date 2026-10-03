@@ -100,12 +100,19 @@ class Release:
 class RegistryHTTPError(ValueError):
     def __init__(self, status: int, host: str, *, excessive_wait: bool = False):
         self.status = status
+        self.package_context = ""
         suffix = (
             f"; Retry-After exceeds {MAX_RETRY_WAIT_SECONDS}-second wait limit"
             if excessive_wait
             else ""
         )
         super().__init__(f"Registry HTTP {status} from {host}{suffix}")
+
+    def __str__(self) -> str:
+        message = super().__str__()
+        return (
+            f"{message} ({self.package_context})" if self.package_context else message
+        )
 
 
 def retry_delay(value: object, attempt: int, status: int, host: str) -> float:
@@ -1059,10 +1066,16 @@ def releases(
             )
         return result
     if provider == "crates":
-        body = table(
-            data(f"https://crates.io/api/v1/crates/{quote(package, safe='')}"),
-            "Crate package",
-        )
+        try:
+            body = table(
+                data(f"https://crates.io/api/v1/crates/{quote(package, safe='')}"),
+                "Crate package",
+            )
+        except RegistryHTTPError as exc:
+            # Identify ordinary crate names without exposing arbitrary URL-like inputs.
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", package):
+                exc.package_context = f"crates:{package}"
+            raise
         result = []
         for raw in array(body["versions"], "Crate versions"):
             crate = table(raw, "Crate version")
