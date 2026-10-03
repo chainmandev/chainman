@@ -314,3 +314,24 @@ reentry correctly resolved macOS `/tmp` to `/private/tmp`. Its fixture now check
 canonical paths and explicitly exercises a symlink alias on every platform.
 Production code and full release gates remain unchanged. Focused Darwin checks
 and a new exact-candidate full qualification are still required.
+
+### Native update-cache fixture paths
+
+The focused Darwin checks passed on both ARM64 and Intel for
+`6a3a71dbc387baa3ab2b4a02af937237cda77510` in
+[run 37098134625](https://github.com/chainmandev/chainman/actions/runs/37098134625).
+The next full [release run 37098619302](https://github.com/chainmandev/chainman/actions/runs/37098619302)
+passed both Linux core lanes and the macOS ARM64 source/starter gates, but the
+native Go update-cache fixtures supplied unresolved `/tmp` state roots.
+Production correctly rejected those symlinked paths before running the scenarios.
+
+The failure was reproduced on Linux by selecting a disposable symlink alias as
+`TMPDIR`. Update-cache state roots now use the existing `physicalTempDir(t)`
+fixture helper, as other native state tests already do. An explicit negative
+case still rejects a symlinked base and asserts that its target pool was not
+created. No production path validation or publication gate was weakened.
+The focused update-cache tests and complete Go race suite passed with that
+aliased temporary root. The full Linux/aarch64 `just control-test` also passed:
+formatting/vet/race checks, native hook and setup-terminal tests, all 78 service
+tests, and Linux/Darwin ARM64/AMD64 cross-builds. Full native Darwin execution
+is checked separately before another release qualification attempt.
