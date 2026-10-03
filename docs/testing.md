@@ -137,6 +137,12 @@ cleanup, use the shared draining wait in `tests/terminal_fixture.py`. Darwin can
 wait for pending terminal output during close; a plain process wait can therefore
 stall even after the test's job-control assertions pass. The interruption fixture
 emits more than a terminal buffer of output to exercise this boundary on Linux too.
+Sending shell commands must also drain terminal output: PTY echo can block a
+large input write before the fixture reaches its assertion timeout. Use the
+shared nonblocking `write_terminal` helper, retain its drained output for marker
+checks, and keep its deadline. The bidirectional backpressure regression sends
+and echoes 256 KiB; a separate stalled-reader case checks the write deadline and
+restoration of the descriptor's original blocking mode.
 Reentry assertions compare canonical project paths and exercise symlink aliases;
 temporary-directory spellings such as `/tmp` and `/private/tmp` need not match.
 Native state-directory fixtures use `physicalTempDir(t)` for the same reason.

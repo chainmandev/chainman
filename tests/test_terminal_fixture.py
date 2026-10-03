@@ -3,16 +3,72 @@
 import errno
 import os
 import pty
+import select
 import subprocess
 import sys
 import termios
+import time
 import unittest
 from unittest.mock import patch
 
-from terminal_fixture import terminal_modes, wait_terminal
+from terminal_fixture import terminal_modes, wait_terminal, write_terminal
 
 
 class TerminalFixtureTests(unittest.TestCase):
+    def test_write_deadline_restores_descriptor_mode(self):
+        import tty
+
+        master, slave = pty.openpty()
+        try:
+            tty.setraw(slave)
+            started = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                write_terminal(master, b"x" * 262144, 0.1)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertTrue(os.get_blocking(master))
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_write_drains_bidirectional_terminal_backpressure(self):
+        master, slave = pty.openpty()
+        size = 262144
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import os,tty; tty.setraw(0); os.write(1,b'READY'); "
+                f"remaining={size}\n"
+                "while remaining:\n"
+                " chunk=os.read(0,min(1024,remaining)); remaining-=len(chunk); "
+                "os.write(1,chunk)\n"
+                "os.write(1,b'DONE'); assert os.read(0,4)==b'exit'; raise SystemExit(17)",
+            ],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+        )
+        os.close(slave)
+        try:
+            self.assertTrue(select.select([master], [], [], 5)[0])
+            self.assertEqual(os.read(master, 5), b"READY")
+            output = write_terminal(master, b"x" * size, 5)
+            self.assertTrue(os.get_blocking(master))
+            deadline = time.monotonic() + 5
+            while not output.endswith(b"DONE"):
+                remaining = deadline - time.monotonic()
+                self.assertGreater(remaining, 0)
+                self.assertTrue(select.select([master], [], [], remaining)[0])
+                output += os.read(master, 65536)
+            self.assertEqual(output, b"x" * size + b"DONE")
+            write_terminal(master, b"exit", 5)
+            self.assertEqual(wait_terminal(child, master, 5)[0], 17)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                wait_terminal(child, master, 5)
+            os.close(master)
+
     def test_job_control_fixture_retries_only_interrupted_mode_changes(self):
         from test_storage import TERMINAL_BODY
 

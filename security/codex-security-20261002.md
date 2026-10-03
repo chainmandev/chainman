@@ -368,3 +368,23 @@ During qualification, public master advanced to
 tip was preserved on dev under the reconciliation backup namespace and merged
 without conflicts or history rewriting. All seven native Cargo tests, including
 its new alias-family regression, passed locally on the combined working tree.
+
+### Bounded PTY writes
+
+Candidate `c44e1c1c2ac26720ac9628cd1e4e67754c59ee60` reached a different fixture
+stall in [diagnostic run 37104959062](https://github.com/chainmandev/chainman/actions/runs/37104959062).
+A separate [45-second stack diagnostic](https://github.com/chainmandev/chainman/actions/runs/37106915183)
+reproduced it in the unchanged candidate: the parent was blocked in the initial
+`os.write` of the storage lease/job-control fixture's shell command. It never
+reached the marker-wait timeout. The longer test command exposed bidirectional
+PTY input/echo backpressure.
+
+The shared fixture now writes nonblocking chunks while draining and retaining
+terminal output, under a deadline. A 256 KiB input/echo regression times out
+with the old blocking write and passes with the helper. A stalled-reader case
+asserts bounded failure and restoration of the descriptor's blocking mode.
+Production code and the release qualification policy remain unchanged.
+The repaired working tree passed all six terminal-helper tests, 33 storage tests,
+both bootstrap job-control tests, documentation/format checks and the complete
+Linux/aarch64 native gate (Go checks, 44 hooks, 9 setup-terminal, 78 services and
+four cross-builds). Hosted qualification remains pending for the new exact SHA.
