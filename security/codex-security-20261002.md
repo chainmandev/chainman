@@ -173,7 +173,7 @@ must select the patched runtime to receive the fix. Saved plans are not
 retroactively sanitized. This patch does not turn container execution into a
 hostile-code sandbox.
 
-### Verification outcome
+### Initial verification outcome
 
 Outcome: **blocked at full native qualification**. The patch is implemented and
 the original injection no longer reproduces, but it is not classified as fully
@@ -209,3 +209,57 @@ No live Docker/Podman workload, host mount, or external migration worktree was
 used. Engine-name combinations test exported vectors, not live engine behavior.
 Darwin execution, other CPU architectures, and the remaining opt-in platform or
 language-adapter lanes were not qualified by this follow-up.
+
+## Append-only integration follow-up
+
+The initial native-qualification blocker above was resolved during integration.
+The production admission code intentionally resets signal notifications while
+the workload is gated. Default signal termination during that reset is a valid
+fail-closed outcome: it closes the permit without admitting the workload. The
+old test sent that signal to the entire Go test runner, so a valid cancellation
+could terminate the suite itself.
+
+Commit `e99f8e84fda5757c0cdb440470273834c7968cce` isolates the admission owner in
+a child process. The test requires the signal-specific exit status, bounds the
+wait, drains the inherited output pipe until the gated child exits, and then
+asserts that the workload produced no side effect. Production signal handling
+is unchanged. The focused admission regressions passed ten repetitions.
+
+### Local integration qualification
+
+| Source commit | Gate | Result |
+| --- | --- | --- |
+| `e99f8e84fda5757c0cdb440470273834c7968cce` | `CHAINMAN_SETUP=auto just control-test` | Passed: Go formatting/vet/race tests, 44 native hook tests, 9 setup-terminal tests, 78 native service tests, and Linux/Darwin arm64/amd64 cross-builds |
+| `ad5789025e09aa14a0d595a1b3e52b17ac384389` | `CHAINMAN_SETUP=auto just verify` | Passed: formatting/lint, strict Linux/Darwin typing of 69 source files, generated-file checks, 2 example tests, 1,331 repository tests (195 skips), and the example build |
+
+The second commit only formats the merged default Just recipe. The source gate
+initially caught that spacing mismatch; the corrected committed source passed
+the complete gate. These are Linux/aarch64 execution results. Cross-building is
+not Darwin execution, and opt-in skips are not qualifications of those lanes.
+The final candidate, including this report update, must separately pass the
+[rolling-publication workflow](../docs/releasing.md) and fresh public readback.
+
+### History preservation
+
+Local master and published master had diverged after
+`5a5974c4d02b4d607730a1508b315a7e83dff641`: eight local runtime/storage commits
+and six published maintenance commits. Integration retained both histories,
+the security fix, and the selected SDK/consumer-forwarder work using ordinary
+merges. The following original tips are all ancestors of the integrated master:
+
+| Retained source | Original tip |
+| --- | --- |
+| Local master | `a3d0099e434edb3dcf2f869e9e21be3c5d0ee853` |
+| Published master | `3b2f4ad1545ae3a86d2071dcdbc9a90f40179e4b` |
+| Dev master | `964528fc3e3b38fc883e7d95aca64d129e24551b` |
+| Security fix | `07b806ba3632996d281ba40887588bec38210696` |
+| SDK/consumer forwarders | `153246818f6241fb9152369a8b64847ada820281` |
+
+Before integration, 49 backup refs were atomically pushed to the dev remote
+under `backups/reconcile-20261003T004212Z/` and their exact object IDs read back.
+They preserve local branches, remote-tracking refs, both live remotes' branches,
+and detached qualification worktree heads. A local full-history Git bundle was
+also created and verified. Diagnostic/recovery branches were preserved rather
+than merged; no existing branches or worktrees were deleted, and no published
+commit was rewritten. Publication must advance both remote masters only by
+fast-forward ancestry.
