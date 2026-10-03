@@ -2,7 +2,7 @@ set positional-arguments
 set shell := ["sh", "-eu", "-c"]
 
 default:
-    @just --list
+    @{{quote(just_executable())}} --list
 
 exec +args:
     @./scripts/enter.sh core python3 scripts/toolchain.py exec -- "$@"
