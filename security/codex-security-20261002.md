@@ -461,3 +461,11 @@ Concurrent public commits `2872c960c0a8966a120d0a2fa5ebb7de11e3278c` and
 `070b63e379bb610e0bacc3c3b3c14305b8d74160` were preserved under the existing dev
 backup namespace and merged append-only in
 `a6bc437dd5275572d74c7e144c715cd9bc71f842`. No published history was rewritten.
+
+The first targeted run of the boundary repair, candidate
+`65aaddc7ee583d6962f5e97ed1c73737f1ff4928`, caught a Darwin portability error:
+Go's directory-entry reader tried to stat a `/dev/fd` slot that was not open.
+The boundary failed closed. It now reads descriptor names without statting
+directory entries, then checks each descriptor directly as before. The native
+regression and real-engine teardown assertions are unchanged; the corrected
+candidate must pass the targeted and full qualification gates.
