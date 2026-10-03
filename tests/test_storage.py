@@ -77,6 +77,10 @@ def exercise_job_control(
     """A real interactive shell owns the job, including waiting bootstrap shells."""
     shell = shutil.which("bash")
     test.assertIsNotNone(shell)
+    command_directory = tempfile.TemporaryDirectory(prefix="chainman terminal command ")
+    test.addCleanup(command_directory.cleanup)
+    command_path = Path(command_directory.name) / "command.sh"
+    command_path.write_text(shlex.join(argv) + "; printf 'RESULT:%s\\n' \"$?\"\n")
     process, master = terminal_process(
         [shell, "--noprofile", "--norc", "-i"],
         dict(env, PS1="PROMPT> ", PS2=""),
@@ -102,10 +106,10 @@ def exercise_job_control(
 
     try:
         expect(b"PROMPT> ")
-        body = shlex.join(argv) + "; printf 'RESULT:%s\\n' \"$?\""
         send(
             (
-                shlex.join([shell, "-c", body]) + (" &\n" if background else "\n")
+                shlex.join([shell, str(command_path)])
+                + (" &\n" if background else "\n")
             ).encode()
         )
         if background:
