@@ -77,6 +77,11 @@ checks one graceful application signal and process cleanup. This is a limitation
 of the pause-based test, not a guarantee of graceful handling by an externally
 suspended process; shutdown deadlines retain their forced-cleanup fallback.
 
+Pending-admission signal tests run in child processes because resetting signal
+notifications can legitimately terminate the admission owner. Both handled and
+default signal exits must deny the workload permission; captured output also
+keeps the test waiting until the gated child exits before checking for side effects.
+
 Git transactions assume cooperating processes and are not a filesystem transaction
 against an adversarial same-user writer. Final application or commit interruption
 can preserve partially applied verified changes. Recovery checks must account for

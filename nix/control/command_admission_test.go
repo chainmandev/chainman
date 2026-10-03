@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -9,9 +11,17 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 4 && os.Args[1] == "pending-signal-fixture" {
+		number, err := strconv.Atoi(os.Args[2])
+		if err != nil {
+			os.Exit(2)
+		}
+		os.Exit(pendingSignalFixture(syscall.Signal(number), os.Args[3]))
+	}
 	if len(os.Args) > 1 && (os.Args[1] == "update-cache" || os.Args[1] == "hook-exec" || os.Args[1] == "build") {
 		os.Exit(mainAction(os.Args[1:]))
 	}
@@ -52,24 +62,63 @@ func gatedFixture(t *testing.T, script string, arguments ...string) (*exec.Cmd, 
 	return cmd, permit
 }
 
+func pendingSignalFixture(number syscall.Signal, marker string) int {
+	read, permit, err := os.Pipe()
+	if err != nil {
+		return 1
+	}
+	defer read.Close()
+	defer permit.Close()
+	cmd := exec.Command(os.Args[0], "admitted", "3", "/bin/sh", "sh", "-c", `printf ran > "$1"`, "fixture", marker)
+	cmd.ExtraFiles = []*os.File{read}
+	// Keep the captured output pipe alive until the gated child also exits.
+	// The parent must not inspect the marker while a child can still create it.
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	signals := make(chan os.Signal, 8)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	if err := cmd.Start(); err != nil {
+		return 1
+	}
+	read.Close()
+	// Default termination during admission's notification reset is also a
+	// valid fail-closed outcome: it closes the permit without granting it.
+	if err := syscall.Kill(os.Getpid(), number); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return 1
+	}
+	if err := admitStarted(cmd, permit, signals); err != nil {
+		return exitCode(err)
+	}
+	return exitCode(cmd.Wait())
+}
+
 func TestPendingSignalVetoesSpawnedHelper(t *testing.T) {
 	for _, number := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
 		t.Run(number.String(), func(t *testing.T) {
 			marker := filepath.Join(physicalTempDir(t), "unexpected")
-			cmd, permit := gatedFixture(t, `printf ran > "$1"`, marker)
-			signals := make(chan os.Signal, 8)
-			signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-			defer signal.Stop(signals)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, os.Args[0], "pending-signal-fixture", strconv.Itoa(int(number)), marker)
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer read.Close()
+			defer write.Close()
+			cmd.Stdout, cmd.Stderr = write, write
 			if err := cmd.Start(); err != nil {
 				t.Fatal(err)
 			}
-			// Leave delivery asynchronous: admission must drain runtime notices,
-			// not rely on a test waiting until its channel already contains one.
-			if err := syscall.Kill(os.Getpid(), number); err != nil {
-				t.Fatal(err)
+			write.Close()
+			err = cmd.Wait()
+			if e := read.SetReadDeadline(time.Now().Add(2 * time.Second)); e != nil {
+				t.Fatal(e)
 			}
-			if err := admitStarted(cmd, permit, signals); exitCode(err) != 128+int(number) {
-				t.Fatalf("expected cancellation, got %v", err)
+			output, drained := io.ReadAll(read)
+			if ctx.Err() != nil || drained != nil || exitCode(err) != 128+int(number) {
+				t.Fatalf("expected cancellation and child exit, got %v (context %v, output %v): %s", err, ctx.Err(), drained, output)
 			}
 			if _, err := os.Stat(marker); !os.IsNotExist(err) {
 				t.Fatalf("unadmitted workload ran: %v", err)
