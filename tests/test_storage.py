@@ -7,11 +7,11 @@ import select
 import signal
 import shlex
 import shutil
-import termios
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -34,20 +34,46 @@ raise SystemExit(7)
 """
 
 
+def terminal_process(argv, env, cwd):
+    """Acquire the controlling PTY only after exec into a fresh interpreter."""
+    master, slave = pty.openpty()
+    try:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                "import os,sys; os.login_tty(0); "
+                "os.execve(sys.argv[1], sys.argv[1:], os.environ)",
+                *argv,
+            ],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            cwd=cwd,
+            env=env,
+        )
+    except BaseException:
+        os.close(master)
+        raise
+    finally:
+        os.close(slave)
+    return process, master
+
+
 def exercise_job_control(
     test, argv, env, cwd, stopped=lambda: None, *, cancel=False, background=False
 ):
     """A real interactive shell owns the job, including waiting bootstrap shells."""
     shell = shutil.which("bash")
     test.assertIsNotNone(shell)
-    pid, master = pty.fork()
-    if pid == 0:
-        os.chdir(cwd)
-        os.execve(
-            shell,
-            [shell, "--noprofile", "--norc", "-i"],
-            dict(env, PS1="PROMPT> ", PS2=""),
-        )
+    process, master = terminal_process(
+        [shell, "--noprofile", "--norc", "-i"],
+        dict(env, PS1="PROMPT> ", PS2=""),
+        cwd,
+    )
+    pid = process.pid
     output = b""
     timeout = 180
 
@@ -105,22 +131,27 @@ def exercise_job_control(
         test.assertEqual(os.tcgetpgrp(master), pid)
     finally:
         # Only groups belonging to this disposable PTY session are addressed.
-        foreground = os.tcgetpgrp(master)
-        if foreground != pid:
+        try:
+            foreground = os.tcgetpgrp(master)
+        except OSError:
+            foreground = 0
+        if foreground > 0 and foreground != pid:
             try:
                 os.killpg(foreground, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        send(b"kill -KILL $(jobs -p) 2>/dev/null; exit\n")
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if os.waitpid(pid, os.WNOHANG)[0]:
-                break
-            time.sleep(0.01)
-        else:
-            os.kill(pid, signal.SIGKILL)
-            os.waitpid(pid, 0)
-        os.close(master)
+        try:
+            try:
+                send(b"kill -KILL $(jobs -p) 2>/dev/null; exit\n")
+            except OSError:
+                pass
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        finally:
+            os.close(master)
 
 
 class StorageTests(unittest.TestCase):
@@ -294,27 +325,23 @@ class StorageTests(unittest.TestCase):
 
     def test_runtime_handoff_restores_terminal_after_foreground_interrupt(self):
         result = self.root / "terminal-result"
-        pid, master = pty.fork()
-        if pid == 0:
-            try:
-                before = termios.tcgetattr(0)
-                status = storage.runtime_child(
-                    [
-                        sys.executable,
-                        "-c",
-                        "import os,termios; assert os.tcgetpgrp(0)==os.getpgrp(); "
-                        "settings=termios.tcgetattr(0); settings[3] &= ~termios.ECHO; "
-                        "termios.tcsetattr(0,termios.TCSANOW,settings); "
-                        "print('ready', flush=True); input()",
-                    ],
-                    dict(os.environ),
-                )
-                result.write_text(
-                    f"{status}:{os.tcgetpgrp(0) == os.getpgrp()}:{termios.tcgetattr(0) == before}"
-                )
-                os._exit(0)
-            except BaseException:
-                os._exit(1)
+        child = (
+            "import os,termios; assert os.tcgetpgrp(0)==os.getpgrp(); "
+            "settings=termios.tcgetattr(0); settings[3] &= ~termios.ECHO; "
+            "termios.tcsetattr(0,termios.TCSANOW,settings); "
+            "print('ready', flush=True); input()"
+        )
+        wrapper = (
+            "import os,sys,termios; from pathlib import Path; "
+            f"sys.path.insert(0,{str(tc.RUNTIME / 'scripts')!r}); import storage; "
+            "before=termios.tcgetattr(0); "
+            f"status=storage.runtime_child({[sys.executable, '-c', child]!r}, dict(os.environ)); "
+            "Path(sys.argv[1]).write_text("
+            "f'{status}:{os.tcgetpgrp(0)==os.getpgrp()}:{termios.tcgetattr(0)==before}')"
+        )
+        process, master = terminal_process(
+            [sys.executable, "-c", wrapper, str(result)], dict(os.environ), self.root
+        )
         try:
             output = b""
             deadline = time.monotonic() + 10
@@ -327,12 +354,14 @@ class StorageTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertTrue(result.exists())
             self.assertEqual(result.read_text(), "130:True:True")
-            self.assertEqual(os.waitpid(pid, 0)[1], 0)
+            self.assertEqual(process.wait(timeout=5), 0)
         finally:
-            if not result.exists():
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-            os.close(master)
+            try:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+            finally:
+                os.close(master)
 
     def test_runtime_handoff_requires_a_matching_inherited_lease(self):
         base = self.root / "runtimes"
@@ -347,6 +376,35 @@ class StorageTests(unittest.TestCase):
                 with self.assertRaises(OSError):
                     storage.runtime_check(args)
         self.assertEqual(storage.runtime_check(args), 3)
+
+    def test_terminal_launcher_avoids_forking_a_threaded_test_runner(self):
+        wrapper = (
+            f"import sys,os; sys.path.insert(0,{str(tc.RUNTIME / 'scripts')!r}); "
+            "import storage; "
+            f"sys.exit(storage.runtime_child({[sys.executable, '-c', TERMINAL_BODY]!r}, dict(os.environ)))"
+        )
+        stop = threading.Event()
+        worker = threading.Thread(target=stop.wait)
+        worker.start()
+        try:
+            with (
+                patch.object(
+                    pty, "fork", side_effect=AssertionError("unsafe pty.fork")
+                ),
+                patch.object(
+                    os, "forkpty", side_effect=AssertionError("unsafe forkpty")
+                ),
+            ):
+                exercise_job_control(
+                    self,
+                    [sys.executable, "-c", wrapper],
+                    dict(os.environ),
+                    self.root,
+                )
+        finally:
+            stop.set()
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
 
     def test_runtime_job_control_keeps_leases_across_stop_and_resume(self):
         entry = self.populated()

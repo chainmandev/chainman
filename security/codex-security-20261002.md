@@ -263,3 +263,30 @@ also created and verified. Diagnostic/recovery branches were preserved rather
 than merged; no existing branches or worktrees were deleted, and no published
 commit was rewritten. Publication must advance both remote masters only by
 fast-forward ancestry.
+
+### First hosted qualification and PTY fixture repair
+
+Candidate `338cabb741092353289ef8fa4af3e13d0f3a3e5d` was staged without
+advancing public master. [Release run 37086776092](https://github.com/chainmandev/chainman/actions/runs/37086776092)
+passed the Linux x86-64 and ARM64 core lanes. Its macOS ARM64 core job reached
+the 60-minute limit. The last test output was
+`test_runtime_job_control_through_native_task`, immediately followed by Python's
+warning that `forkpty()` in a multithreaded process may deadlock. No subsequent
+test output appeared. This is evidence consistent with an unsafe test-launcher
+fork; it is not a locally reproduced Darwin deadlock or a successful Darwin gate.
+
+The shared fixture now opens a disposable PTY and launches a fresh Python
+interpreter through `subprocess.Popen`, without a Python pre-exec callback. Only
+that fresh interpreter acquires the controlling terminal with `os.login_tty`
+and execs the intended process. Both existing `pty.fork()` callers use this
+launcher. Cleanup uses bounded process waits and never signals process group
+zero. Production code, lane selection, and qualification time limits are unchanged.
+
+A threaded-runner regression rejects either Python PTY-fork API while exercising
+real shell job control. It failed at the original `pty.fork()` call before the
+repair. On Linux/aarch64, the repaired working tree passed all 33 storage tests
+and both focused bootstrap job-control tests, including native task cleanup and
+timeout/cancellation subcases. Foreground ownership, repeated stop/background/
+foreground transitions, lease retention, terminal modes, and exit status remain
+asserted. These focused passes do not replace the full hosted qualification;
+the repaired candidate must be staged and qualified as a new exact SHA.

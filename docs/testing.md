@@ -125,3 +125,10 @@ The display-helper fixture uses a local Unix socket and synthetic cookie;
 it proves transport behavior, not browser rendering or a real desktop login.
 Run these focused tests sequentially; no application build or production account
 is needed.
+
+The storage and bootstrap job-control fixtures open a disposable PTY and acquire
+its controlling terminal in a fresh, exec'd Python interpreter. They must not run
+`pty.fork()` or Python pre-exec callbacks in the test runner: on macOS, forking
+after threads or higher-level system APIs have initialized can deadlock before
+the fixture's timeout starts. The threaded-runner regression retains the real
+shell suspend/resume, foreground-ownership, cancellation, and terminal-mode checks.
