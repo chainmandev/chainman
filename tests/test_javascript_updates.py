@@ -1370,6 +1370,26 @@ class JavaScriptTests(unittest.TestCase):
             hashlib.sha256(b"neutral patch bytes\n").hexdigest(),
         )
 
+    def test_patch_binds_locked_release_above_floor_only_in_its_family(self):
+        self.manifest(
+            "package.json",
+            {"old": "npm:library@^1.0.0", "new": "npm:library@^2.0.0"},
+            pnpm={"patchedDependencies": {"library@1.1.0": "patches/fix.patch"}},
+        )
+        self.write("patches/fix.patch", "neutral patch bytes\n")
+        for version in ("1.0.0", "1.1.0", "1.2.0", "2.0.0", "2.2.0"):
+            self.release("library", version)
+        with patch.object(
+            js,
+            "locked_identities",
+            return_value={
+                ("npm", "library", "1.1.0"),
+                ("npm", "library", "2.0.0"),
+            },
+        ):
+            _, selected = self.selected()
+        self.assertEqual(selected, {"old": "1.1.0", "new": "2.2.0"})
+
     def test_toolchain_owned_dependency_retains_an_eligible_exact_pin(self):
         self.manifest("package.json", {"browser-driver": "1.0.0", "library": "1.0.0"})
         self.spec["held_dependencies"] = [
@@ -1455,6 +1475,71 @@ class JavaScriptTests(unittest.TestCase):
         self.assertEqual(workspace.settings["overrides"], {"utility": "^1"})
         self.assertNotIn("pnpm", workspace.documents["package.json"][0])
         self.assertEqual(len(workspace.pins), 1)
+
+    def test_policy_parent_alias_override_binds_canonical_mature_range(self):
+        self.spec["reconcile_policy"] = True
+        for actual in ("replacement", "@neutral/replacement"):
+            with self.subTest(actual=actual):
+                declaration = f"npm:{actual}@^0.2.17"
+                self.write("pnpm-workspace.yaml", "packages: []\n")
+                self.policy["javascript"] = {
+                    "override_constraints": {
+                        "parent>original": {
+                            "range": declaration,
+                            "reason": "Adopt the bounded replacement API.",
+                        }
+                    }
+                }
+                for version, days in (
+                    ("0.2.17", 60),
+                    ("0.2.18", 60),
+                    ("0.3.0", 60),
+                    ("0.2.19", 2),
+                ):
+                    self.release(actual, version, days=days)
+                workspace = js.Workspace(self.root, self.spec)
+                js.reconcile_policy(workspace, self.policy)
+                self.assertEqual(len(workspace.pins), 1)
+                pin = workspace.pins[0]
+                self.assertEqual(
+                    (pin.alias, pin.name, pin.requirement),
+                    ("original", actual, "^0.2.17"),
+                )
+                _, selected = js.plan(workspace, self.policy, self.now)
+                self.assertEqual(selected, ("0.2.18",))
+                self.assertEqual(pin.replacement(selected[0]), declaration)
+                self.assertEqual(
+                    workspace.settings["overrides"], {"parent>original": declaration}
+                )
+                js.reconcile_policy(workspace, self.policy, check=True)
+
+    def test_policy_override_alias_rejects_invalid_or_nonregistry_ranges(self):
+        self.spec["reconcile_policy"] = True
+        for declaration in (
+            "npm:replacement@",
+            "npm:replacement@not-semver",
+            "npm:replacement@file:local",
+            "npm:replacement@https://example.invalid/archive.tgz",
+        ):
+            with self.subTest(declaration=declaration):
+                self.policy["javascript"] = {
+                    "override_constraints": {
+                        "parent>original": {
+                            "range": declaration,
+                            "reason": "Explicit scope.",
+                        }
+                    }
+                }
+                workspace = js.Workspace(self.root, self.spec)
+                with self.assertRaises(ValueError):
+                    js.reconcile_policy(workspace, self.policy)
+
+    def test_alias_override_does_not_relax_numeric_compatibility_rules(self):
+        rule = {"range": "npm:replacement@^1", "reason": "Explicit replacement."}
+        with self.assertRaises(ValueError):
+            js.rule_range(rule)
+        with self.assertRaisesRegex(ValueError, "require a reason"):
+            js.rule_range({"range": "npm:replacement@^1"}, npm_alias=True)
 
     def test_policy_rejects_conflicting_duplicate_overrides_before_assignment(self):
         self.spec["reconcile_policy"] = True
