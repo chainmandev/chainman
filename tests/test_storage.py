@@ -16,6 +16,8 @@ import time
 import unittest
 from unittest.mock import patch
 
+from terminal_fixture import wait_terminal
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import storage
 import toolchain as tc
@@ -146,10 +148,10 @@ def exercise_job_control(
             except OSError:
                 pass
             try:
-                process.wait(timeout=5)
+                wait_terminal(process, master, 5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait(timeout=5)
+                wait_terminal(process, master, 5)
         finally:
             os.close(master)
 
@@ -325,12 +327,19 @@ class StorageTests(unittest.TestCase):
 
     def test_runtime_handoff_restores_terminal_after_foreground_interrupt(self):
         result = self.root / "terminal-result"
-        child = (
-            "import os,termios; assert os.tcgetpgrp(0)==os.getpgrp(); "
-            "settings=termios.tcgetattr(0); settings[3] &= ~termios.ECHO; "
-            "termios.tcsetattr(0,termios.TCSANOW,settings); "
-            "print('ready', flush=True); input()"
-        )
+        child = """import os, signal, sys, termios
+assert os.tcgetpgrp(0) == os.getpgrp()
+settings = termios.tcgetattr(0)
+settings[3] &= ~termios.ECHO
+termios.tcsetattr(0, termios.TCSANOW, settings)
+def interrupted(signum, frame):
+    sys.stderr.write('x' * 262144)
+    sys.stderr.flush()
+    raise KeyboardInterrupt
+signal.signal(signal.SIGINT, interrupted)
+print('ready', flush=True)
+input()
+"""
         wrapper = (
             "import os,sys,termios; from pathlib import Path; "
             f"sys.path.insert(0,{str(tc.RUNTIME / 'scripts')!r}); import storage; "
@@ -350,16 +359,16 @@ class StorageTests(unittest.TestCase):
                 if select.select([master], [], [], 0.1)[0]:
                     output += os.read(master, 4096)
             os.write(master, b"\x03")
-            while not result.exists() and time.monotonic() < deadline:
-                time.sleep(0.01)
+            status, remaining_output = wait_terminal(process, master, 10)
+            self.assertEqual(status, 0)
+            self.assertGreater(len(remaining_output), 131072)
             self.assertTrue(result.exists())
             self.assertEqual(result.read_text(), "130:True:True")
-            self.assertEqual(process.wait(timeout=5), 0)
         finally:
             try:
                 if process.poll() is None:
                     process.kill()
-                process.wait(timeout=5)
+                wait_terminal(process, master, 5)
             finally:
                 os.close(master)
 

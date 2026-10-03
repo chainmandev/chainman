@@ -290,3 +290,27 @@ timeout/cancellation subcases. Foreground ownership, repeated stop/background/
 foreground transitions, lease retention, terminal modes, and exit status remain
 asserted. These focused passes do not replace the full hosted qualification;
 the repaired candidate must be staged and qualified as a new exact SHA.
+
+### Darwin cleanup and canonical-path follow-up
+
+Candidate `0550ee16ce16204691d1c6d975535677133f936e` passed the complete local
+source gate (1,332 repository tests, 195 skips) and both hosted Linux core lanes
+in [release run 37093444469](https://github.com/chainmandev/chainman/actions/runs/37093444469).
+The macOS ARM64 source suite completed rather than deadlocking in the PTY fork,
+but failed with seven terminal-fixture errors and one hook-fixture assertion.
+It was not qualified or published.
+
+The terminal errors exposed waits that stopped draining PTY output during exit.
+The shell job-control cases reached their cleanup waits; the foreground-interrupt
+case waited for its result while the interrupted child still had terminal output.
+They now reuse the repository's existing bounded, draining terminal wait, also
+after a forced kill. A regression makes the interrupted child emit 262,144 bytes:
+it failed with the old wait on Linux, then passed with draining while still
+requiring status 130 and restored terminal ownership/modes. All 33 storage tests,
+8 hook tests, and the shared terminal-helper test passed locally after this repair.
+
+The hook assertion expected the unresolved temporary path, whereas production
+reentry correctly resolved macOS `/tmp` to `/private/tmp`. Its fixture now checks
+canonical paths and explicitly exercises a symlink alias on every platform.
+Production code and full release gates remain unchanged. Focused Darwin checks
+and a new exact-candidate full qualification are still required.

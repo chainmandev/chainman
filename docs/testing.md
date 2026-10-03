@@ -132,3 +132,10 @@ its controlling terminal in a fresh, exec'd Python interpreter. They must not ru
 after threads or higher-level system APIs have initialized can deadlock before
 the fixture's timeout starts. The threaded-runner regression retains the real
 shell suspend/resume, foreground-ownership, cancellation, and terminal-mode checks.
+While waiting for PTY children to exit, including after interruption or forced
+cleanup, use the shared draining wait in `tests/terminal_fixture.py`. Darwin can
+wait for pending terminal output during close; a plain process wait can therefore
+stall even after the test's job-control assertions pass. The interruption fixture
+emits more than a terminal buffer of output to exercise this boundary on Linux too.
+Reentry assertions compare canonical project paths and exercise symlink aliases;
+temporary-directory spellings such as `/tmp` and `/private/tmp` need not match.
