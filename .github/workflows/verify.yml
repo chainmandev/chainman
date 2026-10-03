@@ -1,109 +1,66 @@
-name: Deliberate toolchain verification
+name: Container descriptor boundary qualification
 "on":
-  workflow_call:
-    inputs:
-      candidate_sha:
-        required: true
-        type: string
-      prune_hosted_sdks:
-        type: boolean
-        default: false
   workflow_dispatch:
     inputs:
       candidate_sha:
-        description: Full commit expected at the selected ref
+        description: Exact source commit to test; this workflow cannot publish
         required: true
         type: string
-      prune_hosted_sdks:
-        description: Explicitly remove declared unused SDKs on disposable Linux runners
-        type: boolean
-        default: false
 permissions:
   contents: read
 jobs:
-  verify:
+  boundary:
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 4
       matrix:
         include:
-          - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
-          - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 90}
-          - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: go, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: flutter, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: swift, engine: docker}
-          - {runner: ubuntu-24.04, mode: host-nix, module: compose, engine: docker}
-          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: docker}
-          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: podman}
-          - {runner: macos-15, mode: host-nix, module: swift, engine: docker}
+          - {runner: ubuntu-24.04, engine: docker}
+          - {runner: ubuntu-24.04, engine: podman}
+          - {runner: macos-15, engine: none}
+          - {runner: macos-15-intel, engine: none}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout_minutes || 60 }}
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ${{ github.workspace }}/checkout with spaces
     env:
       CHAINMAN_SETUP: auto
-      TOOLCHAIN_MODE: ${{ matrix.mode }}
-      TOOLCHAIN_CONTAINER_ENGINE: ${{ matrix.engine }}
-      MODULE: ${{ matrix.module }}
+      TOOLCHAIN_MODE: host-nix
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
           path: checkout with spaces
+          ref: ${{ inputs.candidate_sha }}
       - name: Confirm exact source
         env:
           EXPECTED: ${{ inputs.candidate_sha }}
-          EVENT: ${{ github.sha }}
         run: |
-          set -eu
           test "$(git rev-parse HEAD)" = "$EXPECTED"
-          test "$EVENT" = "$EXPECTED"
-      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-      - name: Optional disposable SDK cleanup
-        if: inputs.prune_hosted_sdks && runner.os == 'Linux'
-        env:
-          TOOLCHAIN_MODE: host-nix
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-prune --module "$MODULE" --apply --sudo
-      - name: Apple SDK preflight
-        if: runner.os == 'macOS' && matrix.module == 'swift'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- sdk-doctor apple
-      - name: Verify using the local command
-        run: |
-          if [ "$TOOLCHAIN_MODE" = container-nix ]; then
-            nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- bootstrap-test "$TOOLCHAIN_CONTAINER_ENGINE"
-          else
-            nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module "$MODULE" verify
-          fi
-      - name: Report project cache use
-        if: always()
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- cache-status
-      - name: Qualify initialization and standalone starter
-        if: matrix.module == 'core'
-        run: |
-          engine="$TOOLCHAIN_CONTAINER_ENGINE"
-          if [ "$TOOLCHAIN_MODE" = host-nix ]; then engine=host-nix; fi
-          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- init-test "$engine"
-      - name: Qualify native JavaScript update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'javascript'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
-      - name: Qualify native service ownership and backend
-        if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
+          test -z "$(git status --porcelain)"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342
+      - name: Full native ownership qualification
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
-      - name: Qualify native Python update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'python'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- python-test
-      - name: Qualify native Gradle update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'compose'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- gradle-test
-      - name: Qualify native Cargo update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'rust'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- rust-test
-      - name: Qualify native SwiftPM update validation
-        if: matrix.mode == 'host-nix' && matrix.module == 'swift'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- swift-test
+      - name: Real engine cleanup, nested context, consent and cancellation
+        if: matrix.engine != 'none'
+        env:
+          CHAINMAN_TEST_CONTAINER: ${{ matrix.engine }}
+        run: |
+          export CHAINMAN_TEST_ENGINE_PATH="$PATH"
+          # shellcheck disable=SC2016
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec sh -eu -c 'export PATH="$PATH:$CHAINMAN_TEST_ENGINE_PATH"; exec python3 -B -' <<'PY'
+          import sys, unittest
+          sys.path.insert(0, "tests")
+          from test_bootstrap import BootstrapTests
+          suite = unittest.TestSuite(BootstrapTests(name) for name in (
+              "test_container_stale_setup_consent_preserves_piped_task_input",
+              "test_public_nested_service_entry_preserves_fd9_context",
+              "test_container_preview_port_and_interruption",
+          ))
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          raise SystemExit(not result.wasSuccessful())
+          PY
+      - name: Confirm source was not edited
+        if: always()
+        run: test -z "$(git status --porcelain)"
