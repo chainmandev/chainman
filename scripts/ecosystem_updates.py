@@ -30,6 +30,7 @@ import chainman
 import cargo_sources
 import lock_adapters
 import manifests
+import pub_sources
 import registry
 from dependency_identity import Identity, inventory as identity_inventory
 import adapter_data as ad
@@ -100,6 +101,7 @@ def members(root: Path, directory: Path, kind: str) -> list[str]:
 
 def specifications(root: Path, spec: Config) -> dict[str, ad.Table]:
     cargo_sources.read(root, spec)
+    pub_sources.read(root, spec)
     kind = ad.text(spec["adapter"], "Adapter kind")
     ecosystem, _ = KINDS[kind]
     directories = spec.get("directories", [spec.get("directory", ".")])
@@ -147,6 +149,14 @@ def specifications(root: Path, spec: Config) -> dict[str, ad.Table]:
 
 
 def snapshot(root: Path, spec: Config) -> ad.Table:
+    with pub_sources.bind(root, spec) as scope:
+        result = _snapshot(root, spec)
+        if scope is not None:
+            result["pub_sources"] = scope.records()
+        return result
+
+
+def _snapshot(root: Path, spec: Config) -> ad.Table:
     specs = specifications(root, spec)
     bootstrap = spec.get("bootstrap_verification", False)
     if type(bootstrap) is not bool or (
@@ -1786,6 +1796,14 @@ def cargo_resolution_settings(spec: Config) -> tuple[bool, int]:
 
 
 def resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table:
+    with pub_sources.bind(root, spec, policy) as scope:
+        result = _resolve(root, spec, policy, now)
+        if scope is not None:
+            result["pub_candidates"] = pub_sources.materialized(root, spec, scope)
+        return result
+
+
+def _resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table:
     if spec.get("mode", "aggressive") not in {"aggressive", "compatible"}:
         raise ValueError("Native update policy must be aggressive or compatible")
     repair_cargo, cargo_max_attempts = cargo_resolution_settings(spec)
@@ -1960,6 +1978,28 @@ def resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table
 
 
 def audit(
+    root: Path, spec: Config, before: Config, policy: Config, now: datetime
+) -> None:
+    with pub_sources.bind(root, spec, policy) as scope:
+        if scope is not None:
+            if pub_sources.authority(
+                before.get("pub_sources")
+            ) != pub_sources.authority(scope.records()):
+                raise ValueError(
+                    "Pub candidate source authority changed after its snapshot"
+                )
+            observed = pub_sources.materialized(root, spec, scope)
+            expected = ad.table(before.get("resolution", {}), "Native resolution").get(
+                "pub_candidates"
+            )
+            if expected is not None and expected != observed:
+                raise ValueError(
+                    "A project hook changed the selected Pub candidate sources"
+                )
+        _audit(root, spec, before, policy, now)
+
+
+def _audit(
     root: Path, spec: Config, before: Config, policy: Config, now: datetime
 ) -> None:
     specs = specifications(root, spec)
