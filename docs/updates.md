@@ -795,6 +795,28 @@ Missing, ambiguous, unused, registry-backed
 or differently located native candidate identities fail; inspection must preserve
 all guarded sources and locks, including in projects without Git.
 
+A Flutter adapter may similarly declare `pub_sources = { owned_package =
+"packages/owned/pubspec.yaml" }` with ordinary `flutter pub get` or `dart pub get`.
+The manifest must be a regular contained file with the matching package name and
+a stable version satisfying every original hosted declaration and configured
+version/security constraint. Unused bindings and conflicting declared overrides
+fail. Existing path overrides to the exact bound source remain unchanged and
+retain the ordinary native source checks. Public hosted dependency declarations
+remain unchanged. A temporary
+`pubspec_overrides.yaml` binds each consuming resolution group to the source;
+existing file bytes and permissions are restored after resolution and auditing.
+Unexpected native or concurrent override changes fail and remain available for
+inspection. The native path lock identity and Dart package configuration must
+both identify the exact bound package, version and source directory. Source
+manifest changes, missing or ambiguous imports, and hosted fallback fail.
+The source manifest digest, original public ranges and consuming groups are
+recorded separately from registry selections and rechecked after project hooks.
+Resolve the source's owning adapter before its prepublication consumers: original
+intake records preserve package authority, while the consumer's resolution
+receipt freezes the selected manifest digest. Source manifest changes during that
+resolution or after it fail. Resume auditing re-observes the current native graph
+against the original package authority and ordinary artifact policy.
+
 Candidate sources have no registry publication date and are not registry release
 selections. All third-party registry artifacts retain their normal checksum,
 publication-age, security and graph audit. Final reconciliation rechecks the
