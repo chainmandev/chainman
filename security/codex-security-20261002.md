@@ -388,3 +388,21 @@ The repaired working tree passed all six terminal-helper tests, 33 storage tests
 both bootstrap job-control tests, documentation/format checks and the complete
 Linux/aarch64 native gate (Go checks, 44 hooks, 9 setup-terminal, 78 services and
 four cross-builds). Hosted qualification remains pending for the new exact SHA.
+
+### Intel core qualification allowance
+
+Candidate `4125fb81d70ef22c036ce6de06cee26c5fa138e6` passed the expanded native
+diagnostics on both Darwin architectures in
+[run 37107389435](https://github.com/chainmandev/chainman/actions/runs/37107389435).
+Its full [release run 37108119844](https://github.com/chainmandev/chainman/actions/runs/37108119844)
+passed Linux AMD64, Linux ARM64, and macOS ARM64 core. Intel core then reached
+the 60-minute job limit while source tests were still progressing successfully;
+no assertion failures were found in its log. The remaining release was cancelled
+without publication.
+
+With the owner's approval, only the macOS Intel core lane now receives 90 minutes
+for its cold bootstrap and complete source, starter, and native suites. The
+other 13 lanes retain 60 minutes. Regression checks cover this scoped allowance
+and the qualification/publication/readback dependency chain. No tests, required
+lanes, or publication guards were removed. The new exact candidate must still
+pass the complete release workflow before either remote master is synchronized.

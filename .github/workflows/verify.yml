@@ -30,7 +30,7 @@ jobs:
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
           - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
           - {runner: macos-15, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker}
+          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 90}
           - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}
@@ -42,7 +42,7 @@ jobs:
           - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: podman}
           - {runner: macos-15, mode: host-nix, module: swift, engine: docker}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: ${{ matrix.timeout_minutes || 60 }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}/checkout with spaces

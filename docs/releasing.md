@@ -39,6 +39,11 @@ lanes before publishing. It discovers the default branch at publication, require
 its expected old SHA and fast-forward ancestry, and uses an exact lease to reject
 concurrent movement. It then proves fresh public host/container initialization.
 
+The macOS Intel core lane has a 90-minute job limit to accommodate its cold
+bootstrap and complete source, starter, and native suites. The other 13 lanes
+retain their 60-minute limits. This allowance does not skip tests or change the
+requirement that every lane succeeds before publication.
+
 Repository Actions must permit the publication job's `contents: write`. Branch
 protection must allow that qualified workflow to advance the default branch. If
 policy requires a maintainer push, first run **Deliberate toolchain verification**
