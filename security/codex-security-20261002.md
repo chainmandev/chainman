@@ -424,3 +424,40 @@ cancellation, and terminal ownership assertions. A large quoted-argument
 regression rejects the old implementation's oversized paste, then checks the
 short-input implementation's exact argv delivery. This is a fixture-only repair;
 production execution and qualification requirements are unchanged.
+
+### Container infrastructure descriptor isolation
+
+Candidate `73a8d9bda636539b096879355fb029cda9fba3f3` passed 13 of the 14
+qualification lanes in
+[release run 37132668933](https://github.com/chainmandev/chainman/actions/runs/37132668933),
+including both Darwin core architectures, macOS Swift, and Docker. Podman alone
+failed two immediate service-teardown assertions after successful nested-context
+and setup-consent tasks. Publication and public readback did not run.
+[Diagnostic run 37146037545](https://github.com/chainmandev/chainman/actions/runs/37146037545)
+reproduced both unchanged assertions and identified the exact task lease inodes
+on descriptors 3, 5, 6, and 9 in the surviving `aardvark-dns` processes. Repeated
+status observations remained live: this was inherited ownership in engine
+infrastructure, not a slow teardown or an assertion to relax.
+
+With the owner's approval, owned container task sequences now retain host
+leases in their native anchor but isolate the container bootstrap child. The
+boundary marks all non-stdio descriptors close-on-exec, including unadvertised
+duplicates, and removes stale host-descriptor environment advertisements.
+Merely omitting Go's `ExtraFiles` is insufficient for inherited descriptors that
+lack close-on-exec. The anchor keeps its descriptors open, command admission and
+signals remain unchanged, and container identity/receipt recovery still precedes
+lease release. Ordinary host task descendants continue to inherit leases.
+
+A disposable engine fixture reproduces the original teardown failure with a
+detached helper that deliberately retains inherited descriptors. The repaired
+boundary leaves that helper alive without task leases, preserves literal argv
+and piped stdin, and releases services immediately after the task ends. Coverage
+also includes an unadvertised high descriptor, environment overrides, and setup
+lease survival after killing the caller of either a host or container sequence.
+Real Docker/Podman execution, both Darwin native suites, and a new complete
+exact-candidate release qualification remain required before synchronization.
+
+Concurrent public commits `2872c960c0a8966a120d0a2fa5ebb7de11e3278c` and
+`070b63e379bb610e0bacc3c3b3c14305b8d74160` were preserved under the existing dev
+backup namespace and merged append-only in
+`a6bc437dd5275572d74c7e144c715cd9bc71f842`. No published history was rewritten.
