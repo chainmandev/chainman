@@ -139,3 +139,6 @@ stall even after the test's job-control assertions pass. The interruption fixtur
 emits more than a terminal buffer of output to exercise this boundary on Linux too.
 Reentry assertions compare canonical project paths and exercise symlink aliases;
 temporary-directory spellings such as `/tmp` and `/private/tmp` need not match.
+Native state-directory fixtures use `physicalTempDir(t)` for the same reason.
+Exercise update-cache tests with an aliased `TMPDIR` as a portable regression;
+explicit negative cases must still reject symlinked cache bases before creation.

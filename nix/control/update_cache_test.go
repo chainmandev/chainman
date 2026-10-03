@@ -36,7 +36,7 @@ func updateFixture(t *testing.T, base string, age time.Duration, bytes int64) (s
 }
 
 func TestUpdateCacheAgeBudgetAndActive(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	old, a := updateFixture(t, base, 25*time.Hour, 10)
 	a.Close()
 	recent, b := updateFixture(t, base, time.Minute, 10)
@@ -62,7 +62,7 @@ func TestUpdateCacheAgeBudgetAndActive(t *testing.T) {
 }
 
 func TestUpdateCacheStatusDoesNotRemove(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	entries, removed, err := updateCollect(base, false, false, time.Now(), updateLimit)
@@ -75,7 +75,7 @@ func TestUpdateCacheStatusDoesNotRemove(t *testing.T) {
 }
 
 func TestUpdateCacheNeverAdoptsUnknownOrLegacy(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	pool, gate, err := updateGate(base)
 	if err != nil {
 		t.Fatal(err)
@@ -96,15 +96,30 @@ func TestUpdateCacheNeverAdoptsUnknownOrLegacy(t *testing.T) {
 	}
 }
 
+func TestUpdateCacheRejectsSymlinkBaseBeforeCreatingPool(t *testing.T) {
+	base := physicalTempDir(t)
+	alias := filepath.Join(physicalTempDir(t), "linked-base")
+	if err := os.Symlink(base, alias); err != nil {
+		t.Fatal(err)
+	}
+	if _, gate, err := updateGate(alias); err == nil {
+		gate.Close()
+		t.Fatal("symlink base accepted")
+	}
+	if _, err := os.Stat(filepath.Join(base, "v1")); !os.IsNotExist(err) {
+		t.Fatalf("created pool through symlink base: %v", err)
+	}
+}
+
 func TestUpdateCacheRejectsSymlinkPoolAndLease(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	if err := os.Symlink(t.TempDir(), filepath.Join(base, "v1")); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := updateGate(base); err == nil {
 		t.Fatal("symlink pool accepted")
 	}
-	base = t.TempDir()
+	base = physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	if err := os.Remove(filepath.Join(path, ".lease")); err != nil {
@@ -120,7 +135,7 @@ func TestUpdateCacheRejectsSymlinkPoolAndLease(t *testing.T) {
 }
 
 func TestUpdateCacheReadOnlyDirectoriesAndExternalLinks(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	external := t.TempDir()
@@ -144,7 +159,7 @@ func TestUpdateCacheReadOnlyDirectoriesAndExternalLinks(t *testing.T) {
 }
 
 func TestUpdateCacheResumeAdmissionAndExpiry(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, time.Minute, 10)
 	if _, _, _, err := updateStart(base, path); err == nil {
 		t.Fatal("concurrent resume accepted")
@@ -167,7 +182,7 @@ func TestUpdateCacheForeignOwnership(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("foreign ownership needs root; ordinary runs validate owned paths")
 	}
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	if err := os.Chown(path, 12345, 12345); err != nil {
@@ -180,7 +195,7 @@ func TestUpdateCacheForeignOwnership(t *testing.T) {
 }
 
 func TestUpdateCacheContainerWitness(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	engine := filepath.Join(t.TempDir(), "docker")
@@ -230,7 +245,7 @@ func TestUpdateCacheCommandSuccessFailureAndOversize(t *testing.T) {
 		{"oversize", "truncate -s 13958643712 \"$CHAINMAN_UPDATE_TRANSACTION/large\"; exit 19", 19, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			base := t.TempDir()
+			base := physicalTempDir(t)
 			out, err := updateTestCommand(t, base, test.script).CombinedOutput()
 			got := 0
 			if err != nil {
@@ -258,7 +273,7 @@ func TestUpdateCacheCommandSuccessFailureAndOversize(t *testing.T) {
 }
 
 func TestUpdateCacheInheritedLeaseSurvivesOwner(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	// A different process retains the same kernel open-file description; no PID
 	// lookup is involved in pruning, including after the allocating owner closes.
@@ -288,7 +303,7 @@ func TestUpdateCacheInheritedLeaseSurvivesOwner(t *testing.T) {
 }
 
 func TestUpdateCacheConcurrentPruners(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	_, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	done := make(chan error, 2)
@@ -303,7 +318,7 @@ func TestUpdateCacheConcurrentPruners(t *testing.T) {
 }
 
 func TestUpdateCacheCompletedChildLease(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 0, 10)
 	r, err := updateRead(path)
 	if err != nil {
@@ -325,7 +340,7 @@ func TestUpdateCacheCompletedChildLease(t *testing.T) {
 }
 
 func TestUpdateCacheReceiptHardlinkRejected(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	if err := os.Link(filepath.Join(path, ".transaction.json"), filepath.Join(path, "duplicate")); err != nil {
@@ -338,7 +353,7 @@ func TestUpdateCacheReceiptHardlinkRejected(t *testing.T) {
 }
 
 func TestUpdateCacheReportsJSON(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	_, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	cmd := exec.Command(os.Args[0], "update-cache", "status", base)
@@ -355,7 +370,7 @@ func TestUpdateCacheReportsJSON(t *testing.T) {
 }
 
 func TestUpdateCacheLeaseValidation(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 0, 10)
 	lease.Close()
 	if err := os.Chmod(filepath.Join(path, ".lease"), 0666); err != nil {
@@ -380,7 +395,7 @@ func TestUpdateCacheRealContainer(t *testing.T) {
 	if engine == "" {
 		t.Skip("set CHAINMAN_TEST_UPDATE_ENGINE to an absolute Docker/Podman path")
 	}
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	r, err := updateRead(path)
@@ -420,7 +435,7 @@ func TestUpdateCacheRealContainer(t *testing.T) {
 }
 
 func TestUpdateCacheMaintenanceDoesNotMaskFailure(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	engine := filepath.Join(t.TempDir(), "docker")
 	offline := filepath.Join(t.TempDir(), "offline")
 	if err := os.WriteFile(engine, []byte("#!/bin/sh\n[ ! -f "+quote(offline)+" ] || exit 1\necho daemon\n"), 0700); err != nil {
@@ -441,7 +456,7 @@ func TestUpdateCacheMaintenanceDoesNotMaskFailure(t *testing.T) {
 }
 
 func TestUpdateCachePartialEngineInventory(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	engine := filepath.Join(t.TempDir(), "docker")
@@ -475,7 +490,7 @@ func TestUpdateCachePartialEngineInventory(t *testing.T) {
 }
 
 func TestUpdateCacheBindsDaemonBeforeRegistrationAndCollection(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	engine := filepath.Join(t.TempDir(), "docker")
@@ -514,7 +529,7 @@ func TestUpdateCacheBindsDaemonBeforeRegistrationAndCollection(t *testing.T) {
 }
 
 func TestUpdateCacheMissingIdentityDoesNotAdoptCurrentDaemon(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	r, err := updateRead(path)
@@ -536,7 +551,7 @@ func TestUpdateCacheMissingIdentityDoesNotAdoptCurrentDaemon(t *testing.T) {
 }
 
 func TestUpdateCacheUnavailableEngineDoesNotBlockIndependentCleanup(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	blocked, lease := updateFixture(t, base, 25*time.Hour, 10)
 	lease.Close()
 	r, err := updateRead(blocked)
@@ -581,7 +596,7 @@ func TestUpdateCacheUnavailableEngineDoesNotBlockIndependentCleanup(t *testing.T
 }
 
 func TestUpdateCacheIndependentServiceLeaseProtectsCandidate(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", path)
 	// A detached backend can advertise a descriptor it no longer inherited.
@@ -626,7 +641,7 @@ func TestUpdateCacheIndependentServiceLeaseProtectsCandidate(t *testing.T) {
 }
 
 func TestUpdateCacheLeasedTaskRemapsAroundResourceDescriptor(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	candidate, update := updateFixture(t, base, 0, 10)
 	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", candidate)
 	t.Setenv("CHAINMAN_UPDATE_LEASE_FD", strconv.Itoa(int(update.Fd())))
@@ -662,7 +677,7 @@ func TestUpdateCacheLeasedTaskRemapsAroundResourceDescriptor(t *testing.T) {
 
 func TestUpdateCacheServicePreservesLegacyReceipt(t *testing.T) {
 	legacy := legacyUpdateControl(t)
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 10)
 	r, err := updateRead(path)
 	if err != nil {

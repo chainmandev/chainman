@@ -48,7 +48,7 @@ func TestUpdateCacheLegacyHostSupervisorWithNewWatchHelper(t *testing.T) {
 	legacy := legacyUpdateControl(t)
 	for _, scenario := range []string{"success", "resume", "prune"} {
 		t.Run(scenario, func(t *testing.T) {
-			base, state := t.TempDir(), t.TempDir()
+			base, state := physicalTempDir(t), physicalTempDir(t)
 			plan := Plan{Schema: 1, Root: state, State: state, Services: map[string]Service{
 				"fixture": {Watch: &Watch{Build: Command{Argv: []string{"/bin/true"}, Directory: state}}},
 			}}
@@ -113,7 +113,7 @@ func TestUpdateCacheLegacyHostSupervisorWithNewWatchHelper(t *testing.T) {
 }
 
 func TestUpdateCacheLegacyMigrationRequiresIdleResume(t *testing.T) {
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 0, 0)
 	r, err := updateRead(path)
 	if err != nil {
@@ -173,7 +173,7 @@ func TestUpdateCacheLegacyCollectorCannotFollowChangedDaemon(t *testing.T) {
 	legacy := legacyUpdateControl(t)
 	for _, order := range []string{"register-helper-switch", "helper-register-switch", "register-switch-helper"} {
 		t.Run(order, func(t *testing.T) {
-			base, state := t.TempDir(), t.TempDir()
+			base, state := physicalTempDir(t), physicalTempDir(t)
 			plan := Plan{Schema: 1, Root: state, State: state, Services: map[string]Service{
 				"fixture": {Watch: &Watch{Build: Command{Argv: []string{"/bin/true"}, Directory: state}}},
 			}}
@@ -244,7 +244,7 @@ func TestUpdateCacheLegacyCollectorCannotFollowChangedDaemon(t *testing.T) {
 func TestUpdateCacheLegacyGuardOnlyAcceptsHostOnlyReceipt(t *testing.T) {
 	// Exercise JSON escaping and shell quoting independently, including a
 	// literal newline. The guard must never execute receipt or path contents.
-	base := filepath.Join(t.TempDir(), "space ' quote\" backslash\\ newline\n <&>")
+	base := filepath.Join(physicalTempDir(t), "space ' quote\" backslash\\ newline\n <&>")
 	path, _ := updateFixture(t, base, 0, 0)
 	r, err := updateRead(path)
 	if err != nil {
@@ -314,7 +314,7 @@ func TestUpdateCacheLegacyGuardOnlyAcceptsHostOnlyReceipt(t *testing.T) {
 
 func TestUpdateCacheLegacyMaintenanceProtectsOldWriters(t *testing.T) {
 	legacy := legacyUpdateControl(t)
-	base := t.TempDir()
+	base := physicalTempDir(t)
 	path, lease := updateFixture(t, base, 25*time.Hour, 0)
 	r, err := updateRead(path)
 	if err != nil {
