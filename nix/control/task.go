@@ -337,12 +337,19 @@ func isolateContainerDescriptors(cmd *exec.Cmd) error {
 	// Mark every non-stdio descriptor without closing the anchor's own leases.
 	// Go-created descriptors already have CLOEXEC; an entry closed since this
 	// snapshot is harmless. Refuse launch if the boundary cannot be established.
-	entries, err := os.ReadDir("/dev/fd")
+	directory, err := os.Open("/dev/fd")
 	if err != nil {
 		return fmt.Errorf("inspect container descriptor boundary: %w", err)
 	}
-	for _, entry := range entries {
-		fd, err := strconv.Atoi(entry.Name())
+	// Darwin's fdescfs lists slots that cannot necessarily be statted. Read
+	// names only; ReadDir may attempt fstatat and fail before we can check FDs.
+	names, err := directory.Readdirnames(-1)
+	directory.Close()
+	if err != nil {
+		return fmt.Errorf("read container descriptor boundary: %w", err)
+	}
+	for _, name := range names {
+		fd, err := strconv.Atoi(name)
 		if err != nil || fd < 3 {
 			continue
 		}
@@ -350,7 +357,7 @@ func isolateContainerDescriptors(cmd *exec.Cmd) error {
 			return fmt.Errorf("isolate container descriptor %d: %w", fd, err)
 		}
 	}
-	names := map[string]bool{
+	advertisements := map[string]bool{
 		"TOOLCHAIN_LOCK_FD": true, "TOOLCHAIN_GATE_FD": true,
 		"TOOLCHAIN_COMPAT_FD": true, "TOOLCHAIN_ANCESTOR_FDS": true,
 		"TOOLCHAIN_OPERATION_ID": true, "CHAINMAN_COMPILER_OWNER": true,
@@ -360,7 +367,7 @@ func isolateContainerDescriptors(cmd *exec.Cmd) error {
 	env := cmd.Env[:0]
 	for _, value := range cmd.Env {
 		name, _, _ := strings.Cut(value, "=")
-		if !names[name] && !strings.HasPrefix(name, "CHAINMAN_OPERATION_") {
+		if !advertisements[name] && !strings.HasPrefix(name, "CHAINMAN_OPERATION_") {
 			env = append(env, value)
 		}
 	}
