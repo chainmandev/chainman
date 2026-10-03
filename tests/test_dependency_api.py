@@ -20,6 +20,101 @@ NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 
 
 class PlanTests(unittest.TestCase):
+    def test_nix_recipe_group_reconciles_manager_and_sdk_locks_in_order(self):
+        import recipes
+
+        with tempfile.TemporaryDirectory(prefix="coordinated SDK update ") as directory:
+            root = Path(directory).resolve()
+            (root / "chainman.toml").write_text("""schema=3
+[updates.target_groups]
+nix=["nix","pnpm","flutter"]
+[updates.adapters.nix]
+adapter="nix"
+inputs=[]
+[updates.adapters.pnpm]
+adapter="toolchain"
+tools=[]
+[updates.adapters.js]
+adapter="javascript"
+[updates.adapters.flutter]
+adapter="flutter"
+directories=["."]
+[updates.adapters.github]
+adapter="actions"
+files=[]
+[[updates.steps]]
+resolve="nix"
+[[updates.steps]]
+resolve="pnpm"
+[[updates.steps]]
+resolve="js"
+[[updates.steps]]
+resolve="flutter"
+[[updates.steps]]
+resolve="github"
+""")
+            cfg = api.tc.config(root)
+            action = recipes.actions(cfg)["deps-update-nix"]
+            self.assertEqual(action, [["deps-update", "targets=nix"]])
+            arguments = recipes.selection_options(action[0][1:])
+            selected, _, adapters = api.plan_steps(root, api.policy(root), arguments)
+            self.assertEqual(selected, {"nix", "pnpm", "flutter"})
+            self.assertEqual(list(adapters), ["nix", "pnpm", "flutter"])
+            observed = []
+            profile = {"pnpm": "1.0.0"}
+            pin = root / "package.json"
+            pin.write_text('{"packageManager":"pnpm@1.0.0"}')
+
+            def implementation(spec):
+                kind = spec["adapter"]
+
+                def snapshot(root, spec):
+                    observed.append(("snapshot", kind))
+                    return {"manager": profile["pnpm"]}
+
+                def resolve(root, spec, policy, now, *, before=None):
+                    observed.append(("resolve", kind))
+                    if kind == "nix":
+                        profile["pnpm"] = "2.0.0"
+                    elif kind == "toolchain":
+                        self.assertEqual(before["manager"], "1.0.0")
+                        pin.write_text(
+                            json.dumps({"packageManager": "pnpm@" + profile["pnpm"]})
+                        )
+                    else:
+                        self.assertEqual(
+                            json.loads(pin.read_text())["packageManager"], "pnpm@2.0.0"
+                        )
+
+                def audit(root, spec, before, policy, now):
+                    observed.append(("audit", kind))
+                    self.assertEqual(
+                        json.loads(pin.read_text())["packageManager"], "pnpm@2.0.0"
+                    )
+
+                return api.Adapter(snapshot, resolve, audit)
+
+            with patch.object(api, "implementation", side_effect=implementation):
+                api.run_steps(root, api.policy(root), NOW, arguments)
+            self.assertEqual(
+                observed,
+                [
+                    (phase, kind)
+                    for phase in ("snapshot", "resolve", "audit")
+                    for kind in ("nix", "toolchain", "flutter")
+                ],
+            )
+
+    def test_ungrouped_nix_target_keeps_exact_selection(self):
+        settings = {
+            "adapters": {"nix": {}, "pnpm": {}, "js": {}, "flutter": {}},
+            "target_groups": {"sdk": ["nix", "pnpm", "flutter"]},
+        }
+        self.assertEqual(api.selection(settings, ["--targets", "nix"])[0], {"nix"})
+        self.assertEqual(
+            api.selection(settings, ["--targets", "sdk"])[0], {"nix", "pnpm", "flutter"}
+        )
+
     def test_runtime_resolver_honors_selection_when_every_adapter_is_explicit(self):
         import chainman_updates
         import source_updates

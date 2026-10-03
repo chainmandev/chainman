@@ -56,6 +56,28 @@ independent source pin when a tool should advance separately from Nixpkgs.
 Toolchain version reconciliation does not infer or remove arbitrary constraints
 in a flake.
 
+For targeted Nix updates, explicitly group the adapters that must remain in sync.
+For example, a consumer with Nix-supplied pnpm and Flutter adapters can declare:
+
+```toml
+[updates.target_groups]
+nix = ["nix", "pnpm", "flutter"]
+```
+
+Here `just chainman recipe deps-update-nix` selects the Nix refresh, the `pnpm`
+toolchain adapter that reconciles `packageManager`, and the `flutter` adapter that
+reconciles SDK-bound Pub locks. The named adapters must already be declared, with
+Nix resolution before toolchain reconciliation and package resolution. Ordinary
+JavaScript dependency selection and Actions updates remain separate targets.
+
+A group may intentionally reuse an adapter's name, as above; that target then
+selects the group. Use a distinct group name if bare adapter selection should
+remain available. Chainman does not infer these relationships from adapter names
+or automatically expand unrelated targets. An ungrouped Nix-only refresh that
+changes pnpm can otherwise fail frozen setup because the old `packageManager`
+pin no longer matches the profile. Include any package resolver needed to migrate
+its lock format when changing package-manager generations.
+
 Inspect ownership and policy before refreshing:
 
 ```sh
