@@ -56,13 +56,17 @@ def package_name(value: object) -> str:
     return value
 
 
-def rule_range(rule: object) -> str:
+def rule_range(rule: object, *, npm_alias: bool = False) -> str:
     if not isinstance(rule, Mapping) or not str(rule.get("reason", "")).strip():
         raise ValueError("JavaScript compatibility rules require a reason")
     value = rule.get("range")
     if not isinstance(value, str) or not value.strip():
         raise ValueError("JavaScript compatibility rules require a range")
-    NpmSpec(value)
+    if npm_alias and value.startswith("npm:"):
+        if parse_requirement("policy-override", value) is None:
+            raise ValueError("Override aliases require a registry version range")
+    else:
+        NpmSpec(value)
     return value
 
 
@@ -862,7 +866,9 @@ def reconcile_policy(
                 del manifest["pnpm"]
             changed = True
         for selector, rule in overrides.items():
-            assign(table, selector, rule_range(rule))
+            # Override policy declares a replacement, including its npm alias.
+            # Discovery binds the canonical package and decoded version range.
+            assign(table, selector, rule_range(rule, npm_alias=True))
     if check and changed:
         raise ValueError(
             "JavaScript catalog references or declared policy ranges drifted"
