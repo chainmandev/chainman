@@ -23,10 +23,17 @@ import storage
 import toolchain as tc
 
 
-TERMINAL_BODY = """import os, termios
+TERMINAL_BODY = """import errno, os, termios
 settings = termios.tcgetattr(0)
 settings[3] &= ~termios.ECHO
-termios.tcsetattr(0, termios.TCSANOW, settings)
+while True:
+    try:
+        termios.tcsetattr(0, termios.TCSANOW, settings)
+        break
+    except termios.error as error:
+        # Darwin returns EINTR after SIGTTOU stops a background ioctl.
+        if error.args[0] != errno.EINTR:
+            raise
 while True:
     assert not termios.tcgetattr(0)[3] & termios.ECHO
     print('CHILD-READY', flush=True)

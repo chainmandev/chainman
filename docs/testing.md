@@ -142,3 +142,13 @@ temporary-directory spellings such as `/tmp` and `/private/tmp` need not match.
 Native state-directory fixtures use `physicalTempDir(t)` for the same reason.
 Exercise update-cache tests with an aliased `TMPDIR` as a portable regression;
 explicit negative cases must still reject symlinked cache bases before creation.
+
+Native service PTYs use the same fresh-process launcher and draining waits.
+The background job-control fixture retries `tcsetattr` only on `EINTR`: Darwin
+returns that error after stopping a background ioctl with `SIGTTOU` and resuming
+it. Mode restoration compares every configured field and control character,
+excluding only Darwin's kernel-managed `PENDIN` input bookkeeping bit. XNU adds
+that bit when restoring canonical mode; it is cleared by subsequent input/read.
+The raw round-trip fixture records the observed flag delta, and synthetic
+negative checks retain failures for actual mode or control-character changes.
+See [XNU terminal handling](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c).

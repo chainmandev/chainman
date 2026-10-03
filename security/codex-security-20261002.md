@@ -340,3 +340,31 @@ Expanded Darwin diagnostics for that fixture repair then exposed no-op fixture
 commands hard-coded to `/bin/true`, which is absent on the hosted macOS runners.
 Update-cache fixture commands now use the portable `/bin/sh -c :` no-op instead.
 This does not alter production executable lookup or any acceptance assertion.
+
+### Native Darwin terminal fixture semantics and concurrent work
+
+[Diagnostic run 37103522762](https://github.com/chainmandev/chainman/actions/runs/37103522762)
+passed the ARM64 Go suite and reached the native service tests. Two terminal
+fixtures failed: a background `tcsetattr` returned `EINTR` after resume, and
+raw-mode restoration failed a literal termios equality assertion. The fixture
+now retries only interrupted mode-setting calls and compares configured modes
+without Darwin's transient `PENDIN` bit. The
+[XNU implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c)
+explicitly returns `EINTR` after background `SIGTTOU` and sets `PENDIN` when
+restoring canonical input. A raw round-trip fixture records the actual kernel
+flag difference; negative tests retain checks on every configured field and
+control characters. Native service PTYs also use the fresh-process launcher and
+bounded draining waits. Production terminal code and release gates are unchanged.
+Hosted verification of these fixture changes is still required.
+
+The repaired working tree passed the full Linux/aarch64 `just control-test`
+(44 hooks, 9 setup-terminal, 78 services, Go checks and four cross-builds),
+33 storage tests, both bootstrap job-control tests, four terminal-helper tests,
+documentation tests and formatting checks. The injected `EINTR` regression
+also reproduced the original fixture's failure before the retry repair.
+
+During qualification, public master advanced to
+`37aa883babb094d912243e41a0109192eb0496ec` (Cargo alias-family audits). That exact
+tip was preserved on dev under the reconciliation backup namespace and merged
+without conflicts or history rewriting. All seven native Cargo tests, including
+its new alias-family regression, passed locally on the combined working tree.
