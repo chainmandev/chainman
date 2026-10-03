@@ -506,6 +506,18 @@ replace direct registry declarations with `catalog:`; explicit named catalog and
 local workspace references remain intact. Per-manifest rules retain intentional
 range exceptions. Final audit checks the same declarations for drift.
 
+Override rules also accept registry alias replacements such as
+`npm:@neutral/replacement@^1.0.0`. Reconciliation preserves the complete replacement
+and parent selector; selection and lock auditing use the canonical replacement
+package and decoded version range. Malformed or remote aliases fail, and this
+does not relax numeric catalog, package or prefix compatibility rules.
+
+Version-bound patches retain an existing locked release admitted by the
+dependency declaration, even when that release is above the declaration's range
+floor. A patch for one major does not constrain unrelated declared majors of the
+same package. Patch selectors and bytes remain unchanged during an update;
+upgrading a patched release requires an explicit patch migration.
+
 Policy reconciliation writes pnpm overrides to `pnpm-workspace.yaml`, which is
 supported by current pnpm 10 and 11 releases. It moves existing root
 `package.json` pnpm overrides there, preserving selectors outside the configured
