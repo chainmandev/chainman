@@ -406,3 +406,21 @@ other 13 lanes retain 60 minutes. Regression checks cover this scoped allowance
 and the qualification/publication/readback dependency chain. No tests, required
 lanes, or publication guards were removed. The new exact candidate must still
 pass the complete release workflow before either remote master is synchronized.
+
+### Short interactive fixture commands
+
+The timeout-adjusted candidate `6f45466845156f4ae3cf1c34bba111d15e57bae0`
+passed both Linux core lanes in
+[release run 37126391232](https://github.com/chainmandev/chainman/actions/runs/37126391232).
+The macOS ARM64 source suite completed 1,340 tests with one failure: the storage
+job-control fixture's long, multiply quoted command arrived mangled at the
+interactive shell, yielding a Python `SyntaxError` before the child-ready marker.
+The remaining release was cancelled without publication.
+
+That fixture now writes the quoted command and result marker into a disposable
+shell script and sends only its short launch command through the PTY. It retains
+the interactive owning shell and all real stop/resume, background, lease,
+cancellation, and terminal ownership assertions. A large quoted-argument
+regression rejects the old implementation's oversized paste, then checks the
+short-input implementation's exact argv delivery. This is a fixture-only repair;
+production execution and qualification requirements are unchanged.

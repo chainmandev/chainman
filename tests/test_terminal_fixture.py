@@ -2,11 +2,13 @@
 
 import errno
 import os
+from pathlib import Path
 import pty
 import select
 import subprocess
 import sys
 import termios
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -15,6 +17,41 @@ from terminal_fixture import terminal_modes, wait_terminal, write_terminal
 
 
 class TerminalFixtureTests(unittest.TestCase):
+    def test_job_control_launch_does_not_paste_large_quoted_program(self):
+        from test_storage import TERMINAL_BODY, exercise_job_control
+
+        payload = "quote'\"; $(literal)\\\n" * 1024
+        body = f"import sys; assert sys.argv[1] == {payload!r}\n" + TERMINAL_BODY
+        scripts = Path(__file__).resolve().parents[1] / "scripts"
+        child_argv = [sys.executable, "-c", body, payload]
+        wrapper = (
+            f"import os, sys; sys.path.insert(0, {str(scripts)!r}); import storage; "
+            f"raise SystemExit(storage.runtime_child({child_argv!r}, dict(os.environ)))"
+        )
+        sent = []
+
+        def bounded_input(master, data, timeout):
+            # A short launch avoids overflowing a platform's terminal input
+            # queue with nested program text before the shell can consume it.
+            self.assertLess(len(data), 1024)
+            sent.append(data)
+            return write_terminal(master, data, timeout)
+
+        with (
+            tempfile.TemporaryDirectory(prefix="chainman terminal argv ") as root,
+            patch("test_storage.write_terminal", side_effect=bounded_input),
+        ):
+            exercise_job_control(
+                self,
+                [sys.executable, "-c", wrapper],
+                dict(
+                    os.environ, CHAINMAN_STORAGE_PATHS="[]", CHAINMAN_STORAGE_FDS="[]"
+                ),
+                root,
+            )
+        self.assertTrue(sent)
+        self.assertNotIn(b"import sys", sent[0])
+
     def test_write_deadline_restores_descriptor_mode(self):
         import tty
 

@@ -143,6 +143,11 @@ shared nonblocking `write_terminal` helper, retain its drained output for marker
 checks, and keep its deadline. The bidirectional backpressure regression sends
 and echoes 256 KiB; a separate stalled-reader case checks the write deadline and
 restoration of the descriptor's original blocking mode.
+Do not paste nested program bodies through an interactive PTY: its input queue
+can corrupt a long command before the shell consumes it, even with bounded
+writes. Store the quoted argv and result marker in a disposable shell script,
+then send only its short launch command. The large quoted-argument regression
+checks byte-for-byte argv delivery while retaining real stop/resume assertions.
 Reentry assertions compare canonical project paths and exercise symlink aliases;
 temporary-directory spellings such as `/tmp` and `/private/tmp` need not match.
 Native state-directory fixtures use `physicalTempDir(t)` for the same reason.
