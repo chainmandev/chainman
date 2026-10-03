@@ -16,7 +16,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from terminal_fixture import wait_terminal
+from terminal_fixture import wait_terminal, write_terminal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import storage
@@ -97,7 +97,8 @@ def exercise_job_control(
         return before
 
     def send(value):
-        os.write(master, value)
+        nonlocal output
+        output += write_terminal(master, value, 5)
 
     try:
         expect(b"PROMPT> ")

@@ -18,6 +18,38 @@ def terminal_modes(fd):
     return settings
 
 
+def write_terminal(master, data, timeout):
+    """Send input while draining echo/output, with a deadline on both directions."""
+    deadline = time.monotonic() + timeout
+    output = bytearray()
+    written = 0
+    blocking = os.get_blocking(master)
+    os.set_blocking(master, False)
+    try:
+        while written < len(data):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out writing fixture terminal input")
+            readable, writable, _ = select.select([master], [master], [], remaining)
+            if readable:
+                try:
+                    chunk = os.read(master, 65536)
+                except BlockingIOError:
+                    pass
+                else:
+                    if not chunk:
+                        raise BrokenPipeError("Fixture terminal closed during input")
+                    output.extend(chunk)
+            if writable:
+                try:
+                    written += os.write(master, data[written : written + 4096])
+                except BlockingIOError:
+                    pass
+    finally:
+        os.set_blocking(master, blocking)
+    return bytes(output)
+
+
 def wait_terminal(child, master, timeout):
     # Darwin can wait for pending output to drain while closing the terminal.
     # Waiting without reading can also block any child that fills the PTY.
