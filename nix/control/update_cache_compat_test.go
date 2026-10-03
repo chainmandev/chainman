@@ -50,7 +50,7 @@ func TestUpdateCacheLegacyHostSupervisorWithNewWatchHelper(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			base, state := physicalTempDir(t), physicalTempDir(t)
 			plan := Plan{Schema: 1, Root: state, State: state, Services: map[string]Service{
-				"fixture": {Watch: &Watch{Build: Command{Argv: []string{"/bin/true"}, Directory: state}}},
+				"fixture": {Watch: &Watch{Build: Command{Argv: []string{"/bin/sh", "-c", ":"}, Directory: state}}},
 			}}
 			if err := atomic(filepath.Join(state, "plan.json"), plan); err != nil {
 				t.Fatal(err)
@@ -124,7 +124,7 @@ func TestUpdateCacheLegacyMigrationRequiresIdleResume(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", path)
-	cmd := exec.Command("/bin/true")
+	cmd := exec.Command("/bin/sh", "-c", ":")
 	if err = forwardUpdateLease(cmd); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestUpdateCacheLegacyCollectorCannotFollowChangedDaemon(t *testing.T) {
 		t.Run(order, func(t *testing.T) {
 			base, state := physicalTempDir(t), physicalTempDir(t)
 			plan := Plan{Schema: 1, Root: state, State: state, Services: map[string]Service{
-				"fixture": {Watch: &Watch{Build: Command{Argv: []string{"/bin/true"}, Directory: state}}},
+				"fixture": {Watch: &Watch{Build: Command{Argv: []string{"/bin/sh", "-c", ":"}, Directory: state}}},
 			}}
 			if err := atomic(filepath.Join(state, "plan.json"), plan); err != nil {
 				t.Fatal(err)
@@ -223,7 +223,7 @@ func TestUpdateCacheLegacyCollectorCannotFollowChangedDaemon(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "no recorded daemon identity") || len(removed) != 0 || len(entries) != 1 || entries[0].Eligible {
 				t.Fatalf("new collector adopted the current daemon: %+v %v %v", entries, removed, err)
 			}
-			if out, err := exec.Command(legacy, "update-cache", "run", base, paths[0], "deps-update", "/bin/true").CombinedOutput(); err == nil || !strings.Contains(string(out), "candidate has containers") {
+			if out, err := exec.Command(legacy, "update-cache", "run", base, paths[0], "deps-update", "/bin/sh", "-c", ":").CombinedOutput(); err == nil || !strings.Contains(string(out), "candidate has containers") {
 				t.Fatalf("old resume ignored the unbound daemon: %s %v", out, err)
 			}
 			// The witness must protect just this candidate, not make the old
@@ -255,7 +255,7 @@ func TestUpdateCacheLegacyGuardOnlyAcceptsHostOnlyReceipt(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", path)
-	cmd := exec.Command("/bin/true")
+	cmd := exec.Command("/bin/sh", "-c", ":")
 	if err = forwardUpdateLease(cmd); err != nil {
 		t.Fatal(err)
 	}

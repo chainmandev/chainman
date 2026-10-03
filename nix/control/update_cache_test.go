@@ -692,7 +692,7 @@ func TestUpdateCacheServicePreservesLegacyReceipt(t *testing.T) {
 	}
 	t.Setenv("CHAINMAN_UPDATE_TRANSACTION", path)
 	t.Setenv("CHAINMAN_UPDATE_LEASE_FD", strconv.Itoa(int(lease.Fd())))
-	cmd, err := child(Command{Argv: []string{"/bin/true"}})
+	cmd, err := child(Command{Argv: []string{"/bin/sh", "-c", ":"}})
 	if err != nil {
 		t.Fatal(err)
 	}
