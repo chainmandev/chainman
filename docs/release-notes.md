@@ -29,6 +29,8 @@ review candidate changes and preserve each project's acceptance criteria.
 
 ## Development workflow improvements
 
+- Compatible Cargo updates now preserve valid aliases of different major-version families while retaining selected-pin and exact artifact checks.
+
 - Nested task wrappers can reuse a verified environment through
   `bootstrap/reenter.sh` while retaining setup admission and leases.
 - Profile `inputs` cover imported Nix modules and toolchain pins. `setup-status`

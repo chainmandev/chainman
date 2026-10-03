@@ -207,6 +207,46 @@ class NativeCargoTests(unittest.TestCase):
         self.assertEqual(self.manifest.stat().st_mode & 0o777, 0o640)
         self.assertEqual(self.source.read_bytes(), b"// unchanged application source\n")
 
+    def test_compatible_audit_preserves_aliased_major_version_families(self):
+        self.release("neutral-parent", "2.0.0", 90)
+        self.manifest.write_text(
+            self.manifest.read_text()
+            + 'current={package="neutral-parent",version="=2.0.0"}\n'
+        )
+        self.cargo("update")
+        before = native.snapshot(self.root, self.spec)
+        result = self.resolve()
+        before["resolution"] = result
+        self.assertEqual(
+            {
+                p["version"]
+                for p in tomllib.loads(self.lock.read_text())["package"]
+                if p["name"] == "neutral-parent"
+            },
+            {"1.2.0", "2.0.0"},
+        )
+        with (
+            patch.object(native.chainman, "execute", side_effect=self.execute),
+            patch.object(native.updates, "audit_locks") as audited,
+        ):
+            native.audit(self.root, self.spec, before, {}, self.now)
+        audited.assert_called_once()
+        # A hook still cannot switch the selected current alias to a new major.
+        self.release("neutral-parent", "3.0.0", 90)
+        self.manifest.write_text(
+            self.manifest.read_text().replace('version="2.0.0"', 'version="3.0.0"')
+        )
+        self.cargo("update")
+        with (
+            patch.object(native.chainman, "execute", side_effect=self.execute),
+            patch.object(native.updates, "audit_locks") as audited,
+            self.assertRaisesRegex(
+                ValueError, "selected dependency pin|artifact graph"
+            ),
+        ):
+            native.audit(self.root, self.spec, before, {}, self.now)
+        audited.assert_not_called()
+
     def test_candidate_inspection_downloads_locked_transitives_from_cold_cache(self):
         self.put(
             "owned crate/Cargo.toml",
