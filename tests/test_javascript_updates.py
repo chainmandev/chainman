@@ -1370,6 +1370,26 @@ class JavaScriptTests(unittest.TestCase):
             hashlib.sha256(b"neutral patch bytes\n").hexdigest(),
         )
 
+    def test_patch_binds_locked_release_above_floor_only_in_its_family(self):
+        self.manifest(
+            "package.json",
+            {"old": "npm:library@^1.0.0", "new": "npm:library@^2.0.0"},
+            pnpm={"patchedDependencies": {"library@1.1.0": "patches/fix.patch"}},
+        )
+        self.write("patches/fix.patch", "neutral patch bytes\n")
+        for version in ("1.0.0", "1.1.0", "1.2.0", "2.0.0", "2.2.0"):
+            self.release("library", version)
+        with patch.object(
+            js,
+            "locked_identities",
+            return_value={
+                ("npm", "library", "1.1.0"),
+                ("npm", "library", "2.0.0"),
+            },
+        ):
+            _, selected = self.selected()
+        self.assertEqual(selected, {"old": "1.1.0", "new": "2.2.0"})
+
     def test_toolchain_owned_dependency_retains_an_eligible_exact_pin(self):
         self.manifest("package.json", {"browser-driver": "1.0.0", "library": "1.0.0"})
         self.spec["held_dependencies"] = [

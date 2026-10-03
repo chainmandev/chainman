@@ -933,8 +933,21 @@ def plan(
         )
         for selector in workspace.patches:
             match = re.fullmatch(rf"({NAME})@(.+)", selector)
-            if match and match[1] == pin.name and floor and floor in NpmSpec(match[2]):
-                pin.ranges.append(match[2])
+            if match and match[1] == pin.name:
+                patch_range = NpmSpec(match[2])
+                declaration_range = NpmSpec(pin.requirement)
+                # A range floor need not equal the installed patched release.
+                # Bind patches to this declaration's existing version family,
+                # without constraining unrelated majors of the same package.
+                patched_baseline = any(
+                    provider == "npm"
+                    and name == pin.name
+                    and Version(version) in declaration_range
+                    and Version(version) in patch_range
+                    for provider, name, version, *_ in baseline
+                )
+                if (floor and floor in patch_range) or patched_baseline:
+                    pin.ranges.append(match[2])
         releases = evidence.get(pin.name)[0]
         active_policy = scoped_policy(policy, pin.name, pin.ranges)
         eligible = registry.maturity(

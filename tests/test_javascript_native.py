@@ -301,6 +301,29 @@ class NativeJavaScriptTests(unittest.TestCase):
         frozen = self.frozen("pnpm")
         self.assertEqual(frozen.returncode, 0, frozen.stdout + frozen.stderr)
 
+    def test_real_pnpm_retains_patched_locked_release_above_range_floor(self):
+        self.configure("pnpm")
+        self.add_release("neutral-parent", "1.1.0", {"neutral-leaf": "^1.0.0"})
+        self.write("fix.patch", "neutral patch bytes\n")
+        self.write(
+            "pnpm-workspace.yaml",
+            "packages: []\npatchedDependencies:\n  neutral-parent@1.1.0: fix.patch\n",
+        )
+        initial = self.native("pnpm", "install", "--lockfile-only", "--ignore-scripts")
+        self.assertEqual(initial.returncode, 0, initial.stdout + initial.stderr)
+        before = js.snapshot(self.root, self.spec)
+        self.assertIn("neutral-parent@1.1.0", before["patches"])
+        self.add_release("neutral-parent", "1.2.0", {"neutral-leaf": "^1.0.0"})
+        js.resolve(self.root, self.spec, self.policy, self.now)
+        after = js.snapshot(self.root, self.spec)
+        self.assertEqual(after["patches"], before["patches"])
+        self.assertEqual(
+            {(i[1], i[2]) for i in after["identities"]},
+            {("neutral-parent", "1.1.0"), ("neutral-leaf", "1.0.0")},
+        )
+        frozen = self.frozen("pnpm")
+        self.assertEqual(frozen.returncode, 0, frozen.stdout + frozen.stderr)
+
     def test_real_frozen_checks_reject_manifest_drift(self):
         for manager in ("npm", "pnpm"):
             with self.subTest(manager=manager):
