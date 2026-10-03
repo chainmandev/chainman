@@ -190,6 +190,13 @@ command; close unused inherited descriptors or use the pinned shell. Entry never
 closes a caller's lease to make room, and closes its own borrowed descriptor in
 both parent and child after restoring stdin.
 
+Owned container tasks retain host resource leases in their native supervisor,
+not in the container bootstrap or engine client. Detached engine infrastructure
+(such as rootless Podman's DNS helper) must not keep project services alive after
+the task ends. The controller still stops the owned container before releasing
+its lease, and its durable container receipt protects crash recovery. Ordinary
+host tasks and their descendants continue to inherit their lease descriptors.
+
 New service logs identify `stdout` and `stderr` explicitly. These are output
 streams, not severity levels: PostgreSQL and compilers write ordinary progress
 to stderr. Application warnings and errors retain their original text. Older

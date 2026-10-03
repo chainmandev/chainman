@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 type TaskCommands struct {
@@ -18,6 +21,7 @@ type TaskCommands struct {
 	Timeout       int       `json:"timeout_seconds"`
 	Shutdown      int       `json:"shutdown_seconds"`
 	RecoveryState string    `json:"recovery_state,omitempty"`
+	ContainerTask bool      `json:"container_task,omitempty"`
 }
 
 // Preparation precedes service acquisition but still owns foreground work.
@@ -227,7 +231,16 @@ func taskCommand(action, path string) (result int) {
 			if e != nil {
 				return exitCode(e)
 			}
-			if e = forwardLeases(cmd); e != nil {
+			if task.ContainerTask {
+				// The native anchor retains host leases for the whole task, and
+				// the durable container receipt covers an abruptly lost client.
+				// Do not pass those descriptors into the container bootstrap:
+				// rootless engine infrastructure (for example aardvark-dns) may
+				// outlive both the engine client and its workload container.
+				if e = isolateContainerDescriptors(cmd); e != nil {
+					return exitCode(e)
+				}
+			} else if e = forwardLeases(cmd); e != nil {
 				return exitCode(e)
 			}
 			// The native anchor owns service leases through the whole command.
@@ -313,4 +326,44 @@ func taskCommand(action, path string) (result int) {
 		return exitCode(e)
 	}
 	return waitTask(cmd, terminal, signals, changed, resumed)
+}
+
+// No ExtraFiles are installed at this boundary. Remove the corresponding host
+// advertisements as well, including explicit command-environment overrides.
+// Paths/tokens used for engine/container recovery and consent remain intact.
+func isolateContainerDescriptors(cmd *exec.Cmd) error {
+	// os/exec relies on close-on-exec flags for descriptors it did not open.
+	// Inherited duplicates can be unadvertised (or above the shell's FD range).
+	// Mark every non-stdio descriptor without closing the anchor's own leases.
+	// Go-created descriptors already have CLOEXEC; an entry closed since this
+	// snapshot is harmless. Refuse launch if the boundary cannot be established.
+	entries, err := os.ReadDir("/dev/fd")
+	if err != nil {
+		return fmt.Errorf("inspect container descriptor boundary: %w", err)
+	}
+	for _, entry := range entries {
+		fd, err := strconv.Atoi(entry.Name())
+		if err != nil || fd < 3 {
+			continue
+		}
+		if _, err = unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil && !errors.Is(err, syscall.EBADF) {
+			return fmt.Errorf("isolate container descriptor %d: %w", fd, err)
+		}
+	}
+	names := map[string]bool{
+		"TOOLCHAIN_LOCK_FD": true, "TOOLCHAIN_GATE_FD": true,
+		"TOOLCHAIN_COMPAT_FD": true, "TOOLCHAIN_ANCESTOR_FDS": true,
+		"TOOLCHAIN_OPERATION_ID": true, "CHAINMAN_COMPILER_OWNER": true,
+		"CHAINMAN_SERVICE_LEASE_FDS": true, "CHAINMAN_SERVICE_CONTEXT_FD": true,
+		"CHAINMAN_UPDATE_LEASE_FD": true, "CHAINMAN_STORAGE_FDS": true,
+	}
+	env := cmd.Env[:0]
+	for _, value := range cmd.Env {
+		name, _, _ := strings.Cut(value, "=")
+		if !names[name] && !strings.HasPrefix(name, "CHAINMAN_OPERATION_") {
+			env = append(env, value)
+		}
+	}
+	cmd.Env = env
+	return nil
 }

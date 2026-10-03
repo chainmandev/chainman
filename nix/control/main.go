@@ -1814,7 +1814,7 @@ func mainAction(args []string) (result int) {
 			return exitCode(err)
 		}
 		recoveryState = recovery
-		if e = atomic(path, TaskCommands{Commands: []Command{task}, Shutdown: p.TaskShutdown, RecoveryState: recovery}); e != nil {
+		if e = atomic(path, TaskCommands{Commands: []Command{task}, Shutdown: p.TaskShutdown, RecoveryState: recovery, ContainerTask: p.TaskContainer != nil}); e != nil {
 			return exitCode(e)
 		}
 		defer os.Remove(path)

@@ -1177,6 +1177,12 @@ Path('sequence-finished').write_text(str(signals))
         self.assertFalse(self.alive(int((self.root / "timeout-pid").read_text())))
 
     def test_owned_command_retains_setup_lease_after_client_is_killed(self):
+        self.check_owned_command_retains_setup_lease(container_task=False)
+
+    def test_container_anchor_retains_setup_lease_after_client_is_killed(self):
+        self.check_owned_command_retains_setup_lease(container_task=True)
+
+    def check_owned_command_retains_setup_lease(self, *, container_task):
         path = self.base / "commands.json"
         path.write_text(
             json.dumps(
@@ -1186,12 +1192,16 @@ Path('sequence-finished').write_text(str(signals))
                             [
                                 sys.executable,
                                 "-c",
-                                "import time; from pathlib import Path; Path('task-ready').touch(); time.sleep(2)",
+                                "import os,time; from pathlib import Path; "
+                                "assert ('TOOLCHAIN_LOCK_FD' not in os.environ) == "
+                                f"{container_task!r}; "
+                                "Path('task-ready').touch(); time.sleep(2)",
                             ]
                         )
                     ],
                     "timeout_seconds": 10,
                     "shutdown_seconds": 1,
+                    "container_task": container_task,
                 }
             )
         )
@@ -2000,6 +2010,124 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
             self.assertTrue(status["leases"]["worker"])
         finally:
             os.kill(pid, signal.SIGTERM)
+
+    def test_container_infrastructure_cannot_retain_task_leases(self):
+        # Model a rootless engine's detached DNS helper, not a task descendant.
+        # The helper deliberately keeps every inherited descriptor after the
+        # client exits. No real engine or external container is needed here.
+        engine = self.root / "podman"
+        engine.write_text(f"""#!{sys.executable}
+import json,os,subprocess,sys,time
+from pathlib import Path
+if sys.argv[1] == 'info':
+    print('fixture-host fixture-store true')
+elif sys.argv[1:3] == ['container', 'inspect']:
+    raise SystemExit(1)
+elif sys.argv[1:3] == ['container', 'ls']:
+    pass
+elif sys.argv[1] == 'run':
+    assert sys.argv[2:] == ['literal value', '', '$(literal)']
+    assert sys.stdin.read() == 'preserved input\\n'
+    helper = subprocess.Popen([sys.executable, 'infrastructure.py'],
+        close_fds=False, start_new_session=True, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    Path('infrastructure-pid').write_text(str(helper.pid))
+    Path('task-ready').touch()
+    deadline = time.monotonic() + 20
+    while not Path('finish-task').exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+    raise SystemExit(7)
+else:
+    raise SystemExit(2)
+""")
+        engine.chmod(0o700)
+        (self.root / "infrastructure.py").write_text(f"""import json,os,time
+from pathlib import Path
+witnesses = {{(p.stat().st_dev, p.stat().st_ino)
+             for p in Path({str(self.state)!r}).glob('*.lease')}}
+extra = Path({str(self.base / "unadvertised.lease")!r}).stat()
+witnesses.add((extra.st_dev, extra.st_ino))
+held = []
+for fd in range(3, 256):
+    try:
+        st = os.fstat(fd)
+    except OSError:
+        continue
+    if (st.st_dev, st.st_ino) in witnesses:
+        held.append(fd)
+Path('infrastructure-fds').write_text(json.dumps(held))
+time.sleep(30)
+""")
+        self.plan.update(
+            own_task=True,
+            task_shutdown_seconds=2,
+            task_container={
+                "engine": str(engine),
+                "name": "fixture-task",
+                "token": "a" * 32,
+            },
+        )
+        self.plan["task"] = self.command(
+            [
+                "sh",
+                str(Path(__file__).resolve().parents[1] / "bootstrap/setup-prompt.sh"),
+                str(engine),
+                "literal value",
+                "",
+                "$(literal)",
+            ]
+        )
+        self.plan["task"]["environment"] = {"CHAINMAN_CONTAINER_OWNER": "a" * 32}
+        self.path.write_text(json.dumps(self.plan))
+        # Unadvertised high descriptors also leak through os/exec unless their
+        # close-on-exec flag is set; checking environment names alone is not enough.
+        with (self.base / "unadvertised.lease").open("w+b") as extra:
+            high_fd = fcntl.fcntl(extra, fcntl.F_DUPFD, 200)
+            try:
+                parent = subprocess.Popen(
+                    [CONTROL, "run", str(self.path)],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    pass_fds=(high_fd,),
+                )
+            finally:
+                os.close(high_fd)
+        helper_pid = None
+        try:
+            parent.stdin.write("preserved input\n")
+            parent.stdin.close()
+            parent.stdin = None
+            self.wait_file(self.root / "task-ready")
+            helper_pid = int((self.root / "infrastructure-pid").read_text())
+            self.wait_file(self.root / "infrastructure-fds")
+            status = json.loads(self.run_control("status", check=0).stdout)
+            self.assertTrue(status["running"])
+            self.assertTrue(status["leases"]["worker"])
+            (self.root / "finish-task").touch()
+            output, error = parent.communicate(timeout=15)
+            self.assertEqual(parent.returncode, 7, output + error)
+            self.assertTrue(self.alive(helper_pid))
+            status = json.loads(self.run_control("status", check=0).stdout)
+            self.assertFalse(
+                status["running"],
+                "infrastructure lease descriptors: "
+                + (self.root / "infrastructure-fds").read_text(),
+            )
+            self.assertEqual(status["leases"], {})
+            self.assertEqual(
+                json.loads((self.root / "infrastructure-fds").read_text()), []
+            )
+        finally:
+            (self.root / "finish-task").touch()
+            if parent.poll() is None:
+                parent.terminate()
+            parent.communicate(timeout=10)
+            if helper_pid is None and (self.root / "infrastructure-pid").exists():
+                helper_pid = int((self.root / "infrastructure-pid").read_text())
+            if helper_pid is not None and self.alive(helper_pid):
+                os.kill(helper_pid, signal.SIGTERM)
 
     def test_persistent_owner_is_reused_and_not_stopped_by_borrower(self):
         self.run_control("up", check=0)
