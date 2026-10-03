@@ -335,3 +335,8 @@ aliased temporary root. The full Linux/aarch64 `just control-test` also passed:
 formatting/vet/race checks, native hook and setup-terminal tests, all 78 service
 tests, and Linux/Darwin ARM64/AMD64 cross-builds. Full native Darwin execution
 is checked separately before another release qualification attempt.
+
+Expanded Darwin diagnostics for that fixture repair then exposed no-op fixture
+commands hard-coded to `/bin/true`, which is absent on the hosted macOS runners.
+Update-cache fixture commands now use the portable `/bin/sh -c :` no-op instead.
+This does not alter production executable lookup or any acceptance assertion.
