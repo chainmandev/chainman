@@ -5,7 +5,6 @@ import fcntl
 import os
 from pathlib import Path
 import platform
-import pty
 import select
 import shlex
 import shutil
@@ -18,7 +17,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from test_storage import TERMINAL_BODY, exercise_job_control
+from terminal_fixture import wait_terminal
+from test_storage import TERMINAL_BODY, exercise_job_control, terminal_process
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import native_tasks
@@ -195,26 +195,28 @@ while True:time.sleep(.1)
         harness = (
             "import os,subprocess,sys,termios; "
             "from pathlib import Path; "
-            "before=termios.tcgetattr(0); "
+            f"sys.path.insert(0,{str(Path(__file__).resolve().parent)!r}); "
+            "from terminal_fixture import terminal_modes; "
+            "before=terminal_modes(0); "
             "p=subprocess.Popen(sys.argv[1:]); "
             f"Path({str(client_pid)!r}).write_text(str(p.pid)); "
             "result=p.wait(); "
             "assert os.tcgetpgrp(0)==os.getpgrp(), 'foreground not restored'; "
-            "assert termios.tcgetattr(0)==before, 'terminal settings not restored'; "
+            "after=terminal_modes(0); "
+            "assert after==before, ('terminal settings not restored',before,after); "
             "print('RESTORED',result,flush=True)"
         )
         if ignored_interrupt:
             harness = (
                 "import signal; signal.signal(signal.SIGINT,signal.SIG_IGN); " + harness
             )
-        pid, master = pty.fork()
-        if pid == 0:
-            os.execv(
-                sys.executable,
-                [sys.executable, "-c", harness, CONTROL, "command", str(task)],
-            )
+        process, master = terminal_process(
+            [sys.executable, "-c", harness, CONTROL, "command", str(task)],
+            dict(os.environ),
+            self.root,
+        )
+        pid = process.pid
         output = bytearray()
-        exited = False
         sent = False
         deadline = time.monotonic() + 12
         try:
@@ -260,12 +262,12 @@ while True:time.sleep(.1)
                 if b"RESTORED " in output:
                     break
             self.assertIn(b"RESTORED ", output, output.decode(errors="replace"))
-            _, status = os.waitpid(pid, 0)
-            exited = True
-            self.assertEqual(os.waitstatus_to_exitcode(status), 0, output)
+            status, remaining = wait_terminal(process, master, 5)
+            output.extend(remaining)
+            self.assertEqual(status, 0, output)
             return output.decode(errors="replace")
         finally:
-            if not exited:
+            if process.poll() is None:
                 owner = recovery / "task.owner.json"
                 if owner.exists():
                     group = json.loads(owner.read_text())["identity"]["pid"]
@@ -273,8 +275,13 @@ while True:time.sleep(.1)
                         os.killpg(group, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                os.killpg(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    # Darwin can remove the session's process group during exit
+                    # before the Popen child has become reapable.
+                    process.kill()
+                wait_terminal(process, master, 5)
             os.close(master)
 
     def test_owned_terminal_input_output_and_restore(self):

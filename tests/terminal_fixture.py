@@ -3,7 +3,19 @@
 import os
 import select
 import subprocess
+import sys
+import termios
 import time
+
+
+def terminal_modes(fd):
+    """Compare configured modes, not Darwin's pending-input bookkeeping bit."""
+    settings = termios.tcgetattr(fd)
+    if sys.platform == "darwin":
+        # XNU adds PENDIN when ICANON is restored, even with no queued input.
+        # The next input/read clears it. All actual mode bits remain checked.
+        settings[3] &= ~termios.PENDIN
+    return settings
 
 
 def wait_terminal(child, master, timeout):
