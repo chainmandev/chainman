@@ -2049,6 +2049,7 @@ def audit(
         for provider, package, value, _, _ in updates.lock_identities(
             root, list(specs), specs=specs
         ):
+            accepted_families: list[bool] = []
             for raw_bound in ad.array(
                 before.get("requirements", []), "Original requirements"
             ):
@@ -2059,13 +2060,24 @@ def audit(
                         provider, ad.text(bound["name"], "Package name")
                     )
                     == package
-                    and not accepts(
-                        provider, value, ad.text(bound["range"], "Package range")
-                    )
                 ):
-                    raise ValueError(
-                        "Resolved dependency escaped its original compatible range"
+                    accepted_families.append(
+                        accepts(
+                            provider, value, ad.text(bound["range"], "Package range")
+                        )
                     )
+            # Cargo may resolve multiple major versions of an aliased package.
+            # Each locked version must match one declared family; selected pins
+            # and exact Cargo identities are independently checked above.
+            compatible = (
+                any(accepted_families)
+                if provider == "crates"
+                else all(accepted_families)
+            )
+            if accepted_families and not compatible:
+                raise ValueError(
+                    "Resolved dependency escaped its original compatible range"
+                )
     updates.audit_locks(
         root,
         list(specs),
