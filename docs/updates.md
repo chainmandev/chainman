@@ -854,6 +854,9 @@ graph checkout with the admitted source bytes, committed Git blobs and exact
 revision. Changed source, lock identity, checkout, or materialization fails.
 Only this admitted source identity bypasses public release metadata lookup;
 unbound Swift dependencies retain their ordinary public evidence requirements.
+Native checkout schemas 6 and 7 retain the same exact source obligations.
+Candidate graphs qualify the default trait activation; prebuilt substitutions
+and other trait activations require separate support and fail this projection.
 Candidate-native build/import tests must run inside the projection scope:
 restoring the mirrors restores the consumer's public acquisition contract.
 

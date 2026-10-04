@@ -507,6 +507,11 @@ def mirrored_package(root: Path, url: str) -> str | None:
     )
 
 
+def requires_projection(root: Path, package: str) -> bool:
+    scope = _active.get()
+    return scope is not None and scope.key[0] == root and package in scope.repositories
+
+
 def graph_source(root: Path, url: str, path: Path, version: str) -> str | None:
     scope = _active.get()
     if scope is None or scope.key[0] != root:
@@ -589,14 +594,20 @@ def materialized(
         workspace = ad.table(
             json.loads(tc.regular_input(root, state_path)), "Swift workspace state"
         )
-        if workspace.get("version") != 6:
+        if workspace.get("version") not in {6, 7}:
             raise ValueError("Unsupported Swift candidate workspace state")
+        body = ad.table(workspace.get("object"), "Swift workspace")
+        # Swift 6.3 adds prebuilt dependency state without changing checkout
+        # coordinates. Candidate source qualification must not silently admit
+        # a prebuilt substitute for the source surface being checked.
+        if workspace.get("version") == 7 and body.get("prebuilts") != []:
+            raise ValueError(
+                "Swift candidate workspace has unqualified prebuilt sources"
+            )
         dependencies = [
             ad.table(d, "Swift workspace dependency")
             for d in ad.array(
-                ad.table(workspace.get("object"), "Swift workspace").get(
-                    "dependencies"
-                ),
+                body.get("dependencies"),
                 "Swift dependencies",
             )
         ]

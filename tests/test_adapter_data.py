@@ -360,6 +360,26 @@ class AdapterDataTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 data.swift_node({**child, field: False})
 
+    def test_swift_graph_validates_new_native_traits_without_relaxing_other_fields(
+        self,
+    ):
+        node = {
+            "identity": "root",
+            "name": "root",
+            "url": "/root",
+            "version": "unspecified",
+            "path": "/root",
+            "dependencies": [],
+        }
+        self.assertEqual(
+            data.swift_node({**node, "traits": ["default"]})["traits"], ["default"]
+        )
+        for traits in (None, False, [1], [""], ["default", "default"]):
+            with self.subTest(traits=traits), self.assertRaises(ValueError):
+                data.swift_node({**node, "traits": traits})
+        with self.assertRaises(ValueError):
+            data.swift_node({**node, "traits": ["default"], "unknown": True})
+
     def test_maven_routing_rejects_nonstring_configuration(self):
         for config in (
             {"maven_repositories": [["central"]]},
