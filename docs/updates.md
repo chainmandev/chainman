@@ -867,7 +867,10 @@ must include the aggregate `Package.swift` and its complete target/resource
 surface. The version authority is included automatically.
 
 The adapter stages those exact files in a disposable Git artifact with a
-deterministic commit and candidate-only version tag. Native SwiftPM mirrors bind
+deterministic commit and candidate-only version tag. Its temporary repository
+uses a canonical filesystem path even when the host temporary directory is an
+alias; admitted source files and Git administration still cannot be symlinks.
+Native SwiftPM mirrors bind
 the existing public URL to this artifact during resolution and audit. The public
 URL and version declaration remain unchanged. Existing unrelated mirror bytes
 and full permissions are restored; conflicting mirrors or unexpected changes

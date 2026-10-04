@@ -89,6 +89,28 @@ class SwiftSourceTests(unittest.TestCase):
         self.assertEqual(self.mirrors.read_bytes(), before)
         self.assertEqual(self.mirrors.stat().st_mode & 0o777, 0o640)
 
+    def test_projection_canonicalizes_its_owned_temporary_directory(self):
+        temporary_root = self.root / "real temporary directory"
+        temporary_root.mkdir()
+        alias = self.root / "temporary alias"
+        alias.symlink_to(temporary_root, target_is_directory=True)
+        with patch.object(tempfile, "tempdir", str(alias)):
+            with sources.bind(self.root, self.spec) as scope:
+                repository = scope.repositories["neutral/owned"]
+                self.assertTrue(repository.is_relative_to(temporary_root))
+                self.assertEqual(repository, repository.resolve())
+                self.assertEqual(
+                    sources.git(repository, "rev-parse", "--show-toplevel"),
+                    str(repository),
+                )
+                self.assertEqual(
+                    json.loads(self.mirrors.read_text())["object"][0]["mirror"],
+                    repository.as_uri(),
+                )
+        self.assertFalse(self.mirrors.exists())
+        self.assertFalse(repository.exists())
+        self.assertEqual(list(temporary_root.iterdir()), [])
+
     def test_conflicting_mirror_is_rejected_without_changes(self):
         self.mirrors.parent.mkdir(parents=True)
         before = b'{"version":1,"object":[{"original":"https://github.com/neutral/owned.git","mirror":"file:///tmp/other"}]}\n'

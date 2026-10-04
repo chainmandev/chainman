@@ -399,7 +399,9 @@ def bind(
         ) as temporary:
             if project:
                 for name, binding in scope.bindings.items():
-                    repository = Path(temporary) / name
+                    # Git reports the physical checkout path even when the host
+                    # temporary directory uses an alias (for example on macOS).
+                    repository = Path(temporary).resolve() / name
                     repository.mkdir(parents=True)
                     for source_name, (body, mode) in binding.files.items():
                         destination = repository / source_name
