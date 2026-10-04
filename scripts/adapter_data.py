@@ -329,14 +329,23 @@ class SwiftNode(TypedDict):
     version: str
     path: str
     dependencies: list[object]
+    traits: NotRequired[list[str]]
 
 
 def swift_node(value: object) -> SwiftNode:
     node = table(value, "SwiftPM graph node")
-    if set(node) != {"identity", "name", "url", "version", "path", "dependencies"}:
+    fields = {"identity", "name", "url", "version", "path", "dependencies"}
+    if set(node) not in (fields, fields | {"traits"}):
         raise ValueError("Malformed SwiftPM resolved graph node")
+    traits = (
+        [nonempty(t, "SwiftPM trait") for t in array(node["traits"], "SwiftPM traits")]
+        if "traits" in node
+        else None
+    )
+    if traits is not None and len(traits) != len(set(traits)):
+        raise ValueError("Duplicate SwiftPM graph trait")
     # Decode one level at a time: the adapter traverses the graph iteratively.
-    return {
+    result: SwiftNode = {
         "identity": nonempty(node["identity"], "SwiftPM identity"),
         "name": nonempty(node["name"], "SwiftPM name"),
         "url": nonempty(node["url"], "SwiftPM url"),
@@ -344,3 +353,6 @@ def swift_node(value: object) -> SwiftNode:
         "path": nonempty(node["path"], "SwiftPM path"),
         "dependencies": array(node["dependencies"], "SwiftPM dependencies"),
     }
+    if traits is not None:
+        result["traits"] = traits
+    return result

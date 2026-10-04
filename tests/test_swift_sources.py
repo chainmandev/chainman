@@ -412,3 +412,44 @@ class NativeSwiftSourceTests(unittest.TestCase):
             lock.write_text(json.dumps(state))
             with self.assertRaisesRegex(ValueError, "lock identity"):
                 native.audit(self.root, self.spec, before, {}, self.now)
+
+    def test_native_workspace_schema_seven_keeps_exact_source_obligations(self):
+        before = native.snapshot(self.root, self.spec)
+        with self.evidence():
+            before["resolution"] = native.resolve(self.root, self.spec, {}, self.now)
+            path = self.consumer / ".build/workspace-state.json"
+            state = json.loads(path.read_text())
+            state["version"] = 7
+            state["object"]["prebuilts"] = []
+            path.write_text(json.dumps(state))
+            native.audit(self.root, self.spec, before, {}, self.now)
+            state["object"]["prebuilts"] = [{"unqualified": True}]
+            path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(ValueError, "prebuilt sources"):
+                native.audit(self.root, self.spec, before, {}, self.now)
+            state["version"] = 8
+            path.write_text(json.dumps(state))
+            with self.assertRaisesRegex(ValueError, "Unsupported"):
+                native.audit(self.root, self.spec, before, {}, self.now)
+
+    def test_graph_mirror_and_default_traits_remain_required(self):
+        before = native.snapshot(self.root, self.spec)
+        with self.evidence():
+            before["resolution"] = native.resolve(self.root, self.spec, {}, self.now)
+            for changed, message in (
+                ({"url": "https://github.com/neutral/owned.git"}, "source mirror"),
+                ({"traits": ["unexpected"]}, "unqualified traits"),
+            ):
+
+                def evaluate(root, profile, argv, **kwargs):
+                    value = json.loads(self.command(argv).stdout)
+                    if "show-dependencies" in argv:
+                        value["dependencies"][0].update(changed)
+                    return value
+
+                with (
+                    self.subTest(changed=changed),
+                    patch.object(lock_adapters, "native", side_effect=evaluate),
+                    self.assertRaisesRegex(ValueError, message),
+                ):
+                    native.audit(self.root, self.spec, before, {}, self.now)

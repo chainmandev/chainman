@@ -1095,6 +1095,13 @@ def validate_swift_graph(
         package = swift_sources.graph_source(root, node["url"], path, node["version"])
         if package is None:
             package = swift_repository(node["url"])
+            if swift_sources.requires_projection(root, package):
+                raise ValueError(
+                    "Swift candidate graph lost its admitted source mirror"
+                )
+        else:
+            if node.get("traits", ["default"]) != ["default"]:
+                raise ValueError("Swift candidate graph has unqualified traits")
         return ("remote", package)
 
     if identity(graph) != ("local", str(directory)):
