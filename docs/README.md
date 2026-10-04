@@ -11,6 +11,7 @@
 | [Git hooks](hooks.md) | Complete setup, formatter-only commits, partial staging and outgoing-source checks |
 | [Services](services.md) | Readiness, ownership, persistent data, and cleanup |
 | [Updates](updates.md) | Configure adapters, temporary security exceptions, preview, qualification and recovery |
+| [Candidate exports](candidate-exports.md) | Capture accepted dependency outputs for automation and independent source repair |
 | [Runtime](runtime.md) | Host/container modes, caches, and native SDK boundaries |
 | [Troubleshooting](troubleshooting.md) | Diagnose bootstrap, setup, service, and update failures |
 | [Release trust](release-trust.md) | Understand what a Git pin establishes |

@@ -2,6 +2,10 @@
 
 [Guide index](README.md) · [Getting started](getting-started.md) · [Troubleshooting](troubleshooting.md)
 
+For automation that needs dependency output without applying it, use
+[`deps-update --export-candidate DIR`](candidate-exports.md). It preserves accepted
+bytes before verification, including when verification fails.
+
 `just chainman deps-check` validates the configured adapter names and
 ordered update steps without resolving dependencies, running hooks, or requiring
 a clean Git checkout. It accepts the same selection arguments as the resolver,

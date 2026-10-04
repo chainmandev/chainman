@@ -558,6 +558,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             "_update-tasks",
             "_update-resume",
             "_update-reaudit",
+            "_update-export-start",
+            "_update-export-stage",
+            "_update-export-capture",
+            "_update-export-finish",
         }:
             if any(
                 importlib.util.find_spec(name) is None
@@ -575,7 +579,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "--no-write-lock-file",
                         "--command",
                         "python3",
-                        str(RUNTIME / "scripts/chainman.py"),
+                        "-I",
+                        "-B",
+                        str(RUNTIME / "scripts/isolated.py"),
+                        "chainman.py",
                         "--root",
                         str(root),
                         args.action,
@@ -592,6 +599,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             import update_staging
 
             return update_staging.run(root, args.action, args.arguments)
+        if args.action in {"candidate-check", "_candidate-check"}:
+            import candidate_export
+
+            return candidate_export.main(args.arguments)
         if args.action in {"_hook-export", "_hook-worker", "_hooks-config"}:
             import hook_worker
 

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import stat
 from pathlib import Path
 import re
 import shutil
@@ -12,6 +14,42 @@ import tempfile
 import toolchain as tc
 
 REPOSITORY = "https://github.com/chainmandev/chainman.git"
+
+
+def tree_identity(root: Path) -> str:
+    """Hash an already verified regular-file runtime without fetching objects."""
+
+    def object_id(kind: bytes, body: bytes) -> bytes:
+        return hashlib.sha1(
+            kind + b" " + str(len(body)).encode() + b"\0" + body
+        ).digest()
+
+    def tree(directory: Path) -> bytes:
+        entries = []
+        for path in directory.iterdir():
+            mode = path.lstat().st_mode
+            name = os.fsencode(path.name)
+            if stat.S_ISDIR(mode):
+                entries.append((name + b"/", b"40000 " + name + b"\0" + tree(path)))
+            elif stat.S_ISREG(mode):
+                permissions = b"100755" if mode & stat.S_IXUSR else b"100644"
+                entries.append(
+                    (
+                        name,
+                        permissions
+                        + b" "
+                        + name
+                        + b"\0"
+                        + object_id(b"blob", path.read_bytes()),
+                    )
+                )
+            else:
+                raise ValueError(
+                    "Runtime identity requires only regular files and directories"
+                )
+        return object_id(b"tree", b"".join(body for _, body in sorted(entries)))
+
+    return tree(root).hex()
 
 
 def pin(body: bytes) -> str:
@@ -116,11 +154,26 @@ def objects(revision: str) -> Path:
     return cache
 
 
-def materialize(revision: str, destination: Path) -> None:
+def materialize(
+    revision: str, destination: Path, *, repository: Path | None = None
+) -> None:
     """Export blobs directly: attributes, filters and cached checkouts have no role."""
-    cache = objects(revision)
-    selected = "--git-dir=" + str(cache)
-    tree = git(selected, "ls-tree", "-rz", revision)
+    selection = (
+        ("-C", str(repository))
+        if repository is not None
+        else ("--git-dir=" + str(objects(revision)),)
+    )
+    pin((revision + "\n").encode())
+    if git(*selection, "cat-file", "-t", revision).strip() != b"commit":
+        raise ValueError("Runtime must identify a Git commit")
+    if repository is not None:
+        body = git(*selection, "cat-file", "commit", revision)
+        commit_identity = hashlib.sha1(
+            b"commit " + str(len(body)).encode() + b"\0" + body
+        ).hexdigest()
+        if commit_identity != revision:
+            raise ValueError("Local runtime commit bytes do not match their identity")
+    tree = git(*selection, "ls-tree", "-rz", revision)
     entries = []
     for record in tree.split(b"\0"):
         if not record:
@@ -137,7 +190,7 @@ def materialize(revision: str, destination: Path) -> None:
             raise ValueError("Runtime tree requires ordinary contained files")
         entries.append((path, mode, oid))
     blobs = git(
-        selected,
+        *selection,
         "cat-file",
         "--batch",
         input=b"".join(oid + b"\n" for _, _, oid in entries),
@@ -161,12 +214,19 @@ def materialize(revision: str, destination: Path) -> None:
         target.chmod(0o755 if mode == b"100755" else 0o644)
     if offset != len(blobs):
         raise ValueError("Git returned unexpected runtime data")
+    if repository is not None:
+        expected = git(*selection, "rev-parse", revision + "^{tree}").decode().strip()
+        if tree_identity(destination) != expected:
+            raise ValueError("Local runtime tree bytes do not match their identity")
 
 
-def store(revision: str, *, gc_root: Path) -> Path:
+def store(revision: str, *, gc_root: Path, repository: Path | None = None) -> Path:
     with tempfile.TemporaryDirectory(prefix="chainman-git-source-") as temporary:
         source = Path(temporary) / "source"
-        materialize(revision, source)
+        if repository is None:
+            materialize(revision, source)
+        else:
+            materialize(revision, source, repository=repository)
         expected = tc.managed_run(
             [
                 tc.nix_command(),

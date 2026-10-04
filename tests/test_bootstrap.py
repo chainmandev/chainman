@@ -65,7 +65,7 @@ class BootstrapTests(unittest.TestCase):
             cls.addClassCleanup(cls.cleanup_store)
         cls.tree = Path(cls.shared.name).resolve() / "runtime"
         (cls.tree / "scripts").mkdir(parents=True)
-        for name in ("toolchain.py", "adapter_data.py", "storage.py"):
+        for name in ("toolchain.py", "adapter_data.py", "storage.py", "isolated.py"):
             shutil.copy2(SOURCE / "scripts" / name, cls.tree / "scripts" / name)
         shutil.copytree(SOURCE / "nix", cls.tree / "nix")
         (cls.tree / "scripts/chainman.py").write_text(
@@ -204,13 +204,14 @@ class BootstrapTests(unittest.TestCase):
     def write_lock(self):
         (self.root / "chainman.lock").write_text(self.lock + "\n")
 
-    def run_bootstrap(self, *args, check=True, env=None):
+    def run_bootstrap(self, *args, check=True, env=None, timeout=180):
         args = args or ("status",)
         self.prepare_cache(env or self.env)
         result = run_captured(
             [str(self.launcher), *args],
             cwd="/",
             env=env or self.env,
+            timeout=timeout,
         )
         if check and result.returncode:
             self.fail(result.stdout + result.stderr)
@@ -531,6 +532,212 @@ format-check=["format-check"]
         self.assertEqual(unchanged["verification"], "no changes")
         self.assertIsNone(unchanged["commit"])
         self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+
+    def test_public_candidate_export_success_failure_and_no_change(self):
+        self.candidate_export_lifecycle()
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "explicit container qualification"
+    )
+    def test_container_candidate_export_success_failure_and_no_change(self):
+        self.candidate_export_lifecycle(container=True)
+
+    def candidate_export_lifecycle(self, *, container=False):
+        self.update_lifecycle()
+        if container:
+            self.env.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            )
+        runtime = self.root / "real-runtime"
+        # This test qualifies the real public transport/stages with a built-in
+        # adapter. Provider selection is deterministic fixture data; its live
+        # eligibility algorithm has independent source-adapter tests.
+        with (runtime / "scripts/source_updates.py").open("a") as stream:
+            stream.write(
+                "\ndef select_action(*args, **kwargs):\n    return {'revision': '"
+                + "b" * 40
+                + "', 'version': '2.0.0', 'tag': 'v2.0.0'}\n"
+            )
+        if container:
+            # Inspection fetches the pin inside the container's private cache.
+            # Redirect only Git transport to a real, mounted fixture repository.
+            remote = self.root / "fixture.git"
+            resolver = runtime / "scripts/git_runtime.py"
+            resolver.write_text(
+                resolver.read_text().replace(
+                    'REPOSITORY = "https://github.com/chainmandev/chainman.git"',
+                    "REPOSITORY = " + json.dumps(remote.as_uri()),
+                )
+            )
+            with (self.root / ".gitignore").open("a") as stream:
+                stream.write("fixture.git/\n")
+        self.pin_runtime(runtime)
+        if container:
+            shutil.copytree(self.repositories[self.lock], remote)
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[updates]
+outputs=["workflow.yml"]
+verify_task="verify"
+[updates.adapters.actions]
+adapter="actions"
+files=["workflow.yml"]
+[[updates.steps]]
+resolve="actions"
+[tasks.verify]
+commands=[["python3", "verify.py"]]
+""")
+        (self.root / "workflow.yml").write_text(
+            "steps:\n  - uses: neutral/fixture@" + "a" * 40 + " # v1.0.0\n"
+        )
+        (self.root / "verify.py").write_text(
+            "from pathlib import Path\nassert '"
+            + "b" * 40
+            + "' in Path('workflow.yml').read_text()\n"
+        )
+        self.lifecycle_git("add", ".")
+        self.lifecycle_git("commit", "-qm", "Declare export fixture")
+        for case in ("success", "failure", "no-change"):
+            if case == "failure":
+                (self.root / "verify.py").write_text(
+                    "from pathlib import Path\nPath('workflow.yml').write_text('verifier mutation')\nraise SystemExit(23)\n"
+                )
+            if case == "no-change":
+                (self.root / "workflow.yml").write_text(
+                    "steps:\n  - uses: neutral/fixture@" + "b" * 40 + " # v2.0.0\n"
+                )
+            self.lifecycle_git("add", ".")
+            self.lifecycle_git("commit", "--allow-empty", "-qm", case)
+            before = self.lifecycle_git("rev-parse", "HEAD")
+            target = Path(self.shared.name).resolve() / ("candidate-export-" + case)
+            result = self.run_bootstrap(
+                "deps-update",
+                "--skip-chainman",
+                "--export-candidate",
+                str(target),
+                check=case != "failure",
+                # Cold container startup includes a fresh pinned Nix toolchain.
+                timeout=600 if container else 180,
+            )
+            outcome = json.loads(result.stdout)
+            self.assertEqual(
+                outcome["outcome"],
+                {
+                    "success": "verified_success",
+                    "failure": "accepted_verification_failed",
+                    "no-change": "complete_no_change",
+                }[case],
+            )
+            if case == "failure":
+                self.assertNotEqual(result.returncode, 0)
+            manifest = json.loads((target / "snapshot.json").read_text())
+            self.assertEqual(manifest["runtimes"]["entry"]["commit"], self.lock)
+            self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+            self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+            checked = self.run_bootstrap("candidate-check", str(target))
+            self.assertEqual(json.loads(checked.stdout), outcome)
+            if case != "no-change":
+                row = manifest["outputs"][0]
+                self.assertIn(
+                    b"b" * 40, (target / "blobs" / row["sha256"]).read_bytes()
+                )
+
+    def test_public_candidate_export_rejects_unaudited_hook_targets(self):
+        before = self.update_lifecycle()
+        target = Path(self.shared.name).resolve() / "candidate-unsupported"
+        result = self.run_bootstrap(
+            "deps-update",
+            "--skip-chainman",
+            "--export-candidate",
+            str(target),
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "unsupported")
+        self.assertFalse((target / "snapshot.json").exists())
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
+
+    def test_source_candidate_export_uses_exact_local_runtime(self):
+        runtime = self.use_real_runtime()
+        with (runtime / "scripts/source_updates.py").open("a") as stream:
+            stream.write(
+                "\ndef select_action(*args, **kwargs):\n    return {'revision': '"
+                + "b" * 40
+                + "', 'version': '2.0.0', 'tag': 'v2.0.0'}\n"
+            )
+        (runtime / "toolchain.toml").write_text(
+            'schema=1\nmodules=["core"]\n[updates]\noutputs=["workflow.yml"]\n'
+        )
+        (runtime / "dependencies.toml").write_text("""[nix]
+enabled=false
+[docker]
+enabled=false
+[[pins]]
+provider="github"
+representation="action"
+name="neutral/fixture"
+file="workflow.yml"
+""")
+        (runtime / "modules/core.toml").write_text("""name="core"
+profile="core"
+directory="."
+[commands]
+setup=[["true"]]
+verify=[["python3", "verify.py"]]
+""")
+        (runtime / "workflow.yml").write_text(
+            "steps:\n  - uses: neutral/fixture@" + "a" * 40 + " # v1.0.0\n"
+        )
+        (runtime / "verify.py").write_text(
+            "from pathlib import Path\nassert '"
+            + "b" * 40
+            + "' in Path('workflow.yml').read_text()\n"
+        )
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("CHAINMAN_", "TOOLCHAIN_", "GIT_"))
+        }
+        env["XDG_CACHE_HOME"] = str(Path(self.shared.name).resolve() / "source-cache")
+
+        def git(*args):
+            return subprocess.check_output(
+                ["git", "-C", str(runtime), *args], env=env, text=True
+            ).strip()
+
+        git("init", "-qb", "main")
+        git("config", "user.name", "Fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "commit.gpgsign", "false")
+        git("config", "core.hooksPath", "/dev/null")
+        git("add", ".")
+        git("commit", "-qm", "Source fixture")
+        revision = git("rev-parse", "HEAD")
+        target = Path(self.shared.name).resolve() / "source-export"
+        result = run_captured(
+            [
+                shutil.which("just"),
+                "--justfile",
+                str(runtime / "justfile"),
+                "deps-update",
+                "--export-candidate",
+                str(target),
+            ],
+            env=env,
+            timeout=300,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["outcome"], "verified_success")
+        manifest = json.loads((target / "snapshot.json").read_text())
+        self.assertEqual(manifest["runtime_kind"], "source")
+        self.assertEqual(manifest["runtimes"]["entry"]["commit"], revision)
+        self.assertEqual(
+            manifest["runtimes"]["entry"]["tree"], git("rev-parse", "HEAD^{tree}")
+        )
+        self.assertEqual(git("status", "--porcelain"), "")
 
     def test_public_update_lifecycle_preserves_failure_and_reverifies_resume(self):
         before = self.update_lifecycle(reject=True)
@@ -1549,7 +1756,10 @@ check=["true"]
     def test_public_full_update_failure_resumes_with_the_same_runtime(self):
         self.runtime_update_lifecycle("deps-update", reject=True)
 
-    def runtime_update_lifecycle(self, action, *, reject=False):
+    def test_public_candidate_export_reports_selected_runtime(self):
+        self.runtime_update_lifecycle("deps-update", export_candidate=True)
+
+    def runtime_update_lifecycle(self, action, *, reject=False, export_candidate=False):
         self.update_lifecycle()
         temporary = tempfile.TemporaryDirectory(prefix="chainman release fixture ")
         self.addCleanup(temporary.cleanup)
@@ -1628,7 +1838,35 @@ check=["true"]
                 "exec", "--profile", "host", "--", "python3", "-c", probe
             ).stdout.strip()
         )
-        result = self.run_bootstrap(action, "--json", check=not reject)
+        target = Path(temporary.name).resolve() / "runtime-export"
+        arguments = (
+            ["--only-chainman", "--export-candidate", str(target)]
+            if export_candidate
+            else ["--json"]
+        )
+        result = self.run_bootstrap(action, *arguments, check=not reject)
+        if export_candidate:
+            self.assertEqual(json.loads(result.stdout)["outcome"], "verified_success")
+            manifest = json.loads((target / "snapshot.json").read_text())
+            self.assertEqual(manifest["runtimes"]["entry"]["commit"], old_revision)
+            for stage in ("resolution", "verification"):
+                self.assertEqual(manifest["runtimes"][stage]["commit"], revision)
+            self.assertEqual(manifest["selection"]["runtime"], "only")
+            self.assertEqual(manifest["selection"]["adapters"], [])
+            self.assertEqual(
+                [row["path"] for row in manifest["outputs"]], ["chainman.lock"]
+            )
+            row = manifest["outputs"][0]
+            self.assertEqual(
+                (target / "blobs" / row["sha256"]).read_text(), revision + "\n"
+            )
+            self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+            self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+            self.assertEqual(
+                (self.root / "chainman.lock").read_text().strip(), old_revision
+            )
+            self.assertIn("fixture phase: verify", result.stderr)
+            return
         if reject:
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("fixture runtime verification rejected", result.stderr)

@@ -393,6 +393,11 @@ def options(args: list[str]) -> Options:
         action="store_true",
         help="Write one schema-1 JSON result; send command output to stderr",
     )
+    # Parsed by the outer coordinator so older selected consumer runtimes never
+    # receive an option belonging to the exporting runtime.
+    parser.epilog = (
+        "Use --export-candidate DIR for a detached, non-applying update result."
+    )
     parser.add_argument("--message", default="chore: update dependencies")
     runtime_flags = parser.add_mutually_exclusive_group()
     runtime_flags.add_argument(

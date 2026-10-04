@@ -28,6 +28,7 @@ BUILTINS = {
     "hooks": ["hooks"],
     "trojan-source": ["trojan-source"],
     "deps-update": ["deps-update"],
+    "candidate-check": ["candidate-check"],
     "chainman-update": ["chainman-update"],
     "cache-status": ["cache-status"],
     "cache-prune": ["cache-prune"],

@@ -228,6 +228,8 @@ def entry_command(root: Path, profile: str) -> list[str]:
             profile,
             "--",
         ]
+    if os.environ.get("CHAINMAN_SOURCE_EXPORT_RUNTIME") == str(RUNTIME):
+        return [str(RUNTIME / "scripts/enter.sh"), profile, "--project-root", str(root)]
     return [str(root / "scripts/enter.sh"), profile]
 
 

@@ -1043,8 +1043,17 @@ def perform(root: Path, now: datetime, selected: list[str]) -> None:
     managed_run(
         [
             *entry_command(root, "core"),
-            "python3",
-            str(RUNTIME / "scripts/updates.py"),
+            *(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(RUNTIME / "scripts/isolated.py"),
+                    "updates.py",
+                ]
+                if os.environ.get("CHAINMAN_SOURCE_EXPORT_RUNTIME") == str(RUNTIME)
+                else ["python3", str(RUNTIME / "scripts/updates.py")]
+            ),
             "--resolve-at",
             now.isoformat(),
             "--modules",

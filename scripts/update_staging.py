@@ -383,6 +383,8 @@ def read_state(root: Path, destination: Path) -> tuple[State, Path]:
 
 def resume(root: Path, destination: Path) -> None:
     """Admit edited candidate sources without trusting previous verification."""
+    if (destination / "control/export.json").exists():
+        raise ValueError("Export transactions cannot resume; start a fresh export")
     state, candidate = read_state(root, destination)
     with tc.operation(root):
         unchanged(root, state)
@@ -623,6 +625,8 @@ def inspect(root: Path, destination: Path) -> None:
 
 
 def finalize(root: Path, destination: Path) -> None:
+    if (destination / "control/export.json").exists():
+        raise ValueError("Export transactions cannot apply or commit")
     state, candidate = read_state(root, destination)
     inspected = state.require_inspection()
     with updates.preview_git_environment(), tc.operation(candidate):
@@ -689,6 +693,33 @@ def finalize(root: Path, destination: Path) -> None:
 
 
 def run(root: Path, action: str, args: list[str]) -> int:
+    if action.startswith("_update-export-"):
+        import candidate_export as export
+
+        if not args:
+            raise ValueError("Missing export transaction")
+        destination = directory(args[0])
+        if action == "_update-export-start" and len(args) >= 2:
+            export.split_arguments(["--export-candidate", args[1], *args[2:]])
+            export.start(root, destination, args[1], source=False, created=True)
+        elif action == "_update-export-stage" and len(args) == 2:
+            export.stage(destination, args[1])
+        elif action == "_update-export-capture" and len(args) == 1:
+            try:
+                export.capture(root, destination)
+            except export.Unsupported:
+                tc.atomic_bytes(destination / "control/export-unsupported", b"yes\n")
+                raise
+        elif action == "_update-export-finish" and len(args) == 2:
+            return export.finish(
+                root,
+                destination,
+                int(args[1]),
+                unsupported=(destination / "control/export-unsupported").exists(),
+            )
+        else:
+            raise ValueError("Invalid candidate export phase")
+        return 0
     if action == "_update-reaudit" and args:
         reaudit(root, args[0], args[1:])
         return 0

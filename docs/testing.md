@@ -58,6 +58,18 @@ history, same-version/different-SHA updates, unchanged pins, pin copies, failed
 source acquisition, and frozen selection across branch movement and resume.
 Project dependency age enforcement has separate regression coverage.
 
+Candidate export tests cover acceptance before verification, failed and mutating
+verifiers, interrupted publication, corruption, unsafe destinations, exact file
+bytes/modes/deletions, and reconstruction in a fresh repair checkout. Public
+host-Nix fixtures exercise both source and consumer entrypoints; the source case
+uses an unpublished local commit imported into the Nix store. The opt-in container
+suite repeats consumer success, verification failure and no-change exports using
+real Git transport and a deterministic provider selection fixture. These checks
+qualify the export boundary, not the bot's repair policy, sandbox or publication.
+The runtime-only fixture selects a real Git revision, verifies with that runtime,
+and checks the bundle's entry, resolution and verification identities while the
+original consumer pin stays unchanged.
+
 Real lifecycle tests run Git-pinned runtimes through Nix. They must demonstrate
 successful updates and cleanup, failed candidates, interruption/resume, and runtime
 upgrades that leave the consumer bootstrap byte-identical. Native service tests add

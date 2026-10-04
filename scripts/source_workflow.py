@@ -5,6 +5,7 @@ the installed consumer's lock/bootstrap entry; candidate ownership is shared.
 """
 
 import os
+import subprocess
 from pathlib import Path
 import sys
 
@@ -14,6 +15,7 @@ import toolchain as tc
 import update_staging as staging
 import updates
 import update_cache
+import candidate_export as export
 from adapter_data import strings
 
 
@@ -40,6 +42,9 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         raise ValueError("Expected format or deps-update")
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start an update")
+    export_target, arguments = export.split_arguments(arguments)
+    if export_target is not None and action != "deps-update":
+        raise ValueError("Only dependency updates support candidate export")
     if action == "format" and arguments == ["commit=off"]:
         format_source(root)
         return
@@ -55,6 +60,10 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
             chainman_updates.options(
                 (["--format"] if action == "format" else []) + arguments
             )
+        if export_target is not None:
+            updates.repository(root, clean=True)
+            export_target = str(export.directory(root / export_target))
+            arguments = ["--export-candidate", export_target, *arguments]
         update_cache.run(root, action, arguments)
         return
     if resumed:
@@ -82,6 +91,8 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         destination = staging.directory(Path(os.environ["CHAINMAN_UPDATE_TRANSACTION"]))
         for name in ("candidate", "control"):
             (destination / name).mkdir()
+    if export_target is not None:
+        export.start(root, destination, export_target, source=True)
     try:
         if resumed:
             state, _ = staging.read_state(root, destination)
@@ -94,7 +105,15 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         else:
             staging.prepare(root, destination, arguments, source=True)
         state, candidate = staging.read_state(root, destination)
+        runtime_revision = os.environ.get("CHAINMAN_SOURCE_EXPORT_REVISION")
+        if (
+            export_target is not None
+            and runtime_revision is not None
+            and state.identity[1] != runtime_revision
+        ):
+            raise ValueError("Source base changed after the runtime was captured")
         opts = chainman_updates.options(arguments)
+        export.stage(destination, "resolution")
         with updates.preview_git_environment(), updates.operation(candidate):
             if opts.format:
                 format_source(candidate, staged=opts.staged)
@@ -106,8 +125,11 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
                     state.at,
                     strings(tc.config(candidate)["modules"], "Modules"),
                 )
+        export.stage(destination, "inspection")
         staging.inspect(root, destination)
+        export.capture(root, destination)
         state, candidate = staging.read_state(root, destination)
+        export.stage(destination, "verification")
         if state.require_inspection().paths:
             with updates.preview_git_environment(), updates.operation(candidate):
                 if opts.format:
@@ -116,8 +138,29 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
                     updates.verify(
                         candidate, strings(tc.config(candidate)["modules"], "Modules")
                     )
-        staging.finalize(root, destination)
-    except BaseException:
+        if export_target is not None:
+            code = export.finish(root, destination, 0)
+            if code:
+                raise SystemExit(code)
+        else:
+            staging.finalize(root, destination)
+    except BaseException as error:
+        if export_target is not None:
+            code = (
+                error.returncode
+                if isinstance(error, subprocess.CalledProcessError)
+                else 130
+                if isinstance(error, KeyboardInterrupt)
+                else 1
+            )
+            # finish() already recorded a detected verifier mutation.
+            if not isinstance(error, SystemExit):
+                export.finish(
+                    root,
+                    destination,
+                    code,
+                    unsupported=isinstance(error, export.Unsupported),
+                )
         if legacy:
             print(
                 f"Chainman: legacy temporary candidate at {destination}/candidate; not a backup; resume with: just {action} resume={destination}",

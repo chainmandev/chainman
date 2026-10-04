@@ -5,6 +5,12 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 profile=${1:-core}
 [ "$#" -eq 0 ] || shift
+if [ "${1:-}" = --project-root ]; then
+    [ "$#" -ge 2 ] || exit 2
+    # Runtime code chose this explicit input; never execute a candidate launcher.
+    root=$(CDPATH='' cd -P -- "$2" && pwd)
+    shift 2
+fi
 case "$profile" in core | bootstrap | updates | release | javascript | rust | python | go | flutter | swift | compose | browser | control | hooks | format-text | format-rust) ;; *)
     echo 'Unknown development profile.' >&2
     exit 2

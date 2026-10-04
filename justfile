@@ -45,7 +45,11 @@ module name action="verify":
     @./scripts/enter.sh core python3 scripts/toolchain.py module "$@"
 
 deps-update *args:
-    @./scripts/enter.sh core python3 scripts/source_workflow.py deps-update "$@"
+    @./scripts/enter.sh core python3 -I -B scripts/isolated.py source_workflow.py deps-update "$@"
+
+# Read a detached bundle without executing project code or applying its outputs.
+candidate-check directory:
+    @./scripts/enter.sh core python3 -I -B scripts/isolated.py candidate_export.py "$1"
 
 cache-status:
     @./scripts/enter.sh core python3 scripts/toolchain.py cache-status

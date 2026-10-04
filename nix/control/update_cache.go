@@ -530,7 +530,12 @@ func updateRun(base, resume, action string, argv []string) int {
 	}
 	if result != 0 {
 		if _, err = os.Stat(path); err == nil {
-			fmt.Fprintf(os.Stderr, "Chainman: temporary candidate at %s/candidate; disposable, not a backup. Retention: up to 24 hours / 12 GiB across idle candidates. Resume is best-effort: just %s %s\n", path, action, quote("resume="+path))
+			fmt.Fprintf(os.Stderr, "Chainman: temporary candidate at %s/candidate; disposable, not a backup. Retention: up to 24 hours / 12 GiB across idle candidates. ", path)
+			if _, exportErr := os.Lstat(filepath.Join(path, "control/export.json")); exportErr == nil {
+				fmt.Fprintln(os.Stderr, "Export transactions cannot resume; inspect the external bundle and start a fresh export.")
+			} else {
+				fmt.Fprintf(os.Stderr, "Resume is best-effort: just %s %s\n", action, quote("resume="+path))
+			}
 		} else {
 			fmt.Fprintln(os.Stderr, "Chainman: temporary candidate discarded by retention policy; no resume is available.")
 		}

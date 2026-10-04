@@ -242,6 +242,7 @@ func TestUpdateCacheCommandSuccessFailureAndOversize(t *testing.T) {
 	}{
 		{"success", "test -n \"$CHAINMAN_UPDATE_LEASE_FD\"; mkdir \"$CHAINMAN_UPDATE_TRANSACTION/candidate\"", 0, false},
 		{"failure", "mkdir \"$CHAINMAN_UPDATE_TRANSACTION/candidate\"; exit 17", 17, true},
+		{"export", "mkdir \"$CHAINMAN_UPDATE_TRANSACTION/control\"; touch \"$CHAINMAN_UPDATE_TRANSACTION/control/export.json\"; exit 23", 23, true},
 		{"oversize", "truncate -s 13958643712 \"$CHAINMAN_UPDATE_TRANSACTION/large\"; exit 19", 19, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -267,6 +268,9 @@ func TestUpdateCacheCommandSuccessFailureAndOversize(t *testing.T) {
 			}
 			if test.want != 0 && !test.retained && strings.Contains(string(out), "resume=") {
 				t.Fatal("printed expired resume")
+			}
+			if test.name == "export" && (strings.Contains(string(out), "resume=") || !strings.Contains(string(out), "inspect the external bundle")) {
+				t.Fatal("export advertised an unsupported recovery command")
 			}
 		})
 	}

@@ -249,6 +249,36 @@ update_worker() {
     # Fixed phases only. Host shell orchestration needs neither host Python nor
     # an engine socket in the resolver or verifier containers.
     umask 077
+    update_export=
+    update_count=$#
+    while [ "$update_count" -gt 0 ]; do
+        update_arg=$1
+        shift
+        update_count=$((update_count - 1))
+        case "$update_arg" in
+            --export-candidate)
+                [ -z "$update_export" ] && [ "$update_count" -gt 0 ] || fail 'Specify one --export-candidate DIR.'
+                update_export=$1
+                shift
+                update_count=$((update_count - 1))
+                [ -n "$update_export" ] || fail 'Export destination must not be empty.'
+                ;;
+            --export-candidate=*)
+                [ -z "$update_export" ] || fail 'Specify one --export-candidate DIR.'
+                update_export=${update_arg#*=}
+                [ -n "$update_export" ] || fail 'Export destination must not be empty.'
+                ;;
+            *) set -- "$@" "$update_arg" ;;
+        esac
+    done
+    if [ -n "$update_export" ]; then
+        case "$update_export" in /*) ;; *) update_export=$root/$update_export ;; esac
+        single_line "$update_export"
+        case "$update_export" in *,*) fail 'Export path cannot contain commas.' ;; esac
+        for update_arg in "$@"; do
+            case "$update_arg" in resume=*) fail 'Export cannot resume a retained transaction.' ;; esac
+        done
+    fi
     update_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates
     update_resume=0
     case "${1:-}" in
@@ -271,6 +301,24 @@ update_worker() {
     fi
     printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
     : > "$update_output/control/candidate-mounts"
+    if [ -n "$update_export" ]; then
+        export_parent=$(CDPATH='' cd -P -- "$(dirname -- "$update_export")" && pwd)
+        [ "$export_parent/$(basename -- "$update_export")" = "$update_export" ] || fail 'Export path must not contain aliases or traversal.'
+        physical_cache=$(CDPATH='' cd -P -- "$update_cache" && pwd)
+        for export_forbidden in "$root" "$source_root" "$physical_cache" "$update_output"; do
+            case "$update_export/" in "$export_forbidden/"*) fail 'Export must be outside project, runtime and update cache.' ;; esac
+            case "$export_forbidden/" in "$update_export/"*) fail 'Export cannot contain project, runtime or update cache.' ;; esac
+        done
+        # mkdir is exclusive. Python validates containment before any exported
+        # data is written. Only coordinator phases receive this writable mount.
+        mkdir -m 700 -- "$update_export"
+        printf '%s\n%s\n' --mount "type=bind,src=$update_export,dst=$update_export" >> "$update_output/control/mounts"
+        trap 'update_export_finish $?' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' HUP TERM
+        CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+            "$self" _update-export-start "$update_output" "$update_export" "$@" >&2
+    fi
     if [ "$mode" = container-nix ] && [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
         update_engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
         if [ -z "$update_engine" ]; then
@@ -318,6 +366,7 @@ update_worker() {
     if [ -f "$update_output/resolution-bootstrap/chainman.sh" ]; then
         update_resolver=$update_output/resolution-bootstrap/chainman.sh
     fi
+    if [ -n "$update_export" ]; then update_export_stage resolution; fi
     if [ "$update_resume" = 0 ]; then
         update_candidate "$update_resolver" _update-resolve "$update_at" "$@" >&2
     fi
@@ -328,8 +377,14 @@ update_worker() {
     if [ "$update_resume" = 1 ] || [ -s "$update_output/control/tasks" ]; then
         update_candidate "$update_resolver" _update-reaudit "$update_at" "$@" >&2
     fi
+    if [ -n "$update_export" ]; then update_export_stage inspection; fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-inspect "$update_output" >&2
+    if [ -n "$update_export" ]; then
+        CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+            "$self" _update-export-capture "$update_output" >&2
+        update_export_stage verification
+    fi
     IFS= read -r update_changed < "$update_output/control/changed"
     if [ "$update_changed" = yes ]; then
         while IFS= read -r update_action && IFS= read -r update_task; do
@@ -337,11 +392,23 @@ update_worker() {
                 "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2
         done < "$update_output/control/verify"
     fi
+    if [ -n "$update_export" ]; then exit 0; fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
         CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-finalize "$update_output"
     if [ -z "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then rm -rf -- "$update_output"; fi
     trap - EXIT
     exit 0
+}
+update_export_stage() {
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+        "$self" _update-export-stage "$update_output" "$1" >&2
+}
+update_export_finish() {
+    update_export_code=$1
+    trap - EXIT HUP INT TERM
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+        "$self" _update-export-finish "$update_output" "$update_export_code"
+    exit "$update_export_code"
 }
 update_candidate() (
     # A disposable checkout must not inherit Git routing, hooks or identity that
@@ -443,6 +510,20 @@ case "$CHAINMAN_REQUEST_ACTION" in
 esac
 
 case "$CHAINMAN_REQUEST_ACTION" in
+    candidate-check)
+        [ "$#" = 2 ] || fail 'usage: just chainman candidate-check DIR'
+        check_path=$2
+        case "$check_path" in /*) ;; *) check_path=$root/$check_path ;; esac
+        single_line "$check_path"
+        case "$check_path" in *,*) fail 'Candidate path cannot contain commas.' ;; esac
+        [ "$(CDPATH='' cd -P -- "$check_path" && pwd)" = "$check_path" ] || fail 'Candidate path must not contain aliases or traversal.'
+        check_options=$(mktemp -d "${TMPDIR:-/tmp}/chainman-candidate-check.XXXXXXXX")
+        lifetime_directory=$check_options
+        printf '%s\n%s\n' --mount "type=bind,src=$check_path,dst=$check_path,readonly" > "$check_options/mounts"
+        CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$check_options/mounts \
+            lifetime_run "$self" _candidate-check "$check_path"
+        exit $?
+        ;;
     _update-dispatch)
         [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ] || fail 'Missing update lifetime supervisor.'
         shift
@@ -640,14 +721,14 @@ if [ "$mode" = host-nix ] || [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" = 1 ]; then
     # Bootstrap entry replaces an external project shell. Its old profile token no
     # longer describes PATH, even when the project inputs themselves are unchanged.
     unset IN_NIX_SHELL CHAINMAN_ACTIVE_PROFILE CHAINMAN_ACTIVE_FINGERPRINT
-    develop_runtime exec python3 -c '
+    develop_runtime exec python3 -I -c '
 import os, sys
 root, store, *args = sys.argv[1:]
 os.chdir(root)
 os.environ.update(CHAINMAN_RUNTIME=store, CHAINMAN_ROOT=root, CHAINMAN_PROJECT_ROOT=root,
                   PYTHONDONTWRITEBYTECODE="1")
-os.execv(sys.executable, [sys.executable,
-    store + "/scripts/chainman.py", "--root", root, *args])
+os.execv(sys.executable, [sys.executable, "-I", "-B",
+    store + "/scripts/isolated.py", "chainman.py", "--root", root, *args])
 ' "$root" "$store" "$@"
 fi
 
