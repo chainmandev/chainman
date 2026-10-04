@@ -106,6 +106,7 @@ rust-test:
 
 swift-test:
     @./scripts/enter.sh swift env CHAINMAN_TEST_SWIFT=1 python3 -B -m unittest discover -s tests -p test_swift_native.py -v
+    @./scripts/enter.sh swift env CHAINMAN_TEST_SWIFT=1 python3 -B -m unittest discover -s tests -p test_swift_sources.py -v
 
 gradle-test:
     @./scripts/enter.sh compose env CHAINMAN_TEST_GRADLE=1 python3 -B -m unittest discover -s tests -p test_gradle_resolution.py -v

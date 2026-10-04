@@ -31,6 +31,7 @@ import cargo_sources
 import lock_adapters
 import manifests
 import pub_sources
+import swift_sources
 import registry
 from dependency_identity import Identity, inventory as identity_inventory
 import adapter_data as ad
@@ -102,6 +103,7 @@ def members(root: Path, directory: Path, kind: str) -> list[str]:
 def specifications(root: Path, spec: Config) -> dict[str, ad.Table]:
     cargo_sources.read(root, spec)
     pub_sources.read(root, spec)
+    swift_sources.read(root, spec)
     kind = ad.text(spec["adapter"], "Adapter kind")
     ecosystem, _ = KINDS[kind]
     directories = spec.get("directories", [spec.get("directory", ".")])
@@ -149,10 +151,15 @@ def specifications(root: Path, spec: Config) -> dict[str, ad.Table]:
 
 
 def snapshot(root: Path, spec: Config) -> ad.Table:
-    with pub_sources.bind(root, spec) as scope:
+    with (
+        pub_sources.bind(root, spec) as scope,
+        swift_sources.bind(root, spec, project=False) as swift_scope,
+    ):
         result = _snapshot(root, spec)
         if scope is not None:
             result["pub_sources"] = scope.records()
+        if swift_scope is not None:
+            result["swift_sources"] = swift_scope.records()
         return result
 
 
@@ -444,6 +451,14 @@ def choose(
             raise ValueError(
                 "Cargo candidate source version violates its dependency requirement or policy"
             )
+        return None
+    swift_bindings = swift_sources.read(root, spec)
+    if provider == "swift" and package in swift_bindings:
+        swift_sources.check_version(
+            swift_bindings[package],
+            ad.text(pin.get("bound", requirement), "Swift dependency bound"),
+            policy,
+        )
         return None
     coordinates = ad.strings(pin.get("coordinated", [package]), "Coordinated packages")
     inventories = []
@@ -1796,10 +1811,17 @@ def cargo_resolution_settings(spec: Config) -> tuple[bool, int]:
 
 
 def resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Table:
-    with pub_sources.bind(root, spec, policy) as scope:
+    with (
+        pub_sources.bind(root, spec, policy) as scope,
+        swift_sources.bind(root, spec, policy) as swift_scope,
+    ):
         result = _resolve(root, spec, policy, now)
         if scope is not None:
             result["pub_candidates"] = pub_sources.materialized(root, spec, scope)
+        if swift_scope is not None:
+            result["swift_candidates"] = swift_sources.materialized(
+                root, spec, swift_scope
+            )
         return result
 
 
@@ -1980,7 +2002,27 @@ def _resolve(root: Path, spec: Config, policy: Config, now: datetime) -> ad.Tabl
 def audit(
     root: Path, spec: Config, before: Config, policy: Config, now: datetime
 ) -> None:
-    with pub_sources.bind(root, spec, policy) as scope:
+    with (
+        pub_sources.bind(root, spec, policy) as scope,
+        swift_sources.bind(root, spec, policy) as swift_scope,
+    ):
+        if swift_scope is not None:
+            if swift_sources.authority(
+                before.get("swift_sources")
+            ) != swift_sources.authority(swift_scope.records()):
+                raise ValueError(
+                    "Swift candidate source authority changed after its snapshot"
+                )
+            expected = ad.table(before.get("resolution", {}), "Native resolution").get(
+                "swift_candidates"
+            )
+            observed = swift_sources.materialized(
+                root, spec, swift_scope, expected=expected
+            )
+            if expected is not None and expected != observed:
+                raise ValueError(
+                    "A project hook changed the selected Swift candidate sources"
+                )
         if scope is not None:
             if pub_sources.authority(
                 before.get("pub_sources")

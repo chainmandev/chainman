@@ -945,9 +945,12 @@ def swift_declared_sources(
                 or not isinstance(remote[0], dict)
             ):
                 raise ValueError("SwiftPM dependency requires a public GitHub remote")
-            package = swift_repository(
-                data.text(remote[0].get("urlString"), "SwiftPM remote URL")
-            )
+            import swift_sources
+
+            url = data.text(remote[0].get("urlString"), "SwiftPM remote URL")
+            package = swift_sources.mirrored_package(root, url)
+            if package is None:
+                package = swift_repository(url)
             key = ("remote", package)
             remote_declared = expected.get(key)
             if remote_declared is not None:
@@ -1082,12 +1085,16 @@ def validate_swift_graph(
                 raise ValueError("SwiftPM graph changed a project-local source")
             contained(root, str(path.relative_to(root)))
             return ("local", node["url"])
-        package = swift_repository(node["url"])
         if registry.version(
             "swift", node["version"]
         ) is None or not path.is_relative_to(scratch / "checkouts"):
             raise ValueError("Unsupported SwiftPM resolved graph source")
         contained(root, str(path.relative_to(root)))
+        import swift_sources
+
+        package = swift_sources.graph_source(root, node["url"], path, node["version"])
+        if package is None:
+            package = swift_repository(node["url"])
         return ("remote", package)
 
     if identity(graph) != ("local", str(directory)):
