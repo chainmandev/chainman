@@ -823,8 +823,13 @@ A Flutter adapter may similarly declare `pub_sources = { owned_package =
 "packages/owned/pubspec.yaml" }` with ordinary `flutter pub get` or `dart pub get`.
 The manifest must be a regular contained file with the matching package name and
 a stable version satisfying every original hosted declaration and configured
-version/security constraint. Unused bindings and conflicting declared overrides
-fail. Existing path overrides to the exact bound source remain unchanged and
+version/security constraint. Explicit bindings may include runtime dependencies
+reachable through other bound source manifests. Every hosted edge must satisfy
+its declared range and policy; source package development dependencies do not
+admit extra bindings. These reachable sources are projected at the consuming
+root because native Pub does not inherit dependency override files. Unbound
+third-party dependencies retain registry selection and auditing. Unused bindings
+and conflicting declared overrides fail. Existing path overrides to the exact bound source remain unchanged and
 retain the ordinary native source checks. Public hosted dependency declarations
 remain unchanged. A temporary
 `pubspec_overrides.yaml` binds each consuming resolution group to the source;

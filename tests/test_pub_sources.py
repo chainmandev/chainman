@@ -48,6 +48,110 @@ class PubSourceTests(unittest.TestCase):
         path.write_text(body)
         return path
 
+    def transitive(self):
+        self.source.write_text(
+            self.source.read_text() + "dependencies:\n  owned_codec: ^0.1.0\n"
+        )
+        codec = self.put(
+            "owned codec/pubspec.yaml",
+            "name: owned_codec\nversion: 0.1.2\nenvironment: {sdk: '>=3.3.0 <4.0.0'}\n",
+        )
+        self.spec["pub_sources"]["owned_codec"] = "owned codec/pubspec.yaml"
+        return codec
+
+    def test_transitive_binding_requires_reachable_runtime_hosted_declaration(self):
+        self.transitive()
+        before = self.consumer.read_bytes()
+        with sources.bind(self.root, self.spec) as scope:
+            self.assertIn("owned_codec", self.override.read_text())
+            codec = next(row for row in scope.records() if row["name"] == "owned_codec")
+            self.assertEqual(
+                codec["declarations"],
+                [
+                    {
+                        "name": "owned_codec",
+                        "file": "owned library/pubspec.yaml",
+                        "range": "^0.1.0",
+                    }
+                ],
+            )
+        self.assertEqual(self.consumer.read_bytes(), before)
+        self.assertFalse(self.override.exists())
+        self.source.write_text(
+            self.source.read_text().replace("dependencies:", "dev_dependencies:")
+        )
+        with self.assertRaisesRegex(ValueError, "unused"):
+            sources.admission(self.root, self.spec, {})
+
+    def test_exact_transitive_override_preserves_authority_bytes_and_mode(self):
+        self.transitive()
+        original = b"# Existing owned codec authority\ndependency_overrides:\n  owned_codec: {path: ../owned codec}\n"
+        self.override.write_bytes(original)
+        self.override.chmod(0o600)
+        with sources.bind(self.root, self.spec) as scope:
+            self.assertIsNotNone(scope)
+            self.assertIn("candidate_library", self.override.read_text())
+            self.assertEqual(self.override.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.override.read_bytes(), original)
+        self.assertEqual(self.override.stat().st_mode & 0o777, 0o600)
+
+    def test_transitive_ranges_policy_and_source_authority_remain_required(self):
+        self.transitive()
+        for requirement in (
+            "^0.2.0",
+            "{path: ../owned codec}",
+            "{git: https://example.invalid/codec}",
+        ):
+            with self.subTest(requirement=requirement):
+                self.source.write_text(
+                    "name: candidate_library\nversion: 1.2.3\ndependencies:\n  owned_codec: "
+                    + requirement
+                    + "\n"
+                )
+                with self.assertRaises(ValueError):
+                    sources.admission(self.root, self.spec, {})
+        self.source.write_text(
+            "name: candidate_library\nversion: 1.2.3\ndependencies:\n  owned_codec: ^0.1.0\n"
+        )
+        for policy in (
+            {
+                "constraints": {
+                    "pub:owned_codec": {
+                        "range": "^0.2.0",
+                        "reason": "Preserve codec compatibility",
+                    }
+                }
+            },
+            {
+                "exceptions": [
+                    {
+                        "package": "pub:owned_codec",
+                        "version": "0.2.0",
+                        "minimum_safe": "0.2.0",
+                        "reason": "Retain safe floor",
+                        "advisory": "https://example.invalid/advisory",
+                        "expires": "2027-01-01T00:00:00Z",
+                    }
+                ]
+            },
+        ):
+            with (
+                self.subTest(policy=policy),
+                self.assertRaisesRegex(ValueError, "requirement or policy"),
+            ):
+                sources.admission(self.root, self.spec, policy)
+        self.override.write_text("dependency_overrides:\n  owned_codec: ^0.1.0\n")
+        with self.assertRaisesRegex(ValueError, "declared override"):
+            sources.admission(self.root, self.spec, {})
+
+    def test_transitive_groups_do_not_bind_unrelated_consumers(self):
+        self.transitive()
+        self.put("other/pubspec.yaml", "name: other\n")
+        self.spec["directories"].append("other")
+        with sources.bind(self.root, self.spec) as scope:
+            self.assertEqual(scope.records()[0]["groups"], ["flutter-0"])
+            self.assertFalse((self.root / "other/pubspec_overrides.yaml").exists())
+
     def observed(
         self,
         *,
@@ -336,12 +440,16 @@ class PubSourceTests(unittest.TestCase):
             "dependencies:\n  candidate_library: ^1.0.0\n",
         )
         original_member = member.read_bytes()
-        self.source.write_text(
-            self.source.read_text() + "dependencies:\n  collection: 1.19.1\n"
+        self.transitive()
+        codec = self.root / "owned codec/pubspec.yaml"
+        codec.write_text(codec.read_text() + "dependencies:\n  collection: 1.19.1\n")
+        self.put(
+            "owned codec/lib/owned_codec.dart",
+            "const codecIdentity = 'owned-codec-0.1.2';\n",
         )
         self.put(
             "owned library/lib/candidate_library.dart",
-            "const identity = 'candidate-library-1.2.3';\n",
+            "import 'package:owned_codec/owned_codec.dart';\nconst identity = 'candidate-library-1.2.3/' + codecIdentity;\n",
         )
         main = self.put(
             "consumer/bin/main.dart",
@@ -359,6 +467,23 @@ class PubSourceTests(unittest.TestCase):
                 timeout=120,
             )
 
+        root_only = {
+            **self.spec,
+            "pub_sources": {"candidate_library": "owned library/pubspec.yaml"},
+        }
+        with sources.bind(self.root, root_only):
+            missing = subprocess.run(
+                ["dart", "pub", "get"],
+                cwd=self.consumer.parent,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("owned_codec", missing.stdout + missing.stderr)
+        existing_override = b"# Preserve codec source\ndependency_overrides:\n  owned_codec: {path: ../owned codec}\n"
+        self.override.write_bytes(existing_override)
+        self.override.chmod(0o600)
         before = native.snapshot(self.root, self.spec)
         with (
             patch.object(native.chainman, "execute", side_effect=execute),
@@ -379,7 +504,13 @@ class PubSourceTests(unittest.TestCase):
             }
             self.assertIn("collection", names)
             self.assertNotIn("candidate_library", names)
-        with sources.bind(self.root, self.spec):
+            self.assertNotIn("owned_codec", names)
+        with sources.bind(self.root, self.spec) as scope:
+            original_codec = codec.read_bytes()
+            codec.write_bytes(original_codec + b"# post-resolution mutation\n")
+            with self.assertRaisesRegex(ValueError, "manifest changed"):
+                sources.materialized(self.root, self.spec, scope)
+            codec.write_bytes(original_codec)
             frozen = subprocess.run(
                 ["dart", "pub", "get", "--offline", "--enforce-lockfile"],
                 cwd=self.consumer.parent,
@@ -396,7 +527,10 @@ class PubSourceTests(unittest.TestCase):
                 timeout=120,
             )
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-            self.assertEqual(run.stdout.strip(), "candidate-library-1.2.3")
+            self.assertEqual(
+                run.stdout.strip(), "candidate-library-1.2.3/owned-codec-0.1.2"
+            )
         self.assertEqual(self.consumer.read_bytes(), original)
         self.assertEqual(member.read_bytes(), original_member)
-        self.assertFalse(self.override.exists())
+        self.assertEqual(self.override.read_bytes(), existing_override)
+        self.assertEqual(self.override.stat().st_mode & 0o777, 0o600)
