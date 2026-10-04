@@ -802,6 +802,11 @@ def audit_identities(
     evidence: dict[tuple[str, str], tuple[list[registry.Release], set[str]]] = {}
     for identity in sorted(current):
         provider, package, value, url, digest = identity
+        if provider == "swift":
+            import swift_sources
+
+            if swift_sources.audit_identity(root, identity, policy):
+                continue
         if provider == "github-source":
             import javascript_sources
 

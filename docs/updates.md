@@ -822,6 +822,41 @@ receipt freezes the selected manifest digest. Source manifest changes during tha
 resolution or after it fail. Resume auditing re-observes the current native graph
 against the original package authority and ordinary artifact policy.
 
+A Swift adapter may declare `swift_sources` keyed by the canonical GitHub
+repository, for example:
+
+```toml
+[swift_sources."neutral/owned"]
+directory = "packages/owned"
+version_file = "packages/owned/release.json"
+version_pointer = ["version"]
+paths = ["Package.swift", "Sources", "LICENSE"]
+```
+
+This requires ordinary literal `swift package update` declarations. The owned
+JSON or TOML version authority must contain a stable version satisfying every
+original dependency bound and configured version/security constraint. All source
+paths and the version authority must be regular, contained, nonsymlink inputs;
+operational directories and package-local dependency declarations are rejected.
+Bindings must be reachable from the selected consumer manifests. Source paths
+must include the aggregate `Package.swift` and its complete target/resource
+surface. The version authority is included automatically.
+
+The adapter stages those exact files in a disposable Git artifact with a
+deterministic commit and candidate-only version tag. Native SwiftPM mirrors bind
+the existing public URL to this artifact during resolution and audit. The public
+URL and version declaration remain unchanged. Existing unrelated mirror bytes
+and full permissions are restored; conflicting mirrors or unexpected changes
+fail. Resolution freezes the original declaration authority, native lock
+revision, source file hashes/modes and imported checkout materialization.
+Later audits compare the native import checkout and a separate frozen native
+graph checkout with the admitted source bytes, committed Git blobs and exact
+revision. Changed source, lock identity, checkout, or materialization fails.
+Only this admitted source identity bypasses public release metadata lookup;
+unbound Swift dependencies retain their ordinary public evidence requirements.
+Candidate-native build/import tests must run inside the projection scope:
+restoring the mirrors restores the consumer's public acquisition contract.
+
 Candidate sources have no registry publication date and are not registry release
 selections. All third-party registry artifacts retain their normal checksum,
 publication-age, security and graph audit. Final reconciliation rechecks the
