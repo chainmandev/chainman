@@ -99,7 +99,12 @@ class NixReferenceTests(unittest.TestCase):
                 runtime = root / "runtime"
                 shutil.copytree(root / "nix", runtime / "nix")
                 (runtime / "scripts").mkdir()
-                for name in ("toolchain.py", "adapter_data.py", "storage.py"):
+                for name in (
+                    "toolchain.py",
+                    "adapter_data.py",
+                    "storage.py",
+                    "isolated.py",
+                ):
                     shutil.copy2(
                         toolchain.RUNTIME / "scripts" / name, runtime / "scripts" / name
                     )
