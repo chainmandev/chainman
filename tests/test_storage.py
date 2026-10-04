@@ -104,6 +104,18 @@ def exercise_job_control(
         nonlocal output
         output += write_terminal(master, value, 5)
 
+    def wait_stopped_job():
+        deadline = time.monotonic() + timeout
+        while True:
+            send(b"jobs\n")
+            snapshot = expect(b"PROMPT> ")
+            if b"Stopped" in snapshot:
+                return
+            test.assertLess(
+                time.monotonic(), deadline, snapshot.decode(errors="replace")
+            )
+            time.sleep(0.05)
+
     try:
         expect(b"PROMPT> ")
         send(
@@ -114,13 +126,7 @@ def exercise_job_control(
         )
         if background:
             expect(b"PROMPT> ")
-            deadline = time.monotonic() + timeout
-            while True:
-                send(b"jobs\n")
-                if b"Stopped" in expect(b"PROMPT> "):
-                    break
-                test.assertLess(time.monotonic(), deadline)
-                time.sleep(0.05)
+            wait_stopped_job()
             test.assertEqual(os.tcgetpgrp(master), pid)
             stopped()
             send(b"fg\n")
@@ -131,10 +137,9 @@ def exercise_job_control(
             expect(b"PROMPT> ")
             test.assertEqual(os.tcgetpgrp(master), pid)
             stopped()
-            send(b"bg\nsleep 0.2; jobs\n")
+            send(b"bg\n")
             expect(b"PROMPT> ")
-            background = expect(b"PROMPT> ")
-            test.assertIn(b"Stopped", background)
+            wait_stopped_job()
             test.assertEqual(os.tcgetpgrp(master), pid)
             stopped()
             send(b"fg\ncontinue\n")
@@ -426,6 +431,21 @@ input()
             stop.set()
             worker.join(timeout=5)
             self.assertFalse(worker.is_alive())
+
+    def test_job_control_waits_for_actual_delayed_background_stop(self):
+        body = (
+            "import signal,time\n"
+            "signal.signal(signal.SIGCONT, lambda *args: time.sleep(0.8))\n"
+            + TERMINAL_BODY
+        )
+        wrapper = (
+            f"import sys,os; sys.path.insert(0,{str(tc.RUNTIME / 'scripts')!r}); "
+            "import storage; "
+            f"sys.exit(storage.runtime_child({[sys.executable, '-c', body]!r}, dict(os.environ)))"
+        )
+        exercise_job_control(
+            self, [sys.executable, "-c", wrapper], dict(os.environ), self.root
+        )
 
     def test_runtime_job_control_keeps_leases_across_stop_and_resume(self):
         entry = self.populated()
