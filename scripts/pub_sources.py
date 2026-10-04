@@ -103,6 +103,17 @@ def read(root: Path, spec: Mapping[str, object]) -> dict[str, Binding]:
     return result
 
 
+def exact_path_override(root: Path, path: Path, existing: object, target: Path) -> bool:
+    return (
+        isinstance(existing, Mapping)
+        and set(existing) == {"path"}
+        and tc.local_source(
+            root, path.parent, ad.text(existing["path"], "Pub existing candidate path")
+        )
+        == target
+    )
+
+
 def admission(
     root: Path, spec: Mapping[str, object], policy: Mapping[str, object]
 ) -> Scope:
@@ -113,6 +124,28 @@ def admission(
     scope = Scope(
         (root.resolve(), json.dumps(dict(spec), sort_keys=True)), bindings, {}, []
     )
+
+    def admit(group: str, name: str, relative: str, requirement: str) -> None:
+        binding = bindings[name]
+        safe = registry.minimum_safe("pub", policy, name)
+        if (
+            not native.accepts("pub", binding.version, requirement)
+            or not registry.compatible(
+                "pub", binding.version, registry.constraint("pub", policy, name)
+            )
+            or (
+                safe is not None
+                and registry.stable_version("pub", binding.version) < safe
+            )
+        ):
+            raise ValueError(
+                "Pub candidate source version violates its requirement or policy"
+            )
+        scope.groups.setdefault(group, set()).add(name)
+        scope.declarations.append(
+            {"name": name, "file": relative, "range": requirement}
+        )
+
     for group, member in native.specifications(root, spec).items():
         workspace = ad.table(member["pub"], "Pub workspace")
         for relative in ad.strings(workspace["guarded_inputs"], "Pub guarded inputs"):
@@ -125,17 +158,11 @@ def admission(
                 if isinstance(overrides, Mapping):
                     for name in bindings.keys() & overrides.keys():
                         existing = overrides[name]
-                        if (
-                            not isinstance(existing, Mapping)
-                            or set(existing) != {"path"}
-                            or tc.local_source(
-                                root,
-                                path.parent,
-                                ad.text(
-                                    existing["path"], "Pub existing candidate path"
-                                ),
-                            )
-                            != tc.contained(root, bindings[name].manifest).parent
+                        if not exact_path_override(
+                            root,
+                            path,
+                            existing,
+                            tc.contained(root, bindings[name].manifest).parent,
                         ):
                             raise ValueError(
                                 "Pub candidate source cannot replace a declared override"
@@ -149,26 +176,41 @@ def admission(
                 raise ValueError(
                     "Pub candidate source cannot replace a declared override"
                 )
-            requirement = native.old_requirement(root, pin)
-            binding = bindings[name]
-            safe = registry.minimum_safe("pub", policy, name)
-            if (
-                not native.accepts("pub", binding.version, requirement)
-                or not registry.compatible(
-                    "pub", binding.version, registry.constraint("pub", policy, name)
-                )
-                or (
-                    safe is not None
-                    and registry.stable_version("pub", binding.version) < safe
-                )
-            ):
-                raise ValueError(
-                    "Pub candidate source version violates its requirement or policy"
-                )
-            scope.groups.setdefault(group, set()).add(name)
-            scope.declarations.append(
-                {"name": name, "file": pin["file"], "range": requirement}
+            admit(
+                group,
+                name,
+                ad.text(pin["file"], "Pub manifest"),
+                native.old_requirement(root, pin),
             )
+
+    # Native Pub does not inherit a dependency package's override file. Project
+    # only explicitly bound, reachable runtime dependencies into each consumer.
+    for group, names in scope.groups.items():
+        pending = list(names)
+        visited: set[str] = set()
+        while pending:
+            parent = pending.pop()
+            if parent in visited:
+                continue
+            visited.add(parent)
+            relative = bindings[parent].manifest
+            path = tc.contained(root, relative)
+            value = ad.table(
+                manifests.document(path)[0], "Pub candidate source manifest"
+            )
+            dependencies = ad.table(
+                value.get("dependencies", {}), "Pub runtime dependencies"
+            )
+            for name, requirement in dependencies.items():
+                if name not in bindings:
+                    continue
+                if not isinstance(requirement, str) or not requirement.strip():
+                    raise ValueError(
+                        "Pub candidate transitive source requires a hosted range"
+                    )
+                admit(group, name, relative, requirement)
+                if name not in visited:
+                    pending.append(name)
     used = set().union(*scope.groups.values()) if scope.groups else set()
     if used != set(bindings):
         raise ValueError(
@@ -211,11 +253,13 @@ def bind(
         if not isinstance(overrides, MutableMapping):
             raise ValueError("Pub dependency overrides must be a mapping")
         for name in sorted(names):
-            if name in overrides:
-                raise ValueError(
-                    "Pub candidate source conflicts with an existing override"
-                )
             target = tc.contained(root, scope.bindings[name].manifest).parent
+            if name in overrides:
+                if not exact_path_override(root, path, overrides[name], target):
+                    raise ValueError(
+                        "Pub candidate source conflicts with an existing override"
+                    )
+                continue
             overrides[name] = {
                 "path": Path(os.path.relpath(target, directory)).as_posix()
             }
