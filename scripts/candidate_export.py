@@ -110,12 +110,26 @@ def duplicate_free(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
-def read_json(root: Path, name: str) -> ad.Table:
+def manifest_bytes(root: Path, name: str) -> bytes:
     path = tc.contained(root, name)
-    if path.stat().st_size > MAX_MANIFEST:
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise ValueError("Export manifest must be a regular file")
+    with path.open("rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("Export manifest must be a regular file")
+        if info.st_size > MAX_MANIFEST:
+            raise ValueError("Export manifest exceeds 16 MiB")
+        # The file can grow after fstat; never allocate its unbounded contents.
+        body = stream.read(MAX_MANIFEST + 1)
+    if len(body) > MAX_MANIFEST:
         raise ValueError("Export manifest exceeds 16 MiB")
+    return body
+
+
+def read_json(root: Path, name: str) -> ad.Table:
     return ad.table(
-        json.loads(tc.regular_input(root, name), object_pairs_hook=duplicate_free),
+        json.loads(manifest_bytes(root, name), object_pairs_hook=duplicate_free),
         "Export JSON",
     )
 
@@ -360,7 +374,7 @@ def write_result(
     marker = transaction / "control/export-snapshot"
     snapshot = marker.read_text().strip() if marker.exists() else None
     if snapshot is not None:
-        if digest(tc.regular_input(path, "snapshot.json")) != snapshot:
+        if digest(manifest_bytes(path, "snapshot.json")) != snapshot:
             raise ValueError("Accepted snapshot changed")
         validate_snapshot(path)
     result: dict[str, object] = {
@@ -575,7 +589,7 @@ def check(path: Path) -> ad.Table:
         raise ValueError("Invalid exit code")
     snapshot = data["snapshot_sha256"]
     if snapshot is not None:
-        if digest(tc.regular_input(path, "snapshot.json")) != hash_value(snapshot):
+        if digest(manifest_bytes(path, "snapshot.json")) != hash_value(snapshot):
             raise ValueError("Snapshot digest mismatch")
         manifest = validate_snapshot(path)
         if manifest["operation"] != data["operation"]:

@@ -94,6 +94,9 @@ custom targets without shared adapter audits cannot export accepted project
 updates; their normal human workflows remain available. Runtime-only exports do
 not select or audit project adapters.
 
+Manifest reads are bounded before hashing or parsing, including when a file grows
+after its initial size check.
+
 ## Repair integration and trust
 
 1. Run `candidate-check` and independently match base/runtime identities to the

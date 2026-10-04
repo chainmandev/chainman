@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import candidate_export as export
@@ -20,6 +20,63 @@ import update_staging as staging
 import updates
 import test_source_workflow
 import test_update_staging
+
+
+class ManifestReadTests(unittest.TestCase):
+    def test_check_rejects_oversized_snapshot_before_hashing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            (root / "result.json").write_bytes(
+                export.encoded(
+                    {
+                        "schema": 1,
+                        "kind": "chainman.update-result",
+                        "operation": "12345678-1234-1234-1234-123456789abc",
+                        "outcome": "interrupted_or_unknown",
+                        "stage": "verification",
+                        "exit_code": None,
+                        "snapshot_sha256": "0" * 64,
+                    }
+                )
+            )
+            with (root / "snapshot.json").open("wb") as stream:
+                stream.truncate(export.MAX_MANIFEST + 1)
+            with (
+                patch.object(
+                    export,
+                    "digest",
+                    side_effect=AssertionError("Oversized snapshot reached hashing"),
+                ),
+                self.assertRaisesRegex(ValueError, "exceeds 16 MiB"),
+            ):
+                export.check(root)
+
+    def test_manifest_read_remains_bounded_after_file_growth(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            path = root / "snapshot.json"
+            path.touch()
+            before_growth = path.stat()
+            path.write_bytes(b"x" * 64)
+            with path.open("rb") as stream:
+                reader = Mock(wraps=stream)
+                with (
+                    patch.object(export, "MAX_MANIFEST", 32),
+                    patch.object(export.os, "fstat", return_value=before_growth),
+                    patch.object(
+                        Path, "open", return_value=contextlib.nullcontext(reader)
+                    ),
+                    self.assertRaisesRegex(ValueError, "exceeds 16 MiB"),
+                ):
+                    export.manifest_bytes(root, "snapshot.json")
+                reader.read.assert_called_once_with(33)
+
+    def test_json_manifest_at_exact_limit_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "result.json").write_bytes(b"{}" + b" " * 30)
+            with patch.object(export, "MAX_MANIFEST", 32):
+                self.assertEqual(export.read_json(root, "result.json"), {})
 
 
 class CandidateExports(unittest.TestCase):
