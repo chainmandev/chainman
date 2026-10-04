@@ -88,6 +88,16 @@ func pendingSignalFixture(number syscall.Signal, marker string) int {
 		_ = cmd.Wait()
 		return 1
 	}
+	// Kill returning does not establish delivery to Go's asynchronous signal
+	// channel. Queue the actual notification before exercising pending admission
+	// so this fixture tests received cancellation, not scheduler timing.
+	received := <-signals
+	if received != number {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return 1
+	}
+	signals <- received
 	if err := admitStarted(cmd, permit, signals); err != nil {
 		return exitCode(err)
 	}
