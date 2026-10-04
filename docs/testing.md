@@ -60,12 +60,15 @@ Project dependency age enforcement has separate regression coverage.
 
 Candidate export tests cover acceptance before verification, failed and mutating
 verifiers, interrupted publication, corruption, unsafe destinations, exact file
-bytes/modes/deletions, and reconstruction in a fresh repair checkout. Public
-host-Nix fixtures exercise both source and consumer entrypoints; the source case
-uses an unpublished local commit imported into the Nix store. The opt-in container
-suite repeats consumer success, verification failure and no-change exports using
-real Git transport and a deterministic provider selection fixture. These checks
-qualify the export boundary, not the bot's repair policy, sandbox or publication.
+bytes/modes/deletions, and reconstruction in a fresh repair checkout. Regression
+cases reject results from a previous or competing invocation and require final
+failure results when verification changes Git metadata or the original changes.
+Public host-Nix fixtures exercise both source and consumer entrypoints; the source
+case uses an unpublished local commit imported into the Nix store. The opt-in
+container suite repeats consumer success, verification failure, Git mutation and
+no-change exports using real Git transport and a deterministic provider selection
+fixture. These checks qualify the export boundary, not the bot's repair policy,
+sandbox or publication.
 The runtime-only fixture selects a real Git revision, verifies with that runtime,
 and checks the bundle's entry, resolution and verification identities while the
 original consumer pin stays unchanged.

@@ -32,12 +32,13 @@ One schema-1 result is written to stdout and `result.json`; command logs go to
 stderr. A failed verifier produces a nonzero exit even when accepted dependency
 output exists. Failures before export admission, such as malformed options, a
 dirty project or an unavailable bootstrap, can produce no bundle.
+Reusing a destination fails without reporting the earlier operation's result.
 
 | `outcome` | Meaning |
 |---|---|
 | `verified_success` | Accepted changes passed verification without source mutation. |
 | `complete_no_change` | Selection/audit completed without changes; ordinary no-change behavior skips verification. |
-| `accepted_verification_failed` | Dependencies were accepted, but verification failed or changed candidate sources. |
+| `accepted_verification_failed` | Dependencies were accepted, but verification or the final source/Git checks failed. |
 | `failure_before_acceptance` | No accepted snapshot was established. |
 | `unsupported` | The resolver or artifact shape cannot establish this contract. |
 | `interrupted_or_unknown` | No final outcome is established. |
@@ -47,6 +48,8 @@ Result fields are `schema`, `kind` (`chainman.update-result`), `operation` (UUID
 null). Stages are preparation, resolution, inspection, verification and complete.
 The initial result is interrupted/unknown. Progress and final results replace it
 atomically. Missing or incomplete results never establish success.
+Final source/Git checks also reject concurrent changes to the original checkout;
+those edits remain untouched and the accepted snapshot is preserved.
 
 `candidate-check` rejects malformed bundles. Its zero exit means the record is
 well formed, **not that the update succeeded**; inspect `outcome` separately.

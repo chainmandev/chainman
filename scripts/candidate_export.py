@@ -12,6 +12,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import sys
 import uuid
 
@@ -142,11 +143,20 @@ def destination(root: Path, target: str, transaction: Path) -> Path:
 
 
 def start(
-    root: Path, transaction: Path, target: str, *, source: bool, created: bool = False
+    root: Path,
+    transaction: Path,
+    target: str,
+    *,
+    source: bool,
+    created: bool = False,
+    operation: str | None = None,
 ) -> None:
     import updates
 
     path = destination(root, target, transaction)
+    operation = (
+        str(uuid.UUID(operation)) if operation is not None else str(uuid.uuid4())
+    )
     updates.repository(root, clean=True)
     if created:
         if not path.is_dir() or any(path.iterdir()):
@@ -155,7 +165,7 @@ def start(
         path.mkdir(mode=0o700)
     request = {
         "directory": str(path),
-        "operation": str(uuid.uuid4()),
+        "operation": operation,
         "source": source,
         "stage": "preparation",
     }
@@ -389,15 +399,18 @@ def finish(
         if data["stage"] == "verification":
             outcome = "accepted_verification_failed"
             if code == 0:
-                state, candidate = staging.read_state(root, transaction)
-                staging.unchanged(root, state)
-                staging.candidate_unchanged(candidate, state)
-                if updates.snapshot(candidate) != state.require_inspection().updated:
+                try:
+                    state, candidate = staging.read_state(root, transaction)
+                    staging.unchanged(root, state)
+                    staging.candidate_unchanged(candidate, state)
+                    if (
+                        updates.snapshot(candidate)
+                        != state.require_inspection().updated
+                    ):
+                        raise ValueError("verification changed candidate sources")
+                except (OSError, ValueError, subprocess.CalledProcessError) as error:
                     code = 1
-                    print(
-                        "Chainman: verification changed candidate sources",
-                        file=sys.stderr,
-                    )
+                    print(f"Chainman: verification rejected: {error}", file=sys.stderr)
                 else:
                     outcome = (
                         "verified_success"

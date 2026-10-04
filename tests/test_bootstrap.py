@@ -536,13 +536,20 @@ format-check=["format-check"]
     def test_public_candidate_export_success_failure_and_no_change(self):
         self.candidate_export_lifecycle()
 
+    def test_public_candidate_export_reports_git_mutation_failure(self):
+        self.candidate_export_lifecycle(cases=("git-mutation",))
+
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER"), "explicit container qualification"
     )
     def test_container_candidate_export_success_failure_and_no_change(self):
-        self.candidate_export_lifecycle(container=True)
+        self.candidate_export_lifecycle(
+            container=True, cases=("success", "failure", "git-mutation", "no-change")
+        )
 
-    def candidate_export_lifecycle(self, *, container=False):
+    def candidate_export_lifecycle(
+        self, *, container=False, cases=("success", "failure", "no-change")
+    ):
         self.update_lifecycle()
         if container:
             self.env.update(
@@ -599,7 +606,7 @@ commands=[["python3", "verify.py"]]
         )
         self.lifecycle_git("add", ".")
         self.lifecycle_git("commit", "-qm", "Declare export fixture")
-        for case in ("success", "failure", "no-change"):
+        for case in cases:
             if case == "failure":
                 (self.root / "verify.py").write_text(
                     "from pathlib import Path\nPath('workflow.yml').write_text('verifier mutation')\nraise SystemExit(23)\n"
@@ -607,6 +614,12 @@ commands=[["python3", "verify.py"]]
             if case == "no-change":
                 (self.root / "workflow.yml").write_text(
                     "steps:\n  - uses: neutral/fixture@" + "b" * 40 + " # v2.0.0\n"
+                )
+            if case == "git-mutation":
+                (self.root / "verify.py").write_text(
+                    "from pathlib import Path\n"
+                    "with Path('.git/info/exclude').open('a') as stream:\n"
+                    "    stream.write('verifier-ignore\\n')\n"
                 )
             self.lifecycle_git("add", ".")
             self.lifecycle_git("commit", "--allow-empty", "-qm", case)
@@ -617,7 +630,7 @@ commands=[["python3", "verify.py"]]
                 "--skip-chainman",
                 "--export-candidate",
                 str(target),
-                check=case != "failure",
+                check=case not in ("failure", "git-mutation"),
                 # Cold container startup includes a fresh pinned Nix toolchain.
                 timeout=600 if container else 180,
             )
@@ -627,11 +640,13 @@ commands=[["python3", "verify.py"]]
                 {
                     "success": "verified_success",
                     "failure": "accepted_verification_failed",
+                    "git-mutation": "accepted_verification_failed",
                     "no-change": "complete_no_change",
                 }[case],
             )
-            if case == "failure":
+            if case in ("failure", "git-mutation"):
                 self.assertNotEqual(result.returncode, 0)
+                self.assertNotEqual(outcome["exit_code"], 0)
             manifest = json.loads((target / "snapshot.json").read_text())
             self.assertEqual(manifest["runtimes"]["entry"]["commit"], self.lock)
             self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
@@ -738,6 +753,12 @@ verify=[["python3", "verify.py"]]
             manifest["runtimes"]["entry"]["tree"], git("rev-parse", "HEAD^{tree}")
         )
         self.assertEqual(git("status", "--porcelain"), "")
+        previous = (target / "result.json").read_bytes()
+        refused = run_captured(result.args, env=env, timeout=300)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(refused.stdout, "")
+        self.assertIn("already exists", refused.stderr)
+        self.assertEqual((target / "result.json").read_bytes(), previous)
 
     def test_public_update_lifecycle_preserves_failure_and_reverifies_resume(self):
         before = self.update_lifecycle(reject=True)

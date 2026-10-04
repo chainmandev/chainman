@@ -92,7 +92,13 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         for name in ("candidate", "control"):
             (destination / name).mkdir()
     if export_target is not None:
-        export.start(root, destination, export_target, source=True)
+        export.start(
+            root,
+            destination,
+            export_target,
+            source=True,
+            operation=os.environ.get("CHAINMAN_SOURCE_EXPORT_OPERATION"),
+        )
     try:
         if resumed:
             state, _ = staging.read_state(root, destination)

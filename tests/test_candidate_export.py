@@ -282,12 +282,8 @@ class CandidateExports(unittest.TestCase):
 
 
 class ConsumerRuntimeExportTests(unittest.TestCase):
-    setUp = test_update_staging.StagingTests.setUp
-
-    def test_selected_runtime_is_reported_without_changing_original_pin(self):
-        import chainman
-        import chainman_updates
-
+    def setUp(self):
+        test_update_staging.StagingTests.setUp(self)
         (self.root / "chainman.toml").write_text("""schema=3
 [project]
 default_profile="host"
@@ -304,6 +300,51 @@ commands=[["true"]]
 """)
         updates.git(self.root, "add", ".")
         updates.git(self.root, "commit", "-qm", "Adapter fixture")
+        self.before = updates.snapshot(self.root)
+
+    def prepare_export(self):
+        target = self.base / "export"
+        export.start(self.root, self.stage, str(target), source=False)
+        staging.prepare(self.root, self.stage, ["--skip-chainman"])
+        (self.candidate / "dependency.lock").write_text("new\n")
+        staging.inspect(self.root, self.stage)
+        export.capture(self.root, self.stage)
+        export.stage(self.stage, "verification")
+        return target
+
+    def assert_finished_failure(self, target):
+        accepted = (target / "snapshot.json").read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            code = staging.run(
+                self.root, "_update-export-finish", [str(self.stage), "0"]
+            )
+        self.assertEqual(code, 1)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result, export.check(target))
+        self.assertEqual(result["outcome"], "accepted_verification_failed")
+        self.assertEqual(result["exit_code"], 1)
+        self.assertEqual(result["stage"], "verification")
+        self.assertEqual((target / "snapshot.json").read_bytes(), accepted)
+
+    def test_passing_verifier_git_mutation_produces_a_final_failure(self):
+        target = self.prepare_export()
+        with (self.candidate / ".git/info/exclude").open("a") as stream:
+            stream.write("verifier-ignore\n")
+        self.assert_finished_failure(target)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_original_changes_produce_a_final_failure_and_remain_untouched(self):
+        target = self.prepare_export()
+        (self.root / "source.txt").write_text("concurrent user edit\n")
+        self.assert_finished_failure(target)
+        self.assertEqual(
+            (self.root / "source.txt").read_text(), "concurrent user edit\n"
+        )
+
+    def test_selected_runtime_is_reported_without_changing_original_pin(self):
+        import chainman
+        import chainman_updates
+
         target = self.base / "export"
         export.start(self.root, self.stage, str(target), source=False)
         staging.prepare(self.root, self.stage, [])

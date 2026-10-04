@@ -7,6 +7,7 @@ import sys
 import tempfile
 from contextlib import ExitStack
 import json
+import uuid
 
 import hook_worker
 import toolchain as tc
@@ -18,6 +19,9 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
     import updates
 
     export_target, _ = candidate_export.split_arguments(arguments)
+    if export_target is not None and Path(export_target).exists():
+        raise FileExistsError(f"Export destination already exists: {export_target}")
+    operation = str(uuid.uuid4()) if export_target is not None else None
     target = (
         platform.system().lower()
         + "-"
@@ -44,6 +48,7 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
             worker = [sys.executable, str(tc.RUNTIME / "scripts/source_workflow.py")]
             env = dict(os.environ, CHAINMAN_UPDATE_HELPER=str(helper))
             if export_target is not None:
+                assert operation is not None
                 revision = updates.repository(root, clean=True)[1]
                 rooted = lifetime.enter_context(
                     tc.nix_temporary_directory("chainman-source-export-")
@@ -62,6 +67,7 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
                     CHAINMAN_ROOT=str(root),
                     CHAINMAN_SOURCE_EXPORT_RUNTIME=str(runtime),
                     CHAINMAN_SOURCE_EXPORT_REVISION=revision,
+                    CHAINMAN_SOURCE_EXPORT_OPERATION=operation,
                 )
                 env.pop("CHAINMAN_ENTRY_AUTHORITY", None)
             argv = [
@@ -88,9 +94,10 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
             export_target is not None
             and (Path(export_target) / "result.json").is_file()
         ):
-            print(
-                json.dumps(candidate_export.check(Path(export_target)), sort_keys=True)
-            )
+            record = candidate_export.check(Path(export_target))
+            if record["operation"] != operation:
+                raise ValueError("Candidate export result belongs to another operation")
+            print(json.dumps(record, sort_keys=True))
         if result.returncode:
             raise SystemExit(result.returncode)
 
