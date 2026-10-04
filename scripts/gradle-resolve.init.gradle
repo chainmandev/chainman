@@ -4,8 +4,32 @@ import groovy.json.JsonOutput
 import org.gradle.api.artifacts.component.ModuleComponentSelector
 import org.gradle.api.artifacts.component.ProjectComponentIdentifier
 import org.gradle.api.artifacts.result.ResolvedDependencyResult
+import org.gradle.api.artifacts.result.UnresolvedDependencyResult
 import org.gradle.api.artifacts.dsl.LockMode
 import java.security.MessageDigest
+
+def optionalCommonizedCInterop = { configuration ->
+    def attributes = configuration.attributes.keySet().collectEntries {
+        [(it.name): configuration.attributes.getAttribute(it).toString()]
+    }
+    attributes['org.gradle.usage'] == 'kotlin-commonized-cinterop' &&
+        attributes['org.jetbrains.kotlin.cinteropCommonizerArtifactType'] == 'klib' &&
+        attributes['org.jetbrains.kotlin.native.commonizerTarget']
+}
+
+def absentOptionalVariant
+absentOptionalVariant = { failure ->
+    // KGP uses a lenient artifact view here: most Kotlin libraries publish no
+    // commonized C-interop variant. Only that structured failure is optional.
+    // Avoid importing Gradle internals; unfamiliar failure shapes fail closed.
+    if (failure.hasProperty('failure')) {
+        return failure.failure.class.name ==
+            'org.gradle.internal.component.resolution.failure.type.NoCompatibleVariantsFailure'
+    }
+    def causes = failure.hasProperty('causes') ? failure.causes :
+        (failure.cause ? [failure.cause] : [])
+    !causes.empty && causes.every { absentOptionalVariant(it) }
+}
 
 gradle.beforeProject { project ->
     project.dependencyLocking.lockAllConfigurations()
@@ -34,7 +58,40 @@ gradle.rootProject { root ->
                     configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
                         // resolve() throws on unresolved dependencies; the report-only
                         // dependencies task can otherwise print FAILED and still exit 0.
-                        configuration.resolve()
+                        if (optionalCommonizedCInterop(configuration)) {
+                            // A graph with absent optional variants cannot persist
+                            // Gradle lock state. Lock its strict matching inventory
+                            // below instead, on both update and read-only inspection.
+                            configuration.resolutionStrategy.deactivateDependencyLocking()
+                            def artifacts = configuration.incoming.artifactView { lenient true }.artifacts
+                            // Materialize matching artifacts for checksum verification;
+                            // missing coordinates/artifacts, ambiguity and lock failures
+                            // remain fatal even in this optional artifact inventory.
+                            artifacts.artifactFiles.files
+                            artifacts.failures.each { failure ->
+                                if (!absentOptionalVariant(failure)) {
+                                    throw failure
+                                }
+                            }
+                            def inventory = configuration.copyRecursive()
+                            configuration.incoming.resolutionResult.allDependencies.each { dependency ->
+                                if (dependency instanceof UnresolvedDependencyResult) {
+                                    if (!(dependency.attempted instanceof ModuleComponentSelector) ||
+                                        !absentOptionalVariant(dependency.failure)) {
+                                        throw dependency.failure
+                                    }
+                                    inventory.exclude(group: dependency.attempted.group, module: dependency.attempted.module)
+                                }
+                            }
+                            inventory.resolutionStrategy.activateDependencyLocking()
+                            inventory.resolve()
+                            if (inventory.incoming.artifacts.artifacts.collect { it.id }.toSet() !=
+                                artifacts.artifacts.collect { it.id }.toSet()) {
+                                throw new GradleException('Strict C-interop lock inventory changed matching artifacts')
+                            }
+                        } else {
+                            configuration.resolve()
+                        }
                         configuration.incoming.resolutionResult.allDependencies.each { dependency ->
                             if (dependency instanceof ResolvedDependencyResult && dependency.selected.id instanceof ProjectComponentIdentifier) {
                                 def requested = dependency.requested

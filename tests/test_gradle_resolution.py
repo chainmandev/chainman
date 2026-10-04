@@ -20,6 +20,207 @@ import toolchain
     os.environ.get("CHAINMAN_TEST_GRADLE") == "1", "requires the pinned Gradle profile"
 )
 class GradleResolutionTests(unittest.TestCase):
+    def test_optional_cinterop_variants_retain_required_resolution_integrity(self):
+        with tempfile.TemporaryDirectory(
+            prefix="gradle optional cinterop "
+        ) as temporary:
+            root = Path(temporary).resolve()
+            repository = root / "local repository"
+            cinterop_attributes = {
+                "org.gradle.usage": "kotlin-commonized-cinterop",
+                "org.jetbrains.kotlin.cinteropCommonizerArtifactType": "klib",
+                "org.jetbrains.kotlin.native.commonizerTarget": "(ios_arm64, ios_x64)",
+            }
+
+            def publish(
+                name,
+                attributes,
+                *,
+                missing_artifact=False,
+                ambiguous=False,
+                dependencies=(),
+            ):
+                directory = repository / "sample" / name / "1.0"
+                directory.mkdir(parents=True)
+                artifact = directory / f"{name}-1.0.jar"
+                if not missing_artifact:
+                    with zipfile.ZipFile(artifact, "w") as archive:
+                        archive.writestr("payload", name)
+                (directory / f"{name}-1.0.pom").write_text(
+                    "<project><!-- do_not_remove: published-with-gradle-metadata -->"
+                    "<modelVersion>4.0.0</modelVersion><groupId>sample</groupId>"
+                    f"<artifactId>{name}</artifactId><version>1.0</version></project>"
+                )
+                variant = {
+                    "name": "primary",
+                    "attributes": attributes,
+                    "files": [{"name": artifact.name, "url": artifact.name}],
+                    "dependencies": [
+                        {
+                            "group": "sample",
+                            "module": dependency,
+                            "version": {"requires": "1.0"},
+                        }
+                        for dependency in dependencies
+                    ],
+                }
+                variants = [variant]
+                if ambiguous:
+                    alternate = directory / f"{name}-alternate.jar"
+                    alternate.write_bytes(b"alternative native artifact")
+                    variants.append(
+                        dict(
+                            variant,
+                            name="ambiguous",
+                            files=[
+                                {
+                                    "name": alternate.name,
+                                    "url": alternate.name,
+                                }
+                            ],
+                        )
+                    )
+                (directory / f"{name}-1.0.module").write_text(
+                    json.dumps(
+                        {
+                            "formatVersion": "1.1",
+                            "component": {
+                                "group": "sample",
+                                "module": name,
+                                "version": "1.0",
+                            },
+                            "variants": variants,
+                        }
+                    )
+                )
+                return artifact
+
+            publish("ordinary", {"org.gradle.usage": "java-api"})
+            publish("native-support", cinterop_attributes)
+            native = publish(
+                "native",
+                cinterop_attributes,
+                dependencies=("native-support", "ordinary"),
+            )
+            publish("missing-file", cinterop_attributes, missing_artifact=True)
+            publish("ambiguous", cinterop_attributes, ambiguous=True)
+            (root / "settings.gradle").write_text(
+                "rootProject.name='optional-cinterop'\n"
+            )
+            (root / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx256m\n")
+            path = str(repository).replace("\\", "\\\\").replace("'", "\\'")
+            prefix = (
+                "repositories { maven { url = uri('" + path + "') } }\n"
+                "configurations { artifactInventory { canBeConsumed=false; canBeResolved=true\n"
+                " attributes {\n"
+                "  attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, 'kotlin-commonized-cinterop'))\n"
+                "  attribute(Attribute.of('org.jetbrains.kotlin.cinteropCommonizerArtifactType', String), 'klib')\n"
+                "  attribute(Attribute.of('org.jetbrains.kotlin.native.commonizerTarget', String), '(ios_arm64, ios_x64)')\n"
+                " }\n} }\n"
+            )
+            build = root / "build.gradle"
+            build.write_text(
+                prefix
+                + "dependencies { artifactInventory 'sample:ordinary:1.0'; artifactInventory 'sample:native:1.0' }\n"
+            )
+            env = dict(os.environ, GRADLE_USER_HOME=str(root / "gradle-home"))
+            base = [
+                shutil.which("gradle"),
+                "--offline",
+                "--no-daemon",
+                "--max-workers=2",
+                "--console=plain",
+                "--init-script",
+                str(
+                    Path(__file__).resolve().parents[1]
+                    / "scripts/gradle-resolve.init.gradle"
+                ),
+            ]
+
+            def run(*arguments):
+                return subprocess.run(
+                    base + list(arguments),
+                    cwd=root,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=120,
+                )
+
+            update = (
+                "chainmanResolveAll",
+                "--write-locks",
+                "--write-verification-metadata",
+                "sha256",
+            )
+            resolved = run(*update)
+            self.assertEqual(resolved.returncode, 0, resolved.stdout)
+            self.assertIn(
+                "sample:native:1.0=artifactInventory",
+                (root / "gradle.lockfile").read_text(),
+            )
+            self.assertIn(
+                "sample:native-support:1.0=artifactInventory",
+                (root / "gradle.lockfile").read_text(),
+            )
+            metadata = root / "gradle/verification-metadata.xml"
+            self.assertIn("native-1.0.jar", metadata.read_text())
+            locks = {p: p.read_bytes() for p in (root / "gradle.lockfile", metadata)}
+            inspected = run("--dependency-verification", "strict", "chainmanInspect")
+            self.assertEqual(inspected.returncode, 0, inspected.stdout)
+            self.assertEqual({p: p.read_bytes() for p in locks}, locks)
+            (root / "gradle.lockfile").unlink()
+            unlocked = run("--dependency-verification", "strict", "chainmanInspect")
+            self.assertNotEqual(unlocked.returncode, 0, unlocked.stdout)
+            self.assertIn("does not have lock state", unlocked.stdout)
+            self.assertFalse((root / "gradle.lockfile").exists())
+            (root / "gradle.lockfile").write_bytes(locks[root / "gradle.lockfile"])
+
+            for dependency in ("missing-coordinate", "missing-file", "ambiguous"):
+                with self.subTest(dependency=dependency):
+                    build.write_text(
+                        prefix
+                        + f"dependencies {{ artifactInventory 'sample:{dependency}:1.0' }}\n"
+                    )
+                    rejected = run(*update)
+                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+                    self.assertIn(f"sample:{dependency}:1.0", rejected.stdout)
+
+            # A suggestive configuration name cannot make an ordinary variant
+            # mismatch optional; the complete KGP attribute contract is required.
+            for incomplete in (
+                prefix.replace("artifactInventory", "appleMainCInterop").replace(
+                    "kotlin-commonized-cinterop", "java-runtime"
+                ),
+                prefix.replace("'klib'", "'metadata'"),
+                prefix.replace("'(ios_arm64, ios_x64)'", "''"),
+            ):
+                with self.subTest(incomplete=incomplete):
+                    configuration = (
+                        "appleMainCInterop"
+                        if "appleMainCInterop" in incomplete
+                        else "artifactInventory"
+                    )
+                    build.write_text(
+                        incomplete
+                        + f"dependencies {{ {configuration} 'sample:ordinary:1.0' }}\n"
+                    )
+                    rejected = run(*update)
+                    self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+                    self.assertIn("No matching variant", rejected.stdout)
+
+            build.write_text(
+                prefix + "dependencies { artifactInventory 'sample:native:1.0' }\n"
+            )
+            for p, contents in locks.items():
+                p.write_bytes(contents)
+            native.write_bytes(b"tampered matching native artifact")
+            tampered = run("--dependency-verification", "strict", "chainmanInspect")
+            self.assertNotEqual(tampered.returncode, 0, tampered.stdout)
+            self.assertIn("Dependency verification failed", tampered.stdout)
+            self.assertEqual({p: p.read_bytes() for p in locks}, locks)
+
     def test_managed_defaults_end_the_build_jvm_after_completion(self):
         with tempfile.TemporaryDirectory(
             prefix="chainman gradle lifetime "

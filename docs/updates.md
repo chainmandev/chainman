@@ -451,7 +451,16 @@ changes remain guarded through resolution and the final post-hook audit.
 
 Gradle resolution additionally visits every resolvable project and buildscript
 configuration, requiring failures to stop the update. A root `dependencies` report
-alone does not cover child projects. Exact `local_projects` coordinate-to-directory
+alone does not cover child projects. Kotlin's commonized C-interop artifact views
+are optional inventories: a library that publishes no compatible variant may be
+absent when the configuration has the full commonized-C-interop/klib/target
+attribute contract. A strict copy excluding only those absent external variants
+locks the matching artifact inventory, including transitive dependencies, and
+must preserve the original matching artifacts. Read-only inspection requires
+that inventory's existing lock state and verifies its checksums.
+Missing coordinates or artifacts, ambiguous variants, and unfamiliar Gradle failure
+shapes stop the update; ordinary configurations remain strict.
+Exact `local_projects` coordinate-to-directory
 bindings keep first-party composite/project dependencies out of registry selection;
 each binding must remain inside the adopted project and contain its Gradle build
 source. Gradle 8.3 or later reports actual build-tree identities and directories,
