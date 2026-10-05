@@ -3565,6 +3565,45 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.records()), 1)
 
+    def test_runtime_storage_handoff_preserves_full_posix_descriptor_range(self):
+        env = dict(
+            self.env,
+            CHAINMAN_PROJECT_ROOT=str(self.root),
+            CHAINMAN_SOURCE_REVISION=self.lock,
+            DEMO_TEST_FD="3",
+        )
+        self.prepare_cache(env)
+        runner = r"""
+import os, subprocess, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+for target in range(3, 10):
+    os.dup2(fd, target)
+before = [(os.fstat(target).st_dev, os.fstat(target).st_ino) for target in range(3, 10)]
+result = subprocess.run(sys.argv[2:], env=os.environ, pass_fds=tuple(range(3, 10)), capture_output=True)
+after = [(os.fstat(target).st_dev, os.fstat(target).st_ino) for target in range(3, 10)]
+assert before == after, 'Storage handoff changed caller-owned descriptors'
+sys.stdout.buffer.write(result.stdout)
+sys.stderr.buffer.write(result.stderr)
+sys.exit(result.returncode)
+"""
+        result = run_captured(
+            [
+                sys.executable,
+                "-c",
+                runner,
+                str(self.root / "chainman.lock"),
+                shutil.which("bash"),
+                "--noprofile",
+                "--norc",
+                str(self.tree / "bootstrap/chainman.sh"),
+                "status",
+            ],
+            env=env,
+            cwd="/",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.records()), 1)
+
     def test_host_python_is_not_used_and_inherited_descriptor_survives(self):
         tools = self.root / "host tools"
         tools.mkdir()

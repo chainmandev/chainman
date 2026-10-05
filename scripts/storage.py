@@ -790,7 +790,17 @@ def runtime_run(args: list[str]) -> int:
                     stdout=subprocess.DEVNULL,
                 )
         env = dict(os.environ, CHAINMAN_RUNTIME_STORAGE_ACTIVE=revision)
-        result = runtime_child([launcher, *arguments], env)
+        # This handoff runs inside the pinned bootstrap profile. Executing the
+        # script directly would select host /bin/sh from its portable shebang,
+        # losing Bash's descriptor allocator while inherited leases stay open.
+        bash = shutil.which("bash")
+        if bash is None:
+            raise ValueError("Runtime storage handoff requires bootstrap Bash")
+        for name in ("BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"):
+            env.pop(name, None)
+        result = runtime_child(
+            [bash, "--noprofile", "--norc", launcher, *arguments], env
+        )
     collect(pool, apply=True)
     return result
 

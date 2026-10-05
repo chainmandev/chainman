@@ -24,6 +24,8 @@ corruption, replacement refs, concurrency, interrupted fetches, source checkout
 modifications, literal arguments, stdin, process status, and signals.
 The shell lifetime tests also occupy all descriptors 3–9 and require literal stdin,
 the child's exit status, and every caller-owned descriptor to survive execution.
+A real-Nix bootstrap control also fills descriptors 3–9 across runtime-storage
+reentry, requiring successful dispatch and intact caller descriptor identities.
 Consumer profile tests evaluate a real shallow Git checkout with a nested flake,
 tracked edits and untracked caches, requiring the edits to survive and caches to
 stay outside the Nix source.
