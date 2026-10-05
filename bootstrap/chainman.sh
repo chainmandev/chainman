@@ -368,14 +368,14 @@ update_worker() {
     fi
     if [ -n "$update_export" ]; then update_export_stage resolution; fi
     if [ "$update_resume" = 0 ]; then
-        update_candidate "$update_resolver" _update-resolve "$update_at" "$@" >&2
+        update_candidate "$update_resolver" _update-resolve "$update_at" "$@" >&2 || exit $?
     fi
-    update_candidate "$update_resolver" _update-tasks "$@" > "$update_output/control/tasks"
+    update_candidate "$update_resolver" _update-tasks "$@" > "$update_output/control/tasks" || exit $?
     while IFS= read -r update_task; do
-        CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_resolver" run "$update_task" < /dev/null >&2
+        CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$update_resolver" run "$update_task" < /dev/null >&2 || exit $?
     done < "$update_output/control/tasks"
     if [ "$update_resume" = 1 ] || [ -s "$update_output/control/tasks" ]; then
-        update_candidate "$update_resolver" _update-reaudit "$update_at" "$@" >&2
+        update_candidate "$update_resolver" _update-reaudit "$update_at" "$@" >&2 || exit $?
     fi
     if [ -n "$update_export" ]; then update_export_stage inspection; fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
@@ -388,8 +388,11 @@ update_worker() {
     IFS= read -r update_changed < "$update_output/control/changed"
     if [ "$update_changed" = yes ]; then
         while IFS= read -r update_action && IFS= read -r update_task; do
+            # Bash runs EXIT traps before restoring a failed subshell function's
+            # redirections under errexit. Exit after restoration so export JSON
+            # keeps stdout while verifier output remains on stderr.
             CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
-                "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2
+                "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2 || exit $?
         done < "$update_output/control/verify"
     fi
     if [ -n "$update_export" ]; then exit 0; fi

@@ -539,6 +539,11 @@ format-check=["format-check"]
     def test_public_candidate_export_reports_git_mutation_failure(self):
         self.candidate_export_lifecycle(cases=("git-mutation",))
 
+    def test_public_candidate_export_bash_preserves_result_stdout(self):
+        # Darwin's /bin/sh uses Bash; qualify its EXIT-trap redirection behavior
+        # on every host with the real public update coordinator.
+        self.candidate_export_lifecycle(shell="bash")
+
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER"), "explicit container qualification"
     )
@@ -548,7 +553,7 @@ format-check=["format-check"]
         )
 
     def candidate_export_lifecycle(
-        self, *, container=False, cases=("success", "failure", "no-change")
+        self, *, container=False, cases=("success", "failure", "no-change"), shell=None
     ):
         self.update_lifecycle()
         if container:
@@ -557,6 +562,10 @@ format-check=["format-check"]
                 CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
             )
         runtime = self.root / "real-runtime"
+        if shell is not None:
+            coordinator = runtime / "bootstrap/chainman.sh"
+            body = coordinator.read_text().split("\n", 1)[1]
+            coordinator.write_text(f"#!/usr/bin/env {shell}\n" + body)
         # This test qualifies the real public transport/stages with a built-in
         # adapter. Provider selection is deterministic fixture data; its live
         # eligibility algorithm has independent source-adapter tests.
@@ -624,7 +633,9 @@ commands=[["python3", "verify.py"]]
             self.lifecycle_git("add", ".")
             self.lifecycle_git("commit", "--allow-empty", "-qm", case)
             before = self.lifecycle_git("rev-parse", "HEAD")
-            target = Path(self.shared.name).resolve() / ("candidate-export-" + case)
+            target = Path(self.shared.name).resolve() / (
+                "candidate-export-" + self.root.name + "-" + case
+            )
             result = self.run_bootstrap(
                 "deps-update",
                 "--skip-chainman",
@@ -652,6 +663,9 @@ commands=[["python3", "verify.py"]]
             if case in ("failure", "git-mutation"):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertNotEqual(outcome["exit_code"], 0)
+            if case == "failure":
+                self.assertEqual(result.returncode, 23)
+                self.assertEqual(outcome["exit_code"], 23)
             manifest = json.loads((target / "snapshot.json").read_text())
             self.assertEqual(manifest["runtimes"]["entry"]["commit"], self.lock)
             self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
