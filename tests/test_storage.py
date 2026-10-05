@@ -3,6 +3,7 @@
 import json
 import os
 import pty
+import re
 import select
 import signal
 import shlex
@@ -72,7 +73,15 @@ def terminal_process(argv, env, cwd):
 
 
 def exercise_job_control(
-    test, argv, env, cwd, stopped=lambda: None, *, cancel=False, background=False
+    test,
+    argv,
+    env,
+    cwd,
+    stopped=lambda: None,
+    *,
+    cancel=False,
+    background=False,
+    timeout=180,
 ):
     """A real interactive shell owns the job, including waiting bootstrap shells."""
     shell = shutil.which("bash")
@@ -88,21 +97,42 @@ def exercise_job_control(
     )
     pid = process.pid
     output = b""
-    timeout = 180
+    transcript = bytearray()
+
+    def receive(data):
+        nonlocal output
+        output += data
+        if len(transcript) < 262144:
+            transcript.extend(data[: 262144 - len(transcript)])
+
+    def diagnostics(snapshot=b""):
+        return (
+            snapshot.decode(errors="replace")
+            + "\nTerminal transcript:\n"
+            + transcript.decode(errors="replace")
+        )
+
+    def reject_early_exit():
+        if re.search(rb"(?:^|\r?\n)RESULT:[0-9]+\r?\n", transcript):
+            test.fail(
+                "Terminal workload exited before expected job control.\n"
+                + diagnostics()
+            )
 
     def expect(marker):
         nonlocal output
         deadline = time.monotonic() + timeout
         while marker not in output:
-            test.assertLess(time.monotonic(), deadline, output.decode(errors="replace"))
+            if marker == b"CHILD-READY\r\n":
+                reject_early_exit()
+            test.assertLess(time.monotonic(), deadline, diagnostics(output))
             if select.select([master], [], [], 0.1)[0]:
-                output += os.read(master, 65536)
+                receive(os.read(master, 65536))
         before, output = output.split(marker, 1)
         return before
 
     def send(value):
-        nonlocal output
-        output += write_terminal(master, value, 5)
+        receive(write_terminal(master, value, 5))
 
     def wait_stopped_job():
         deadline = time.monotonic() + timeout
@@ -111,9 +141,8 @@ def exercise_job_control(
             snapshot = expect(b"PROMPT> ")
             if b"Stopped" in snapshot:
                 return
-            test.assertLess(
-                time.monotonic(), deadline, snapshot.decode(errors="replace")
-            )
+            reject_early_exit()
+            test.assertLess(time.monotonic(), deadline, diagnostics(snapshot))
             time.sleep(0.05)
 
     try:
@@ -131,7 +160,7 @@ def exercise_job_control(
             stopped()
             send(b"fg\n")
         expect(b"CHILD-READY\r\n")
-        timeout = 10
+        timeout = min(timeout, 10)
         for _ in range(2):
             send(b"\x1a")
             expect(b"PROMPT> ")
@@ -192,6 +221,25 @@ class StorageTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.pool = self.root / "nix-just-downloads" / storage.POOL
+
+    def test_terminal_fixture_retains_early_workload_exit_diagnostics(self):
+        with self.assertRaises(AssertionError) as raised:
+            exercise_job_control(
+                self,
+                [
+                    sys.executable,
+                    "-c",
+                    "print('EARLY-EXIT-WITNESS', flush=True); raise SystemExit(23)",
+                ],
+                dict(os.environ),
+                self.root,
+                background=True,
+                timeout=2,
+            )
+        message = str(raised.exception)
+        self.assertIn("Terminal workload exited before expected job control", message)
+        self.assertIn("EARLY-EXIT-WITNESS", message)
+        self.assertIn("RESULT:23", message)
 
     def populated(self):
         with storage.use(self.pool, "downloads", "downloads") as entry:
