@@ -2229,7 +2229,20 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
                     "CHAINMAN_TEST_WARM_VOLUME", self.test_volume
                 ),
             )
+        else:
+            config = self.root / "chainman.toml"
+            config.write_text(
+                config.read_text() + "\n[tasks.prepare_preview_controller]\n"
+                'commands=[["python3","-c","pass"]]\n'
+                "cleanup_children=true\nshutdown_seconds=2\n"
+            )
         self.prepare_cache(env)
+        if not container:
+            # Qualify cold native-controller construction before measuring the
+            # preview server's unchanged connection-readiness deadline.
+            self.run_bootstrap(
+                "run", "prepare_preview_controller", env=env, timeout=600
+            )
         log = self.root / "preview-output"
         with log.open("w") as output:
             child = subprocess.Popen(

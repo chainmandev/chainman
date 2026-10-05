@@ -26,6 +26,11 @@ The shell lifetime tests also occupy all descriptors 3–9 and require literal s
 the child's exit status, and every caller-owned descriptor to survive execution.
 A real-Nix bootstrap control also fills descriptors 3–9 across runtime-storage
 reentry, requiring successful dispatch and intact caller descriptor identities.
+The host preview fixture first constructs and executes its native controller through
+the public bootstrap, with a bounded ten-minute cold-build allowance. It then keeps
+the separate sixty-second HTTP readiness deadline, interrupt handling, and port
+release assertions. Container preview qualification retains its existing engine
+interruption path without compiling the native controller.
 Consumer profile tests evaluate a real shallow Git checkout with a nested flake,
 tracked edits and untracked caches, requiring the edits to survive and caches to
 stay outside the Nix source.
