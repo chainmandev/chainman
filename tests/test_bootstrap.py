@@ -642,8 +642,9 @@ commands=[["python3", "verify.py"]]
                 "--export-candidate",
                 str(target),
                 check=case not in ("failure", "git-mutation"),
-                # Cold container startup includes a fresh pinned Nix toolchain.
-                timeout=600 if container else 180,
+                # Every fixture pins a distinct runtime. Host and container
+                # startup can both build the native task and pinned toolchain.
+                timeout=600,
             )
             self.assertTrue(
                 result.stdout.strip(),

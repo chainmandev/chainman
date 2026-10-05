@@ -9,6 +9,10 @@ property tests, real Git transaction tests, host-Nix bootstrap tests, and the sm
 example build. Native adapters and service ownership have additional focused gates
 listed in [contributing](contributing.md).
 
+The core source suite stops at its first error or failure, so the traceback and
+captured startup output are reported before a later job deadline can cancel the
+runner. A successful source gate still executes the complete discovered suite.
+
 The manually dispatched verification workflow binds every lane to the requested
 source SHA. It includes Linux x86-64/ARM64 and macOS ARM64/Intel host lanes,
 Docker/Podman container lanes, and language/native-tool checks. A source commit is
@@ -79,6 +83,11 @@ sandbox or publication.
 The runtime-only fixture selects a real Git revision, verifies with that runtime,
 and checks the bundle's entry, resolution and verification identities while the
 original consumer pin stays unchanged.
+
+Public candidate-export fixtures allow ten minutes per export for cold native-task
+and pinned-toolchain construction on both hosts and containers. They still require
+the original result stdout, verification status, unchanged consumer Git state, and
+detached-bundle readback. Exceeding the allowance remains an error.
 
 Real lifecycle tests run Git-pinned runtimes through Nix. They must demonstrate
 successful updates and cleanup, failed candidates, interruption/resume, and runtime
