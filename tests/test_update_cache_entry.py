@@ -45,7 +45,9 @@ class UpdateCacheEntry(unittest.TestCase):
                 self.subTest(current=current),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                root = Path(directory)
+                # Successful export fixtures use canonical paths; aliases are
+                # rejected by the independent export containment tests.
+                root = Path(directory).resolve()
                 target = root / "export"
                 record = None
 

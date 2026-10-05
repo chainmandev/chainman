@@ -634,6 +634,11 @@ commands=[["python3", "verify.py"]]
                 # Cold container startup includes a fresh pinned Nix toolchain.
                 timeout=600 if container else 180,
             )
+            self.assertTrue(
+                result.stdout.strip(),
+                f"{case} export exited {result.returncode} without a result:\n"
+                + result.stderr,
+            )
             outcome = json.loads(result.stdout)
             self.assertEqual(
                 outcome["outcome"],
