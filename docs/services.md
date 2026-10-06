@@ -122,6 +122,12 @@ separate from service health. Retry status after the transition; recovery and
 cleanup remain the responsibility of start/stop operations. Runtime bootstrap
 and provisioning time are outside this native inspection budget.
 
+A read-only process-list probe may be sampled once more if its command exited
+successfully but timed out draining inherited output pipes. The controller
+discards the first output and retains the original probe deadline; repeated drain
+errors, invalid JSON, and genuine command failures remain errors. Start, restart,
+stop, and other service-control mutations are never retried this way.
+
 When a service exits before readiness, the error identifies the service, backend
 status, exit code when supplied, and log path. Finite tasks also show up to 16 KiB
 per service scope from the end of this startup attempt; older log history is

@@ -277,6 +277,21 @@ func queryCommand(ctx context.Context, executable string, args ...string) *exec.
 	cmd.WaitDelay = 100 * time.Millisecond
 	return cmd
 }
+
+// Resample a read-only probe once after a successful exit whose pipe drain
+// timed out. Discard that attempt's possibly truncated output and retain the
+// caller's deadline. Control mutations must not use this helper.
+func readOnlyQuery(ctx context.Context, query func() ([]byte, error)) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	out, err := query()
+	if errors.Is(err, exec.ErrWaitDelay) && ctx.Err() == nil {
+		return query()
+	}
+	return out, err
+}
+
 func backend(p Plan, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -331,7 +346,9 @@ func statesContext(ctx context.Context, p Plan) ([]Process, error) {
 	if len(p.Services) == 0 {
 		return []Process{}, nil
 	}
-	b, e := backendContext(ctx, p, "process", "list", "-o", "json")
+	b, e := readOnlyQuery(ctx, func() ([]byte, error) {
+		return backendContext(ctx, p, "process", "list", "-o", "json")
+	})
 	if e != nil {
 		return nil, e
 	}
