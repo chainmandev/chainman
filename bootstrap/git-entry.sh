@@ -54,10 +54,18 @@ export CHAINMAN_PROJECT_ROOT="$project" CHAINMAN_SOURCE_REVISION="$revision"
 # environments and runtime used inside Nix are rooted separately in its store.
 # A foreground shell wait defers traps until its child exits. Use the verified
 # lifetime helper so a signal directed only at this entrypoint reaches the child.
-# Preserve Bash's descriptor allocator through both supervisors when available.
+# Preserve Bash's descriptor allocator when the portable range is full. Normal
+# cold bootstrap must not require a usable host Bash before realizing its pin.
 # Re-exec only after export verification, transferring private-path cleanup to
 # the replacement supervisor. Portable sh remains supported without Bash.
-if entry_bash=$(command -v bash); then
+entry_needs_bash=1
+for entry_fd in 9 8 7 6 5 4 3; do
+    if ! (: <&"$entry_fd") 2> /dev/null && ! (: >&"$entry_fd") 2> /dev/null; then
+        entry_needs_bash=0
+        break
+    fi
+done
+if [ "$entry_needs_bash" = 1 ] && entry_bash=$(command -v bash); then
     unset BASH_ENV ENV
     # Bash owns readonly option variables; remove their export rather than
     # attempting to unset them when this entry was itself invoked with Bash.

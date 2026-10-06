@@ -34,6 +34,9 @@ and private-export cleanup. Without Bash, a full descriptor table must fail befo
 dispatch without changing the caller's leases. Real-Nix bootstrap controls fill
 descriptors 3–9 through both public entry and direct runtime-storage reentry,
 requiring successful dispatch and intact caller descriptor identities.
+Ordinary entry with a free descriptor must retain its portable path even when an
+unusable host Bash precedes the pinned shell. The primary-input compatibility
+fixture independently requires the bootstrap to reach its pinned Bash.
 The host preview fixture first constructs and executes its native controller through
 the public bootstrap, with a bounded ten-minute cold-build allowance. It then keeps
 the separate sixty-second HTTP readiness deadline, interrupt handling, and port

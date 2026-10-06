@@ -394,6 +394,31 @@ class GitBootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 37, result.stderr)
         self.assertEqual(result.stdout, b"['literal $() spaces']\npiped input\n")
 
+    def test_public_entry_does_not_require_host_bash_without_descriptor_pressure(self):
+        for name in ("git-entry.sh", "lifetime.sh"):
+            shutil.copyfile(
+                SOURCE / "bootstrap" / name, self.origin / "bootstrap" / name
+            )
+        bash = self.binaries / "bash"
+        bash.write_text('#!/bin/sh\nprintf called > "$FIXTURE_MARKER"\nexit 77\n')
+        bash.chmod(0o755)
+        runtime = self.origin / "bootstrap/chainman.sh"
+        runtime.write_text('#!/bin/sh\nprintf "%s\\0" "$@"; cat; exit 37\n')
+        runtime.chmod(0o755)
+        self.git_run("add", ".")
+        self.git_run(
+            "-c", "commit.gpgsign=false", "commit", "-qm", "No host Bash fixture"
+        )
+        revision = self.git_run("rev-parse", "HEAD").stdout.strip()
+        (self.project / "chainman.lock").write_text(revision + "\n")
+        marker = self.project / "bash-called"
+        result = self.run_entry(
+            "literal $() spaces", input=b"piped input\n", FIXTURE_MARKER=str(marker)
+        )
+        self.assertEqual(result.returncode, 37, result.stderr)
+        self.assertEqual(result.stdout, b"literal $() spaces\0piped input\n")
+        self.assertFalse(marker.exists())
+
     def test_public_entry_preserves_full_descriptor_table_with_bash(self):
         for name in ("git-entry.sh", "lifetime.sh"):
             shutil.copyfile(
