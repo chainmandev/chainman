@@ -267,6 +267,13 @@ class GitBootstrapTests(unittest.TestCase):
         self.assertEqual(result.stdout, b"literal $() spaces\0piped input\n")
 
     def test_real_entry_forwards_signals_directed_only_at_entrypoint(self):
+        self.assert_real_entry_signal_forwarding()
+
+    def test_bash_entry_forwards_signals_directed_only_at_entrypoint(self):
+        (self.binaries / "bash").symlink_to(shutil.which("bash"))
+        self.assert_real_entry_signal_forwarding(shell="bash")
+
+    def assert_real_entry_signal_forwarding(self, *, shell="sh"):
         for name in ("git-entry.sh", "lifetime.sh"):
             shutil.copyfile(
                 SOURCE / "bootstrap" / name, self.origin / "bootstrap" / name
@@ -292,7 +299,7 @@ class GitBootstrapTests(unittest.TestCase):
                     (self.project / name).unlink(missing_ok=True)
                 process = subprocess.Popen(
                     [
-                        "sh",
+                        shell,
                         str(SOURCE / "bootstrap/git-entry.sh"),
                         str(self.project),
                         str(self.origin / ".git"),
@@ -300,6 +307,9 @@ class GitBootstrapTests(unittest.TestCase):
                     ],
                     env=dict(
                         self.env,
+                        TMPDIR=str(self.root),
+                        SHELLOPTS="nounset",
+                        BASHOPTS="extquote",
                         FIXTURE_SHUTDOWN_DELAY="6" if sent == signal.SIGTERM else "0",
                     ),
                     stdout=subprocess.PIPE,
@@ -316,6 +326,7 @@ class GitBootstrapTests(unittest.TestCase):
                     output = process.communicate(timeout=12)
                     self.assertEqual(process.returncode, expected, output)
                     self.assertTrue((self.project / "stopped").exists())
+                    self.assertEqual(list(self.root.glob("chainman-source.*")), [])
                 finally:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
@@ -382,6 +393,89 @@ class GitBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 37, result.stderr)
         self.assertEqual(result.stdout, b"['literal $() spaces']\npiped input\n")
+
+    def test_public_entry_preserves_full_descriptor_table_with_bash(self):
+        for name in ("git-entry.sh", "lifetime.sh"):
+            shutil.copyfile(
+                SOURCE / "bootstrap" / name, self.origin / "bootstrap" / name
+            )
+        (self.binaries / "bash").symlink_to(shutil.which("bash"))
+        (self.binaries / "dirname").symlink_to(shutil.which("dirname"))
+        runtime = self.origin / "bootstrap/chainman.sh"
+        runtime.write_text(
+            "#!/bin/sh\nset -eu\n"
+            '. "$(dirname "$0")/lifetime.sh"\n'
+            'lifetime_run "$FIXTURE_PYTHON" "$CHAINMAN_PROJECT_ROOT/worker.py" "$@"\n'
+        )
+        runtime.chmod(0o755)
+        (self.project / "worker.py").write_text(
+            "import os,sys\nfrom pathlib import Path\n"
+            "for name in ('BASH_ENV','ENV','SHELLOPTS','BASHOPTS'): assert name not in os.environ\n"
+            "for fd in range(3,10):\n"
+            " actual=os.fstat(fd)\n"
+            " expected=os.stat(Path(os.environ['CHAINMAN_PROJECT_ROOT'])/f'lease-{fd}')\n"
+            " assert (actual.st_dev,actual.st_ino)==(expected.st_dev,expected.st_ino)\n"
+            "print(repr(sys.argv[1:]),flush=True)\n"
+            "sys.stdout.buffer.write(sys.stdin.buffer.read())\n"
+            "raise SystemExit(37)\n"
+        )
+        self.git_run("add", ".")
+        self.git_run(
+            "-c", "commit.gpgsign=false", "commit", "-qm", "Full lease fixture"
+        )
+        revision = self.git_run("rev-parse", "HEAD").stdout.strip()
+        (self.project / "chainman.lock").write_text(revision + "\n")
+        startup = self.project / "startup.sh"
+        startup.write_text(
+            'if [ "${CHAINMAN_PROJECT_ROOT:-}" = "$FIXTURE_PROJECT" ]; then\n'
+            ' printf poisoned > "$FIXTURE_PROJECT/poisoned"\n'
+            "fi\n"
+        )
+        runner = r"""
+import os,subprocess,sys
+for target in range(3,10):
+    fd=os.open(f'lease-{target}',os.O_CREAT|os.O_RDWR,0o600)
+    os.dup2(fd,target)
+    if fd != target: os.close(fd)
+before=[(os.fstat(fd).st_dev,os.fstat(fd).st_ino) for fd in range(3,10)]
+result=subprocess.run(['just','chainman','literal $() spaces',''],pass_fds=tuple(range(3,10)),input=b'piped input\n',capture_output=True)
+assert before==[(os.fstat(fd).st_dev,os.fstat(fd).st_ino) for fd in range(3,10)]
+sys.stdout.buffer.write(result.stdout)
+sys.stderr.buffer.write(result.stderr)
+raise SystemExit(result.returncode)
+"""
+        env = dict(
+            self.env,
+            FIXTURE_PYTHON=sys.executable,
+            FIXTURE_PROJECT=str(self.project),
+            BASH_ENV=str(startup),
+            ENV=str(startup),
+            SHELLOPTS="nounset",
+            BASHOPTS="extquote",
+            TMPDIR=str(self.root),
+        )
+        for bash_available in (True, False):
+            with self.subTest(bash_available=bash_available):
+                if not bash_available:
+                    (self.binaries / "bash").unlink()
+                result = subprocess.run(
+                    [sys.executable, "-c", runner],
+                    cwd=self.project,
+                    env=env,
+                    capture_output=True,
+                    timeout=30,
+                )
+                if bash_available:
+                    self.assertEqual(result.returncode, 37, result.stderr)
+                    self.assertEqual(
+                        result.stdout, b"['literal $() spaces', '']\npiped input\n"
+                    )
+                else:
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, b"")
+                    self.assertIn(b"cannot preserve stdin", result.stderr)
+                self.assertFalse((self.project / "poisoned").exists())
+                self.assertEqual(list(self.root.glob("chainman-source.*")), [])
 
     def test_full_descriptor_table_fails_without_starting_or_closing_leases(self):
         check = self.project / "check-descriptors.py"

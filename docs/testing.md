@@ -28,8 +28,12 @@ corruption, replacement refs, concurrency, interrupted fetches, source checkout
 modifications, literal arguments, stdin, process status, and signals.
 The shell lifetime tests also occupy all descriptors 3–9 and require literal stdin,
 the child's exit status, and every caller-owned descriptor to survive execution.
-A real-Nix bootstrap control also fills descriptors 3–9 across runtime-storage
-reentry, requiring successful dispatch and intact caller descriptor identities.
+Public Git-entry controls fill descriptors 3–9 and exercise both supervisors with
+Bash, including literal streams, status, startup-file suppression, signal handling,
+and private-export cleanup. Without Bash, a full descriptor table must fail before
+dispatch without changing the caller's leases. Real-Nix bootstrap controls fill
+descriptors 3–9 through both public entry and direct runtime-storage reentry,
+requiring successful dispatch and intact caller descriptor identities.
 The host preview fixture first constructs and executes its native controller through
 the public bootstrap, with a bounded ten-minute cold-build allowance. It then keeps
 the separate sixty-second HTTP readiness deadline, interrupt handling, and port

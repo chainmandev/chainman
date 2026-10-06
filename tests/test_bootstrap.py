@@ -3580,12 +3580,25 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         self.assertEqual(len(self.records()), 1)
 
     def test_runtime_storage_handoff_preserves_full_posix_descriptor_range(self):
+        self.assert_full_descriptor_handoff(public_entry=False)
+
+    def test_public_bootstrap_preserves_full_posix_descriptor_range(self):
+        self.assert_full_descriptor_handoff(public_entry=True)
+
+    def assert_full_descriptor_handoff(self, *, public_entry):
         env = dict(
             self.env,
             CHAINMAN_PROJECT_ROOT=str(self.root),
             CHAINMAN_SOURCE_REVISION=self.lock,
             DEMO_TEST_FD="3",
         )
+        if public_entry:
+            # Nix's core shell aliases sh to Bash, masking the public entry's
+            # portable-shell boundary. Keep pinned Bash available separately.
+            tools = self.root / "portable shell"
+            tools.mkdir()
+            (tools / "sh").symlink_to(shutil.which("sh", path=os.defpath))
+            env["PATH"] = str(tools) + os.pathsep + env["PATH"]
         self.prepare_cache(env)
         runner = r"""
 import os, subprocess, sys
@@ -3600,17 +3613,24 @@ sys.stdout.buffer.write(result.stdout)
 sys.stderr.buffer.write(result.stderr)
 sys.exit(result.returncode)
 """
+        command = (
+            [str(self.launcher), "status"]
+            if public_entry
+            else [
+                shutil.which("bash"),
+                "--noprofile",
+                "--norc",
+                str(self.tree / "bootstrap/chainman.sh"),
+                "status",
+            ]
+        )
         result = run_captured(
             [
                 sys.executable,
                 "-c",
                 runner,
                 str(self.root / "chainman.lock"),
-                shutil.which("bash"),
-                "--noprofile",
-                "--norc",
-                str(self.tree / "bootstrap/chainman.sh"),
-                "status",
+                *command,
             ],
             env=env,
             cwd="/",

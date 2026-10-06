@@ -54,6 +54,32 @@ export CHAINMAN_PROJECT_ROOT="$project" CHAINMAN_SOURCE_REVISION="$revision"
 # environments and runtime used inside Nix are rooted separately in its store.
 # A foreground shell wait defers traps until its child exits. Use the verified
 # lifetime helper so a signal directed only at this entrypoint reaches the child.
+# Preserve Bash's descriptor allocator through both supervisors when available.
+# Re-exec only after export verification, transferring private-path cleanup to
+# the replacement supervisor. Portable sh remains supported without Bash.
+if entry_bash=$(command -v bash); then
+    unset BASH_ENV ENV
+    # Bash owns readonly option variables; remove their export rather than
+    # attempting to unset them when this entry was itself invoked with Bash.
+    # The non-POSIX builtin is probed in a subshell before use.
+    # shellcheck disable=SC3045
+    if (export -n SHELLOPTS BASHOPTS) 2> /dev/null; then
+        export -n SHELLOPTS BASHOPTS
+    else
+        unset SHELLOPTS BASHOPTS
+    fi
+    # The replacement shell expands its own positional parameters.
+    # shellcheck disable=SC2016
+    exec "$entry_bash" --noprofile --norc -c '
+        set -eu
+        entry_staging=$1
+        entry_bash=$2
+        shift 2
+        . "$entry_staging/source/bootstrap/lifetime.sh"
+        lifetime_directory=$entry_staging
+        lifetime_supervise "$entry_bash" --noprofile --norc "$entry_staging/source/bootstrap/chainman.sh" "$@"
+    ' chainman "$staging" "$entry_bash" "$@"
+fi
 # shellcheck source=bootstrap/lifetime.sh
 . "$staging/source/bootstrap/lifetime.sh"
 lifetime_directory=$staging
