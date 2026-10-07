@@ -56,13 +56,17 @@ def task_process_snapshot(pid, group):
 
 
 def task_failure_stacks(client, snapshot):
-    """Opt-in fatal Go dumps after failure; finish only the verified fixture."""
+    """Opt-in fatal Go dump after failure; finish only the verified fixture."""
     evidence = {"diagnostic_only": True}
     if os.environ.get("CHAINMAN_TEST_STOPPED_TASK_STACKS") != "1":
         evidence["skipped"] = "Not explicitly enabled"
         return json.dumps(evidence)
     owned = False
+    output = bytearray()
     try:
+        target = os.environ.get("CHAINMAN_TEST_TASK_STACK_TARGET", "anchor")
+        if target not in ("anchor", "outer"):
+            raise ValueError("Unknown disposable controller target")
         group = snapshot["anchor_group"]
         rows = {row["pid"]: row for row in snapshot["processes"]}
         outer = rows[client.pid]
@@ -86,46 +90,39 @@ def task_failure_stacks(client, snapshot):
         owned = True
         fd = client.stderr.fileno()
         blocking = os.get_blocking(fd)
-        output = bytearray()
-        sections = []
         try:
             os.set_blocking(fd, False)
-            # Both are running Go controllers observed after the original
-            # three-second assertion failed. SIGQUIT is fatal, never repair.
-            evidence["targets"] = [client.pid, group]
+            # One fatal dump can end the other controller. Independent failed
+            # fixtures select the anchor and outer; never assume both survive.
+            pid = group if target == "anchor" else client.pid
+            evidence.update(target=target, targets=[pid])
+            os.kill(pid, signal.SIGQUIT)
             deadline = time.monotonic() + 2
-            for pid in (client.pid, group):
-                if pid == group and os.getpgid(group) != group:
-                    raise ValueError("Disposable anchor ownership changed")
-                start = len(output)
-                os.kill(pid, signal.SIGQUIT)
-                until = min(deadline, time.monotonic() + 1)
-                while len(output) < 65536 and time.monotonic() < until:
-                    if select.select([fd], [], [], 0.05)[0]:
-                        try:
-                            chunk = os.read(fd, min(4096, 65536 - len(output)))
-                        except BlockingIOError:
-                            continue
-                        if not chunk:
-                            break
-                        output.extend(chunk)
-                    elif pid == client.pid and client.poll() is not None:
+            while len(output) < 65536:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if select.select([fd], [], [], min(0.05, remaining))[0]:
+                    try:
+                        chunk = os.read(fd, min(4096, 65536 - len(output)))
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
                         break
-                sections.append(
-                    {"pid": pid, "start": start, "bytes": len(output) - start}
-                )
+                    output.extend(chunk)
+                elif target == "outer" and client.poll() is not None:
+                    break
         finally:
             os.set_blocking(fd, blocking)
-        evidence["stack"] = output.decode(errors="replace")
-        evidence["stack_bytes"] = len(output)
-        evidence["sections"] = sections
     except (OSError, KeyError, ValueError) as error:
         evidence["error"] = type(error).__name__
     finally:
         if owned:
-            # Fatal dumps can let the outer exit before the normal test cleanup
-            # notices stopped descendants. The validated disposable group must
-            # still be finished; no unrelated process or group is addressed.
+            # Retain bytes even if a target or descriptor disappeared. Observer
+            # failures must not erase the already-failed fixture's evidence.
+            evidence["stack"] = output.decode(errors="replace")
+            evidence["stack_bytes"] = len(output)
+            evidence["outer_exit_before_cleanup"] = client.poll()
             try:
                 os.killpg(group, signal.SIGKILL)
             except OSError as error:
@@ -135,4 +132,17 @@ def task_failure_stacks(client, snapshot):
                     client.kill()
                 except OSError as error:
                     evidence["outer_cleanup_error"] = type(error).__name__
+            try:
+                evidence["outer_exit_after_cleanup"] = client.wait(timeout=1)
+            except (OSError, subprocess.SubprocessError) as error:
+                evidence["outer_wait_error"] = type(error).__name__
+            else:
+                for stream in (client.stdout, client.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError as error:
+                            evidence.setdefault("pipe_close_errors", []).append(
+                                type(error).__name__
+                            )
     return json.dumps(evidence)

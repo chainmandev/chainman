@@ -153,7 +153,10 @@ jobs:
           retention-days: 14
       - name: Repeat the unchanged stopped-task cancellation assertion
         id: repeat
+        if: ${{ !cancelled() }}
         timeout-minutes: 8
+        env:
+          CHAINMAN_TEST_TASK_STACK_TARGET: outer
         run: |
           set -o pipefail
           printf 'Source: %s\nPhase: entering control profile for repetitions\n' "$(git rev-parse HEAD)" | tee cancellation-diagnostic/repetitions.log

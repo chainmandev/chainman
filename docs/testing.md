@@ -223,7 +223,7 @@ the normal matrix. Its default is false; ordinary verification keeps every
 existing matrix lane and command. The diagnostic runs the unchanged full native
 ownership gate. A new standalone dispatch workflow must first exist on GitHub's
 default branch, so this branch uses the existing registered entrypoint.
-If that gate passes, it repeats the original cancellation assertion twelve
+After that gate finishes, it repeats the original cancellation assertion twelve
 times in the same pinned control profile. It stops on the first failure and
 does not establish release qualification. Phase markers distinguish profile
 entry, the control-package build and individual repetitions. Each repetition
@@ -240,13 +240,20 @@ fourteen-lane workflow before final full release qualification.
 The deliberate diagnostic also enables `CHAINMAN_TEST_STOPPED_TASK_STACKS=1`.
 After the original stopped-task assertion fails, it checks that the running
 outer controller is the test process's child, and that its running anchor still
-owns the published disposable group. It sends fatal Go `SIGQUIT` dumps only to
-those two controllers, reads at most64KiB for two seconds, and finishes that
-verified group even if the outer has exited. This opt-in failure path changes
-cleanup and never proves successful cancellation. Missing or changed ownership
-refuses all signals. Captured stderr from the failed assertion is retained so
-the anchor's cancellation marker can be distinguished from its stack state.
-The original exception, three-second assertion and successful path remain.
+owns the published disposable group. Each observation sends one fatal Go
+`SIGQUIT` dump: the full ownership gate selects the anchor, while a fresh
+repetition fixture selects the outer through `CHAINMAN_TEST_TASK_STACK_TARGET`.
+The repetition step runs after a full-gate failure unless canceled; the job
+still fails and never establishes qualification. Separate fixtures avoid
+assuming that one fatal dump leaves the other controller alive.
+
+Each dump reads at most64KiB for two seconds, retains partial bytes and the
+outer's observed exit even if collection fails, and finishes the verified group.
+Cleanup waits at most one second for the outer and closes its captured pipes.
+This opt-in failure path changes cleanup and never proves successful cancellation.
+Missing or changed ownership and unknown targets refuse all signals. Captured
+stderr and the post-observer workload termination marker are retained. The
+original exception, three-second assertion and successful path remain.
 
 Terminal job-control assertions record the disposable PTY's foreground group
 and its session-owned process IDs, parents, groups, states and executable names

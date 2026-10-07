@@ -567,9 +567,12 @@ print('CLEANUP FINISHED', signals, flush=True)
                 flush=True,
             )
             if os.environ.get("CHAINMAN_TEST_STOPPED_TASK_STACKS") == "1":
+                stacks = json.loads(task_failure_stacks(client, json.loads(snapshot)))
+                stacks["post_observer_term_received"] = (
+                    self.root / "term-received"
+                ).exists()
                 print(
-                    "Owned stopped-task controller stacks: "
-                    + task_failure_stacks(client, json.loads(snapshot)),
+                    "Owned stopped-task controller stacks: " + json.dumps(stacks),
                     file=sys.stderr,
                     flush=True,
                 )

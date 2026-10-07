@@ -9,7 +9,7 @@ import signal
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock, call, patch
+from unittest.mock import Mock, patch
 
 from task_diagnostics import task_failure_stacks, task_process_snapshot
 
@@ -52,7 +52,13 @@ class TaskDiagnosticsTests(unittest.TestCase):
         client = Mock(pid=41)
         snapshot = self.stack_snapshot()
         with (
-            patch.dict(os.environ, {"CHAINMAN_TEST_STOPPED_TASK_STACKS": "1"}),
+            patch.dict(
+                os.environ,
+                {
+                    "CHAINMAN_TEST_STOPPED_TASK_STACKS": "1",
+                    "CHAINMAN_TEST_TASK_STACK_TARGET": "anchor",
+                },
+            ),
             patch("task_diagnostics.os.getpgid", return_value=99),
             patch("task_diagnostics.os.kill") as kill,
             patch("task_diagnostics.os.killpg") as kill_group,
@@ -68,14 +74,21 @@ class TaskDiagnosticsTests(unittest.TestCase):
             fd = stream.fileno()
             client = Mock(pid=41, stderr=stream)
             client.poll.return_value = None
+            client.wait.return_value = 2
             with (
-                patch.dict(os.environ, {"CHAINMAN_TEST_STOPPED_TASK_STACKS": "1"}),
-                patch("task_diagnostics.os.getpgid", side_effect=[40, 42, 42]),
+                patch.dict(
+                    os.environ,
+                    {
+                        "CHAINMAN_TEST_STOPPED_TASK_STACKS": "1",
+                        "CHAINMAN_TEST_TASK_STACK_TARGET": "anchor",
+                    },
+                ),
+                patch("task_diagnostics.os.getpgid", side_effect=[40, 42]),
                 patch("task_diagnostics.os.kill") as kill,
                 patch("task_diagnostics.os.killpg") as kill_group,
                 patch(
                     "task_diagnostics.time.monotonic",
-                    side_effect=[0, 0, 0.1, 1.2, 1.2, 1.3, 2.1],
+                    side_effect=[0, 0.1, 3],
                 ),
                 patch(
                     "task_diagnostics.select.select",
@@ -86,19 +99,64 @@ class TaskDiagnosticsTests(unittest.TestCase):
                 ) as read,
             ):
                 result = json.loads(task_failure_stacks(client, snapshot))
-        self.assertEqual(result["stack"], "fixture-stackfixture-stack")
-        self.assertEqual([section["pid"] for section in result["sections"]], [41, 42])
-        self.assertEqual(result["targets"], [41, 42])
-        self.assertEqual(
-            kill.call_args_list,
-            [
-                call(41, signal.SIGQUIT),
-                call(42, signal.SIGQUIT),
-            ],
-        )
+        self.assertEqual(result["stack"], "fixture-stack")
+        self.assertEqual(result["targets"], [42])
+        kill.assert_called_once_with(42, signal.SIGQUIT)
         kill_group.assert_called_once_with(42, signal.SIGKILL)
         client.kill.assert_called_once_with()
-        self.assertEqual(read.call_args_list, [call(fd, 4096), call(fd, 4096)])
+        client.wait.assert_called_once_with(timeout=1)
+        self.assertTrue(stream.closed)
+        read.assert_called_once_with(fd, 4096)
+
+    def test_stack_diagnosis_retains_partial_output_when_collection_fails(self):
+        snapshot = self.stack_snapshot()
+        with tempfile.TemporaryFile() as stream:
+            client = Mock(pid=41, stderr=stream)
+            client.poll.return_value = None
+            client.wait.return_value = 2
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CHAINMAN_TEST_STOPPED_TASK_STACKS": "1",
+                        "CHAINMAN_TEST_TASK_STACK_TARGET": "anchor",
+                    },
+                ),
+                patch("task_diagnostics.os.getpgid", side_effect=[40, 42]),
+                patch("task_diagnostics.os.kill"),
+                patch("task_diagnostics.os.killpg", side_effect=ProcessLookupError),
+                patch("task_diagnostics.time.monotonic", side_effect=[0, 0.1, 0.2]),
+                patch(
+                    "task_diagnostics.select.select",
+                    return_value=([stream.fileno()], [], []),
+                ),
+                patch(
+                    "task_diagnostics.os.read",
+                    side_effect=[b"retained-stack", OSError()],
+                ),
+            ):
+                result = json.loads(task_failure_stacks(client, snapshot))
+        self.assertEqual(result["error"], "OSError")
+        self.assertEqual(result["stack"], "retained-stack")
+        self.assertEqual(result["stack_bytes"], len(b"retained-stack"))
+        self.assertEqual(result["group_cleanup_error"], "ProcessLookupError")
+
+    def test_stack_diagnosis_rejects_unknown_target_without_signals(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CHAINMAN_TEST_STOPPED_TASK_STACKS": "1",
+                    "CHAINMAN_TEST_TASK_STACK_TARGET": "invalid",
+                },
+            ),
+            patch("task_diagnostics.os.kill") as kill,
+            patch("task_diagnostics.os.killpg") as kill_group,
+        ):
+            result = json.loads(task_failure_stacks(Mock(), {}))
+        self.assertEqual(result["error"], "ValueError")
+        kill.assert_not_called()
+        kill_group.assert_not_called()
 
     def test_only_outer_descendants_and_owned_group_are_recorded(self):
         result = subprocess.CompletedProcess(
