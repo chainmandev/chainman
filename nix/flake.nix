@@ -219,7 +219,14 @@
           bash = pkgs.bashInteractive;
           audit-rust = pkgs.cargo-deny;
           audit-go = pkgs.govulncheck;
-          audit-python = pkgs.pip-audit;
+          # pip-api launches Python separately, without inheriting sys.path.
+          audit-python = pkgs.pip-audit.overridePythonAttrs (old: {
+            makeWrapperArgs = (old.makeWrapperArgs or [ ]) ++ [
+              "--set"
+              "PIPAPI_PYTHON_LOCATION"
+              "${pkgs.python3.withPackages (p: [ p.pip ])}/bin/python3"
+            ];
+          });
         }
         // builtins.listToAttrs (
           builtins.concatMap

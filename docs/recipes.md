@@ -118,6 +118,8 @@ or built locally on demand, not installed globally. Rust scanners receive an abs
 manifest path so their normal ancestor search includes repository-level policy files
 when a workspace lives in a subdirectory. Maintainers can run `just audit-test` for
 the real pinned scanner fixtures without auditing an application or waiving policy.
+The Python scanner binds pip-api's subprocess to its own pip-enabled interpreter;
+it does not rely on a project virtual environment or user-installed packages to start.
 `audits.exceptions.ADAPTER` for JavaScript
 accepts exact `id`, `package`, `reason`, and `review_after` entries; stale, mismatched
 or expired exceptions fail. Flutter, Swift and Gradle currently report unsupported
