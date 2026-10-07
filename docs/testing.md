@@ -193,6 +193,11 @@ Exercise update-cache tests with an aliased `TMPDIR` as a portable regression;
 explicit negative cases must still reject symlinked cache bases before creation.
 
 Native service PTYs use the same fresh-process launcher and draining waits.
+Finite native task anchors observe both sequence stops and exits while attached
+to a terminal. The partial-stop regression stops only the disposable sequence and
+payload, then requires the anchor to propagate the stop, restore foreground
+ownership and preserve exit status 7 after resume. Ordinary services, probes and
+non-terminal tasks retain their existing wait path.
 The background job-control fixture retries `tcsetattr` only on `EINTR`: Darwin
 returns that error after stopping a background ioctl with `SIGTTOU` and resuming
 it. Mode restoration compares every configured field and control character,

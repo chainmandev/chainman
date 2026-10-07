@@ -20,6 +20,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type Command struct {
@@ -1390,13 +1392,29 @@ func owned(state, name string, probe bool, generation string) int {
 	if e = readJSON(filepath.Join(state, name+".command.json"), &current); e != nil || current.Generation != generation {
 		return exitCode(fmt.Errorf("service generation changed during admission"))
 	}
+	if s.ForwardLeases {
+		if _, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP); err == nil {
+			// Let the sequence waiter propagate terminal stops. If this anchor
+			// stops on the same Ctrl-Z first, its child stop can remain pending
+			// after the shell resumes the task and spuriously stop it again.
+			stopping := make(chan os.Signal, 1)
+			signal.Notify(stopping, syscall.SIGTSTP)
+			defer signal.Stop(stopping)
+		}
+	}
 	if e = startAdmitted(cmd, signals); e != nil {
 		_ = os.Remove(path)
 		return exitCode(e)
 	}
 	admission.Close()
 	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	go func() {
+		if s.ForwardLeases {
+			done <- waitTaskAnchor(cmd)
+		} else {
+			done <- cmd.Wait()
+		}
+	}()
 	var timeout <-chan time.Time
 	if s.Timeout > 0 {
 		timer := time.NewTimer(time.Duration(s.Timeout) * time.Second)
@@ -1519,6 +1537,10 @@ func exitCode(e error) int {
 	}
 	if e == nil {
 		return 0
+	}
+	var anchorExit *taskAnchorExit
+	if errors.As(e, &anchorExit) {
+		return anchorExit.code()
 	}
 	var x *exec.ExitError
 	if errors.As(e, &x) {

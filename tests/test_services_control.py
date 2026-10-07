@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from terminal_fixture import wait_terminal
+from terminal_fixture import wait_terminal, write_terminal
 from test_storage import TERMINAL_BODY, exercise_job_control, terminal_process
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -336,6 +336,89 @@ while True:time.sleep(.1)
         )
         self.assertTrue(storage.collect(pool, apply=True, all_idle=True)[1])
         self.assertFalse(payload.exists())
+
+    def test_owned_terminal_anchor_propagates_a_stopped_sequence(self):
+        for timeout in (0, 180):
+            with self.subTest(timeout=timeout):
+                task = self.base / "partial-stop-task.json"
+                body = (
+                    "import os; "
+                    "print(f'PAYLOAD:{os.getpid()}:{os.getppid()}',flush=True); "
+                    "assert input()=='finish'; "
+                    "print('RESUMED',flush=True); raise SystemExit(7)"
+                )
+                task.write_text(
+                    json.dumps(
+                        {
+                            "commands": [self.command([sys.executable, "-c", body])],
+                            "shutdown_seconds": 2,
+                            "timeout_seconds": timeout,
+                        }
+                    )
+                )
+                environment = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+                }
+                process, master = terminal_process(
+                    [CONTROL, "command", str(task)], environment, self.root
+                )
+                output = bytearray()
+                group = None
+                try:
+                    deadline = time.monotonic() + 10
+                    while (
+                        b"PAYLOAD:" not in output
+                        or b"\n" not in output.split(b"PAYLOAD:", 1)[-1]
+                    ):
+                        self.assertLess(time.monotonic(), deadline, bytes(output))
+                        if select.select([master], [], [], 0.1)[0]:
+                            output.extend(os.read(master, 8192))
+                    line = output.split(b"PAYLOAD:", 1)[1].splitlines()[0]
+                    payload, sequence = (int(value) for value in line.split(b":"))
+                    group = os.getpgid(payload)
+                    self.assertGreater(group, 1)
+                    self.assertNotEqual(group, process.pid)
+                    self.assertEqual(os.getpgid(sequence), group)
+                    self.assertEqual(os.getsid(payload), process.pid)
+                    self.assertEqual(os.getsid(sequence), process.pid)
+                    # Reproduce a stopped sequence/payload with its anchor running.
+                    # Every signalled PID belongs to this disposable PTY session.
+                    os.kill(payload, signal.SIGSTOP)
+                    os.kill(sequence, signal.SIGSTOP)
+                    deadline = time.monotonic() + 3
+                    while True:
+                        pid, status = os.waitpid(process.pid, os.WUNTRACED | os.WNOHANG)
+                        if pid:
+                            self.assertTrue(os.WIFSTOPPED(status), status)
+                            break
+                        self.assertLess(
+                            time.monotonic(), deadline, "Task anchor hid sequence stop"
+                        )
+                        time.sleep(0.01)
+                    self.assertEqual(os.tcgetpgrp(master), process.pid)
+                    os.kill(process.pid, signal.SIGCONT)
+                    output.extend(write_terminal(master, b"finish\n", 3))
+                    status, remaining = wait_terminal(process, master, 5)
+                    output.extend(remaining)
+                    self.assertEqual(status, 7, bytes(output))
+                    self.assertIn(b"RESUMED", output)
+                finally:
+                    if group is not None:
+                        try:
+                            os.killpg(group, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    if process.poll() is None:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    try:
+                        wait_terminal(process, master, 5)
+                    finally:
+                        os.close(master)
 
     def test_owned_terminal_ctrl_c_and_restore(self):
         code = (

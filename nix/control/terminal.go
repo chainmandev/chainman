@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -9,6 +10,70 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+type taskAnchorExit struct {
+	status syscall.WaitStatus
+}
+
+func (e *taskAnchorExit) code() int {
+	if e.status.Signaled() {
+		return 128 + int(e.status.Signal())
+	}
+	return e.status.ExitStatus()
+}
+
+func (e *taskAnchorExit) Error() string {
+	if e.status.Signaled() {
+		return "signal: " + e.status.Signal().String()
+	}
+	return fmt.Sprintf("exit status %d", e.status.ExitStatus())
+}
+
+// A native task anchor can resume while its sequence remains stopped. Waiting
+// only for exits hides that stop from the outer terminal owner. Keep one status
+// waiter and propagate sequence stops through this anchor to its outer terminal owner.
+func waitTaskAnchor(cmd *exec.Cmd) error {
+	if _, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP); err != nil {
+		return cmd.Wait()
+	}
+	resumed := make(chan os.Signal, 1)
+	signal.Notify(resumed, syscall.SIGCONT)
+	defer signal.Stop(resumed)
+	for {
+		var status syscall.WaitStatus
+		_, err := syscall.Wait4(cmd.Process.Pid, &status, syscall.WUNTRACED, nil)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if status.Stopped() {
+			// The sequence is already stopped. Stopping its group again would
+			// create another child stop event that can outlive the next resume.
+			select {
+			case <-resumed:
+			default:
+			}
+			if err = syscall.Kill(os.Getpid(), syscall.SIGSTOP); err != nil {
+				return err
+			}
+			<-resumed
+			continue
+		}
+		if status.Exited() || status.Signaled() {
+			// The actual exit was collected above; release os/exec resources
+			// without letting ECHILD replace its status.
+			if err = cmd.Wait(); err != nil && !errors.Is(err, syscall.ECHILD) {
+				return err
+			}
+			if status.Exited() && status.ExitStatus() == 0 {
+				return nil
+			}
+			return &taskAnchorExit{status}
+		}
+	}
+}
 
 func foregroundTask(group int) bool {
 	foreground, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP)
