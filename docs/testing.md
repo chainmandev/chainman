@@ -220,40 +220,38 @@ original three-second assertion failure. Successful tests are unchanged.
 The `diagnose_stopped_cancellation` dispatch input of the registered
 `verify.yml` workflow selects an exact-source Intel macOS diagnostic instead of
 the normal matrix. Its default is false; ordinary verification keeps every
-existing matrix lane and command. The diagnostic runs the unchanged full native
-ownership gate. A new standalone dispatch workflow must first exist on GitHub's
-default branch, so this branch uses the existing registered entrypoint.
-After that gate finishes, it repeats the original cancellation assertion twelve
-times in the same pinned control profile. It stops on the first failure and
-does not establish release qualification. Phase markers distinguish profile
-entry, the control-package build and individual repetitions. Each repetition
-prints its Python thread stacks every30 seconds if it stalls; these observations
-do not change the native assertion's three-second deadline. The full ownership
-output is uploaded before repetition starts, and repetition output is uploaded
-even after a step failure. An eight-minute diagnostic step limit reserves time
-for that upload inside the existing thirty-minute job limit. Reaching either
-diagnostic limit is a failure, not qualification. Logs exclude environment dumps
-and retain source identity. Runtime sources and the
-publication/readback workflow remain unchanged. Restore the original
-fourteen-lane workflow before final full release qualification.
+existing matrix lane and command. `just control-cancellation-diagnostic` enters
+the pinned control profile once, runs the unchanged full native ownership gate,
+and then repeats the original cancellation assertion twelve times in fresh
+unittest processes. A failed full gate never becomes successful because a later
+probe passes. The repetition probe stops on its first failure. This is diagnosis,
+not release qualification; restore the original fourteen-lane workflow before
+final full release qualification.
 
-The deliberate diagnostic also enables `CHAINMAN_TEST_STOPPED_TASK_STACKS=1`.
-After the original stopped-task assertion fails, it checks that the running
-outer controller is the test process's child, and that its running anchor still
-owns the published disposable group. Each observation sends one fatal Go
-`SIGQUIT` dump: the full ownership gate selects the anchor, while a fresh
-repetition fixture selects the outer through `CHAINMAN_TEST_TASK_STACK_TARGET`.
-The repetition step runs after a full-gate failure unless canceled; the job
-still fails and never establishes qualification. Separate fixtures avoid
-assuming that one fatal dump leaves the other controller alive.
+Entry, ownership and repetition output have separate source-bound files, and
+`phases.json` retains each completed phase's exit and elapsed observation time.
+Outputs go directly to files, so a phase waits for its own process instead of
+inherited pipe EOF. The full phase has an eighteen-minute observation limit;
+repetitions have four minutes. On expiry, only the created phase process receives
+an interrupt, followed by a bounded wait and force termination if necessary.
+Any limit records exit124 and fails the diagnostic. These outer limits never
+change the native assertion's three-second wait. The unchanged thirty-minute
+job limit and a twenty-six-minute run-step limit reserve time for log upload.
+Profile entry, package builds and repetitions have progress markers. Each
+repetition prints its Python thread stacks every30 seconds if it stalls.
 
-Each dump reads at most64KiB for two seconds, retains partial bytes and the
-outer's observed exit even if collection fails, and finishes the verified group.
-Cleanup waits at most one second for the outer and closes its captured pipes.
-This opt-in failure path changes cleanup and never proves successful cancellation.
-Missing or changed ownership and unknown targets refuse all signals. Captured
-stderr and the post-observer workload termination marker are retained. The
-original exception, three-second assertion and successful path remain.
+The deliberate diagnostic enables `CHAINMAN_TEST_STOPPED_TASK_STACKS=1`.
+After the original stopped-task assertion fails, it validates the disposable
+outer and anchor ownership. The full gate selects the anchor for one fatal Go
+`SIGQUIT` dump; fresh repetition fixtures select the outer through
+`CHAINMAN_TEST_TASK_STACK_TARGET`. Separate fixtures avoid assuming that one
+fatal dump leaves the other controller alive. Each dump reads at most64KiB for
+two seconds, retains partial bytes and exit status even if collection fails,
+finishes the verified group, waits at most one second for the outer and closes
+its captured pipes. Missing/changed ownership and unknown targets refuse all
+signals. Captured stderr and the post-observer workload termination marker are
+retained. This opt-in failure path changes cleanup and never proves successful
+cancellation. The original exception and successful assertion path remain.
 
 Terminal job-control assertions record the disposable PTY's foreground group
 and its session-owned process IDs, parents, groups, states and executable names

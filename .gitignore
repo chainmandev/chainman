@@ -1,4 +1,5 @@
 /.cache/
+/cancellation-diagnostic/
 /dist/
 examples/javascript/packages/*/dist/
 **/__pycache__/
