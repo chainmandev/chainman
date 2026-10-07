@@ -88,12 +88,14 @@ func foregroundTask(group int) bool {
 // direct interrupt of the public command. Its owner observes it without sending
 // it twice. Direct owner cancellation (including explicit stop) uses SIGTERM.
 func interruptTask(cmd *exec.Cmd, sig os.Signal) {
+	// Resume the signal receiver before delivering cancellation. A stopped
+	// Darwin Go receiver can lose a termination notification followed by CONT.
+	_ = cmd.Process.Signal(syscall.SIGCONT)
 	if sig == syscall.SIGINT && foregroundTask(cmd.Process.Pid) {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
 	} else {
 		_ = cmd.Process.Signal(sig)
 	}
-	_ = cmd.Process.Signal(syscall.SIGCONT)
 }
 
 type taskTTY struct {
