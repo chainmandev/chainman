@@ -137,6 +137,31 @@ jobs:
           test "$EVENT" = "$EXPECTED"
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
       - name: Run the unchanged full native ownership gate
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
+        run: |
+          set -o pipefail
+          mkdir -p cancellation-diagnostic
+          printf 'Source: %s\nPhase: full native ownership gate\n' "$(git rev-parse HEAD)" | tee cancellation-diagnostic/ownership.log
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test 2>&1 | tee -a cancellation-diagnostic/ownership.log
+      - name: Retain full native ownership output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stopped-cancellation-ownership-${{ github.sha }}
+          path: checkout with spaces/cancellation-diagnostic/ownership.log
+          if-no-files-found: error
+          retention-days: 14
       - name: Repeat the unchanged stopped-task cancellation assertion
-        run: ./scripts/enter.sh control python3 -B scripts/task_cancellation_diagnostic.py
+        id: repeat
+        timeout-minutes: 8
+        run: |
+          set -o pipefail
+          printf 'Source: %s\nPhase: entering control profile for repetitions\n' "$(git rev-parse HEAD)" | tee cancellation-diagnostic/repetitions.log
+          ./scripts/enter.sh control python3 -B scripts/task_cancellation_diagnostic.py 2>&1 | tee -a cancellation-diagnostic/repetitions.log
+      - name: Retain repetition output even after a diagnostic timeout
+        if: always() && steps.repeat.outcome != 'skipped'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stopped-cancellation-repetitions-${{ github.sha }}
+          path: checkout with spaces/cancellation-diagnostic/repetitions.log
+          if-no-files-found: error
+          retention-days: 14

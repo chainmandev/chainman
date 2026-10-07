@@ -225,7 +225,15 @@ ownership gate. A new standalone dispatch workflow must first exist on GitHub's
 default branch, so this branch uses the existing registered entrypoint.
 If that gate passes, it repeats the original cancellation assertion twelve
 times in the same pinned control profile. It stops on the first failure and
-does not establish release qualification. Runtime sources and the
+does not establish release qualification. Phase markers distinguish profile
+entry, the control-package build and individual repetitions. Each repetition
+prints its Python thread stacks every30 seconds if it stalls; these observations
+do not change the native assertion's three-second deadline. The full ownership
+output is uploaded before repetition starts, and repetition output is uploaded
+even after a step failure. An eight-minute diagnostic step limit reserves time
+for that upload inside the existing thirty-minute job limit. Reaching either
+diagnostic limit is a failure, not qualification. Logs exclude environment dumps
+and retain source identity. Runtime sources and the
 publication/readback workflow remain unchanged. Restore the original
 fourteen-lane workflow before final full release qualification.
 

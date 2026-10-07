@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import platform
 import subprocess
+import sys
 import tempfile
 
 import toolchain as tc
@@ -19,6 +20,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(
         prefix="chainman-cancellation-diagnostic-"
     ) as directory:
+        print(f"Cancellation diagnostic: building control-{target}", flush=True)
         package = subprocess.check_output(
             [
                 tc.nix_command(),
@@ -33,6 +35,7 @@ def main() -> None:
             ],
             text=True,
         ).strip()
+        print("Cancellation diagnostic: control package ready", flush=True)
         environment = dict(
             os.environ,
             CHAINMAN_TEST_CONTROL=package + "/bin/chainman-control",
@@ -46,10 +49,12 @@ def main() -> None:
             )
             subprocess.run(
                 [
-                    "python3",
+                    sys.executable,
                     "-B",
-                    "-m",
-                    "unittest",
+                    "-c",
+                    "import faulthandler,runpy; "
+                    "faulthandler.dump_traceback_later(30,repeat=True); "
+                    "runpy.run_module('unittest',run_name='__main__')",
                     "discover",
                     "-s",
                     "tests",
