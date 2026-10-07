@@ -114,7 +114,11 @@ modules use their actual shared adapters when enabled.
 Vulnerability auditing is distinct from release-age and immutable-source auditing.
 JavaScript includes development dependencies. Cargo, Go and Python use cargo-deny,
 govulncheck and pip-audit supplied by the pinned runtime Nix inputs. Tools are fetched
-or built locally on demand, not installed globally. `audits.exceptions.ADAPTER` for JavaScript
+or built locally on demand, not installed globally. Rust scanners receive an absolute
+manifest path so their normal ancestor search includes repository-level policy files
+when a workspace lives in a subdirectory. Maintainers can run `just audit-test` for
+the real pinned scanner fixtures without auditing an application or waiving policy.
+`audits.exceptions.ADAPTER` for JavaScript
 accepts exact `id`, `package`, `reason`, and `review_after` entries; stale, mismatched
 or expired exceptions fail. Flutter, Swift and Gradle currently report unsupported
 vulnerability scanning and make the aggregate audit incomplete and nonzero; a

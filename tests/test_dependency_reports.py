@@ -18,6 +18,70 @@ import updates
 
 
 class ReportTests(unittest.TestCase):
+    def test_rust_audit_uses_absolute_manifest_and_preserves_scanner_status(self):
+        for directory in (".", "server", "nested/server"):
+            for scanner_status in (0, 1):
+                with (
+                    self.subTest(directory=directory, scanner_status=scanner_status),
+                    tempfile.TemporaryDirectory(prefix="chainman audit ") as temporary,
+                ):
+                    root = Path(temporary).resolve()
+                    workspace = root / directory
+                    workspace.mkdir(parents=True, exist_ok=True)
+                    (workspace / "Cargo.toml").write_text("[workspace]\nmembers=[]\n")
+                    (root / "deny.toml").write_text("[advisories]\nversion=2\n")
+                    cfg = {
+                        "updates": {
+                            "adapters": {
+                                "rust": {
+                                    "adapter": "rust",
+                                    "profile": "host",
+                                    "directories": [directory],
+                                }
+                            },
+                            "steps": [{"resolve": "rust"}],
+                        }
+                    }
+
+                    def execute(project, profile, argv, **kwargs):
+                        self.assertEqual(project, root)
+                        self.assertEqual(profile, "host")
+                        self.assertEqual(kwargs["cwd"], workspace)
+                        self.assertEqual(
+                            argv,
+                            [
+                                "/nix/store/fixture-audit/bin/cargo-deny",
+                                "--manifest-path",
+                                str(workspace / "Cargo.toml"),
+                                "check",
+                                "advisories",
+                            ],
+                        )
+                        return subprocess.CompletedProcess(
+                            argv, scanner_status, "scanner result", ""
+                        )
+
+                    output = io.StringIO()
+                    with (
+                        patch.object(dependency_audit.tc, "config", return_value=cfg),
+                        patch.object(
+                            dependency_audit.tc, "environment", return_value={}
+                        ),
+                        patch.object(
+                            dependency_audit,
+                            "tools_path",
+                            return_value=Path("/nix/store/fixture-audit/bin"),
+                        ),
+                        patch.object(
+                            dependency_audit.chainman, "execute", side_effect=execute
+                        ),
+                        redirect_stdout(output),
+                    ):
+                        self.assertEqual(dependency_audit.run(root, []), scanner_status)
+                    report = json.loads(output.getvalue())
+                    self.assertEqual(report["passed"], scanner_status == 0)
+                    self.assertEqual(report["lanes"][0]["output"], "scanner result")
+
     def test_native_audit_tools_remain_rooted_through_scanner_execution(self):
         cfg = {
             "updates": {

@@ -247,7 +247,7 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
                         [
                             str(bin_path / "cargo-deny"),
                             "--manifest-path",
-                            "Cargo.toml",
+                            str(cwd / "Cargo.toml"),
                             "check",
                             "advisories",
                         ]
