@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from terminal_fixture import wait_terminal, write_terminal
+from terminal_fixture import terminal_process_snapshot, wait_terminal, write_terminal
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import storage
@@ -177,6 +177,14 @@ def exercise_job_control(
         expect(b"RESULT:130\r\n" if cancel else b"RESULT:7\r\n")
         expect(b"PROMPT> ")
         test.assertEqual(os.tcgetpgrp(master), pid)
+    except AssertionError:
+        print(
+            "Owned terminal process snapshot: "
+            + terminal_process_snapshot(master, pid),
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
     finally:
         # Only groups belonging to this disposable PTY session are addressed.
         try:
@@ -240,6 +248,33 @@ class StorageTests(unittest.TestCase):
         self.assertIn("Terminal workload exited before expected job control", message)
         self.assertIn("EARLY-EXIT-WITNESS", message)
         self.assertIn("RESULT:23", message)
+
+    def test_terminal_process_snapshot_filters_session_and_omits_arguments(self):
+        rows = subprocess.CompletedProcess(
+            [],
+            0,
+            stdout="41 40 41 S /fixture/bash\n42 41 42 T /fixture/control\n99 1 99 S /other/secret\n",
+        )
+        with (
+            patch("terminal_fixture.os.tcgetpgrp", return_value=42),
+            patch("terminal_fixture.subprocess.run", return_value=rows) as read,
+            patch("terminal_fixture.os.getsid", side_effect=[41, 41, 99]),
+        ):
+            snapshot = json.loads(terminal_process_snapshot(7, 41))
+        self.assertEqual(snapshot["foreground_group"], 42)
+        self.assertEqual([row["pid"] for row in snapshot["processes"]], [41, 42])
+        self.assertEqual(snapshot["processes"][1]["state"], "T")
+        self.assertNotIn("secret", json.dumps(snapshot))
+        self.assertEqual(read.call_args.args[0][-1], "pid=,ppid=,pgid=,stat=,comm=")
+
+    def test_terminal_process_snapshot_preserves_failure_when_ps_unavailable(self):
+        with (
+            patch("terminal_fixture.os.tcgetpgrp", return_value=42),
+            patch("terminal_fixture.subprocess.run", side_effect=OSError("fixture")),
+        ):
+            snapshot = json.loads(terminal_process_snapshot(7, 41))
+        self.assertEqual(snapshot["error"], "OSError")
+        self.assertEqual(snapshot["processes"], [])
 
     def populated(self):
         with storage.use(self.pool, "downloads", "downloads") as entry:

@@ -1,11 +1,54 @@
 """Bounded process waits that keep a fixture's pseudo-terminal draining."""
 
+import json
 import os
 import select
 import subprocess
 import sys
 import termios
 import time
+
+
+def terminal_process_snapshot(master, session):
+    """Read bounded failure evidence for only the disposable terminal session."""
+    snapshot = {"session": session, "processes": []}
+    try:
+        snapshot["foreground_group"] = os.tcgetpgrp(master)
+        # Explicit columns avoid argv and environment disclosure. Darwin has no
+        # /proc; obtain process IDs from ps and check session ownership ourselves.
+        result = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,stat=,comm="],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=True,
+        )
+        for line in result.stdout.splitlines():
+            fields = line.split(None, 4)
+            if len(fields) != 5:
+                continue
+            try:
+                pid, parent, group = map(int, fields[:3])
+                if os.getsid(pid) != session:
+                    continue
+            except (OSError, ValueError):
+                continue
+            snapshot["processes"].append(
+                {
+                    "pid": pid,
+                    "parent": parent,
+                    "group": group,
+                    "state": fields[3],
+                    "executable": os.path.basename(fields[4]),
+                }
+            )
+            if len(snapshot["processes"]) >= 64:
+                snapshot["truncated"] = True
+                break
+    except (OSError, subprocess.SubprocessError) as error:
+        # Diagnostics must never replace the original assertion failure.
+        snapshot["error"] = type(error).__name__
+    return json.dumps(snapshot, sort_keys=True)
 
 
 def terminal_modes(fd):

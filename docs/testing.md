@@ -206,3 +206,16 @@ that bit when restoring canonical mode; it is cleared by subsequent input/read.
 The raw round-trip fixture records the observed flag delta, and synthetic
 negative checks retain failures for actual mode or control-character changes.
 See [XNU terminal handling](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c).
+
+## Failure diagnostics
+
+Terminal job-control assertions record the disposable PTY's foreground group
+and its session-owned process IDs, parents, groups, states and executable names
+before cleanup. This read-only snapshot runs only after an assertion fails;
+arguments and environment variables are excluded, and diagnostic errors never
+replace the assertion. Test deadlines and successful paths are unchanged.
+
+The verification workflow's optional `diagnose_terminal` dispatch runs the
+unchanged Apple ARM core command at an exact source revision. It provides
+diagnostic evidence only. Release qualification still requires the original
+full matrix, guarded publication and cold readbacks.
