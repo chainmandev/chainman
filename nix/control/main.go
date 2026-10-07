@@ -1395,10 +1395,10 @@ func owned(state, name string, probe bool, generation string) int {
 	if s.ForwardLeases {
 		if _, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP); err == nil {
 			// Let the sequence waiter propagate terminal stops. If this anchor
-			// stops on the same Ctrl-Z first, its child stop can remain pending
+			// stops on Ctrl-Z or background I/O first, its child stop can remain pending
 			// after the shell resumes the task and spuriously stop it again.
 			stopping := make(chan os.Signal, 1)
-			signal.Notify(stopping, syscall.SIGTSTP)
+			signal.Notify(stopping, syscall.SIGTSTP, syscall.SIGTTIN, syscall.SIGTTOU)
 			defer signal.Stop(stopping)
 		}
 	}

@@ -219,3 +219,25 @@ The verification workflow's optional `diagnose_terminal` dispatch runs the
 unchanged Apple ARM core command at an exact source revision. It provides
 diagnostic evidence only. Release qualification still requires the original
 full matrix, guarded publication and cold readbacks.
+
+Finite task owners treat child-change notifications as wakeup hints and use a
+100 millisecond periodic process-status check while waiting. A stopped or
+exited child cannot remain hidden solely because a notification is unavailable.
+The status waiter remains the only consumer of child status; cancellation,
+terminal restoration and actual exit codes retain their existing paths. The
+owning control exercises a stopped child and exit status 7 with a deliberately
+silent notification channel. Native qualification remains required to establish
+the observed Apple failure is repaired.
+
+Terminal task anchors capture `SIGTSTP`, `SIGTTIN` and `SIGTTOU` so terminal
+stops flow through their sequence waiter. This includes background terminal I/O:
+letting the anchor stop first can leave a sequence stop pending after resume,
+which then causes another stop. Services, probes and non-terminal anchors retain
+their existing signal handling.
+
+After stopping itself, an anchor returns to its blocking sequence-status wait
+instead of awaiting a separate continue notification. The kernel can resume a
+process even when a later stop discards the pending `SIGCONT` notification;
+requiring that notification can strand a running anchor with a stopped child.
+The anchor does not resume the sequence itself. Actual child stops and exits
+remain the authority. See [POSIX signal generation](https://pubs.opengroup.org/onlinepubs/9699919799/functions/V2_chap02.html).

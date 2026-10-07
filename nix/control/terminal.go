@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,9 +37,6 @@ func waitTaskAnchor(cmd *exec.Cmd) error {
 	if _, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP); err != nil {
 		return cmd.Wait()
 	}
-	resumed := make(chan os.Signal, 1)
-	signal.Notify(resumed, syscall.SIGCONT)
-	defer signal.Stop(resumed)
 	for {
 		var status syscall.WaitStatus
 		_, err := syscall.Wait4(cmd.Process.Pid, &status, syscall.WUNTRACED, nil)
@@ -51,14 +49,12 @@ func waitTaskAnchor(cmd *exec.Cmd) error {
 		if status.Stopped() {
 			// The sequence is already stopped. Stopping its group again would
 			// create another child stop event that can outlive the next resume.
-			select {
-			case <-resumed:
-			default:
-			}
 			if err = syscall.Kill(os.Getpid(), syscall.SIGSTOP); err != nil {
 				return err
 			}
-			<-resumed
+			// A later terminal stop can discard a pending SIGCONT notification
+			// even though the kernel resumed us. This anchor never resumes its
+			// sequence itself; the next blocking child-status wait is sufficient.
 			continue
 		}
 		if status.Exited() || status.Signaled() {
@@ -207,6 +203,10 @@ func (t *taskTTY) close(cmd *exec.Cmd) error {
 // The command uses file-backed stdio (no copying goroutines); Cmd.Wait below
 // releases os/exec resources after wait4 has collected the actual exit status.
 func waitTask(cmd *exec.Cmd, terminal *taskTTY, signals <-chan os.Signal, changed, resumed <-chan os.Signal) int {
+	// Notifications are wakeup hints, not the process-status authority. Bound
+	// observation even if a stop or exit produces no usable notification.
+	statusCheck := time.NewTicker(100 * time.Millisecond)
+	defer statusCheck.Stop()
 	interrupted := false
 	cancel := func(sig os.Signal) {
 		if !interrupted {
@@ -280,6 +280,7 @@ func waitTask(cmd *exec.Cmd, terminal *taskTTY, signals <-chan os.Signal, change
 		case sig := <-signals:
 			cancel(sig)
 		case <-changed:
+		case <-statusCheck.C:
 		}
 	}
 }
