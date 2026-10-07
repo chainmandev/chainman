@@ -217,12 +217,17 @@ It excludes arguments and environment, sends no signals, limits the process
 query to two seconds and retains at most64 rows. Query errors preserve the
 original three-second assertion failure. Successful tests are unchanged.
 
-The deliberate `task-cancellation-diagnostic.yml` workflow checks its exact
-source and runs the unchanged full native ownership gate on Intel macOS.
+The `diagnose_stopped_cancellation` dispatch input of the registered
+`verify.yml` workflow selects an exact-source Intel macOS diagnostic instead of
+the normal matrix. Its default is false; ordinary verification keeps every
+existing matrix lane and command. The diagnostic runs the unchanged full native
+ownership gate. A new standalone dispatch workflow must first exist on GitHub's
+default branch, so this branch uses the existing registered entrypoint.
 If that gate passes, it repeats the original cancellation assertion twelve
 times in the same pinned control profile. It stops on the first failure and
-does not establish release qualification. Runtime sources, the fourteen-lane
-qualification workflow and the publication/readback workflow remain unchanged.
+does not establish release qualification. Runtime sources and the
+publication/readback workflow remain unchanged. Restore the original
+fourteen-lane workflow before final full release qualification.
 
 Terminal job-control assertions record the disposable PTY's foreground group
 and its session-owned process IDs, parents, groups, states and executable names
