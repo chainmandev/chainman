@@ -18,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from terminal_fixture import wait_terminal, write_terminal
-from task_diagnostics import task_process_snapshot
+from task_diagnostics import task_failure_stacks, task_process_snapshot
 from test_storage import TERMINAL_BODY, exercise_job_control, terminal_process
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -545,10 +545,10 @@ print('CLEANUP FINISHED', signals, flush=True)
             _, error = client.communicate(timeout=3)
             self.assertEqual(client.returncode, 143, error)
             self.assertTrue((self.root / "term-received").exists(), error)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as failure:
+            snapshot = task_process_snapshot(client.pid, group)
             print(
-                "Owned stopped-task cancellation snapshot: "
-                + task_process_snapshot(client.pid, group),
+                "Owned stopped-task cancellation snapshot: " + snapshot,
                 file=sys.stderr,
                 flush=True,
             )
@@ -558,11 +558,21 @@ print('CLEANUP FINISHED', signals, flush=True)
                         "term_received": (self.root / "term-received").exists(),
                         "owner_receipt_present": (receipt / "task.owner.json").exists(),
                         "outer_exit": client.poll(),
+                        "captured_stderr": (failure.stderr or b"")[:8192].decode(
+                            errors="replace"
+                        ),
                     }
                 ),
                 file=sys.stderr,
                 flush=True,
             )
+            if os.environ.get("CHAINMAN_TEST_STOPPED_TASK_STACKS") == "1":
+                print(
+                    "Owned stopped-task controller stacks: "
+                    + task_failure_stacks(client, json.loads(snapshot)),
+                    file=sys.stderr,
+                    flush=True,
+                )
             raise
         finally:
             if client.poll() is None:

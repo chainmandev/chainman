@@ -237,6 +237,17 @@ and retain source identity. Runtime sources and the
 publication/readback workflow remain unchanged. Restore the original
 fourteen-lane workflow before final full release qualification.
 
+The deliberate diagnostic also enables `CHAINMAN_TEST_STOPPED_TASK_STACKS=1`.
+After the original stopped-task assertion fails, it checks that the running
+outer controller is the test process's child, and that its running anchor still
+owns the published disposable group. It sends fatal Go `SIGQUIT` dumps only to
+those two controllers, reads at most64KiB for two seconds, and finishes that
+verified group even if the outer has exited. This opt-in failure path changes
+cleanup and never proves successful cancellation. Missing or changed ownership
+refuses all signals. Captured stderr from the failed assertion is retained so
+the anchor's cancellation marker can be distinguished from its stack state.
+The original exception, three-second assertion and successful path remain.
+
 Terminal job-control assertions record the disposable PTY's foreground group
 and its session-owned process IDs, parents, groups, states and executable names
 before cleanup. This read-only snapshot runs only after an assertion fails;

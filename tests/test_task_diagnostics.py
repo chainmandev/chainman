@@ -3,16 +3,103 @@
 import json
 import contextlib
 import io
+import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
-from task_diagnostics import task_process_snapshot
+from task_diagnostics import task_failure_stacks, task_process_snapshot
 
 
 class TaskDiagnosticsTests(unittest.TestCase):
+    def test_stack_diagnosis_is_disabled_without_explicit_opt_in(self):
+        with (
+            patch.dict(os.environ, {"CHAINMAN_TEST_STOPPED_TASK_STACKS": "0"}),
+            patch("task_diagnostics.os.kill") as kill,
+            patch("task_diagnostics.os.killpg") as kill_group,
+        ):
+            result = json.loads(task_failure_stacks(Mock(), {}))
+        self.assertIn("skipped", result)
+        kill.assert_not_called()
+        kill_group.assert_not_called()
+
+    def stack_snapshot(self):
+        return {
+            "outer_pid": 41,
+            "anchor_group": 42,
+            "processes": [
+                {
+                    "pid": 41,
+                    "parent": os.getpid(),
+                    "group": 40,
+                    "executable": "chainman-control",
+                    "state": "S",
+                },
+                {
+                    "pid": 42,
+                    "parent": 41,
+                    "group": 42,
+                    "executable": "chainman-control",
+                    "state": "S",
+                },
+            ],
+        }
+
+    def test_stack_diagnosis_rejects_changed_group_without_any_signal(self):
+        client = Mock(pid=41)
+        snapshot = self.stack_snapshot()
+        with (
+            patch.dict(os.environ, {"CHAINMAN_TEST_STOPPED_TASK_STACKS": "1"}),
+            patch("task_diagnostics.os.getpgid", return_value=99),
+            patch("task_diagnostics.os.kill") as kill,
+            patch("task_diagnostics.os.killpg") as kill_group,
+        ):
+            result = json.loads(task_failure_stacks(client, snapshot))
+        self.assertEqual(result["error"], "ValueError")
+        kill.assert_not_called()
+        kill_group.assert_not_called()
+
+    def test_stack_diagnosis_bounds_output_and_finishes_only_owned_fixture(self):
+        snapshot = self.stack_snapshot()
+        with tempfile.TemporaryFile() as stream:
+            fd = stream.fileno()
+            client = Mock(pid=41, stderr=stream)
+            client.poll.return_value = None
+            with (
+                patch.dict(os.environ, {"CHAINMAN_TEST_STOPPED_TASK_STACKS": "1"}),
+                patch("task_diagnostics.os.getpgid", side_effect=[40, 42, 42]),
+                patch("task_diagnostics.os.kill") as kill,
+                patch("task_diagnostics.os.killpg") as kill_group,
+                patch(
+                    "task_diagnostics.time.monotonic",
+                    side_effect=[0, 0, 0.1, 1.2, 1.2, 1.3, 2.1],
+                ),
+                patch(
+                    "task_diagnostics.select.select",
+                    return_value=([stream.fileno()], [], []),
+                ),
+                patch(
+                    "task_diagnostics.os.read", return_value=b"fixture-stack"
+                ) as read,
+            ):
+                result = json.loads(task_failure_stacks(client, snapshot))
+        self.assertEqual(result["stack"], "fixture-stackfixture-stack")
+        self.assertEqual([section["pid"] for section in result["sections"]], [41, 42])
+        self.assertEqual(result["targets"], [41, 42])
+        self.assertEqual(
+            kill.call_args_list,
+            [
+                call(41, signal.SIGQUIT),
+                call(42, signal.SIGQUIT),
+            ],
+        )
+        kill_group.assert_called_once_with(42, signal.SIGKILL)
+        client.kill.assert_called_once_with()
+        self.assertEqual(read.call_args_list, [call(fd, 4096), call(fd, 4096)])
+
     def test_only_outer_descendants_and_owned_group_are_recorded(self):
         result = subprocess.CompletedProcess(
             [],
