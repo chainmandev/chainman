@@ -223,12 +223,6 @@ seconds and 64KiB, then only that controller and its owned anchor group are
 finished. The original assertion remains the failure. Ordinary qualification
 does not enable this fatal, failure-only forensic path.
 
-The verification workflow's optional `diagnose_terminal` dispatch runs the
-unchanged Apple ARM core command at an exact source revision. It provides
-diagnostic evidence only, plus focused native stop-report controls. Release
-qualification still requires the original full matrix, guarded publication and
-cold readbacks.
-
 Finite task owners treat child-change notifications as wakeup hints and use a
 100 millisecond periodic process-status check while waiting. A stopped or
 exited child cannot remain hidden solely because a notification is unavailable.
