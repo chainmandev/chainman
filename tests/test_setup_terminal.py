@@ -32,7 +32,10 @@ for sig in (signal.SIGINT, signal.SIGTERM):
     signal.signal(sig, lambda number, _: signals.append(number))
 assert sys.argv[1:] == ['run', 'literal value', '', '$(literal)']
 assert sys.stdin.readline() == 'preserved input\\n'
-Path({str(root / "ready")!r}).write_text(str(os.getpid()))
+ready = Path({str(root / "ready")!r})
+pending = ready.with_name("ready.pending")
+pending.write_text(str(os.getpid()))
+pending.replace(ready)
 while not signals: time.sleep(.01)
 time.sleep(.3)
 print(json.dumps(signals), flush=True)
