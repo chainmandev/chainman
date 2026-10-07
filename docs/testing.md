@@ -209,6 +209,21 @@ See [XNU terminal handling](https://github.com/apple-oss-distributions/xnu/blob/
 
 ## Failure diagnostics
 
+If the stopped-task cancellation assertion times out, it records only the
+disposable outer process, its descendants and its published anchor group.
+The snapshot contains process IDs, parents, groups, states and executable names,
+plus whether the workload received termination and retained its owner receipt.
+It excludes arguments and environment, sends no signals, limits the process
+query to two seconds and retains at most64 rows. Query errors preserve the
+original three-second assertion failure. Successful tests are unchanged.
+
+The deliberate `task-cancellation-diagnostic.yml` workflow checks its exact
+source and runs the unchanged full native ownership gate on Intel macOS.
+If that gate passes, it repeats the original cancellation assertion twelve
+times in the same pinned control profile. It stops on the first failure and
+does not establish release qualification. Runtime sources, the fourteen-lane
+qualification workflow and the publication/readback workflow remain unchanged.
+
 Terminal job-control assertions record the disposable PTY's foreground group
 and its session-owned process IDs, parents, groups, states and executable names
 before cleanup. This read-only snapshot runs only after an assertion fails;

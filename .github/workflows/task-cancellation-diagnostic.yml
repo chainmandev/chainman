@@ -1,0 +1,38 @@
+name: Diagnose stopped-task cancellation
+"on":
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full diagnostic commit expected at the selected ref
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/checkout with spaces
+    env:
+      CHAINMAN_SETUP: auto
+      TOOLCHAIN_MODE: host-nix
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: checkout with spaces
+      - name: Confirm exact diagnostic source
+        env:
+          EXPECTED: ${{ inputs.candidate_sha }}
+          EVENT: ${{ github.sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$EVENT" = "$EXPECTED"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Run the unchanged full native ownership gate
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
+      - name: Repeat the unchanged stopped-task cancellation assertion
+        run: ./scripts/enter.sh control python3 -B scripts/task_cancellation_diagnostic.py
