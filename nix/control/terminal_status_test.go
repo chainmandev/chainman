@@ -15,7 +15,7 @@ func TestTaskStoppedReports(t *testing.T) {
 		status syscall.WaitStatus
 		stop   bool
 	}{
-		{"Darwin SIGSTOP", 0x147f, true},
+		{"Darwin SIGSTOP", 0x117f, true},
 		{"Linux SIGSTOP", 0x137f, true},
 		{"terminal stop", syscall.WaitStatus(uint32(syscall.SIGTSTP)<<8 | 0x7f), true},
 		{"terminal input stop", syscall.WaitStatus(uint32(syscall.SIGTTIN)<<8 | 0x7f), true},

@@ -239,6 +239,8 @@ reports that signal as a stop. This matters when an anchor propagates a sequence
 stop with `SIGSTOP`. Controls cover Linux and Darwin stop encodings, exits,
 signal termination, and a real child's native `SIGSTOP` report. A future waiter
 that requests continue reports must distinguish those reports separately.
+The native Darwin control reports `0x117f` for `SIGSTOP` (signal17), while Go's
+`syscall.WaitStatus.Stopped` returns false for that actual stop report.
 
 Terminal task anchors capture `SIGTSTP`, `SIGTTIN` and `SIGTTOU` so terminal
 stops flow through their sequence waiter. This includes background terminal I/O:
