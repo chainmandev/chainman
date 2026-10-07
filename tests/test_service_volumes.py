@@ -1,7 +1,9 @@
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import services
@@ -35,7 +37,12 @@ commands=[["true"]]
             cfg = workflows.configuration(root)
             with self.assertRaisesRegex(ValueError, "matched no files"):
                 services.config_fingerprint(root, cfg)
-            self.assertEqual(services.prepare_requested(root, ["database"]), 0)
+            with patch.dict(os.environ, CHAINMAN_SETUP="error"):
+                with self.assertRaisesRegex(ValueError, "Setup is not ready"):
+                    services.prepare_requested(root, ["database"])
+                self.assertFalse((root / "seed-identity").exists())
+            with patch.dict(os.environ, CHAINMAN_SETUP="auto"):
+                self.assertEqual(services.prepare_requested(root, ["database"]), 0)
             expected = services.config_fingerprint(root, cfg)
             self.assertEqual((root / "seed-identity").read_text(), "canonical seed")
             services.execute_internal(root, "_workflow-prepare", ["database", expected])
