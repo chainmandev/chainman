@@ -30,6 +30,14 @@ func (e *taskAnchorExit) Error() string {
 	return fmt.Sprintf("exit status %d", e.status.ExitStatus())
 }
 
+// Both task waiters request WUNTRACED, never WCONTINUED. Linux and Darwin
+// encode those stop reports with a low byte of 0x7f. Decode that byte directly:
+// syscall.WaitStatus.Stopped on Darwin incorrectly excludes SIGSTOP, which
+// anchors use to propagate a sequence stop. Continue reports are not requested.
+func taskStopped(status syscall.WaitStatus) bool {
+	return uint32(status)&0xff == 0x7f
+}
+
 // A native task anchor can resume while its sequence remains stopped. Waiting
 // only for exits hides that stop from the outer terminal owner. Keep one status
 // waiter and propagate sequence stops through this anchor to its outer terminal owner.
@@ -46,7 +54,7 @@ func waitTaskAnchor(cmd *exec.Cmd) error {
 		if err != nil {
 			return err
 		}
-		if status.Stopped() {
+		if taskStopped(status) {
 			// The sequence is already stopped. Stopping its group again would
 			// create another child stop event that can outlive the next resume.
 			if err = syscall.Kill(os.Getpid(), syscall.SIGSTOP); err != nil {
@@ -235,7 +243,7 @@ func waitTask(cmd *exec.Cmd, terminal *taskTTY, signals <-chan os.Signal, change
 				}
 				return status.ExitStatus()
 			}
-			if status.Stopped() {
+			if taskStopped(status) {
 				select {
 				case sig := <-signals:
 					cancel(sig)

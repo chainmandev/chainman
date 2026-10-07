@@ -138,5 +138,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           test "$EVENT" = "$EXPECTED"
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Qualify native stop report classification
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec-in control sh -c 'cd nix/control; go test -race -mod=readonly -run "TestTaskStopped|TestTaskWaitDoesNotDepend" -v ./...'
       - name: Diagnose using the unchanged core command
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module core verify

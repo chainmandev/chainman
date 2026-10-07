@@ -225,8 +225,9 @@ does not enable this fatal, failure-only forensic path.
 
 The verification workflow's optional `diagnose_terminal` dispatch runs the
 unchanged Apple ARM core command at an exact source revision. It provides
-diagnostic evidence only. Release qualification still requires the original
-full matrix, guarded publication and cold readbacks.
+diagnostic evidence only, plus focused native stop-report controls. Release
+qualification still requires the original full matrix, guarded publication and
+cold readbacks.
 
 Finite task owners treat child-change notifications as wakeup hints and use a
 100 millisecond periodic process-status check while waiting. A stopped or
@@ -236,6 +237,14 @@ terminal restoration and actual exit codes retain their existing paths. The
 owning control exercises a stopped child and exit status 7 with a deliberately
 silent notification channel. Native qualification remains required to establish
 the observed Apple failure is repaired.
+
+Both task status waiters request stopped children with `WUNTRACED` and never
+request `WCONTINUED`. They decode the stop-report byte directly because Go's
+Darwin `syscall.WaitStatus.Stopped` excludes `SIGSTOP`, although Apple's kernel
+reports that signal as a stop. This matters when an anchor propagates a sequence
+stop with `SIGSTOP`. Controls cover Linux and Darwin stop encodings, exits,
+signal termination, and a real child's native `SIGSTOP` report. A future waiter
+that requests continue reports must distinguish those reports separately.
 
 Terminal task anchors capture `SIGTSTP`, `SIGTTIN` and `SIGTTOU` so terminal
 stops flow through their sequence waiter. This includes background terminal I/O:
