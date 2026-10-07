@@ -17,7 +17,12 @@ import time
 import unittest
 from unittest.mock import patch
 
-from terminal_fixture import terminal_process_snapshot, wait_terminal, write_terminal
+from terminal_fixture import (
+    terminal_outer_stack,
+    terminal_process_snapshot,
+    wait_terminal,
+    write_terminal,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import storage
@@ -178,12 +183,19 @@ def exercise_job_control(
         expect(b"PROMPT> ")
         test.assertEqual(os.tcgetpgrp(master), pid)
     except AssertionError:
+        snapshot = terminal_process_snapshot(master, pid)
         print(
-            "Owned terminal process snapshot: "
-            + terminal_process_snapshot(master, pid),
+            "Owned terminal process snapshot: " + snapshot,
             file=sys.stderr,
             flush=True,
         )
+        if os.environ.get("CHAINMAN_TEST_TERMINAL_STACKS") == "1":
+            print(
+                "Owned outer controller stack: "
+                + terminal_outer_stack(master, json.loads(snapshot)),
+                file=sys.stderr,
+                flush=True,
+            )
         raise
     finally:
         # Only groups belonging to this disposable PTY session are addressed.

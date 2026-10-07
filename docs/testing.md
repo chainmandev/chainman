@@ -215,6 +215,14 @@ before cleanup. This read-only snapshot runs only after an assertion fails;
 arguments and environment variables are excluded, and diagnostic errors never
 replace the assertion. Test deadlines and successful paths are unchanged.
 
+The diagnostic-only job opts into `CHAINMAN_TEST_TERMINAL_STACKS=1`. After an
+assertion fails, a unique running Go outer controller with a stopped anchor in
+the disposable PTY session can receive `SIGQUIT` for a stack dump. Live session
+and group ownership are checked before signals. Capture is limited to two
+seconds and 64KiB, then only that controller and its owned anchor group are
+finished. The original assertion remains the failure. Ordinary qualification
+does not enable this fatal, failure-only forensic path.
+
 The verification workflow's optional `diagnose_terminal` dispatch runs the
 unchanged Apple ARM core command at an exact source revision. It provides
 diagnostic evidence only. Release qualification still requires the original

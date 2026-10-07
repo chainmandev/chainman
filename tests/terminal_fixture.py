@@ -1,8 +1,10 @@
 """Bounded process waits that keep a fixture's pseudo-terminal draining."""
 
+import errno
 import json
 import os
 import select
+import signal
 import subprocess
 import sys
 import termios
@@ -49,6 +51,79 @@ def terminal_process_snapshot(master, session):
         # Diagnostics must never replace the original assertion failure.
         snapshot["error"] = type(error).__name__
     return json.dumps(snapshot, sort_keys=True)
+
+
+def terminal_outer_stack(master, snapshot):
+    """Finish an already-failed, owned fixture after a bounded Go stack dump."""
+    evidence = {"diagnostic_only": True}
+    try:
+        session = snapshot["session"]
+        rows = snapshot["processes"]
+        pairs = [
+            (parent, child)
+            for parent in rows
+            for child in rows
+            if parent["executable"].startswith("chainman-contro")
+            and parent["state"].startswith(("S", "R"))
+            and parent["pid"] != parent["group"]
+            and child["executable"].startswith("chainman-contro")
+            and child["state"].startswith("T")
+            and child["parent"] == parent["pid"]
+            and child["pid"] == child["group"]
+        ]
+        if len(pairs) != 1:
+            evidence["skipped"] = "No unique running outer controller/stopped anchor"
+            return json.dumps(evidence)
+        parent, child = pairs[0]
+
+        def still_owned(row):
+            try:
+                return (
+                    os.getsid(row["pid"]) == session
+                    and os.getpgid(row["pid"]) == row["group"]
+                )
+            except OSError:
+                return False
+
+        if not all(still_owned(row) for row in (parent, child)):
+            evidence["skipped"] = "Fixture process ownership changed"
+            return json.dumps(evidence)
+        evidence.update(outer_pid=parent["pid"], anchor_group=child["group"])
+        try:
+            # Go's SIGQUIT dump is fatal. This opt-in path runs only after the
+            # original assertion failed and addresses only this PTY session.
+            os.kill(parent["pid"], signal.SIGQUIT)
+            output = bytearray()
+            deadline = time.monotonic() + 2
+            while len(output) < 65536 and time.monotonic() < deadline:
+                if select.select([master], [], [], 0.05)[0]:
+                    try:
+                        chunk = os.read(master, min(4096, 65536 - len(output)))
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+                        break  # PTY closes after the fatal dump completes.
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+            evidence["stack"] = output.decode(errors="replace")
+            evidence["stack_bytes"] = len(output)
+        finally:
+            # Finish only the verified disposable anchor group and controller;
+            # unrelated jobs, process arguments and environment are untouched.
+            if still_owned(child):
+                try:
+                    os.killpg(child["group"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if still_owned(parent):
+                try:
+                    os.kill(parent["pid"], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+    except (OSError, KeyError, ValueError) as error:
+        evidence["error"] = type(error).__name__
+    return json.dumps(evidence)
 
 
 def terminal_modes(fd):
