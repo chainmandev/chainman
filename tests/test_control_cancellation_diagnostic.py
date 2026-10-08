@@ -2,8 +2,10 @@
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 import json
@@ -59,18 +61,41 @@ class ControlCancellationDiagnosticTests(unittest.TestCase):
     def test_unresponsive_phase_has_a_failed_observation_result(self):
         with tempfile.TemporaryDirectory(prefix="chainman phase timeout ") as directory:
             log = Path(directory) / "phase.log"
-            result = run_phase(
-                [
-                    sys.executable,
-                    "-c",
-                    "import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); "
-                    "print('PHASE READY',flush=True); time.sleep(120)",
-                ],
-                log,
-                dict(os.environ),
-                0.2,
-                cleanup_timeout=0.1,
-            )
+            spawn = subprocess.Popen
+
+            def start_ready_phase(*args, **kwargs):
+                child = spawn(*args, **kwargs)
+                try:
+                    deadline = time.monotonic() + 5
+                    while "PHASE READY" not in log.read_text():
+                        self.assertIsNone(child.poll(), log.read_text())
+                        self.assertLess(time.monotonic(), deadline, log.read_text())
+                        time.sleep(0.01)
+                except BaseException:
+                    child.kill()
+                    child.wait(timeout=5)
+                    raise
+                return child
+
+            # Exercise timeout escalation only after the real child has
+            # installed its signal handler. Interpreter startup can exceed
+            # the short observation timeout on a busy qualification runner.
+            with patch(
+                "control_cancellation_diagnostic.subprocess.Popen",
+                side_effect=start_ready_phase,
+            ):
+                result = run_phase(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import signal,time; signal.signal(signal.SIGINT,signal.SIG_IGN); "
+                        "print('PHASE READY',flush=True); time.sleep(120)",
+                    ],
+                    log,
+                    dict(os.environ),
+                    0.2,
+                    cleanup_timeout=0.1,
+                )
             output = log.read_text()
         self.assertEqual(result["exit"], 124)
         self.assertTrue(result["observation_timeout"])

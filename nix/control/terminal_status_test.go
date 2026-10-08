@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -91,9 +94,26 @@ func TestTaskWaitDoesNotDependOnChildNotifications(t *testing.T) {
 	go func() {
 		done <- waitTask(cmd, &taskTTY{fd: -1}, make(chan os.Signal), changed, make(chan os.Signal))
 	}()
+	// Observe the kernel state without consuming the waiter's stop report.
+	// A fixed delay could send CONT before a slow child reaches its STOP.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for {
+		state, err := exec.CommandContext(ctx, "/bin/ps", "-o", "stat=", "-p", strconv.Itoa(cmd.Process.Pid)).Output()
+		if err != nil {
+			t.Fatalf("observe disposable child stop: %v", err)
+		}
+		if strings.HasPrefix(strings.TrimSpace(string(state)), "T") {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("disposable child did not stop")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 	// Resume only this disposable child. No real signal notification is
 	// connected to changed, including the subsequent exit notification.
-	time.Sleep(200 * time.Millisecond)
 	if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
 		t.Fatal(err)
 	}
