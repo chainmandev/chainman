@@ -34,11 +34,11 @@ val composeTarget =
 dependencies {
     implementation(
         when (composeTarget) {
-            "linux-arm64" -> compose.desktop.linux_arm64
-            "linux-x64" -> compose.desktop.linux_x64
-            "macos-arm64" -> compose.desktop.macos_arm64
-            "macos-x64" -> compose.desktop.macos_x64
-            "windows-x64" -> compose.desktop.windows_x64
+            "linux-arm64" -> libs.compose.desktop.linux.arm64
+            "linux-x64" -> libs.compose.desktop.linux.x64
+            "macos-arm64" -> libs.compose.desktop.macos.arm64
+            "macos-x64" -> libs.compose.desktop.macos.x64
+            "windows-x64" -> libs.compose.desktop.windows.x64
             else -> error("Unsupported Compose Desktop target: $composeTarget")
         },
     )
