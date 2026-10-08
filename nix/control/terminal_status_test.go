@@ -3,14 +3,38 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func fixtureProcessState(ctx context.Context, pid int) (string, error) {
+	if runtime.GOOS == "linux" {
+		// Linux hosts need not provide /bin/ps. The controller already uses
+		// procfs, which also exposes state without consuming a wait report.
+		stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+		if err != nil {
+			return "", err
+		}
+		end := strings.LastIndexByte(string(stat), ')')
+		if end < 0 {
+			return "", fmt.Errorf("invalid fixture process stat")
+		}
+		fields := strings.Fields(string(stat[end+1:]))
+		if len(fields) == 0 {
+			return "", fmt.Errorf("missing fixture process state")
+		}
+		return fields[0], nil
+	}
+	state, err := exec.CommandContext(ctx, "/bin/ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return strings.TrimSpace(string(state)), err
+}
 
 func TestTaskStoppedReports(t *testing.T) {
 	for _, test := range []struct {
@@ -99,11 +123,11 @@ func TestTaskWaitDoesNotDependOnChildNotifications(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for {
-		state, err := exec.CommandContext(ctx, "/bin/ps", "-o", "stat=", "-p", strconv.Itoa(cmd.Process.Pid)).Output()
+		state, err := fixtureProcessState(ctx, cmd.Process.Pid)
 		if err != nil {
 			t.Fatalf("observe disposable child stop: %v", err)
 		}
-		if strings.HasPrefix(strings.TrimSpace(string(state)), "T") {
+		if strings.HasPrefix(state, "T") {
 			break
 		}
 		select {
