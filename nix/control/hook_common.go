@@ -430,6 +430,17 @@ func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
 // Remote discovery gets a deadline and no controlling terminal. The existing
 // finite-command supervisor still owns its credential/transport descendants.
 func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Duration) error {
+	// The supervisor is an os/exec boundary too: inherited lease labels must
+	// travel with their descriptors before its private channels are appended.
+	// updateRun already supplies ExtraFiles and child-number labels; do not
+	// reinterpret those prepared numbers as descriptors in this parent.
+	if len(c.ExtraFiles) == 0 && os.Getenv("CHAINMAN_UPDATE_LEASE_FD") != "" {
+		if err := forwardLeases(c); err != nil {
+			closeForwarded(c)
+			return err
+		}
+		defer closeForwarded(c)
+	}
 	lease, e := hookCallbackLease()
 	if e != nil {
 		return e

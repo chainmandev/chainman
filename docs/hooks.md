@@ -156,6 +156,11 @@ completion or cancellation, including children whose immediate parent exits firs
 Lefthook cancellation uses its SIGINT cleanup path while preserving the caller's
 signal exit status. The outer hook waits for managed callback cleanup even if
 lefthook has already stopped the callback's client or closed its output.
+Hooks invoked during an update forward their checked lease descriptors through
+the finite-command supervisor and into managed workers. Already-prepared updater
+commands retain their child-number mappings rather than interpreting them as
+parent descriptors. Invalid lease advertisements fail before worker execution;
+the outgoing-source scanner and its policy still run normally.
 Direct lefthook shell commands must wait for their own
 background work; lefthook owns their job/PTY groups. Hooks must not daemonize or
 detach background work into a separate session.

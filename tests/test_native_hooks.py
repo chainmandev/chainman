@@ -370,6 +370,68 @@ check=["true"]
     def test_empty_push_has_no_scanner_work(self):
         self.hook("trojan-source", input=b"")
 
+    def test_explicit_scan_preserves_inherited_update_lease(self):
+        with (self.base / "update-lifetime.lease").open("w+b") as lease:
+            fcntl.flock(lease, fcntl.LOCK_SH)
+            self.env["CHAINMAN_UPDATE_LEASE_FD"] = str(lease.fileno())
+            revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+            self.hook("trojan-source", revision, pass_fds=(lease.fileno(),), timeout=20)
+            (self.root / "source.ts").write_text("// harmless canary \u202e\n")
+            self.git("add", "source.ts")
+            self.git("commit", "-qm", "Scanner canary")
+            revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+            result = self.hook(
+                "trojan-source",
+                revision,
+                pass_fds=(lease.fileno(),),
+                timeout=20,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"U+202E", result.stderr)
+            self.assertEqual(
+                self.git("rev-parse", "HEAD").stdout.decode().strip(), revision
+            )
+            self.assertEqual(self.git("status", "--porcelain").stdout, b"")
+
+    def test_explicit_scan_rejects_invalid_update_lease_before_worker(self):
+        marker = self.base / "worker-started"
+        self.launcher.write_text("#!/bin/sh\ntouch " + shlex.quote(str(marker)) + "\n")
+        self.env["CHAINMAN_UPDATE_LEASE_FD"] = "65535"
+        revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        result = self.hook("trojan-source", revision, check=False, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"invalid inherited lease descriptor", result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_update_runner_preserves_prepared_leases_through_explicit_scan(self):
+        revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
+        pool = self.base / "updates"
+        result = subprocess.run(
+            [
+                CONTROL,
+                "update-cache",
+                "run",
+                str(pool),
+                "-",
+                "deps-update",
+                CONTROL,
+                "hook",
+                str(self.control / "plan.json"),
+                "trojan-source",
+                revision,
+            ],
+            env=self.env,
+            capture_output=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
+        self.assertEqual(list((pool / "v1").glob("candidate.*")), [])
+        self.assertEqual(
+            self.git("rev-parse", "HEAD").stdout.decode().strip(), revision
+        )
+        self.assertEqual(self.git("status", "--porcelain").stdout, b"")
+
     def test_inactive_malformed_include_does_not_break_native_hooks(self):
         malformed = self.base / "unused"
         malformed.write_text("malformed config\n")
