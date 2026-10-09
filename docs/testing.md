@@ -14,10 +14,14 @@ captured startup output are reported before a later job deadline can cancel the
 runner. A successful source gate still executes the complete discovered suite.
 
 The manually dispatched verification workflow binds every lane to the requested
-source SHA. It includes Linux x86-64/ARM64 and macOS ARM64/Intel host lanes,
-Docker/Podman container lanes, and language/native-tool checks. A source commit is
-qualified only by the lanes actually executed successfully. Availability of a
+source SHA. Its thirteen lanes include Linux x86-64/ARM64 and macOS ARM64 host
+lanes, Docker/Podman container lanes, and language/native-tool checks. A source
+commit is qualified only by the lanes actually executed successfully. Availability of a
 workflow definition is not evidence that it has passed.
+
+Intel macOS build targets and the independently pinned Nixpkgs 26.05 compatibility
+channel remain available, but Intel macOS no longer has an ongoing CI qualification
+guarantee. The compatibility pin does not extend upstream platform support.
 
 ## Bootstrap and source identity
 
@@ -218,15 +222,15 @@ query to two seconds and retains at most64 rows. Query errors preserve the
 original three-second assertion failure. Successful tests are unchanged.
 
 The `diagnose_stopped_cancellation` dispatch input of the registered
-`verify.yml` workflow selects an exact-source Intel macOS diagnostic instead of
-the normal matrix. Its default is false; ordinary verification keeps every
-existing matrix lane and command. `just control-cancellation-diagnostic` enters
+`verify.yml` workflow selects an exact-source Apple Silicon macOS diagnostic
+instead of the normal matrix. Its default is false; ordinary verification keeps
+every existing matrix lane and command. `just control-cancellation-diagnostic` enters
 the pinned control profile once, runs the unchanged full native ownership gate,
 and then repeats the original cancellation assertion twelve times in fresh
 unittest processes. A failed full gate never becomes successful because a later
 probe passes. The repetition probe stops on its first failure. This is diagnosis,
-not release qualification; restore the original fourteen-lane workflow before
-final full release qualification.
+not release qualification; dispatch the normal rolling-publication workflow to
+run all thirteen lanes before publishing.
 
 Entry, ownership and repetition output have separate source-bound files, and
 `phases.json` retains each completed phase's exit and elapsed observation time.

@@ -19,7 +19,7 @@ name: Deliberate toolchain verification
         type: boolean
         default: false
       diagnose_stopped_cancellation:
-        description: Run only the deliberate Intel cancellation diagnostic
+        description: Run only the deliberate Apple Silicon cancellation diagnostic
         type: boolean
         default: false
       diagnose_bootstrap_scan:
@@ -39,7 +39,6 @@ jobs:
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
           - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
           - {runner: macos-15, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 180}
           - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}
@@ -51,7 +50,7 @@ jobs:
           - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: podman}
           - {runner: macos-15, mode: host-nix, module: swift, engine: docker}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout_minutes || 60 }}
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: ${{ github.workspace }}/checkout with spaces
@@ -118,7 +117,7 @@ jobs:
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- swift-test
   diagnose-stopped-cancellation:
     if: inputs.diagnose_stopped_cancellation
-    runs-on: macos-15-intel
+    runs-on: macos-15
     timeout-minutes: 30
     defaults:
       run:
@@ -127,6 +126,7 @@ jobs:
       CHAINMAN_SETUP: auto
       TOOLCHAIN_MODE: host-nix
       CHAINMAN_TEST_STOPPED_TASK_STACKS: '1'
+      CHAINMAN_TEST_TERMINAL_STACKS: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

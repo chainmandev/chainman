@@ -39,11 +39,11 @@ lanes before publishing. It discovers the default branch at publication, require
 its expected old SHA and fast-forward ancestry, and uses an exact lease to reject
 concurrent movement. It then proves fresh public host/container initialization.
 
-The macOS Intel core lane has a 180-minute job limit: its cold bootstrap and source
-suite exceeded the previous 90-minute limit before reaching the starter and native
-suites. The other 13 lanes
-retain their 60-minute limits. This allowance does not skip tests or change the
-requirement that every lane succeeds before publication.
+All thirteen qualification lanes have a 60-minute job limit. Linux x86-64/ARM64,
+macOS ARM64, Docker/Podman bootstrap, and every language/native-tool lane remain
+required before publication. Intel macOS runners are excluded from CI; available
+Intel build targets do not imply ongoing native qualification. Optional diagnostics
+are separate from release qualification and cannot satisfy its gates.
 
 Repository Actions must permit the publication job's `contents: write`. Branch
 protection must allow that qualified workflow to advance the default branch. If
