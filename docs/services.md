@@ -81,6 +81,15 @@ verified workflow's successful completion of preparation reports **ready**. An
 HTTP response alone does not establish application readiness. Setup and any
 project-owned preflight wrapper still run before this operation is admitted.
 
+Requested Nix-backed service profiles are provisioned before service acquisition,
+outside the application's readiness budget. Preparation realizes the development
+closure without running its shell hook or service command. Contained helpers hold
+temporary Nix roots through the native operation (or until a persistent `up` has
+acquired ready services); each service retains its ordinary environment roots.
+Helpers use their execution lane's mounts without publishing application ports.
+Preparation failure or cancellation prevents application admission. A kernel
+liveness lease cancels provisioning even if the native caller is killed.
+
 `CHAINMAN_DEV_OUTPUT=auto` (the default) selects a concise summary when stdin and
 stderr are terminals, and streams service logs otherwise. Summary mode prints
 lifecycle transitions, startup/preparation reminders every 15 seconds, and the

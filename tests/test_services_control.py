@@ -1952,6 +1952,181 @@ time.sleep(120)
         self.run_control("run", check=7)
         self.assertFalse(self.alive(self.pid()))
 
+    def profile_preparation_fixture(self, delay=0):
+        helper = self.root / "profile-prepare.py"
+        helper.write_text(
+            """import fcntl,json,os,signal,time
+from pathlib import Path
+channel=Path(os.environ['CHAINMAN_PROFILE_CHANNEL'])
+Path('profile-pid').write_text(str(os.getpid()))
+Path('profile-channel').write_text(str(channel))
+signal.signal(signal.SIGTERM,lambda *_:exit(0))
+owner=(channel/'outgoing/alive').open('rb')
+def owned():
+    try:fcntl.flock(owner,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError:return True
+    fcntl.flock(owner,fcntl.LOCK_UN)
+    return False
+try:
+    time.sleep("""
+            + str(delay)
+            + """)
+    Path('profile-root').touch()
+    (channel/'incoming/ready.json').write_text(json.dumps({'schema':1}))
+    while owned():time.sleep(.02)
+finally:
+    Path('profile-root').unlink(missing_ok=True)
+"""
+        )
+        self.plan["profile_preparations"] = [
+            self.command([sys.executable, str(helper)])
+        ]
+
+    def test_cold_profile_preparation_precedes_unchanged_application_readiness(self):
+        worker = self.root / "worker.py"
+        original_worker = worker.read_text()
+        # Reproduce the original failure boundary: cold provisioning inside the
+        # service is still subject to its unchanged application health window.
+        worker.write_text("import time; time.sleep(3)\n" + original_worker)
+        failure = self.run_control("run", check=1)
+        self.assertIn("exit code 143", failure.stderr)
+        self.assertFalse((self.root / "ready").exists())
+        self.profile_preparation_fixture(delay=3)
+        worker.write_text(
+            "from pathlib import Path; assert Path('profile-root').is_file()\n"
+            + original_worker
+        )
+        self.plan["task"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; assert Path('profile-root').is_file(); raise SystemExit(7)",
+            ]
+        )
+        original = dict(self.plan["services"]["worker"]["readiness"])
+        self.run_control("run", check=7)
+        compose = json.loads((self.state / "compose.json").read_text())
+        probe = compose["processes"]["worker"]["readiness_probe"]
+        self.assertEqual(probe["period_seconds"], original["period_seconds"])
+        self.assertEqual(probe["failure_threshold"], original["failure_threshold"])
+        self.assertFalse((self.root / "profile-root").exists())
+        self.assertFalse(self.alive(int((self.root / "profile-pid").read_text())))
+        self.assertFalse(Path((self.root / "profile-channel").read_text()).exists())
+
+    def test_failed_profile_preparation_preserves_status_and_never_starts_services(
+        self,
+    ):
+        self.plan["profile_preparations"] = [
+            self.command([sys.executable, "-c", "raise SystemExit(23)"])
+        ]
+        self.run_control("run", check=23)
+        self.assertFalse((self.root / "pid").exists())
+        self.assertFalse(list(self.state.glob("*.lease")))
+
+    def test_prepared_profile_does_not_mask_failed_application_health(self):
+        self.profile_preparation_fixture()
+        self.plan["services"]["worker"]["readiness"]["command"] = self.command(
+            [sys.executable, "-c", "raise SystemExit(1)"]
+        )
+        self.run_control("run", check=1, timeout=25)
+        self.assertFalse(self.alive(self.pid()))
+        self.assertFalse((self.root / "profile-root").exists())
+
+    def test_profile_provisioning_is_cancelled_when_native_caller_is_killed(self):
+        self.profile_preparation_fixture(delay=60)
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "profile-startup.log").open("w") as log:
+            parent = subprocess.Popen(
+                [CONTROL, "run", str(self.path)], stdout=log, stderr=log
+            )
+            try:
+                self.wait_file(self.root / "profile-pid")
+                pid = int((self.root / "profile-pid").read_text())
+                parent.kill()
+                parent.wait(timeout=5)
+                self.wait_until(lambda: not self.alive(pid))
+                channel = Path((self.root / "profile-channel").read_text())
+                self.wait_until(lambda: not channel.exists())
+                self.assertFalse((self.root / "pid").exists())
+                self.assertFalse((self.root / "profile-root").exists())
+            finally:
+                if parent.poll() is None:
+                    parent.kill()
+                    parent.wait(timeout=5)
+                # Failure cleanup is limited to this disposable fixture's
+                # channel. The normal assertion above requires native cleanup.
+                if (self.root / "profile-channel").exists():
+                    channel = Path((self.root / "profile-channel").read_text())
+                    self.assertTrue(
+                        channel.name.startswith("chainman-profile-preparation-")
+                    )
+                    self.assertFalse(channel.is_symlink())
+                    shutil.rmtree(channel, ignore_errors=True)
+
+    def test_explicit_stop_cancels_profile_provisioning_before_application_admission(
+        self,
+    ):
+        original_plan = json.dumps(self.plan)
+        self.shared_resource()
+        shared_plan = json.dumps(self.plan)
+        for shared, stop_resource in ((False, False), (True, False), (True, True)):
+            with self.subTest(shared=shared, stop_resource=stop_resource):
+                self.plan = json.loads(shared_plan if shared else original_plan)
+                self.profile_preparation_fixture(delay=60)
+                self.path.write_text(json.dumps(self.plan))
+                with (self.base / "profile-stop.log").open("w") as log:
+                    parent = subprocess.Popen(
+                        [CONTROL, "run", str(self.path)], stdout=log, stderr=log
+                    )
+                    try:
+                        self.wait_file(self.root / "profile-pid")
+                        if stop_resource:
+                            stopped = subprocess.run(
+                                [CONTROL, "stop", self.plan["resources"][0]["state"]],
+                                capture_output=True,
+                                text=True,
+                                timeout=8,
+                            )
+                            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                        else:
+                            self.run_control("stop", check=0, timeout=8)
+                        self.assertEqual(parent.wait(timeout=8), 1)
+                        self.assertFalse(
+                            self.alive(int((self.root / "profile-pid").read_text()))
+                        )
+                        self.assertFalse((self.root / "pid").exists())
+                        self.assertFalse(
+                            Path((self.root / "profile-channel").read_text()).exists()
+                        )
+                    finally:
+                        if parent.poll() is None:
+                            parent.kill()
+                            parent.wait(timeout=5)
+                        (self.root / "profile-pid").unlink(missing_ok=True)
+
+    def test_profile_provisioning_interrupt_never_admits_application(self):
+        self.profile_preparation_fixture(delay=60)
+        self.path.write_text(json.dumps(self.plan))
+        with (self.base / "profile-interrupt.log").open("w") as log:
+            parent = subprocess.Popen(
+                [CONTROL, "run", str(self.path)], stdout=log, stderr=log
+            )
+            try:
+                self.wait_file(self.root / "profile-pid")
+                parent.send_signal(signal.SIGINT)
+                self.assertEqual(parent.wait(timeout=8), 130)
+                self.assertFalse(
+                    self.alive(int((self.root / "profile-pid").read_text()))
+                )
+                self.assertFalse((self.root / "pid").exists())
+                self.assertFalse(
+                    Path((self.root / "profile-channel").read_text()).exists()
+                )
+            finally:
+                if parent.poll() is None:
+                    parent.kill()
+                    parent.wait(timeout=5)
+
     def test_native_http_readiness_admits_only_the_expected_status(self):
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))

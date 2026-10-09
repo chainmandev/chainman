@@ -26,6 +26,7 @@ INTERNAL = {
     "_workflow-service",
     "_workflow-probe",
     "_workflow-prepare",
+    "_workflow-profile",
     "_service-prepare",
     "exec",
     "shell",
@@ -139,7 +140,7 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_*?]*", line(pattern)):
             raise ValueError("Invalid environment forwarding pattern")
         options += ["--env-pattern", pattern]
-    if request in {"_workflow-service", "_workflow-probe"}:
+    if request in {"_workflow-service", "_workflow-probe", "_workflow-profile"}:
         selected = table(services.get(name, {}), "Service")
     elif request in {"_workflow-task", "run"}:
         selected = table(tasks.get(name, {}), "Task")
@@ -153,6 +154,7 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
             "_workflow-task",
             "_workflow-service",
             "_workflow-probe",
+            "_workflow-profile",
             "run",
         }
         or request in tasks
@@ -178,6 +180,10 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         }
         else []
     )
+    if request == "_workflow-profile":
+        # Tool provisioning needs the execution lane's mounts, not its published
+        # application ports: this helper stays alive during service acquisition.
+        transports = [dict(value, ports=[]) for value in transports]
     # Admit graphical requirements across a graph before setup or services.
     if controller or request == "preflight":
         import admission

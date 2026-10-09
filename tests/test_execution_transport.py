@@ -164,6 +164,26 @@ commands=[["true"]]
                 self.assertEqual(before, set(root.iterdir()))
                 self.assertIn("profiles.private.transport", json.dumps(doc))
 
+    def test_service_profile_preparation_uses_mounts_without_publishing_ports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "flake.nix").write_text("{}")
+            (root / "flake.lock").write_text("{}")
+            (root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[profiles.private]
+flake="flake.nix#private"
+transport={mounts=[{source_env="FIXTURE_KEY",target="/key",optional=true}],ports=["127.0.0.1:4321:4321"]}
+[services.worker]
+profile="private"
+command=["true"]
+""")
+            _, options = bootstrap_plan.plan(root, "_workflow-profile", "worker")
+            self.assertIn("FIXTURE_KEY:/key:ro", options)
+            self.assertNotIn("--publish", options)
+            self.assertNotIn("--controller", options)
+
     def test_graph_display_preflight_and_conflicting_dependency_scope(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

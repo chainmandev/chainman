@@ -10,6 +10,9 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import fcntl
+import stat
+import time
 from urllib.parse import urlsplit
 from collections.abc import Mapping
 from typing import Literal, NotRequired, TypedDict
@@ -98,6 +101,7 @@ class Plan(TypedDict):
     watcher: NotRequired[str]
     volumes: NotRequired[list[Volume]]
     prepare: NotRequired[Command]
+    profile_preparations: NotRequired[list[Command]]
     task: NotRequired[Command]
     wait_for_services: NotRequired[bool]
     presentation: NotRequired[Table]
@@ -1050,6 +1054,21 @@ def export(root: Path, arguments: list[str]) -> int:
         "prepare": command(
             [launcher, "_workflow-prepare", task, fingerprint], root, forwarded
         ),
+        # This is data only. Realize consumer profiles in their execution lane,
+        # before Process Compose starts application readiness, not during export.
+        "profile_preparations": [
+            command([launcher, "_workflow-profile", name, fingerprint], root, forwarded)
+            for name in closure
+            if "container" not in declared[name]
+            and chainman.profile(
+                root,
+                text(
+                    declared[name].get("profile", workflows.default_profile(cfg)),
+                    "Service profile",
+                ),
+                cfg=cfg,
+            )[0]
+        ],
         "task": command(
             [launcher, "_workflow-task", task, fingerprint, *task_args], root, forwarded
         ),
@@ -1290,6 +1309,10 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                 "Service inputs changed during preparation; rerun the workflow"
             )
         return result
+    if action == "_workflow-profile":
+        if name not in entries or "container" in entries[name] or arguments:
+            raise ValueError("Invalid service profile preparation")
+        return prepare_profile(root, cfg, entries[name], expected, env)
     if name not in entries or "command" not in entries[name] or arguments:
         raise ValueError("Invalid internal service execution")
     spec = entries[name]
@@ -1335,3 +1358,79 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                     pass_fds=descriptors,
                     check=False,
                 ).returncode
+
+
+def prepare_profile(
+    root: Path,
+    cfg: Mapping[str, object],
+    spec: Table,
+    expected: str,
+    env: dict[str, str],
+) -> int:
+    """Root a service's tools across preparation and application acquisition.
+
+    print-dev-env realizes the same development closure without running its
+    shell hook or application command. A native owner holds the channel lease;
+    its contained helper cancels provisioning if that owner disappears.
+    """
+    channel = Path(os.environ.get("CHAINMAN_PROFILE_CHANNEL", ""))
+    if not channel.is_absolute() or channel.is_symlink() or not channel.is_dir():
+        raise ValueError("Service profile preparation requires an owned channel")
+    descriptor = os.open(channel / "outgoing/alive", os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ValueError("Invalid service profile owner lease")
+
+        def owned() -> bool:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            return False
+
+        if not owned():
+            raise ValueError("Service profile owner ended before preparation")
+        profile = text(
+            spec.get("profile", workflows.default_profile(cfg)), "Service profile"
+        )
+        reference, _ = chainman.profile(root, profile, cfg=cfg)
+        if not reference:
+            raise ValueError("Service profile preparation requires a Nix profile")
+        with tc.operation(
+            root, exclusive=False, new_execution=True, automatic_prune=False
+        ):
+            selected = tc.environment(root)
+            tc.runtime_nix_environment(selected)
+            with tc.nix_temporary_directory("chainman-service-profile-") as directory:
+                result = tc.managed_run(
+                    [
+                        tc.nix_command(selected),
+                        "--extra-experimental-features",
+                        "nix-command flakes",
+                        "print-dev-env",
+                        reference,
+                        "--no-write-lock-file",
+                        "--profile",
+                        str(Path(directory) / "profile"),
+                    ],
+                    cwd=root,
+                    env=selected,
+                    stdout=subprocess.DEVNULL,
+                    check=False,
+                )
+                if result.returncode:
+                    return result.returncode
+                if config_fingerprint(root, cfg, env=env) != expected:
+                    raise ValueError(
+                        "Service inputs changed during profile preparation"
+                    )
+                if not owned():
+                    raise ValueError("Service profile owner ended during preparation")
+                tc.atomic_json(channel / "incoming/ready.json", {"schema": 1})
+                while owned():
+                    time.sleep(0.05)
+        return 0
+    finally:
+        os.close(descriptor)

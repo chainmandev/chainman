@@ -685,6 +685,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "_workflow-service",
             "_workflow-probe",
             "_workflow-prepare",
+            "_workflow-profile",
         }:
             import services
 

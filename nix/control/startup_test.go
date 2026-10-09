@@ -27,6 +27,9 @@ func TestStartupStopTickets(t *testing.T) {
 	if !errors.Is(guard.check(), servicesStopped) {
 		t.Fatal("startup missed a stop that completed between observations")
 	}
+	if !errors.Is(guard.observe(state), servicesStopped) {
+		t.Fatal("repeated acquisition observation erased a stop during preparation")
+	}
 	notice.Pending = true
 	if err := atomic(path, notice); err != nil {
 		t.Fatal(err)

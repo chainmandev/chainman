@@ -2039,6 +2039,53 @@ check=["true"]
         )
         self.assertEqual(self.run_bootstrap("run", "probe").stdout, "composed-command")
 
+    def service_profile_preparation_smoke(self, *, container=False):
+        self.use_real_runtime()
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        environment = dict(self.env)
+        if container:
+            environment.update(
+                CHAINMAN_MODE="container-nix",
+                CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+                CHAINMAN_NIX_VOLUME=os.environ.get(
+                    "CHAINMAN_TEST_WARM_VOLUME", self.test_volume
+                ),
+            )
+        (self.root / "worker.py").write_text("""import http.server,os
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+http.server.HTTPServer(("0.0.0.0",int(os.environ["FIXTURE_SERVICE_PORT"])),Handler).serve_forever()
+""")
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[profiles.service]\nruntime_profile="bootstrap"\n'
+            f'transport={{ports=["127.0.0.1:{port}:8080"]}}\n'
+            '[tasks.check]\nservices=["worker"]\ncommands=[["python3","-c","print(\'profile service ready\')"]]\n'
+            '[services.worker]\nprofile="service"\ncommand=["python3","worker.py"]\nshutdown_seconds=2\n'
+            f'environment={{FIXTURE_SERVICE_PORT="{8080 if container else port}"}}\n'
+            f'[services.worker.readiness]\nhttp_get={{port={port},path="/",body="OK"}}\n'
+            "period_seconds=1\ntimeout_seconds=2\nfailure_threshold=30\n"
+        )
+        self.addCleanup(
+            lambda: self.run_bootstrap("services-stop", env=environment, check=False)
+        )
+        result = self.run_bootstrap("run", "check", env=environment, timeout=300)
+        self.assertEqual(result.stdout.strip(), "profile service ready")
+
+    def test_host_service_profile_preparation_smoke(self):
+        self.service_profile_preparation_smoke()
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
+    )
+    def test_container_service_profile_preparation_smoke(self):
+        self.service_profile_preparation_smoke(container=True)
+
     def setup_readiness_smoke(self, *, container=False):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text("""schema=3

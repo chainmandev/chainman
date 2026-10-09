@@ -32,6 +32,17 @@ if [ -n "${CHAINMAN_DEV_CHANNEL:-}" ]; then
         --env "CHAINMAN_DEV_OPERATION=$CHAINMAN_DEV_OPERATION" \
         --env "CHAINMAN_DEV_TASK=$CHAINMAN_DEV_TASK" "$@"
 fi
+if [ -n "${CHAINMAN_PROFILE_CHANNEL:-}" ]; then
+    [ -d "$CHAINMAN_PROFILE_CHANNEL/incoming" ] && [ -f "$CHAINMAN_PROFILE_CHANNEL/outgoing/alive" ] || {
+        echo 'chainman: service profile preparation channel is unavailable.' >&2
+        exit 1
+    }
+    # No controller state or control socket enters the workload. The native
+    # owner alone holds liveness; the helper only publishes completed provision.
+    set -- --mount "type=bind,src=$CHAINMAN_PROFILE_CHANNEL/incoming,dst=/chainman-profile-preparation/incoming" \
+        --mount "type=bind,src=$CHAINMAN_PROFILE_CHANNEL/outgoing,dst=/chainman-profile-preparation/outgoing,readonly" \
+        --env CHAINMAN_PROFILE_CHANNEL=/chainman-profile-preparation "$@"
+fi
 if [ "${CHAINMAN_SETUP:-prompt}" = prompt ] && [ -n "${CHAINMAN_SETUP_CHANNEL:-}" ]; then
     channel=$CHAINMAN_SETUP_CHANNEL
     [ -d "$channel/incoming" ] && [ -f "$channel/outgoing/alive" ] || {

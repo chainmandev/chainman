@@ -66,28 +66,29 @@ type Container struct {
 	EngineIdentity string `json:"engine_identity,omitempty"`
 }
 type Plan struct {
-	Schema             int                `json:"schema"`
-	Root               string             `json:"root"`
-	State              string             `json:"state"`
-	Backend            string             `json:"backend"`
-	Watcher            string             `json:"watcher,omitempty"`
-	Licenses           map[string]string  `json:"licenses,omitempty"`
-	Fingerprint        string             `json:"fingerprint"`
-	Services           map[string]Service `json:"services"`
-	Volumes            []Volume           `json:"volumes,omitempty"`
-	Bridge             *Bridge            `json:"bridge,omitempty"`
-	Requested          []string           `json:"requested"`
-	Task               Command            `json:"task"`
-	Prepare            *Command           `json:"prepare,omitempty"`
-	TaskContainer      *Container         `json:"task_container,omitempty"`
-	WaitForServices    bool               `json:"wait_for_services,omitempty"`
-	Presentation       Presentation       `json:"presentation,omitempty"`
-	ExclusiveServices  bool               `json:"exclusive_services,omitempty"`
-	OwnTask            bool               `json:"own_task,omitempty"`
-	TaskShutdown       int                `json:"task_shutdown_seconds,omitempty"`
-	Resources          []Plan             `json:"resources,omitempty"`
-	Generation         string             `json:"generation,omitempty"`
-	TaskNetworkService string             `json:"task_network_service,omitempty"`
+	Schema              int                `json:"schema"`
+	Root                string             `json:"root"`
+	State               string             `json:"state"`
+	Backend             string             `json:"backend"`
+	Watcher             string             `json:"watcher,omitempty"`
+	Licenses            map[string]string  `json:"licenses,omitempty"`
+	Fingerprint         string             `json:"fingerprint"`
+	Services            map[string]Service `json:"services"`
+	Volumes             []Volume           `json:"volumes,omitempty"`
+	Bridge              *Bridge            `json:"bridge,omitempty"`
+	Requested           []string           `json:"requested"`
+	Task                Command            `json:"task"`
+	Prepare             *Command           `json:"prepare,omitempty"`
+	ProfilePreparations []Command          `json:"profile_preparations,omitempty"`
+	TaskContainer       *Container         `json:"task_container,omitempty"`
+	WaitForServices     bool               `json:"wait_for_services,omitempty"`
+	Presentation        Presentation       `json:"presentation,omitempty"`
+	ExclusiveServices   bool               `json:"exclusive_services,omitempty"`
+	OwnTask             bool               `json:"own_task,omitempty"`
+	TaskShutdown        int                `json:"task_shutdown_seconds,omitempty"`
+	Resources           []Plan             `json:"resources,omitempty"`
+	Generation          string             `json:"generation,omitempty"`
+	TaskNetworkService  string             `json:"task_network_service,omitempty"`
 }
 type Identity struct {
 	PID   int    `json:"pid"`
@@ -1607,6 +1608,9 @@ func mainAction(args []string) (result int) {
 		}
 		return taskCommand(args[0], args[1])
 	}
+	if args[0] == "profile-preparation" && len(args) == 2 {
+		return profilePreparationCommand(args[1])
+	}
 	if args[0] == "leased-task" && len(args) == 2 {
 		return exitCode(leasedTask(args[1]))
 	}
@@ -1729,6 +1733,26 @@ func mainAction(args []string) (result int) {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
 	startup := &startupGuard{signals: signals, stops: map[string]string{}}
+	if len(p.ProfilePreparations) > 0 {
+		if err := startup.observePlan(p); err != nil {
+			return exitCode(err)
+		}
+	}
+	for _, command := range p.ProfilePreparations {
+		preparation, err := startProfilePreparation(command, p.TaskShutdown, signals, startup)
+		if err != nil {
+			return exitCode(err)
+		}
+		startup.preparations = append(startup.preparations, preparation)
+		defer func() {
+			if err := preparation.close(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				if result == 0 {
+					result = 1
+				}
+			}
+		}()
+	}
 	if p.WaitForServices && args[0] == "run" {
 		cursors, err := liveLogCursors(p)
 		if err != nil {
@@ -1765,6 +1789,8 @@ func mainAction(args []string) (result int) {
 		}
 		return exitCode(e)
 	}
+	// Preparation roots remain through this operation's cleanup (or the ready
+	// handoff for persistent up). Services retain their ordinary Nix/compiler roots.
 	if args[0] == "up" {
 		lease.Close()
 		fmt.Println(p.State)

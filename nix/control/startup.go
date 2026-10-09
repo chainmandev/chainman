@@ -56,11 +56,17 @@ type startupInterrupted struct{ signal syscall.Signal }
 func (e *startupInterrupted) Error() string { return "startup interrupted: " + e.signal.String() }
 
 type startupGuard struct {
-	signals <-chan os.Signal
-	stops   map[string]string
+	signals      <-chan os.Signal
+	stops        map[string]string
+	preparations []*profilePreparation
 }
 
 func (g *startupGuard) observe(state string) error {
+	if _, observed := g.stops[state]; observed {
+		// Preparation already watched this scope. Do not erase a stop that
+		// completed before the later service-acquisition observation.
+		return g.check()
+	}
 	notice, err := readStopNotice(state)
 	if err != nil {
 		return err
@@ -72,11 +78,30 @@ func (g *startupGuard) observe(state string) error {
 	return g.check()
 }
 
+func (g *startupGuard) observePlan(p Plan) error {
+	if err := g.observe(p.State); err != nil {
+		return err
+	}
+	for _, resource := range p.Resources {
+		if err := g.observePlan(resource); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (g *startupGuard) check() error {
 	select {
 	case sig := <-g.signals:
 		return &startupInterrupted{sig.(syscall.Signal)}
 	default:
+	}
+	for _, preparation := range g.preparations {
+		select {
+		case <-preparation.done:
+			return fmt.Errorf("service profile preparation ended before acquisition: %w", preparation.outcome())
+		default:
+		}
 	}
 	for state, token := range g.stops {
 		notice, err := readStopNotice(state)

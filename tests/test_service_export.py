@@ -106,6 +106,67 @@ class ServiceExportTests(unittest.TestCase):
             text=True,
         ).strip()
 
+    def test_export_defers_requested_service_profiles_without_executing_consumer_flake(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix="chainman profile plan ") as temporary:
+            base = Path(temporary).resolve()
+            root, output = base / "project", base / "output"
+            root.mkdir()
+            output.mkdir()
+            (output / "host-environment").write_bytes(b"")
+            (root / "flake.nix").write_text(
+                'throw "consumer flake must not execute in export"'
+            )
+            (root / "flake.lock").write_text("{}")
+            (root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[profiles.private]
+flake="flake.nix#private"
+[tasks.main]
+services=["worker"]
+commands=[["true"]]
+[services.worker]
+profile="private"
+command=["false"]
+[services.unrequested]
+profile="private"
+command=["false"]
+""")
+            real_run = subprocess.run
+
+            def run(argv, **kwargs):
+                if "--out-link" in argv:
+                    self.assertIn("/nix#control-linux-arm64", argv[4])
+                    return subprocess.CompletedProcess(argv, 0, self.package + "\n")
+                self.assertNotIn("print-dev-env", argv)
+                self.assertNotIn("develop", argv)
+                return real_run(argv, **kwargs)
+
+            with (
+                patch.dict(os.environ, CHAINMAN_MODE="host-nix"),
+                patch.object(services.subprocess, "run", side_effect=run),
+            ):
+                services.export(
+                    root,
+                    [
+                        str(output),
+                        "linux-arm64",
+                        str(base / "state"),
+                        "",
+                        "/fixture/launcher",
+                        "run",
+                        "main",
+                    ],
+                )
+            plan = json.loads((output / "plan.json").read_text())
+            self.assertEqual(len(plan["profile_preparations"]), 1)
+            self.assertEqual(
+                plan["profile_preparations"][0]["argv"][:3],
+                ["/fixture/launcher", "_workflow-profile", "worker"],
+            )
+
     def test_service_image_is_separated_from_engine_options(self):
         digest = "@sha256:" + "a" * 64
         image = "registry.example.invalid:5000/team/database:1.0" + digest

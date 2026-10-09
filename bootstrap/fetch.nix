@@ -78,7 +78,9 @@ let
   request = b.getEnv "CHAINMAN_REQUEST_ACTION";
   requestedName = b.getEnv "CHAINMAN_REQUEST_TASK";
   transport =
-    if request == "_workflow-service" || request == "_workflow-probe" then
+    if
+      request == "_workflow-service" || request == "_workflow-probe" || request == "_workflow-profile"
+    then
       config.services.${requestedName}.transport or { }
     else if request == "_workflow-task" || request == "run" then
       config.tasks.${requestedName}.transport or { }
@@ -90,7 +92,7 @@ let
     ++ b.concatMap (port: [
       "--publish"
       (line port)
-    ]) (item.ports or [ ])
+    ]) (if request == "_workflow-profile" then [ ] else item.ports or [ ])
     ++ (
       if item.host_access or false then
         [
@@ -138,6 +140,7 @@ let
         "_workflow-task"
         "_workflow-service"
         "_workflow-prepare"
+        "_workflow-profile"
         "_service-prepare"
         "exec"
         "shell"

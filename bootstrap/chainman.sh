@@ -124,7 +124,7 @@ esac
 # Planning and setup admission must not let an interactive engine client drain
 # the application's piped input. Setup consent uses its separate terminal channel.
 case "$CHAINMAN_REQUEST_ACTION" in
-    preflight | _service-prepare | _control-export | _workflow-prepare) exec < /dev/null ;;
+    preflight | _service-prepare | _control-export | _workflow-prepare | _workflow-profile) exec < /dev/null ;;
 esac
 if [ "$CHAINMAN_REQUEST_ACTION" = preflight ]; then
     CHAINMAN_PREFLIGHT_TASKS=$(
