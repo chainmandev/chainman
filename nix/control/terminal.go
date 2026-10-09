@@ -16,6 +16,14 @@ type taskAnchorExit struct {
 	status syscall.WaitStatus
 }
 
+// Explicit diagnostics contain only controller identities and signal events,
+// never the task's command, arguments, or environment.
+func taskSignalTrace(event string, pid int, sig syscall.Signal, err error) {
+	if os.Getenv("CHAINMAN_DEBUG_TASK_SIGNALS") == "1" {
+		fmt.Fprintf(os.Stderr, "chainman task signal: owner=%d event=%s target=%d signal=%d error=%v\n", os.Getpid(), event, pid, sig, err)
+	}
+}
+
 func (e *taskAnchorExit) code() int {
 	if e.status.Signaled() {
 		return 128 + int(e.status.Signal())
@@ -43,8 +51,10 @@ func taskStopped(status syscall.WaitStatus) bool {
 // waiter and propagate sequence stops through this anchor to its outer terminal owner.
 func waitTaskAnchor(cmd *exec.Cmd) error {
 	if _, err := unix.IoctlGetInt(int(os.Stdin.Fd()), unix.TIOCGPGRP); err != nil {
+		taskSignalTrace("anchor-wait-no-tty", cmd.Process.Pid, 0, nil)
 		return cmd.Wait()
 	}
+	taskSignalTrace("anchor-wait-tty", cmd.Process.Pid, 0, nil)
 	for {
 		var status syscall.WaitStatus
 		_, err := syscall.Wait4(cmd.Process.Pid, &status, syscall.WUNTRACED, nil)
@@ -55,11 +65,13 @@ func waitTaskAnchor(cmd *exec.Cmd) error {
 			return err
 		}
 		if taskStopped(status) {
+			taskSignalTrace("sequence-stopped", cmd.Process.Pid, syscall.Signal(uint32(status)>>8&0xff), nil)
 			// The sequence is already stopped. Stopping its group again would
 			// create another child stop event that can outlive the next resume.
 			if err = syscall.Kill(os.Getpid(), syscall.SIGSTOP); err != nil {
 				return err
 			}
+			taskSignalTrace("anchor-resumed", os.Getpid(), syscall.SIGCONT, nil)
 			// A later terminal stop can discard a pending SIGCONT notification
 			// even though the kernel resumed us. This anchor never resumes its
 			// sequence itself; the next blocking child-status wait is sufficient.
@@ -90,12 +102,14 @@ func foregroundTask(group int) bool {
 func interruptTask(cmd *exec.Cmd, sig os.Signal) {
 	// Resume the signal receiver before delivering cancellation. A stopped
 	// Darwin Go receiver can lose a termination notification followed by CONT.
-	_ = cmd.Process.Signal(syscall.SIGCONT)
+	err := cmd.Process.Signal(syscall.SIGCONT)
+	taskSignalTrace("outer-resume-anchor", cmd.Process.Pid, syscall.SIGCONT, err)
 	if sig == syscall.SIGINT && foregroundTask(cmd.Process.Pid) {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
+		err = syscall.Kill(-cmd.Process.Pid, syscall.SIGINT)
 	} else {
-		_ = cmd.Process.Signal(sig)
+		err = cmd.Process.Signal(sig)
 	}
+	taskSignalTrace("outer-cancel-anchor", cmd.Process.Pid, sig.(syscall.Signal), err)
 }
 
 type taskTTY struct {
@@ -219,6 +233,7 @@ func waitTask(cmd *exec.Cmd, terminal *taskTTY, signals <-chan os.Signal, change
 	defer statusCheck.Stop()
 	interrupted := false
 	cancel := func(sig os.Signal) {
+		taskSignalTrace("outer-observed-cancellation", cmd.Process.Pid, sig.(syscall.Signal), nil)
 		if !interrupted {
 			interrupted = true
 			interruptTask(cmd, sig)
@@ -246,6 +261,7 @@ func waitTask(cmd *exec.Cmd, terminal *taskTTY, signals <-chan os.Signal, change
 				return status.ExitStatus()
 			}
 			if taskStopped(status) {
+				taskSignalTrace("outer-observed-stop", pid, syscall.Signal(uint32(status)>>8&0xff), nil)
 				select {
 				case sig := <-signals:
 					cancel(sig)
@@ -277,7 +293,8 @@ func waitTask(cmd *exec.Cmd, terminal *taskTTY, signals <-chan os.Signal, change
 						cancel(syscall.SIGTERM)
 					}
 				}
-				_ = syscall.Kill(-pid, syscall.SIGCONT)
+				resumeErr := syscall.Kill(-pid, syscall.SIGCONT)
+				taskSignalTrace("outer-resume-group", pid, syscall.SIGCONT, resumeErr)
 				if err != nil {
 					// Preserve bounded native cleanup before reporting a tty error.
 					_ = cmd.Wait()

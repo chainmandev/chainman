@@ -57,6 +57,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for flag in (
             "CHAINMAN_TEST_STOPPED_TASK_STACKS",
             "CHAINMAN_TEST_TERMINAL_STACKS",
+            "CHAINMAN_TEST_TASK_SIGNAL_TRACE",
         ):
             with self.subTest(flag=flag):
                 self.assertEqual(diagnostic["env"][flag], "1")

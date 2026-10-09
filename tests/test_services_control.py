@@ -533,6 +533,12 @@ print('CLEANUP FINISHED', signals, flush=True)
             [CONTROL, "command", str(task)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=dict(
+                os.environ,
+                CHAINMAN_DEBUG_TASK_SIGNALS=os.environ.get(
+                    "CHAINMAN_TEST_TASK_SIGNAL_TRACE", "0"
+                ),
+            ),
         )
         group = None
         try:
@@ -543,6 +549,8 @@ print('CLEANUP FINISHED', signals, flush=True)
             os.killpg(group, signal.SIGSTOP)
             client.terminate()
             _, error = client.communicate(timeout=3)
+            if os.environ.get("CHAINMAN_TEST_TASK_SIGNAL_TRACE") == "1":
+                print(error.decode(errors="replace"), file=sys.stderr, flush=True)
             self.assertEqual(client.returncode, 143, error)
             self.assertTrue((self.root / "term-received").exists(), error)
         except subprocess.TimeoutExpired as failure:

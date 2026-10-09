@@ -1437,6 +1437,7 @@ func owned(state, name string, probe bool, generation string) int {
 		}
 	case sig := <-signals:
 		interrupted = sig.(syscall.Signal)
+		taskSignalTrace("anchor-observed-cancellation", id.PID, interrupted, nil)
 		if s.ForwardLeases {
 			fmt.Fprintln(os.Stderr, "chainman: stopping task…")
 		}
@@ -1444,9 +1445,11 @@ func owned(state, name string, probe bool, generation string) int {
 		// command interrupts use that same group route; explicit stop remains a
 		// direct SIGTERM and must still be forwarded to the application's group.
 		if interrupted != syscall.SIGINT || !foregroundTask(id.PID) {
-			_ = syscall.Kill(-id.PID, interrupted)
+			err := syscall.Kill(-id.PID, interrupted)
+			taskSignalTrace("anchor-cancel-group", id.PID, interrupted, err)
 		}
-		_ = syscall.Kill(-id.PID, syscall.SIGCONT)
+		resumeErr := syscall.Kill(-id.PID, syscall.SIGCONT)
+		taskSignalTrace("anchor-resume-group", id.PID, syscall.SIGCONT, resumeErr)
 		select {
 		case e = <-done:
 		case <-time.After(time.Duration(s.Shutdown) * time.Second):

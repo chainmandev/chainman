@@ -226,7 +226,7 @@ The `diagnose_stopped_cancellation` dispatch input of the registered
 instead of the normal matrix. Its default is false; ordinary verification keeps
 every existing matrix lane and command. `just control-cancellation-diagnostic` enters
 the pinned control profile once, runs the unchanged full native ownership gate,
-and then repeats the original cancellation assertion twelve times in fresh
+and then repeats the original cancellation assertion sixty-four times in fresh
 unittest processes. A failed full gate never becomes successful because a later
 probe passes. The repetition probe stops on its first failure. This is diagnosis,
 not release qualification; dispatch the normal rolling-publication workflow to
@@ -245,6 +245,11 @@ Profile entry, package builds and repetitions have progress markers. Each
 repetition prints its Python thread stacks every30 seconds if it stalls.
 
 The deliberate diagnostic enables `CHAINMAN_TEST_STOPPED_TASK_STACKS=1`.
+It also enables `CHAINMAN_TEST_TASK_SIGNAL_TRACE=1` for the stopped-task fixture.
+That fixture opts its controllers into `CHAINMAN_DEBUG_TASK_SIGNALS=1` and retains
+signal observations, sends, stop reports, and resume events even on success.
+The trace includes process identities and errors, without command arguments or
+environment values. Ordinary verification leaves this trace disabled.
 After the original stopped-task assertion fails, it validates the disposable
 outer and anchor ownership. The full gate selects the anchor for one fatal Go
 `SIGQUIT` dump; fresh repetition fixtures select the outer through

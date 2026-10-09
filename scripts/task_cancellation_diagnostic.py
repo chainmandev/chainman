@@ -42,9 +42,9 @@ def main() -> None:
             CHAINMAN_TEST_PROCESS_COMPOSE=package + "/bin/process-compose",
             CHAINMAN_TEST_WATCHEXEC=package + "/bin/watchexec",
         )
-        for iteration in range(1, 13):
+        for iteration in range(1, 65):
             print(
-                f"Stopped-task cancellation diagnostic iteration {iteration}/12",
+                f"Stopped-task cancellation diagnostic iteration {iteration}/64",
                 flush=True,
             )
             subprocess.run(
