@@ -43,8 +43,16 @@ def main() -> None:
             CHAINMAN_TEST_WATCHEXEC=package + "/bin/watchexec",
         )
         for iteration in range(1, 65):
+            traced = (
+                iteration <= 32
+                and environment.get("CHAINMAN_TEST_TASK_SIGNAL_TRACE") == "1"
+            )
+            case_environment = dict(
+                environment, CHAINMAN_TEST_TASK_SIGNAL_TRACE="1" if traced else "0"
+            )
             print(
-                f"Stopped-task cancellation diagnostic iteration {iteration}/64",
+                f"Stopped-task cancellation diagnostic iteration {iteration}/64 "
+                f"(signal trace: {traced})",
                 flush=True,
             )
             subprocess.run(
@@ -65,7 +73,7 @@ def main() -> None:
                     "-v",
                 ],
                 cwd=ROOT,
-                env=environment,
+                env=case_environment,
                 check=True,
             )
 

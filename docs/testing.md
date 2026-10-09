@@ -228,7 +228,9 @@ every existing matrix lane and command. `just control-cancellation-diagnostic` e
 the pinned control profile once, runs the full native ownership gate,
 and then repeats both noninteractive and PTY cancellation assertions sixty-four
 times in fresh unittest processes. A failed full gate never becomes successful
-because a later probe passes. The repetition probe stops on its first failure. This is diagnosis,
+because a later probe passes. The repetition probe stops on its first failure.
+The second half disables signal tracing to exercise cancellation without its
+timing overhead; failure-only stack capture remains enabled. This is diagnosis,
 not release qualification; dispatch the normal rolling-publication workflow to
 run all thirteen lanes before publishing.
 
@@ -237,8 +239,8 @@ Entry, ownership and repetition output have separate source-bound files, and
 Outputs go directly to files, so a phase waits for its own process instead of
 inherited pipe EOF. Each phase starts in a fresh session with null stdin, so
 accidental job-control stops cannot suspend its observer or the hosted runner.
-The full phase has an eighteen-minute observation limit;
-repetitions have four minutes. On expiry, only the created phase process receives
+The full phase has an eighteen-minute observation limit; repetitions have four
+minutes. On expiry, only the created phase process receives
 an interrupt, followed by a bounded wait and force termination if necessary.
 Any limit records exit124 and fails the diagnostic. These outer limits never
 change the native assertion's three-second wait. The unchanged thirty-minute
