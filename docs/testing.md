@@ -225,17 +225,19 @@ The `diagnose_stopped_cancellation` dispatch input of the registered
 `verify.yml` workflow selects an exact-source Apple Silicon macOS diagnostic
 instead of the normal matrix. Its default is false; ordinary verification keeps
 every existing matrix lane and command. `just control-cancellation-diagnostic` enters
-the pinned control profile once, runs the unchanged full native ownership gate,
-and then repeats the original cancellation assertion sixty-four times in fresh
-unittest processes. A failed full gate never becomes successful because a later
-probe passes. The repetition probe stops on its first failure. This is diagnosis,
+the pinned control profile once, runs the full native ownership gate,
+and then repeats both noninteractive and PTY cancellation assertions sixty-four
+times in fresh unittest processes. A failed full gate never becomes successful
+because a later probe passes. The repetition probe stops on its first failure. This is diagnosis,
 not release qualification; dispatch the normal rolling-publication workflow to
 run all thirteen lanes before publishing.
 
 Entry, ownership and repetition output have separate source-bound files, and
 `phases.json` retains each completed phase's exit and elapsed observation time.
 Outputs go directly to files, so a phase waits for its own process instead of
-inherited pipe EOF. The full phase has an eighteen-minute observation limit;
+inherited pipe EOF. Each phase starts in a fresh session with null stdin, so
+accidental job-control stops cannot suspend its observer or the hosted runner.
+The full phase has an eighteen-minute observation limit;
 repetitions have four minutes. On expiry, only the created phase process receives
 an interrupt, followed by a bounded wait and force termination if necessary.
 Any limit records exit124 and fails the diagnostic. These outer limits never
@@ -245,6 +247,11 @@ Profile entry, package builds and repetitions have progress markers. Each
 repetition prints its Python thread stacks every30 seconds if it stalls.
 
 The deliberate diagnostic enables `CHAINMAN_TEST_STOPPED_TASK_STACKS=1`.
+The noninteractive fixture uses null stdin and a fresh session so it cannot
+borrow the caller's terminal or suspend the CI harness. The separate PTY fixture
+owns its controlling terminal and resumes any reported owner stop before awaiting
+queued cancellation. Both require status143 and workload termination within the
+original three-second assertion; terminal behavior remains a native test gate.
 It also enables `CHAINMAN_TEST_TASK_SIGNAL_TRACE=1` for the stopped-task fixture.
 That fixture opts its controllers into `CHAINMAN_DEBUG_TASK_SIGNALS=1` and retains
 signal observations, sends, stop reports, and resume events even on success.

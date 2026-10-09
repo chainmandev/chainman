@@ -48,7 +48,14 @@ class ControlCancellationDiagnosticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="chainman phase capture ") as directory:
             log = Path(directory) / "phase.log"
             result = run_phase(
-                [sys.executable, "-c", "import sys; print('x'*100000); sys.exit(23)"],
+                [
+                    sys.executable,
+                    "-c",
+                    "import os,sys; assert not os.isatty(0); "
+                    "assert os.getsid(0)==os.getpid(); "
+                    "assert os.getpgrp()==os.getpid(); "
+                    "print('x'*100000); sys.exit(23)",
+                ],
                 log,
                 dict(os.environ),
                 5,

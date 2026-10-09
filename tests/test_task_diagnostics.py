@@ -227,7 +227,9 @@ class TaskDiagnosticsTests(unittest.TestCase):
             output = io.StringIO()
             with (
                 patch.object(fixture, "wait_file"),
-                patch("test_services_control.subprocess.Popen", return_value=client),
+                patch(
+                    "test_services_control.subprocess.Popen", return_value=client
+                ) as spawn,
                 patch("test_services_control.os.killpg"),
                 patch(
                     "test_services_control.task_process_snapshot", return_value="{}"
@@ -237,6 +239,8 @@ class TaskDiagnosticsTests(unittest.TestCase):
             ):
                 fixture.test_stopped_task_owner_handles_cancellation_without_kill_timeout()
         self.assertIs(raised.exception, failure)
+        self.assertEqual(spawn.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(spawn.call_args.kwargs["start_new_session"])
         client.communicate.assert_called_once_with(timeout=3)
         snapshot.assert_called_once_with(41, 42)
         self.assertIn("Owned stopped-task cancellation snapshot", output.getvalue())

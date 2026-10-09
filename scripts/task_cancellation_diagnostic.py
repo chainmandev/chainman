@@ -61,7 +61,7 @@ def main() -> None:
                     "-p",
                     "test_services_control.py",
                     "-k",
-                    "test_stopped_task_owner_handles_cancellation_without_kill_timeout",
+                    "test_stopped_task_owner_handles_cancellation",
                     "-v",
                 ],
                 cwd=ROOT,

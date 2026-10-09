@@ -23,7 +23,13 @@ def run_phase(
     cleanup_incomplete = False
     with log.open("ab") as output:
         child = subprocess.Popen(
-            command, cwd=ROOT, env=environment, stdout=output, stderr=subprocess.STDOUT
+            command,
+            cwd=ROOT,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            stdout=output,
+            stderr=subprocess.STDOUT,
         )
         try:
             code = child.wait(timeout=timeout)

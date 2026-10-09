@@ -1,5 +1,6 @@
 """Native ownership contracts against the actual Process Compose backend."""
 
+import errno
 import json
 import fcntl
 import os
@@ -506,7 +507,7 @@ print('CLEANUP FINISHED', signals, flush=True)
         output = self.terminal_command(code, interrupt=True, ignored_interrupt=True)
         self.assertIn("RESTORED 130", output)
 
-    def test_stopped_task_owner_handles_cancellation_without_kill_timeout(self):
+    def stopped_task(self, *, terminal=False):
         receipt = self.base / "stopped-owner"
         ready = self.root / "stopped-ready"
         task = self.base / "stopped-task.json"
@@ -518,8 +519,14 @@ print('CLEANUP FINISHED', signals, flush=True)
                             [
                                 sys.executable,
                                 "-c",
-                                "import signal,time; from pathlib import Path; "
-                                "signal.signal(signal.SIGTERM,lambda *_:(Path('term-received').touch(),exit(23))); "
+                                "import os,signal,time; from pathlib import Path; "
+                                + (
+                                    "assert os.isatty(0); "
+                                    "assert os.tcgetpgrp(0)==os.getpgrp(); "
+                                    if terminal
+                                    else "assert not os.isatty(0); "
+                                )
+                                + "signal.signal(signal.SIGTERM,lambda *_:(Path('term-received').touch(),exit(23))); "
                                 f"Path({str(ready)!r}).touch(); time.sleep(120)",
                             ]
                         )
@@ -529,8 +536,16 @@ print('CLEANUP FINISHED', signals, flush=True)
                 }
             )
         )
+        return ready, receipt, task
+
+    def test_stopped_task_owner_handles_cancellation_without_kill_timeout(self):
+        ready, receipt, task = self.stopped_task()
         client = subprocess.Popen(
             [CONTROL, "command", str(task)],
+            # This contract is noninteractive. Never borrow a CI/developer
+            # terminal or let job-control stops suspend the test runner.
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=dict(
@@ -594,6 +609,76 @@ print('CLEANUP FINISHED', signals, flush=True)
                         pass
                 client.kill()
                 client.communicate(timeout=5)
+
+    def test_stopped_task_owner_handles_cancellation_in_isolated_terminal(self):
+        ready, receipt, task = self.stopped_task(terminal=True)
+        process, master = terminal_process(
+            [CONTROL, "command", str(task)],
+            dict(
+                os.environ,
+                CHAINMAN_DEBUG_TASK_SIGNALS=os.environ.get(
+                    "CHAINMAN_TEST_TASK_SIGNAL_TRACE", "0"
+                ),
+            ),
+            self.root,
+        )
+        group = None
+        output = bytearray()
+        try:
+            self.wait_file(ready)
+            group = json.loads((receipt / "task.owner.json").read_text())["identity"][
+                "pid"
+            ]
+            self.assertEqual(os.getsid(process.pid), process.pid)
+            self.assertEqual(os.getsid(group), process.pid)
+            self.assertEqual(os.getpgid(group), group)
+            os.killpg(group, signal.SIGSTOP)
+            os.kill(process.pid, signal.SIGTERM)
+            deadline = time.monotonic() + 3
+            while process.returncode is None:
+                observed, status = os.waitpid(process.pid, os.WNOHANG | os.WUNTRACED)
+                if observed:
+                    if os.WIFSTOPPED(status):
+                        # A real shell resumes a suspended job before queued
+                        # cancellation can run. This session belongs only to
+                        # the fixture; it cannot suspend the test/CI harness.
+                        os.kill(process.pid, signal.SIGCONT)
+                    else:
+                        process.returncode = os.waitstatus_to_exitcode(status)
+                        break
+                self.assertLess(time.monotonic(), deadline, bytes(output))
+                if select.select([master], [], [], 0.01)[0]:
+                    try:
+                        output.extend(os.read(master, 8192))
+                    except OSError as error:
+                        if error.errno != errno.EIO:
+                            raise
+            status, remaining = wait_terminal(process, master, 1)
+            output.extend(remaining)
+            if os.environ.get("CHAINMAN_TEST_TASK_SIGNAL_TRACE") == "1":
+                print(output.decode(errors="replace"), file=sys.stderr, flush=True)
+            self.assertEqual(status, 143, bytes(output))
+            self.assertTrue((self.root / "term-received").exists(), bytes(output))
+        except (AssertionError, subprocess.TimeoutExpired):
+            print(
+                "Owned terminal cancellation snapshot: "
+                + task_process_snapshot(process.pid, group),
+                file=sys.stderr,
+                flush=True,
+            )
+            raise
+        finally:
+            if group is not None:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if process.poll() is None:
+                process.kill()
+            try:
+                wait_terminal(process, master, 5)
+            finally:
+                os.close(master)
 
     def test_cancelled_task_cannot_report_success_when_child_exits_zero(self):
         ready = self.root / "cooperative-ready"
