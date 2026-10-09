@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 import chainman
@@ -182,7 +183,9 @@ def worker(root: Path, directory: Path, phase: str) -> int:
             "hooks",
             ["node", str(chainman.RUNTIME / "scripts/trojan-source.mjs")],
             input=json.dumps(texts).encode(),
-            capture_output=True,
+            # Only stdout is the scanner protocol. Keep launcher/scanner errors
+            # visible to the caller even when checked execution raises.
+            stdout=subprocess.PIPE,
         )
         findings = json.loads(result.stdout)
         if not isinstance(findings, list) or len(findings) != len(scanned):

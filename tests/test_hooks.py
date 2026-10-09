@@ -4,6 +4,7 @@ import json
 import base64
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -18,6 +19,47 @@ import hook_worker
 
 
 class HookDeclarations(unittest.TestCase):
+    def test_scanner_failure_preserves_stderr_and_does_not_cache_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "scan"
+            (directory / "blobs").mkdir(parents=True)
+            (directory / "result").mkdir()
+            blob, revision = "a" * 40, "b" * 40
+            (directory / "input.json").write_text(
+                json.dumps(
+                    {
+                        "roots": [revision],
+                        "entries": [
+                            {
+                                "mode": "100644",
+                                "blob": blob,
+                                "path": "safe.js",
+                                "revision": revision,
+                            }
+                        ],
+                    }
+                )
+            )
+            (directory / "blobs" / blob).write_text("// ordinary text\n")
+            (directory / "result/requested.json").write_text(json.dumps([blob]))
+            failure = subprocess.CalledProcessError(37, ["scanner"])
+            with (
+                patch.object(trojan_source.tc, "config", return_value={}),
+                patch.object(
+                    trojan_source.chainman, "execute", side_effect=failure
+                ) as execute,
+                self.assertRaises(subprocess.CalledProcessError) as raised,
+            ):
+                trojan_source.worker(root, directory, "scan-check")
+            self.assertIs(raised.exception, failure)
+            options = execute.call_args.kwargs
+            self.assertEqual(options["stdout"], subprocess.PIPE)
+            self.assertNotIn("stderr", options)
+            self.assertNotIn("capture_output", options)
+            self.assertEqual(json.loads(options["input"]), ["// ordinary text\n"])
+            self.assertFalse(list((root / ".cache").rglob(blob)))
+
     def test_scan_export_uses_frozen_authority_without_loading_lefthook_config(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

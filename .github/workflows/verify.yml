@@ -22,11 +22,15 @@ name: Deliberate toolchain verification
         description: Run only the deliberate Intel cancellation diagnostic
         type: boolean
         default: false
+      diagnose_bootstrap_scan:
+        description: Run only the repeated macOS bootstrap scanner diagnostic
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   verify:
-    if: ${{ !inputs.diagnose_stopped_cancellation }}
+    if: ${{ !inputs.diagnose_stopped_cancellation && !inputs.diagnose_bootstrap_scan }}
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -150,5 +154,46 @@ jobs:
         with:
           name: stopped-cancellation-phases-${{ github.sha }}
           path: checkout with spaces/cancellation-diagnostic/
+          if-no-files-found: error
+          retention-days: 14
+  diagnose-bootstrap-scan:
+    if: inputs.diagnose_bootstrap_scan
+    runs-on: macos-15
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/checkout with spaces
+    env:
+      CHAINMAN_SETUP: auto
+      TOOLCHAIN_MODE: host-nix
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: checkout with spaces
+      - name: Confirm exact diagnostic source
+        env:
+          EXPECTED: ${{ inputs.candidate_sha }}
+          EVENT: ${{ github.sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$EVENT" = "$EXPECTED"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Check scanner error reporting and repeat the bootstrap boundary
+        timeout-minutes: 26
+        run: |
+          set -o pipefail
+          mkdir -p bootstrap-scan-diagnostic
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec python3 -B -m unittest discover -s tests -p test_hooks.py -v 2>&1 | tee bootstrap-scan-diagnostic/unit.log
+          for attempt in 1 2 3 4 5; do
+            nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- exec python3 -B -m unittest discover -s tests -p test_bootstrap.py -k test_public_explicit_scan_inside_managed_profile -v 2>&1 | tee "bootstrap-scan-diagnostic/attempt-$attempt.log"
+          done
+      - name: Retain bootstrap scanner diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bootstrap-scan-${{ github.sha }}
+          path: checkout with spaces/bootstrap-scan-diagnostic/
           if-no-files-found: error
           retention-days: 14
