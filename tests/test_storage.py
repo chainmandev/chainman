@@ -77,6 +77,12 @@ def terminal_process(argv, env, cwd):
     return process, master
 
 
+def terminal_workload_exited(transcript):
+    # Background output can follow a prompt or unterminated workload text. Like
+    # expect(), recognize our complete status marker at any transcript offset.
+    return re.search(rb"RESULT:[0-9]+\r?\n", transcript) is not None
+
+
 def exercise_job_control(
     test,
     argv,
@@ -118,7 +124,7 @@ def exercise_job_control(
         )
 
     def reject_early_exit():
-        if re.search(rb"(?:^|\r?\n)RESULT:[0-9]+\r?\n", transcript):
+        if terminal_workload_exited(transcript):
             test.fail(
                 "Terminal workload exited before expected job control.\n"
                 + diagnostics()
@@ -241,6 +247,24 @@ class StorageTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.pool = self.root / "nix-just-downloads" / storage.POOL
+
+    def test_terminal_result_is_recognized_after_background_prompt(self):
+        for transcript in (
+            b"RESULT:23\r\n",
+            b"PROMPT> RESULT:23\r\n",
+            b"PROMPT> RESULT:0\r\n",
+            b"partial workload outputRESULT:23\n",
+        ):
+            with self.subTest(transcript=transcript):
+                self.assertTrue(terminal_workload_exited(transcript))
+        for transcript in (
+            b"RESULT:23",
+            b"RESULT:%s\n",
+            b"RESULT:invalid\r\n",
+            b"RESULT:23extra\n",
+        ):
+            with self.subTest(transcript=transcript):
+                self.assertFalse(terminal_workload_exited(transcript))
 
     def test_terminal_fixture_retains_early_workload_exit_diagnostics(self):
         with self.assertRaises(AssertionError) as raised:
