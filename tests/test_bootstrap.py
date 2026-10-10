@@ -2080,6 +2080,115 @@ http.server.HTTPServer(("0.0.0.0",int(os.environ["FIXTURE_SERVICE_PORT"])),Handl
     def test_host_service_profile_preparation_smoke(self):
         self.service_profile_preparation_smoke()
 
+    def test_host_container_engine_survives_isolated_runtime_handoff(self):
+        runtime = self.use_real_runtime()
+        # Exercise the real public entry, Nix bootstrap and storage re-entry.
+        # Record its native-export boundary without starting any containers.
+        with (runtime / "scripts/services.py").open("a") as stream:
+            stream.write("""
+def export(root, arguments):
+    import json, os
+    destination = Path(arguments[0])
+    (root / 'engine-observation.json').write_text(json.dumps({
+        'engine': arguments[3], 'path': os.environ['PATH']}))
+    controller = destination / 'chainman-control'
+    controller.write_text('#!/bin/sh\\nexit 0\\n')
+    controller.chmod(0o755)
+    (destination / 'plan.json').write_text('{}')
+    return 0
+""")
+        self.pin_runtime(runtime)
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[tasks.check]\nservices=["fixture"]\ncommands=[["true"]]\n'
+            "[services.fixture]\n"
+            'container={image="neutral.invalid/fixture@sha256:' + "a" * 64 + '"}\n'
+            'readiness={command=["true"]}\n'
+        )
+        tools = self.root / "host container tools with spaces"
+        tools.mkdir()
+        for name in ("docker", "podman", "python3"):
+            executable = tools / name
+            executable.write_text(
+                "#!/bin/sh\n"
+                + "touch "
+                + shlex.quote(str(self.root / "host-tool-executed"))
+                + "\n"
+                + "exit 97\n"
+            )
+            executable.chmod(0o755)
+        environment = dict(self.env, PATH=str(tools) + os.pathsep + self.env["PATH"])
+        for selection, expected in (("", "docker"), ("podman", "podman")):
+            with self.subTest(selection=selection or "auto"):
+                result = self.run_bootstrap(
+                    "run",
+                    "check",
+                    env=dict(environment, CHAINMAN_CONTAINER_ENGINE=selection),
+                )
+                self.assertEqual(result.returncode, 0)
+                observed = json.loads(
+                    (self.root / "engine-observation.json").read_text()
+                )
+                self.assertEqual(observed["engine"], str(tools / expected))
+                self.assertNotIn(str(tools), observed["path"].split(os.pathsep))
+                self.assertFalse((self.root / "host-tool-executed").exists())
+        # An older launcher may already have dropped host PATH before selecting
+        # the updated runtime. Its ordinary explicit selector must still work.
+        self.run_bootstrap(
+            "run",
+            "check",
+            env=dict(self.env, CHAINMAN_CONTAINER_ENGINE=str(tools / "docker")),
+        )
+        observed = json.loads((self.root / "engine-observation.json").read_text())
+        self.assertEqual(observed["engine"], str(tools / "docker"))
+        self.assertNotIn(str(tools), observed["path"].split(os.pathsep))
+        self.assertFalse((self.root / "host-tool-executed").exists())
+        for path in (tools / "python3", tools / "missing" / "docker"):
+            with self.subTest(invalid_executable=path):
+                rejected = self.run_bootstrap(
+                    "run",
+                    "check",
+                    check=False,
+                    env=dict(environment, CHAINMAN_CONTAINER_ENGINE=str(path)),
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertFalse((self.root / "host-tool-executed").exists())
+        (tools / "podman").unlink()
+        self.run_bootstrap(
+            "run", "check", env=dict(environment, CHAINMAN_CONTAINER_ENGINE="podman")
+        )
+        observed = json.loads((self.root / "engine-observation.json").read_text())
+        self.assertEqual(
+            observed["engine"], "", "Explicit Podman must not select Docker"
+        )
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "select an available real container engine",
+    )
+    def test_host_container_service_survives_isolated_runtime_handoff(self):
+        self.use_real_runtime()
+        image = (SOURCE / "nix/container-image.txt").read_text().strip()
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[profiles.host]\nruntime_profile="bootstrap"\n'
+            '[tasks.check]\nservices=["fixture"]\n'
+            'commands=[["printf","host container client ready\\n"]]\n'
+            "[services.fixture]\nshutdown_seconds=2\n"
+            + "container={image="
+            + json.dumps(image)
+            + ',command=["sleep","120"]}\n'
+            + 'readiness={command=["true"],period_seconds=1,timeout_seconds=2,failure_threshold=30}\n'
+        )
+        environment = dict(
+            self.env, CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"]
+        )
+        self.addCleanup(
+            lambda: self.run_bootstrap("services-stop", env=environment, check=False)
+        )
+        result = self.run_bootstrap("run", "check", env=environment, timeout=300)
+        self.assertEqual(result.stdout.strip(), "host container client ready")
+
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER"), "requires container engine"
     )

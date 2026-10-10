@@ -8,6 +8,26 @@ while another task owns them. Process Compose handles readiness, supervision, an
 restart behavior; chainman's native controller tracks clients, leases, and crash
 recovery. Neither requires host Python or Go.
 
+## Host container clients
+
+Container services use the host's Docker or Podman client. The project entrypoint
+captures available clients before entering its isolated Nix bootstrap and carries
+their executable paths through runtime re-entry. It does not add host directories
+or language interpreters back to the pinned tooling PATH. An explicit
+`CHAINMAN_CONTAINER_ENGINE=podman` does not fall back to Docker.
+
+For existing project entrypoints, the engine setting also accepts an absolute,
+executable file path whose filename is `docker` or `podman`. This is useful when
+upgrading from an older host-Nix runtime that has already discarded host PATH:
+
+```sh
+CHAINMAN_CONTAINER_ENGINE=/opt/container-tools/docker just chainman-update
+```
+
+The path is passed as one argument, including spaces. Unsupported clients and
+missing/non-executable files are rejected. This selects the host client; it does
+not change the configured verification tasks, isolation, or readiness budgets.
+
 ## A small local server
 
 Add these declarations to a schema-3 project with a `core` profile:

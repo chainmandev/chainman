@@ -15,6 +15,46 @@ single_line() {
     case "$1" in *'
 '* | *"$(printf '\r')"*) fail 'Newlines are not supported in bootstrap paths or options.' ;; esac
 }
+container_executable() {
+    container_path=
+    if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ]; then
+        case "$1" in
+            docker) container_path=${CHAINMAN_HOST_DOCKER_BIN:-} ;;
+            podman) container_path=${CHAINMAN_HOST_PODMAN_BIN:-} ;;
+        esac
+    fi
+    if [ -z "$container_path" ] || [ ! -f "$container_path" ] || [ ! -x "$container_path" ]; then
+        container_path=$(command -v "$1" 2> /dev/null || :)
+    fi
+    case "$container_path" in /*) ;; *) return 1 ;; esac
+    [ -f "$container_path" ] && [ -x "$container_path" ] || return 1
+    single_line "$container_path"
+    printf '%s\n' "$container_path"
+}
+select_container_engine() {
+    container_name=
+    container_program=
+    container_selection=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
+    case "$container_selection" in
+        /*)
+            single_line "$container_selection"
+            container_name=$(basename -- "$container_selection")
+            case "$container_name" in docker | podman) ;; *) fail 'Unsupported container engine.' ;; esac
+            [ -f "$container_selection" ] && [ -x "$container_selection" ] || fail 'Container engine path must be an executable file.'
+            container_program=$container_selection
+            return 0
+            ;;
+    esac
+    if [ -z "$container_selection" ]; then container_selection='docker podman'; fi
+    for container_choice in $container_selection; do
+        case "$container_choice" in docker | podman) ;; *) fail 'Unsupported container engine.' ;; esac
+        if container_program=$(container_executable "$container_choice"); then
+            container_name=$container_choice
+            return 0
+        fi
+    done
+    return 1
+}
 develop_runtime() {
     develop_action=$1
     shift
@@ -70,6 +110,14 @@ fi
 source_root=$(CDPATH='' cd -P -- "$script_dir/.." && pwd)
 helper=$script_dir/fetch.nix
 export CHAINMAN_SOURCE_ROOT="$source_root"
+# Keep host clients across the isolated bootstrap/storage re-entry without
+# putting host interpreters or directories back on the verified tooling PATH.
+if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] && [ "${CHAINMAN_HOST_ENGINES_CAPTURED:-0}" != 1 ]; then
+    CHAINMAN_HOST_DOCKER_BIN=$(command -v docker 2> /dev/null || :)
+    CHAINMAN_HOST_PODMAN_BIN=$(command -v podman 2> /dev/null || :)
+    CHAINMAN_HOST_ENGINES_CAPTURED=1
+    export CHAINMAN_HOST_DOCKER_BIN CHAINMAN_HOST_PODMAN_BIN CHAINMAN_HOST_ENGINES_CAPTURED
+fi
 if [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ] && [ -n "${CHAINMAN_ROOT:-}" ]; then
     if [ "$#" = 2 ] && [ "$1" = hooks ] && [ "$2" = config ]; then
         exec "$script_dir/reenter.sh" "$root" --entry hooks config
@@ -181,15 +229,7 @@ control_dispatch() {
         *) fail 'Unsupported native service-controller platform.' ;;
     esac
     control_engine=
-    control_candidates=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
-    if [ -z "$control_candidates" ]; then control_candidates='docker podman'; fi
-    for candidate in $control_candidates; do
-        case "$candidate" in docker | podman) ;; *) fail 'Unsupported container engine.' ;; esac
-        if command -v "$candidate" > /dev/null 2>&1; then
-            control_engine=$(command -v "$candidate")
-            break
-        fi
-    done
+    if select_container_engine; then control_engine=$container_program; fi
     printf '%s\n%s\n' --mount "type=bind,src=$control_output,dst=$control_output" > "$control_output/mounts"
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts lifetime_helper "$self" _control-export "$control_output" "$control_target" \
         "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" "$control_engine" "$self" "$@"
@@ -320,17 +360,8 @@ update_worker() {
             "$self" _update-export-start "$update_output" "$update_export" "$@" >&2
     fi
     if [ "$mode" = container-nix ] && [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
-        update_engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
-        if [ -z "$update_engine" ]; then
-            for update_engine_candidate in docker podman; do
-                if command -v "$update_engine_candidate" > /dev/null 2>&1; then
-                    update_engine=$update_engine_candidate
-                    break
-                fi
-            done
-        fi
-        case "$update_engine" in docker | podman) ;; *) fail 'Container updates require Docker or Podman.' ;; esac
-        update_token=$("$CHAINMAN_UPDATE_HELPER" update-cache engine "$update_cache" "$update_output" "$(command -v "$update_engine")")
+        select_container_engine || fail 'Container updates require Docker or Podman.'
+        update_token=$("$CHAINMAN_UPDATE_HELPER" update-cache engine "$update_cache" "$update_output" "$container_program")
         # Frozen/older launchers also understand these engine options.
         printf '%s\n%s\n' --label "dev.chainman.update=$update_token" >> "$update_output/control/mounts"
         printf '%s\n%s\n' --label "dev.chainman.update=$update_token" >> "$update_output/control/candidate-mounts"
@@ -735,20 +766,13 @@ os.execv(sys.executable, [sys.executable, "-I", "-B",
 ' "$root" "$store" "$@"
 fi
 
-engine=${CHAINMAN_CONTAINER_ENGINE:-${CHAINMAN_ENGINE:-}}
-if [ -z "$engine" ]; then
-    for candidate in docker podman; do
-        if command -v "$candidate" > /dev/null 2>&1; then
-            engine=$candidate
-            break
-        fi
-    done
-fi
-case "$engine" in docker | podman) ;; *) fail 'Container mode requires Docker or Podman.' ;; esac
+select_container_engine || fail 'Container mode requires Docker or Podman.'
+engine=$container_name
+engine_executable=$container_program
 update_container_token=
 if [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
     update_container_token=$("${CHAINMAN_UPDATE_HELPER:?Missing update supervisor}" update-cache engine \
-        "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates" "$CHAINMAN_UPDATE_TRANSACTION" "$(command -v "$engine")")
+        "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/updates" "$CHAINMAN_UPDATE_TRANSACTION" "$engine_executable")
 fi
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
 lifetime_directory=$temporary
@@ -758,7 +782,7 @@ gid=$(id -g)
 container_uid=$uid
 container_gid=$gid
 if [ "$engine" = docker ]; then
-    lifetime_run "$engine" info --format '{{range .SecurityOptions}}{{println .}}{{end}}' > "$temporary/identity" || fail 'Cannot determine Docker daemon identity mapping.'
+    lifetime_run "$engine_executable" info --format '{{range .SecurityOptions}}{{println .}}{{end}}' > "$temporary/identity" || fail 'Cannot determine Docker daemon identity mapping.'
     security_options=$(cat "$temporary/identity")
     while IFS= read -r option; do
         if [ "$option" = name=rootless ]; then
@@ -807,7 +831,7 @@ if [ -n "$platform" ]; then volume=$volume-${platform#linux/}; fi
 downloads_volume=${volume}-downloads
 run() {
     if [ -n "$platform" ]; then set -- --platform "$platform" "$@"; fi
-    if [ "$engine" = podman ]; then lifetime_run "$engine" run --userns=keep-id "$@"; else lifetime_run "$engine" run "$@"; fi
+    if [ "$engine" = podman ]; then lifetime_run "$engine_executable" run --userns=keep-id "$@"; else lifetime_run "$engine_executable" run "$@"; fi
 }
 # Capability-free UID 0 still owns /. Keep Nix's nonexistent build HOME from
 # being created accidentally, without changing writable mounts or disk-backed /tmp.
@@ -833,7 +857,7 @@ validate_daemon() {
         capability_fields='{{.EffectiveCaps}} {{.BoundingCaps}}'
         expected_capabilities='[] []'
     fi
-    lifetime_run "$engine" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
+    lifetime_run "$engine_executable" container inspect --format '{{index .Config.Labels "dev.chainman.store.schema"}}
 {{index .Config.Labels "dev.chainman.store.gc"}}
 {{index .Config.Labels "dev.chainman.store.volume"}}
 {{.Config.Image}}
@@ -862,13 +886,13 @@ bridge
 pid=$expected_pid"
     [ "$daemon_identity" = "$expected_identity" ] || fail "Nix store daemon $daemon_name has incompatible identity or isolation (including its GC policy). Stop its clients and remove that daemon container before changing its configuration; retain the Nix volume."
 }
-if lifetime_run "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
+if lifetime_run "$engine_executable" container inspect "$daemon_name" > /dev/null 2>&1; then validate_daemon; fi
 if [ "$engine" = podman ]; then
     # Podman 4.x has no Docker-compatible .Label template accessor. Its negative
     # label filter selects the same incompatible clients in one engine snapshot.
-    lifetime_run "$engine" ps --filter "volume=$volume" --filter 'label!=dev.chainman.store.schema=1' --format '{{.ID}}' > "$temporary/clients"
+    lifetime_run "$engine_executable" ps --filter "volume=$volume" --filter 'label!=dev.chainman.store.schema=1' --format '{{.ID}}' > "$temporary/clients"
 else
-    lifetime_run "$engine" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}' > "$temporary/clients"
+    lifetime_run "$engine_executable" ps --filter "volume=$volume" --format '{{.ID}} {{.Label "dev.chainman.store.schema"}}' > "$temporary/clients"
 fi
 volume_clients=$(cat "$temporary/clients")
 while IFS= read -r client; do
@@ -894,7 +918,7 @@ run --rm --user 0:0 --label dev.chainman.store.schema=1 --mount "type=volume,src
 # Local-store writers assume one PID namespace. A single upstream Nix daemon
 # owns this volume's store state; isolated project containers are daemon clients.
 # Its Unix socket and managed temporary roots are visible through the Nix volume.
-if ! lifetime_run "$engine" container inspect "$daemon_name" > /dev/null 2>&1; then
+if ! lifetime_run "$engine_executable" container inspect "$daemon_name" > /dev/null 2>&1; then
     run --detach --name "$daemon_name" --init --read-only --network bridge \
         --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
         --label dev.chainman.store.schema=1 --label "dev.chainman.store.volume=$volume" \
@@ -908,14 +932,14 @@ max-free = 17179869184' \
         "$image" sh -eu -c 'mkdir -p "$HOME" "$TMPDIR"; exec nix-daemon --daemon' \
         > /dev/null 2> "$temporary/daemon-create" || {
         # Container creation is atomic; a concurrent bootstrap can win the name.
-        lifetime_run "$engine" container inspect "$daemon_name" > /dev/null 2>&1 || {
+        lifetime_run "$engine_executable" container inspect "$daemon_name" > /dev/null 2>&1 || {
             cat "$temporary/daemon-create" >&2
             fail 'Could not create the shared Nix store daemon.'
         }
     }
 fi
 validate_daemon
-lifetime_run "$engine" container start "$daemon_name" > /dev/null
+lifetime_run "$engine_executable" container start "$daemon_name" > /dev/null
 plan_options() {
     # The verified planner reads declared host inputs as data, never as its own
     # execution environment. Do not expose this snapshot to project commands.
@@ -1314,8 +1338,8 @@ fi
 if [ -d "$temporary/x11" ] || { [ -f "$temporary/extra" ] && { [ "$prepare_action" = config ] || [ "$prepare_action" = explain ]; }; }; then
     # The supervisor owns cleanup through interruption and normal exit.
     trap - EXIT HUP INT TERM
-    exec sh "$script_dir/setup-prompt.sh" --cleanup-directory "$temporary" "$engine" "$@"
+    exec sh "$script_dir/setup-prompt.sh" --cleanup-directory "$temporary" "$engine_executable" "$@"
 fi
 rm -rf -- "$temporary"
 trap - EXIT HUP INT TERM
-exec sh "$script_dir/setup-prompt.sh" "$engine" "$@"
+exec sh "$script_dir/setup-prompt.sh" "$engine_executable" "$@"
