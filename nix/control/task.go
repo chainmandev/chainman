@@ -22,6 +22,37 @@ type TaskCommands struct {
 	Shutdown      int       `json:"shutdown_seconds"`
 	RecoveryState string    `json:"recovery_state,omitempty"`
 	ContainerTask bool      `json:"container_task,omitempty"`
+	OwnerFD       int       `json:"owner_fd,omitempty"`
+}
+
+// A detached helper must not retain project/update leases after its caller dies.
+// Only this native owner receives the read end; the caller alone keeps the write
+// end. EOF (including SIGKILL of the caller) uses ordinary bounded cancellation.
+func watchTaskOwner(fd int, signals chan os.Signal) (func(), error) {
+	if fd == 0 {
+		return func() {}, nil
+	}
+	var info syscall.Stat_t
+	flags, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if fd < 3 || err != nil || syscall.Fstat(fd, &info) != nil || info.Mode&syscall.S_IFMT != syscall.S_IFIFO || flags&syscall.O_ACCMODE != syscall.O_RDONLY {
+		return nil, fmt.Errorf("invalid command owner descriptor")
+	}
+	syscall.CloseOnExec(fd)
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		return nil, err
+	}
+	owner := os.NewFile(uintptr(fd), "command-owner")
+	stop, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		var value [1]byte
+		_, _ = owner.Read(value[:])
+		select {
+		case signals <- syscall.SIGTERM:
+		case <-stop:
+		}
+	}()
+	return func() { close(stop); owner.Close(); <-stopped }, nil
 }
 
 // Preparation precedes service acquisition but still owns foreground work.
@@ -220,6 +251,9 @@ func taskCommand(action, path string) (result int) {
 		}
 	}
 	if action == "sequence" {
+		if task.OwnerFD != 0 {
+			return exitCode(fmt.Errorf("command owner must not enter its workload"))
+		}
 		// The owner signals this whole process group. Stay alive until the
 		// current child has finished its graceful shutdown; exiting here would
 		// make the owner immediately signal its still-running descendants again.
@@ -269,8 +303,18 @@ func taskCommand(action, path string) (result int) {
 		}
 		return 0
 	}
+	signals := make(chan os.Signal, 8)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
+	stopOwner, e := watchTaskOwner(task.OwnerFD, signals)
+	if e != nil {
+		return exitCode(e)
+	}
+	defer stopOwner()
+	// The private descriptor must neither be inherited by the sequence nor be
+	// interpreted there after os/exec remaps the regular lifetime descriptors.
+	task.OwnerFD = 0
 	state := task.RecoveryState
-	var e error
 	if state == "" {
 		state, e = os.MkdirTemp("", "chainman-command-")
 	} else {
@@ -313,15 +357,17 @@ func taskCommand(action, path string) (result int) {
 			}
 		}
 	}()
-	signals := make(chan os.Signal, 8)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-	defer signal.Stop(signals)
 	changed := make(chan os.Signal, 1)
 	signal.Notify(changed, syscall.SIGCHLD)
 	defer signal.Stop(changed)
 	resumed := make(chan os.Signal, 1)
 	signal.Notify(resumed, syscall.SIGCONT)
 	defer signal.Stop(resumed)
+	select {
+	case sig := <-signals:
+		return 128 + int(sig.(syscall.Signal))
+	default:
+	}
 	if e = cmd.Start(); e != nil {
 		return exitCode(e)
 	}

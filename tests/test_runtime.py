@@ -643,6 +643,110 @@ commands=[["python3","check.py"]]
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / "server-exited").read_text(), "yes")
 
+    def test_background_compiler_releases_leases_when_its_caller_dies(self):
+        env = self.cache_fixture()
+        wrapper = textwrap.dedent("""\
+            import os, sys, time
+            from pathlib import Path
+            from unittest.mock import patch
+            sys.path.insert(0, sys.argv[1])
+            import toolchain
+            root = Path(sys.argv[2])
+            launch = toolchain.subprocess.Popen
+            def recorded_launch(argv, **kwargs):
+                child = launch(argv, **kwargs)
+                if kwargs.get("env", {}).get("SCCACHE_START_SERVER") == "1":
+                    (root / "compiler-owner-pid").write_text(str(child.pid))
+                return child
+            with patch.object(toolchain.subprocess, "Popen", side_effect=recorded_launch):
+                with toolchain.operation(root):
+                    with toolchain.compiler_cache("rust", dict(os.environ), root):
+                        (root / "caller-ready").touch()
+                        while True:
+                            time.sleep(1)
+            """)
+        for termination in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(termination=termination):
+                update_path = self.root / "update.lease"
+                with (
+                    update_path.open("a") as update,
+                    (self.root / "caller.log").open("w") as log,
+                ):
+                    toolchain.fcntl.flock(update, toolchain.fcntl.LOCK_SH)
+                    caller = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            wrapper,
+                            str(toolchain.RUNTIME / "scripts"),
+                            str(self.root),
+                        ],
+                        env=dict(env, CHAINMAN_UPDATE_LEASE_FD=str(update.fileno())),
+                        pass_fds=(update.fileno(),),
+                        start_new_session=True,
+                        stdout=log,
+                        stderr=log,
+                    )
+                completed = False
+                try:
+                    deadline = time.monotonic() + 15
+                    while not (self.root / "caller-ready").exists():
+                        if caller.poll() is not None or time.monotonic() >= deadline:
+                            self.fail((self.root / "caller.log").read_text())
+                        time.sleep(0.01)
+                    caller.send_signal(termination)
+                    self.assertEqual(caller.wait(timeout=5), -termination)
+                    deadline = time.monotonic() + 10
+                    with update_path.open("a") as update:
+                        while True:
+                            try:
+                                toolchain.fcntl.flock(
+                                    update,
+                                    toolchain.fcntl.LOCK_EX | toolchain.fcntl.LOCK_NB,
+                                )
+                                break
+                            except BlockingIOError:
+                                if time.monotonic() >= deadline:
+                                    self.fail(
+                                        "Detached compiler retained the update lease after caller death"
+                                    )
+                                time.sleep(0.01)
+                    with toolchain.operation(self.root):
+                        pass
+                    completed = True
+                finally:
+                    if caller.poll() is None:
+                        caller.kill()
+                        caller.wait(timeout=5)
+                    # This PID belongs to this disposable fixture's native
+                    # command owner, not an unrelated host cache daemon.
+                    owner_path = self.root / "compiler-owner-pid"
+                    if not completed and owner_path.exists():
+                        try:
+                            os.kill(int(owner_path.read_text()), signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                    deadline = time.monotonic() + 10
+                    with update_path.open("a") as update:
+                        while True:
+                            try:
+                                toolchain.fcntl.flock(
+                                    update,
+                                    toolchain.fcntl.LOCK_EX | toolchain.fcntl.LOCK_NB,
+                                )
+                                break
+                            except BlockingIOError:
+                                if time.monotonic() >= deadline:
+                                    self.fail(
+                                        "Fixture cache owner did not finish cleanup"
+                                    )
+                                time.sleep(0.01)
+                    endpoint = Path(env["SCCACHE_SERVER_UDS"])
+                    if endpoint.exists():
+                        endpoint.unlink()
+                    (self.root / "caller-ready").unlink(missing_ok=True)
+                    owner_path.unlink(missing_ok=True)
+
     def test_dead_launcher_does_not_authorize_unlinking_a_live_compiler_socket(self):
         env = self.cache_fixture()
         real_popen = subprocess.Popen

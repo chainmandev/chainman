@@ -181,6 +181,10 @@ and the original socket identity before removing an endpoint. A failed cache sto
 remains an error even when bounded termination succeeds.
 The stop request calls the executable resolved during preflight directly, so
 shutdown does not require another Nix evaluation or wait behind garbage collection.
+The cache has its own terminal session, but not an independent lifetime: a private
+pipe held only by its caller triggers the native owner's bounded cleanup if that
+caller dies, including forced termination. The pipe is not forwarded to workloads;
+normal terminal interrupts still leave cache shutdown to the caller's cleanup.
 
 If a subprocess wrapper closes inherited operation descriptors while retaining
 their environment variables, the next command obtains a new operation lease.

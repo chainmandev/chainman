@@ -1074,11 +1074,22 @@ def compiler_cache(
         # ordinary finite tasks, including children of an intermediate launcher.
         # Setup leases and a newly created service receipt are not inherited
         # operation ancestors yet; forward them with the compiler as with tasks.
-        with native_tasks.command(
-            root, [[*prefix, "sccache"]], {"shutdown_seconds": 5}
-        ) as command:
+        with (
+            native_tasks.caller_lifetime() as owner_fd,
+            native_tasks.command(
+                root,
+                [[*prefix, "sccache"]],
+                {"shutdown_seconds": 5, "owner_fd": owner_fd},
+            ) as command,
+        ):
             with owned_compiler_cache(
-                root, env, executable, server_env, command, pass_fds=pass_fds
+                root,
+                env,
+                executable,
+                server_env,
+                command,
+                pass_fds=pass_fds,
+                owner_fd=owner_fd,
             ):
                 yield dict(
                     env, RUSTC_WRAPPER="sccache", CHAINMAN_COMPILER_OWNER=str(root)
@@ -1094,6 +1105,7 @@ def owned_compiler_cache(
     command: list[str],
     *,
     pass_fds: tuple[int, ...] = (),
+    owner_fd: int | None = None,
 ) -> Iterator[dict[str, str]]:
     endpoint = Path(env["SCCACHE_SERVER_UDS"])
     lifecycle_name = "compiler-" + uuid.uuid4().hex + ".lock"
@@ -1114,7 +1126,13 @@ def owned_compiler_cache(
             "stdout": sys.stderr,
             "pass_fds": (*pass_fds, lifecycle.fileno()),
         }
-        server = subprocess.Popen(command, **managed_options(options))
+        options = managed_options(options)
+        if owner_fd is not None:
+            # Unlike regular operation leases, this pipe belongs only to the
+            # immediate native owner. Never advertise it as an ancestor lease;
+            # the write end remains close-on-exec in this Python caller alone.
+            options["pass_fds"] = (*options["pass_fds"], owner_fd)
+        server = subprocess.Popen(command, **options)
     deadline = time.monotonic() + _COMPILER_STARTUP_SECONDS
     owned_socket = None
     try:

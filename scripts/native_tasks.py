@@ -3,12 +3,24 @@
 from contextlib import contextmanager
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+import os
 import platform
 import subprocess
 
 import chainman
 import toolchain as tc
 from adapter_data import text
+
+
+@contextmanager
+def caller_lifetime() -> Iterator[int]:
+    """Give a detached native owner a witness held only by its Python caller."""
+    reader, writer = os.pipe()
+    try:
+        yield reader
+    finally:
+        os.close(reader)
+        os.close(writer)
 
 
 @contextmanager
@@ -57,6 +69,7 @@ def command(
                 ],
                 "timeout_seconds": spec.get("timeout_seconds", 0),
                 "shutdown_seconds": spec.get("shutdown_seconds", 10),
+                "owner_fd": spec.get("owner_fd", 0),
             },
         )
         yield [str(executable), "command", str(path)]
