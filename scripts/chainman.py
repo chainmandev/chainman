@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 import hashlib
 import importlib.util
 import json
@@ -401,54 +402,64 @@ def execute(
             timing_operation,
             *argv,
         ]
-    command = argv
-    if ref and (
-        gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
-    ):
-        if selected.get("TOOLCHAIN_CONTAINER") == "1":
-            # Nix's own temporary profile must be visible to its daemon. The
-            # command below restores the application's selected temporary base.
-            selected["TMPDIR"] = "/nix/tmp"
-        command = [
-            tc.nix_command(selected),
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "develop",
-            ref,
-            "--no-write-lock-file",
-            *(["--profile", str(gc_root)] if gc_root is not None else []),
-            "--command",
-            "sh",
-            "-eu",
-            "-c",
-            'if [ -n "${CHAINMAN_TEMP_BASE:-}" ]; then export TMPDIR="$CHAINMAN_TEMP_BASE"; '
-            'elif [ -n "${TMPDIR:-}" ]; then export CHAINMAN_TEMP_BASE="$TMPDIR"; fi; '
-            'if [ "${TOOLCHAIN_CONTAINER:-}" = 1 ]; then '
-            "unset NIX_STATE_DIR NIX_STORE_DIR NIX_DAEMON_SOCKET_PATH; export NIX_REMOTE=daemon; "
-            "export NIX_CONFIG='build-users-group =\nstore = daemon'; fi; "
-            "runtime_nix=$1; shift; "
-            'if [ -n "$runtime_nix" ]; then export CHAINMAN_RUNTIME_NIX_BIN="$runtime_nix" PATH="$runtime_nix:$PATH"; fi; '
-            'cd "$1"; shift; exec "$@"',
-            "sh",
-            selected.get("CHAINMAN_RUNTIME_NIX_BIN", ""),
-            str(target),
-            *argv,
-        ]
-    selected.update(CHAINMAN_ACTIVE_PROFILE=name, CHAINMAN_ACTIVE_FINGERPRINT=token)
-    selected.pop("TOOLCHAIN_FRESH", None)
-    try:
-        return tc.managed_run(
-            command,
-            cwd=target,
-            env=selected,
-            check=check,
-            text=text,
-            input=input,
-            **kwargs,
-        )
-    finally:
-        if timing_operation is not None:
-            timing.emit("command", "end", timing_operation)
+    with ExitStack() as lifetime:
+        command = argv
+        if ref and (
+            gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
+        ):
+            if gc_root is None:
+                # nix develop execs the payload: its process-local roots do not
+                # retain the shell tools across an isolated daemon's GC. Keep a
+                # registered profile and inherited lease through command exit.
+                directory = lifetime.enter_context(
+                    tc.nix_temporary_directory("chainman-profile-")
+                )
+                gc_root = Path(directory) / "profile"
+            if selected.get("TOOLCHAIN_CONTAINER") == "1":
+                # The profile must be visible to the shared store daemon. The
+                # command restores the application's selected temporary base.
+                selected["TMPDIR"] = "/nix/tmp"
+            command = [
+                tc.nix_command(selected),
+                "--extra-experimental-features",
+                "nix-command flakes",
+                "develop",
+                ref,
+                "--no-write-lock-file",
+                "--profile",
+                str(gc_root),
+                "--command",
+                "sh",
+                "-eu",
+                "-c",
+                'if [ -n "${CHAINMAN_TEMP_BASE:-}" ]; then export TMPDIR="$CHAINMAN_TEMP_BASE"; '
+                'elif [ -n "${TMPDIR:-}" ]; then export CHAINMAN_TEMP_BASE="$TMPDIR"; fi; '
+                'if [ "${TOOLCHAIN_CONTAINER:-}" = 1 ]; then '
+                "unset NIX_STATE_DIR NIX_STORE_DIR NIX_DAEMON_SOCKET_PATH; export NIX_REMOTE=daemon; "
+                "export NIX_CONFIG='build-users-group =\nstore = daemon'; fi; "
+                "runtime_nix=$1; shift; "
+                'if [ -n "$runtime_nix" ]; then export CHAINMAN_RUNTIME_NIX_BIN="$runtime_nix" PATH="$runtime_nix:$PATH"; fi; '
+                'cd "$1"; shift; exec "$@"',
+                "sh",
+                selected.get("CHAINMAN_RUNTIME_NIX_BIN", ""),
+                str(target),
+                *argv,
+            ]
+        selected.update(CHAINMAN_ACTIVE_PROFILE=name, CHAINMAN_ACTIVE_FINGERPRINT=token)
+        selected.pop("TOOLCHAIN_FRESH", None)
+        try:
+            return tc.managed_run(
+                command,
+                cwd=target,
+                env=selected,
+                check=check,
+                text=text,
+                input=input,
+                **kwargs,
+            )
+        finally:
+            if timing_operation is not None:
+                timing.emit("command", "end", timing_operation)
 
 
 def run_hook(

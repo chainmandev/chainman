@@ -3511,6 +3511,92 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
         "requires the selected real container engine",
     )
+    def test_container_command_profile_is_rooted_for_its_entire_lifetime(self):
+        self.use_real_runtime()
+        body = (
+            "import json, os, time; from pathlib import Path\n"
+            "pool=Path('/nix/tmp')/f'chainman-gc-roots-{os.getuid()}'\n"
+            "profiles=list(pool.glob('chainman-profile-*/profile'))\n"
+            "assert profiles, 'ordinary command has no retained profile root'\n"
+            "Path('command-profiles.json').write_text(json.dumps(["
+            "dict(profile=str(p),output=str(p.resolve())) for p in profiles]))\n"
+            "deadline=time.monotonic()+120\n"
+            "while not Path('release-command-profile').exists():\n"
+            " assert time.monotonic()<deadline, 'profile release was not received'\n"
+            " time.sleep(0.05)\n"
+            "assert all(p.is_symlink() for p in profiles)\n"
+        )
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[profiles.command]\nruntime_profile="core"\n[tasks.command]\n'
+            'profile="command"\ncommands='
+            + json.dumps([["python3", "-c", body]])
+            + "\n"
+        )
+        engine = os.environ["CHAINMAN_TEST_CONTAINER"]
+        env = dict(
+            self.env, CHAINMAN_MODE="container-nix", CHAINMAN_CONTAINER_ENGINE=engine
+        )
+        process = subprocess.Popen(
+            [str(self.launcher), "run", "command"],
+            cwd="/",
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            ready = self.root / "command-profiles.json"
+            deadline = time.monotonic() + 180
+            while not ready.exists():
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    self.fail(
+                        f"Profile command exited {process.returncode}: {stdout}{stderr}"
+                    )
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.05)
+            profiles = json.loads(ready.read_text())
+            for record in profiles:
+                # The daemon has a separate PID/mount namespace. Address only
+                # this suite's disposable store, never the developer's store.
+                prefix = [engine, "exec", self.test_volume + "-daemon", "nix-store"]
+                roots = subprocess.check_output(
+                    [*prefix, "--query", "--roots", record["output"]], text=True
+                )
+                self.assertIn(record["profile"], roots)
+                deletion = subprocess.run(
+                    [*prefix, "--delete", record["output"]],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertNotEqual(
+                    deletion.returncode, 0, deletion.stdout + deletion.stderr
+                )
+        finally:
+            (self.root / "release-command-profile").touch()
+            stdout, stderr = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
+        for record in profiles:
+            removed = subprocess.run(
+                [
+                    engine,
+                    "exec",
+                    self.test_volume + "-daemon",
+                    "test",
+                    "-e",
+                    record["profile"],
+                ],
+                capture_output=True,
+                timeout=30,
+            )
+            self.assertEqual(removed.returncode, 1)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
     def test_container_root_sweep_preserves_another_clients_lease(self):
         env = dict(
             self.env,

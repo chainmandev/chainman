@@ -117,8 +117,14 @@ available if offline operation is required.
 Nix source roots and the matching bootstrap interpreter/Git environment live
 under the host chainman runtime-roots cache or the owned container store. The
 bootstrap profile stays rooted after Nix hands execution to Python, so a consumer
-profile refresh cannot collect the runtime's interpreter. Temporary environment roots remain while their managed operations
-need them. Runtime generations coexist across projects and updates. Cache cleanup
+profile refresh cannot collect the runtime's interpreter. Every fresh command
+profile also has an explicit registered Nix root and inherited lifetime lease,
+retained until the command and surviving managed children release it. This keeps
+tools available after `nix develop` hands execution to the payload, including
+when the shared container daemon cannot inspect the client's process namespace.
+Caller-owned profile roots keep their caller's lifetime; matching active entries
+borrow their enclosing environment instead of provisioning another profile.
+Runtime generations coexist across projects and updates. Cache cleanup
 must respect active operations and service ownership.
 
 Nested commands in an active Nix environment verify the pinned Git tree again

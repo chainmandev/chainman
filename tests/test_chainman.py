@@ -73,6 +73,53 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_fresh_profile_has_a_leased_root_until_command_completion(self):
+        self.write("flake.nix", "{}")
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="flake.nix#default"\n'
+        )
+        for fail in (False, True):
+            with self.subTest(failure=fail):
+                roots = []
+
+                def observe(argv, **kwargs):
+                    self.assertIn("--profile", argv)
+                    root = Path(argv[argv.index("--profile") + 1])
+                    roots.append(root)
+                    self.assertTrue(root.parent.name.startswith("chainman-profile-"))
+                    self.assertTrue((root.parent / ".lease").is_file())
+                    # A concurrent admission must not collect this live root.
+                    with toolchain.nix_temporary_directory("chainman-test-"):
+                        self.assertTrue(root.parent.is_dir())
+                    if fail:
+                        raise subprocess.CalledProcessError(37, argv)
+                    return subprocess.CompletedProcess(argv, 0)
+
+                with patch.object(toolchain, "managed_run", side_effect=observe):
+                    if fail:
+                        with self.assertRaises(subprocess.CalledProcessError):
+                            chainman.execute(self.root, "native", ["true"])
+                    else:
+                        self.assertEqual(
+                            chainman.execute(self.root, "native", ["true"]).returncode,
+                            0,
+                        )
+                self.assertEqual(len(roots), 1)
+                self.assertFalse(roots[0].parent.exists())
+
+    def test_explicit_profile_root_remains_owned_by_caller(self):
+        self.write("flake.nix", "{}")
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="flake.nix#default"\n'
+        )
+        root = self.base / "caller profile"
+        root.write_text("caller-owned sentinel")
+        with patch.object(toolchain, "managed_run") as execute:
+            chainman.execute(self.root, "native", ["true"], gc_root=root)
+        argv = execute.call_args.args[0]
+        self.assertEqual(argv[argv.index("--profile") + 1], str(root))
+        self.assertEqual(root.read_text(), "caller-owned sentinel")
+
     def test_runtime_nix_survives_external_shells_refresh_and_active_reentry(self):
         # Bind the real Nix package, never a directory containing host language tools.
         binding = str(Path(shutil.which("nix")).resolve().parent)
