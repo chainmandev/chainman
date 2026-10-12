@@ -249,6 +249,30 @@ control_dispatch() {
     trap - EXIT HUP INT TERM
     exit "$control_result"
 }
+verification_dispatch() {
+    [ "$mode" != host ] || fail 'Keep-going verification requires host-nix or container-nix.'
+    umask 077
+    verification_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/verification
+    mkdir -p "$verification_cache"
+    verification_cache=$(CDPATH='' cd -P -- "$verification_cache" && pwd)
+    case "$verification_cache/" in "$root/"* | "$source_root/"*) fail 'Verification reports must be outside project and runtime.' ;; esac
+    verification_output=$(mktemp -d "$verification_cache/run.XXXXXXXX")
+    verification_helper=$(mktemp -d "${TMPDIR:-/tmp}/chainman-verification-export.XXXXXXXX")
+    lifetime_directory=$verification_helper
+    case "$(uname -s):$(uname -m)" in
+        Linux:aarch64 | Linux:arm64) verification_target=linux-arm64 ;;
+        Linux:x86_64) verification_target=linux-amd64 ;;
+        Darwin:arm64) verification_target=darwin-arm64 ;;
+        Darwin:x86_64) verification_target=darwin-amd64 ;;
+        *) fail 'Unsupported native verification platform.' ;;
+    esac
+    printf '%s\n%s\n' --mount "type=bind,src=$verification_helper,dst=$verification_helper" > "$verification_helper/mounts"
+    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$verification_helper/mounts \
+        lifetime_helper "$self" _consent-export "$verification_helper" "$verification_target" >&2
+    "$self" _verification-plan verify "$self" "$self" > "$verification_output/plan.json"
+    lifetime_supervise "$verification_helper/chainman-control" verification "$verification_output/plan.json" "$verification_output"
+    exit $?
+}
 update_dispatch() {
     # Export the same small native supervisor used by hooks, including on a
     # container-only host. Never require a host Python or an engine in a worker.
@@ -290,12 +314,35 @@ update_worker() {
     # an engine socket in the resolver or verifier containers.
     umask 077
     update_export=
+    update_keep_going=0
+    update_passthrough=0
+    update_option_value=0
     update_count=$#
     while [ "$update_count" -gt 0 ]; do
         update_arg=$1
         shift
         update_count=$((update_count - 1))
+        if [ "$update_option_value" = 1 ]; then
+            update_option_value=0
+            set -- "$@" "$update_arg"
+            continue
+        fi
+        if [ "$update_passthrough" = 1 ]; then
+            set -- "$@" "$update_arg"
+            continue
+        fi
         case "$update_arg" in
+            --)
+                update_passthrough=1
+                set -- "$@" "$update_arg"
+                ;;
+            --message | --targets | --policy | --target-policy)
+                update_option_value=1
+                set -- "$@" "$update_arg"
+                ;;
+            --keep-going)
+                if [ "$update_passthrough" = 1 ]; then set -- "$@" "$update_arg"; else update_keep_going=1; fi
+                ;;
             --export-candidate)
                 [ -z "$update_export" ] && [ "$update_count" -gt 0 ] || fail 'Specify one --export-candidate DIR.'
                 update_export=$1
@@ -338,6 +385,12 @@ update_worker() {
     fi
     if [ "$update_resume" = 0 ]; then
         mkdir "$update_output/candidate" "$update_output/control"
+    fi
+    if [ "$update_keep_going" = 1 ]; then printf '%s\n' yes > "$update_output/control/keep-going"; fi
+    if [ -f "$update_output/control/keep-going" ]; then
+        IFS= read -r update_keep_going_saved < "$update_output/control/keep-going"
+        [ "$update_keep_going_saved" = yes ] || fail 'Invalid retained verification policy.'
+        update_keep_going=1
     fi
     printf '%s\n%s\n' --mount "type=bind,src=$update_output,dst=$update_output" > "$update_output/control/mounts"
     : > "$update_output/control/candidate-mounts"
@@ -418,13 +471,21 @@ update_worker() {
     fi
     IFS= read -r update_changed < "$update_output/control/changed"
     if [ "$update_changed" = yes ]; then
-        while IFS= read -r update_action && IFS= read -r update_task; do
-            # Bash runs EXIT traps before restoring a failed subshell function's
-            # redirections under errexit. Exit after restoration so export JSON
-            # keeps stdout while verifier output remains on stderr.
-            CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
-                "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2 || exit $?
-        done < "$update_output/control/verify"
+        if [ "$update_keep_going" = 1 ]; then
+            CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
+                "$self" _verification-update-plan "$update_output/control/verify" \
+                "$update_output/candidate-bootstrap/chainman.sh" "$self" > "$update_output/control/verification-plan.json"
+            CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$CHAINMAN_UPDATE_HELPER" \
+                verification "$update_output/control/verification-plan.json" "$update_output/control" >&2 || exit $?
+        else
+            while IFS= read -r update_action && IFS= read -r update_task; do
+                # Bash runs EXIT traps before restoring a failed subshell function's
+                # redirections under errexit. Exit after restoration so export JSON
+                # keeps stdout while verifier output remains on stderr.
+                CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
+                    "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2 || exit $?
+            done < "$update_output/control/verify"
+        fi
     fi
     if [ -n "$update_export" ]; then exit 0; fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
@@ -497,6 +558,10 @@ if [ "$CHAINMAN_REQUEST_ACTION" = recipe ]; then
     [ "$#" -ge 1 ] || fail 'usage: just chainman recipe NAME [ARGUMENTS...]'
     recipe_name=$1
     shift
+    if [ "$recipe_name" = verify ] && [ "${1:-}" = --keep-going ]; then
+        [ "$#" = 1 ] || fail 'Keep-going verification accepts only --keep-going.'
+        verification_dispatch
+    fi
     recipe_plan=$("$self" _recipe-plan "$recipe_name")
     exec sh -eu -c "$recipe_plan" chainman "$self" "$@"
 fi

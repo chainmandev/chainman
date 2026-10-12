@@ -169,6 +169,109 @@ class RecipeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             recipes.plan(cfg, "verify")
 
+    def test_keep_going_plan_preserves_entries_and_transitive_prerequisites(self):
+        cfg = {
+            "schema": 3,
+            "project": {"name": "fixture"},
+            "tasks": {
+                "build": {"commands": [["true"]]},
+                "middle": {"commands": [["true"]], "depends_on": ["build"]},
+                "test": {"commands": [["true"]], "depends_on": ["middle"]},
+            },
+        }
+        with (
+            patch("recipes.verification_identity", return_value={}),
+            patch("admission.graph"),
+        ):
+            plan = recipes.verification_plan(
+                Path("/fixture"),
+                cfg,
+                [["run", "build"], ["run", "test"]],
+                "/gate-entry",
+                "/identity-entry",
+            )
+        gates = plan["gates"]
+        self.assertIsInstance(gates, list)
+        self.assertEqual(
+            gates[1],
+            {
+                "name": "test",
+                "argv": ["/gate-entry", "run", "test"],
+                "depends_on": ["build"],
+            },
+        )
+
+    def test_keep_going_plan_rejects_nonfinite_or_out_of_order_gates(self):
+        cfg = {
+            "schema": 3,
+            "project": {"name": "fixture"},
+            "tasks": {
+                "build": {"commands": [["true"]]},
+                "test": {"commands": [["true"]], "depends_on": ["build"]},
+            },
+        }
+        with (
+            patch("recipes.verification_identity", return_value={}),
+            patch("admission.graph"),
+        ):
+            with self.assertRaises(ValueError):
+                recipes.verification_plan(
+                    Path("/fixture"),
+                    cfg,
+                    [["run", "test"], ["run", "build"]],
+                    "/entry",
+                    "/entry",
+                )
+            cfg["tasks"]["test"]["wait_for_services"] = True
+            with self.assertRaises(ValueError):
+                recipes.verification_plan(
+                    Path("/fixture"), cfg, [["run", "test"]], "/entry", "/entry"
+                )
+
+    def test_verification_identity_tracks_raw_source_and_index_but_not_ignored_cache(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix="chainman identity ") as temporary:
+            root = Path(temporary).resolve()
+            (root / "chainman.lock").write_text("a" * 40 + "\n")
+            (root / ".gitignore").write_text(".cache/\n")
+            source = root / "source\rname.txt"
+            source.write_text("original\n")
+            git = [
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ]
+            for arguments in (
+                ["init", "-q"],
+                ["add", "."],
+                ["commit", "-qm", "Identity fixture"],
+            ):
+                subprocess.run([*git, *arguments], check=True, capture_output=True)
+            before = recipes.verification_identity(root)
+            (root / ".cache").mkdir()
+            (root / ".cache/log").write_text("ignored output\n")
+            self.assertEqual(recipes.verification_identity(root), before)
+            source.write_text("changed\n")
+            dirty = recipes.verification_identity(root)
+            self.assertNotEqual(
+                dirty["source_fingerprint"], before["source_fingerprint"]
+            )
+            self.assertEqual(dirty["commit"], before["commit"])
+            subprocess.run([*git, "add", "."], check=True, capture_output=True)
+            self.assertNotEqual(
+                recipes.verification_identity(root)["source_fingerprint"],
+                dirty["source_fingerprint"],
+            )
+
 
 class FormatTransactions(unittest.TestCase):
     prepare = staging.StagingTests.prepare

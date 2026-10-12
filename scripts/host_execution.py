@@ -21,6 +21,8 @@ def validate_action(root: Path, action: str) -> None:
         "setup-status",
         "run",
         "_recipe-plan",
+        "_verification-plan",
+        "_verification-identity",
     }
     reserved = {
         "module",
@@ -36,7 +38,9 @@ def validate_action(root: Path, action: str) -> None:
         "chainman-update",
     }
     unsupported = (
-        action.startswith(("deps-", "_")) and action != "_recipe-plan"
+        action.startswith(("deps-", "_"))
+        and action
+        not in {"_recipe-plan", "_verification-plan", "_verification-identity"}
     ) or action in reserved
     if unsupported or (
         action not in allowed and action not in table(cfg.get("tasks", {}), "Tasks")

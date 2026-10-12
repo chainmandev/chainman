@@ -2,6 +2,29 @@
 
 [Documentation index](README.md) · [Adoption](adoption.md) · [Release trust](release-trust.md)
 
+## Collecting verification failures
+
+`just verify --keep-going` runs the project's declared verification gates
+sequentially and prints a final summary instead of stopping at the first ordinary
+failure. The default remains fail-fast. Failed prerequisites block dependent
+gates; commands within each gate still stop on failure. Cancellation, source or
+runtime changes, and uncertain service cleanup abort the sweep.
+Keep-going uses the managed `host-nix` or `container-nix` execution modes.
+
+Private reports and per-gate logs are retained outside the project under the
+Chainman verification cache. Reports include the source commit, source-byte
+fingerprint, runtime pin, gate outcomes, durations and log paths. They are
+diagnostic artifacts, not reusable acceptance receipts; do not commit them.
+
+`just chainman-update --keep-going` and `just deps-update --keep-going` use the
+same aggregation for candidate qualification. A failed or incomplete sweep never
+adopts the candidate or automatically commits it. The coordinator consumes the
+option before invoking candidate runtimes, including older runtimes. Retained
+transactions remember it; use `just deps-update resume=/path/to/transaction` to
+retry the complete qualification. Update reports remain with their private
+transaction. Options after `--`, or used as another option's value, retain their
+normal meaning and are not interpreted as keep-going.
+
 ## Per-project runtime selection
 
 A project records a full Git SHA in `chainman.lock`. The bootstrap verifies that

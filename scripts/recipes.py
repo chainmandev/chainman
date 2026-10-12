@@ -4,6 +4,10 @@ from collections.abc import Mapping
 from pathlib import Path
 import re
 import shlex
+import hashlib
+import json
+import os
+import subprocess
 
 import toolchain as tc
 from adapter_data import Table, strings, table
@@ -123,6 +127,144 @@ def plan(cfg: Mapping[str, object], name: str) -> str:
             + (' "$@"' if last else "")
         )
     return "\n".join(lines)
+
+
+def verification_identity(root: Path) -> dict[str, str]:
+    """Hash source bytes, never expose their contents in diagnostic reports."""
+
+    def git(directory: Path, *arguments: str) -> str:
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        }
+        env.update(
+            GIT_CONFIG_GLOBAL=os.devnull,
+            GIT_CONFIG_SYSTEM=os.devnull,
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_OPTIONAL_LOCKS="0",
+            GIT_NO_REPLACE_OBJECTS="1",
+        )
+        return subprocess.check_output(
+            [
+                "git",
+                "--literal-pathspecs",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(directory),
+                *arguments,
+            ],
+            env=env,
+        ).decode()
+
+    def snapshot(directory: Path) -> dict[str, str]:
+        state = {
+            "@index": hashlib.sha256(
+                git(directory, "ls-files", "--stage", "-z").encode()
+            ).hexdigest()
+        }
+        for name in sorted(
+            set(
+                git(
+                    directory,
+                    "ls-files",
+                    "-z",
+                    "--cached",
+                    "--others",
+                    "--exclude-standard",
+                ).split("\0")
+            )
+            - {""}
+        ):
+            path = directory / name
+            digest = hashlib.sha256()
+            if path.is_symlink():
+                digest.update(b"symlink\0" + os.readlink(path).encode())
+            elif path.is_file():
+                digest.update(str(path.stat().st_mode & 0o777).encode() + b"\0")
+                with path.open("rb") as stream:
+                    while block := stream.read(65536):
+                        digest.update(block)
+            elif path.is_dir():
+                nested_root = Path(
+                    git(path, "rev-parse", "--show-toplevel").strip()
+                ).resolve()
+                if nested_root == path.resolve():
+                    digest.update(git(path, "rev-parse", "HEAD").encode())
+                    digest.update(json.dumps(snapshot(path), sort_keys=True).encode())
+                elif any(path.iterdir()):
+                    raise ValueError(
+                        "Uninitialized source submodule contains unexpected files"
+                    )
+                else:
+                    digest.update(b"uninitialized-submodule")
+            elif not path.exists():
+                continue
+            else:
+                raise ValueError("Unexpected verification source entry")
+            state[name] = digest.hexdigest()
+        return state
+
+    return {
+        "commit": git(root, "rev-parse", "HEAD").strip(),
+        "source_fingerprint": hashlib.sha256(
+            json.dumps(snapshot(root), sort_keys=True).encode()
+        ).hexdigest(),
+        "runtime_pin": tc.regular_input(root, "chainman.lock").decode().strip(),
+    }
+
+
+def verification_plan(
+    root: Path,
+    cfg: Mapping[str, object],
+    commands: list[list[str]],
+    launcher: str,
+    identity_launcher: str,
+) -> Table:
+    """Describe existing finite task entries, without changing their execution."""
+    import admission
+    import workflows
+
+    tasks = workflows.declarations(cfg, "tasks")
+    selected = [argv[1] for argv in commands if argv[:1] == ["run"]]
+    admission.graph(root, cfg, selected)
+    dependencies = {
+        task: [name for name in workflows.order(tasks, [task]) if name != task]
+        for task in selected
+    }
+    positions = {task: index for index, task in enumerate(selected)}
+    for task, required in dependencies.items():
+        if any(
+            name in positions and positions[name] >= positions[task]
+            for name in required
+        ):
+            raise ValueError("Verification prerequisites must precede their gates")
+    if not commands or any(
+        len(argv) != 2 or argv[0] not in {"run", "_update-verify"} for argv in commands
+    ):
+        raise ValueError("Keep-going requires finite verification entries")
+    if any(tasks[name].get("wait_for_services", False) for name in selected):
+        raise ValueError("Keep-going requires finite verification tasks")
+    return {
+        "schema": 1,
+        "root": str(root),
+        "identity_command": [identity_launcher, "_verification-identity"],
+        "health_command": [launcher, "services-status"],
+        "identity": verification_identity(root),
+        "gates": [
+            {
+                "name": argv[1],
+                "argv": [launcher, *argv],
+                "depends_on": [
+                    name for name in dependencies.get(argv[1], []) if name in positions
+                ],
+            }
+            for argv in commands
+        ],
+    }
 
 
 def roots(root: Path) -> list[Path]:

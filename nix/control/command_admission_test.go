@@ -22,7 +22,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(pendingSignalFixture(syscall.Signal(number), os.Args[3]))
 	}
-	if len(os.Args) > 1 && (os.Args[1] == "update-cache" || os.Args[1] == "hook-exec" || os.Args[1] == "build") {
+	if len(os.Args) > 1 && (os.Args[1] == "update-cache" || os.Args[1] == "hook-exec" || os.Args[1] == "build" || os.Args[1] == "verification") {
 		os.Exit(mainAction(os.Args[1:]))
 	}
 	// Exercise the actual admission entrypoint in a subprocess of the test

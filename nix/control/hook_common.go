@@ -430,6 +430,10 @@ func hookRun(c *exec.Cmd, cancelSignal syscall.Signal) error {
 // Remote discovery gets a deadline and no controlling terminal. The existing
 // finite-command supervisor still owns its credential/transport descendants.
 func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Duration) error {
+	return hookRunWithShutdown(c, cancelSignal, timeout, 8*time.Second)
+}
+
+func hookRunWithShutdown(c *exec.Cmd, cancelSignal syscall.Signal, timeout, shutdown time.Duration) error {
 	// The supervisor is an os/exec boundary too: inherited lease labels must
 	// travel with their descriptors before its private channels are appended.
 	// updateRun already supplies ExtraFiles and child-number labels; do not
@@ -461,7 +465,11 @@ func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Durat
 	defer writer.Close()
 	fd := 3 + len(c.ExtraFiles)
 	c.ExtraFiles = append(c.ExtraFiles, reader)
-	c.Args = append([]string{self, "hook-exec", strconv.Itoa(fd), strconv.Itoa(int(cancelSignal)), c.Path}, c.Args[1:]...)
+	prefix := []string{self, "hook-exec", strconv.Itoa(fd), strconv.Itoa(int(cancelSignal))}
+	if shutdown != 8*time.Second {
+		prefix = append(prefix, "--shutdown", strconv.Itoa(int(shutdown/time.Second)))
+	}
+	c.Args = append(append(prefix, c.Path), c.Args[1:]...)
 	c.Path = self
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var expired <-chan time.Time
@@ -485,7 +493,7 @@ func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Durat
 		return e
 	case <-expired:
 		_ = syscall.Kill(-c.Process.Pid, syscall.SIGTERM)
-		cleanup := time.NewTimer(8 * time.Second)
+		cleanup := time.NewTimer(shutdown)
 		defer cleanup.Stop()
 		var interrupted os.Signal
 		for {
@@ -515,7 +523,7 @@ func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Durat
 		select {
 		case <-done:
 			return &startupInterrupted{sig.(syscall.Signal)}
-		case <-time.After(8 * time.Second):
+		case <-time.After(shutdown):
 			_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 			<-done
 			return &startupInterrupted{sig.(syscall.Signal)}
@@ -528,6 +536,15 @@ func hookRunBounded(c *exec.Cmd, cancelSignal syscall.Signal, timeout time.Durat
 func hookExec(args []string) error {
 	if len(args) < 3 || syscall.Getpgrp() != os.Getpid() {
 		return fmt.Errorf("hook command requires its own process group")
+	}
+	shutdown := 8 * time.Second
+	if len(args) >= 5 && args[2] == "--shutdown" {
+		seconds, err := strconv.Atoi(args[3])
+		if err != nil || seconds < 2 || seconds > 300 {
+			return fmt.Errorf("invalid command shutdown deadline")
+		}
+		shutdown = time.Duration(seconds) * time.Second
+		args = append(args[:2:2], args[4:]...)
 	}
 	fd, e := strconv.Atoi(args[0])
 	cancel, x := strconv.Atoi(args[1])
@@ -563,11 +580,11 @@ func hookExec(args []string) error {
 	done := make(chan error, 1)
 	go func() { done <- c.Wait() }()
 	var interrupted os.Signal
-	// Leave time inside hookRun's eight-second deadline for forced cleanup.
+	// Leave time inside the supervisor's deadline for forced cleanup.
 	deadline := time.Time{}
 	select {
 	case e = <-done:
-		deadline = time.Now().Add(7 * time.Second)
+		deadline = time.Now().Add(shutdown - time.Second)
 	case interrupted = <-signals:
 	case <-ownerGone:
 		// Lefthook may kill a callback's client group during cancellation.
@@ -575,7 +592,7 @@ func hookExec(args []string) error {
 		interrupted = syscall.SIGTERM
 	}
 	if interrupted != nil {
-		deadline = time.Now().Add(7 * time.Second)
+		deadline = time.Now().Add(shutdown - time.Second)
 		forward := interrupted.(syscall.Signal)
 		if cancel != 0 {
 			forward = syscall.Signal(cancel)

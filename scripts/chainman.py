@@ -670,6 +670,56 @@ def main(argv: Sequence[str] | None = None) -> int:
             import services
 
             return services.prepare_requested(root, rest)
+        elif args.action == "_verification-identity":
+            import recipes
+
+            if len(rest) > 1:
+                raise ValueError("Verification identity takes at most one source root")
+            source = Path(rest[0]).resolve(strict=True) if rest else root
+            print(json.dumps(recipes.verification_identity(source)))
+        elif args.action == "_verification-plan":
+            import recipes
+
+            if len(rest) != 3 or rest[0] != "verify":
+                raise ValueError("Verification plan requires verify and two launchers")
+            print(
+                json.dumps(
+                    recipes.verification_plan(
+                        root, cfg, recipes.actions(cfg)["verify"], rest[1], rest[2]
+                    )
+                )
+            )
+        elif args.action == "_verification-update-plan":
+            import recipes
+            import workflows
+
+            if len(rest) != 3:
+                raise ValueError(
+                    "Update verification plan requires task file and launchers"
+                )
+            arguments = Path(rest[0]).read_text().splitlines()
+            if len(arguments) % 2:
+                raise ValueError("Invalid update verification task file")
+            commands = [
+                arguments[index : index + 2] for index in range(0, len(arguments), 2)
+            ]
+            candidate = Path(rest[0]).parent.parent / "candidate"
+            candidate = candidate.resolve(strict=True)
+            plan = recipes.verification_plan(
+                candidate,
+                workflows.configuration(candidate),
+                commands,
+                rest[1],
+                rest[2],
+            )
+            plan["identity_command"] = [
+                rest[2],
+                "_verification-identity",
+                str(candidate),
+            ]
+            plan["identity_root"] = str(root)
+            plan["identity_mounts"] = str(Path(rest[0]).parent / "mounts")
+            print(json.dumps(plan))
         elif args.action == "_recipe-plan":
             import admission
             import recipes

@@ -1554,6 +1554,9 @@ func exitCode(e error) int {
 	return 1
 }
 func mainAction(args []string) (result int) {
+	if len(args) > 0 && args[0] == "verification" {
+		return verificationAction(args[1:])
+	}
 	if len(args) == 2 && (args[0] == "run" || args[0] == "up" || args[0] == "stop") {
 		state := args[1]
 		if args[0] != "stop" {

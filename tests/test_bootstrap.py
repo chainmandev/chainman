@@ -533,6 +533,98 @@ format-check=["format-check"]
         self.assertIsNone(unchanged["commit"])
         self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
 
+    def test_public_keep_going_candidate_collects_failures_without_adoption(self):
+        self.update_lifecycle()
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                'verify_task="verify"', 'verify_tasks=["verify", "reject", "last"]'
+            )
+            + """
+[tasks.reject]
+commands=[["python3", "-c", "import sys; sys.exit(7)"]]
+[tasks.last]
+commands=[["python3", "-c", "print('last verification gate executed')"]]
+"""
+        )
+        self.lifecycle_git("add", "chainman.toml")
+        self.lifecycle_git("commit", "-m", "Verification fixture")
+        before = self.lifecycle_git("rev-parse", "HEAD")
+        result = self.run_bootstrap(
+            "deps-update", "--skip-chainman", "--keep-going", check=False, timeout=600
+        )
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("last verification gate executed", result.stdout + result.stderr)
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
+        reports = list(
+            self.update_cache.glob("candidate.*/control/verification-*/report.json")
+        )
+        self.assertEqual(len(reports), 1, result.stderr)
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(
+            [gate["status"] for gate in report["gates"]], ["passed", "failed", "passed"]
+        )
+        self.assertEqual(report["exit_code"], 1)
+
+    def test_public_keep_going_local_verification(self):
+        self.use_real_runtime()
+        (self.root / ".gitignore").write_text(".cache/\nreal-runtime/\n")
+        (self.root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[tasks.reject]
+commands=[["python3", "-c", "import sys; sys.exit(7)"]]
+[tasks.last]
+commands=[["python3", "-c", "print('last verification gate executed')"]]
+[recipes]
+verify=["reject", "last"]
+""")
+        self.lifecycle_git("init", "-b", "main")
+        self.lifecycle_git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "add",
+            ".",
+        )
+        self.lifecycle_git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "commit",
+            "-m",
+            "Verification fixture",
+        )
+        result = self.run_bootstrap(
+            "recipe", "verify", "--keep-going", check=False, timeout=600
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("last verification gate executed", result.stdout)
+        reports = list(
+            Path(self.env["XDG_CACHE_HOME"]).glob(
+                "chainman/verification/run.*/verification-*/report.json"
+            )
+        )
+        self.assertTrue(reports, result.stderr)
+        report = json.loads(
+            max(reports, key=lambda path: path.stat().st_mtime_ns).read_text()
+        )
+        self.assertEqual(
+            [gate["status"] for gate in report["gates"]], ["failed", "passed"]
+        )
+        self.assertEqual(self.lifecycle_git("status", "--porcelain"), "")
+
     def test_public_candidate_export_success_failure_and_no_change(self):
         self.candidate_export_lifecycle()
 
