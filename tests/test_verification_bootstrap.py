@@ -37,7 +37,7 @@ _update-inspect)
   printf 'yes\\n' > "$2/control/changed"
   printf 'run\\nfirst\\nrun\\nsecond\\n' > "$2/control/verify" ;;
 _verification-update-plan) printf '{}\\n' ;;
-verification) printf 'coordinated\\n' >> "$TEST_BASE/events"; exit "$TEST_RESULT" ;;
+verification) test -z "$(cat)"; printf 'coordinated\\n' >> "$TEST_BASE/events"; exit "$TEST_RESULT" ;;
 run) printf '%s\\n' "$2" >> "$TEST_BASE/events"; exit "$TEST_RESULT" ;;
 _update-finalize) touch "$TEST_BASE/finalized" ;;
 *) exit 2 ;;
@@ -83,6 +83,7 @@ esac
             env=env,
             text=True,
             capture_output=True,
+            input="unexpected candidate stdin",
         )
         return completed, base
 

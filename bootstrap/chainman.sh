@@ -476,7 +476,7 @@ update_worker() {
                 "$self" _verification-update-plan "$update_output/control/verify" \
                 "$update_output/candidate-bootstrap/chainman.sh" "$self" > "$update_output/control/verification-plan.json"
             CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$CHAINMAN_UPDATE_HELPER" \
-                verification "$update_output/control/verification-plan.json" "$update_output/control" >&2 || exit $?
+                verification "$update_output/control/verification-plan.json" "$update_output/control" < /dev/null >&2 || exit $?
         else
             while IFS= read -r update_action && IFS= read -r update_task; do
                 # Bash runs EXIT traps before restoring a failed subshell function's
