@@ -3597,6 +3597,103 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
         "requires the selected real container engine",
     )
+    def test_container_profile_preparation_recovers_without_replaying_hook_or_payload(
+        self,
+    ):
+        self.use_real_runtime()
+        body = """import json, os, platform, shlex, shutil, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, str(Path(os.environ['CHAINMAN_RUNTIME']) / 'scripts'))
+import chainman, toolchain
+
+root = Path.cwd()
+environment = root / 'collected-shell'
+environment.mkdir()
+environment.joinpath('flake.nix').write_text(
+    '{ inputs.base.url = '
+    + json.dumps(toolchain.nix_path_reference(chainman.RUNTIME / 'nix', '').removesuffix('#'))
+    + '; inputs.nixpkgs.follows = "base/nixpkgs"; '
+    + 'outputs = { base, ... }: { devShells = builtins.mapAttrs '
+    + '(system: shells: { fixture = shells.core.overrideAttrs (old: { '
+    + 'name = "chainman-collected-derivation-fixture"; '
+    + 'shellHook = '
+    + json.dumps('printf hook >> ' + shlex.quote(str(root / 'shell-hook-count')))
+    + '; fixtureIdentity = '
+    + json.dumps(str(root))
+    + '; }); }) base.devShells; }; }'
+)
+nix = [toolchain.nix_command(), '--extra-experimental-features', 'nix-command flakes']
+subprocess.run([*nix, 'flake', 'lock', str(environment)], check=True)
+system = platform.machine() + '-linux'
+ref = toolchain.nix_path_reference(environment, 'devShells.' + system + '.fixture')
+drv = subprocess.check_output([*nix, 'eval', '--raw', ref + '.drvPath'], text=True).strip()
+assert drv.endswith('-chainman-collected-derivation-fixture.drv'), drv
+# Only this test's unique derivation in its disposable store is removed. No
+# global collector or developer-owned path is involved.
+subprocess.run(['nix-store', '--delete', drv], check=True)
+assert not Path(drv).exists()
+# Inject the observed error at the pure preparation boundary, then use actual
+# Nix to reconstruct and root the collected fixture. This validates recovery,
+# not the cause of a particular upstream collection race.
+shim = root / 'nix-shim'
+shim.mkdir()
+counts = shlex.quote(str(root / 'nix-call-count'))
+fault = shlex.quote(str(root / 'preparation-fault-injected'))
+hook = shlex.quote(str(root / 'shell-hook-count'))
+shim.joinpath('nix').write_text(
+    '#!' + shutil.which('sh') + '\\nset -eu\\n'
+    + 'case "$*" in *print-dev-env*)\\n'
+    + ' printf prep >> ' + counts + '\\n'
+    + ' if [ ! -e ' + fault + ' ]; then\\n'
+    + '  touch ' + fault + '\\n'
+    + '  printf "%s\\\\n" ' + shlex.quote("error: path '" + drv + "' is not valid") + ' >&2\\n'
+    + '  exit 1\\n fi\\n'
+    + ' case "$*" in *--no-eval-cache*) ;; *) exit 97;; esac\\n'
+    + ' ;; *develop*)\\n printf develop >> ' + counts + '\\n'
+    + ' test ! -e ' + hook + '\\n ;; esac\\n'
+    + 'exec ' + shlex.quote(toolchain.nix_command()) + ' "$@"\\n'
+)
+shim.joinpath('nix').chmod(0o755)
+root.joinpath('chainman.toml').write_text(
+    'schema=3\\n[project]\\ndefault_profile="host"\\n'
+    '[profiles.fixture]\\nflake="collected-shell#fixture"\\n'
+)
+result = chainman.execute(root, 'fixture', [sys.executable, '-c',
+    'from pathlib import Path; p=Path("fresh-command-count"); '
+    'p.write_text(p.read_text()+"run" if p.exists() else "run"); '
+    'import sys; assert sys.stdin.read()=="fixture input"; '
+    'print("payload output"); print("payload stderr", file=sys.stderr)'],
+    env=dict(os.environ, CHAINMAN_RUNTIME_NIX_BIN=str(shim)),
+    text=True, input='fixture input', capture_output=True)
+assert result.stdout == 'payload output\\n', result.stdout
+assert 'is not valid' in result.stderr, 'preparation stderr escaped caller capture'
+assert 'payload stderr' in result.stderr, 'payload stderr escaped caller capture'
+assert root.joinpath('fresh-command-count').read_text() == 'run'
+assert root.joinpath('shell-hook-count').read_text() == 'hook'
+assert root.joinpath('nix-call-count').read_text() == 'prepprepdevelop'
+# After command exit the derivation may be collected again; only the command's
+# leased tooling lifetime, not perpetual derivation retention, is guaranteed.
+print('injected preparation failure recovered; hook and payload ran exactly once')
+"""
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[profiles.command]\nruntime_profile="core"\n[tasks.command]\n'
+            'profile="command"\ncommands='
+            + json.dumps([["python3", "-c", body]])
+            + "\n"
+        )
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+        )
+        result = self.run_bootstrap("run", "command", env=env, timeout=300)
+        self.assertIn("payload ran exactly once", result.stdout)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires the selected real container engine",
+    )
     def test_container_root_sweep_preserves_another_clients_lease(self):
         env = dict(
             self.env,

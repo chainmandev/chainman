@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -73,6 +74,240 @@ class ConsumerFixture(unittest.TestCase):
 
 
 class ExecutionTests(ConsumerFixture):
+    def test_only_container_profile_is_prepared_with_managed_store_policy(self):
+        self.write("flake.nix", "{}")
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="flake.nix#default"\n'
+        )
+        for container in (False, True):
+            with self.subTest(container=container):
+                inherited = dict(
+                    os.environ,
+                    TOOLCHAIN_CONTAINER="1" if container else "0",
+                    NIX_CONFIG="fixture-setting = unchanged",
+                )
+                with patch.object(
+                    toolchain,
+                    "managed_run",
+                    return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+                ) as execute:
+                    chainman.execute(
+                        self.root,
+                        "native",
+                        ["true"],
+                        env=inherited,
+                        gc_root=self.base / "caller profile",
+                    )
+                argv = execute.call_args.args[0]
+                self.assertIn("develop", argv)
+                self.assertNotIn("--no-eval-cache", argv)
+                self.assertEqual(
+                    execute.call_args.kwargs["env"]["NIX_CONFIG"],
+                    "build-users-group =\nstore = daemon"
+                    if container
+                    else "fixture-setting = unchanged",
+                )
+                self.assertEqual(execute.call_count, 1)
+                if container:
+                    self.assertEqual(
+                        argv[1], str(chainman.RUNTIME / "scripts/profile_entry.py")
+                    )
+                    self.assertEqual(argv[4], argv[argv.index("--profile") + 1])
+                else:
+                    self.assertNotIn(
+                        str(chainman.RUNTIME / "scripts/profile_entry.py"), argv
+                    )
+
+    def test_missing_derivation_error_does_not_replay_a_user_command(self):
+        self.write("flake.nix", "{}")
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="flake.nix#default"\n'
+        )
+        failure = subprocess.CalledProcessError(
+            19,
+            ["fixture-command"],
+            stderr="error: path '/nix/store/fixture-dependency.drv' is not valid",
+        )
+        with patch.object(
+            toolchain,
+            "managed_run",
+            side_effect=failure,
+        ) as execute:
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                chainman.execute(
+                    self.root,
+                    "native",
+                    ["fixture-command"],
+                    env=dict(os.environ, TOOLCHAIN_CONTAINER="1"),
+                    gc_root=self.base / "caller profile",
+                    timeout=7,
+                )
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(execute.call_args.kwargs["timeout"], 7)
+
+    def test_container_entry_preserves_process_io_timeout_and_check(self):
+        self.write("flake.nix", "{}")
+        self.write(
+            "chainman.toml", 'schema=1\n[profiles.native]\nflake="flake.nix#default"\n'
+        )
+        result = subprocess.CompletedProcess(
+            [], 19, stdout="fixture stdout", stderr="fixture stderr"
+        )
+        with patch.object(toolchain, "managed_run", return_value=result) as execute:
+            observed = chainman.execute(
+                self.root,
+                "native",
+                ["fixture-command"],
+                env=dict(os.environ, TOOLCHAIN_CONTAINER="1"),
+                gc_root=self.base / "caller profile",
+                timeout=7,
+                text=True,
+                input="fixture input",
+                capture_output=True,
+                check=False,
+            )
+        self.assertIs(observed, result)
+        execute.assert_called_once()
+        options = execute.call_args.kwargs
+        self.assertEqual(options["timeout"], 7)
+        self.assertEqual(options["input"], "fixture input")
+        self.assertTrue(options["text"])
+        self.assertTrue(options["capture_output"])
+        self.assertFalse(options["check"])
+
+    def test_collected_derivation_retries_only_preparation_once(self):
+        import profile_entry
+
+        missing = (
+            b"error: path '/nix/store/" + b"a" * 32 + b"-fixture.drv' is not valid\n"
+        )
+
+        def evaluate(argv, **kwargs):
+            kwargs["stderr"].write(missing if "--no-eval-cache" not in argv else b"")
+            return subprocess.CompletedProcess(
+                argv, 0 if "--no-eval-cache" in argv else 1
+            )
+
+        with patch.object(
+            profile_entry.subprocess, "run", side_effect=evaluate
+        ) as execute:
+            self.assertEqual(
+                profile_entry.prepare("nix", "fixture#default", "profile"), 0
+            )
+        self.assertEqual(execute.call_count, 2)
+        first, retry = execute.call_args_list
+        for preparation in (first, retry):
+            self.assertIn("print-dev-env", preparation.args[0])
+            self.assertNotIn("--command", preparation.args[0])
+            self.assertEqual(preparation.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertNotIn("timeout", preparation.kwargs)
+        self.assertNotIn("--no-eval-cache", first.args[0])
+        self.assertIn("--no-eval-cache", retry.args[0])
+
+    def test_profile_preparation_does_not_retry_other_errors_or_launch_payload(self):
+        import profile_entry
+
+        missing = (
+            b"error: path '/nix/store/" + b"a" * 32 + b"-fixture.drv' is not valid\n"
+        )
+        for code, error, calls in (
+            (1, missing, 2),
+            (1, b"syntax error", 1),
+            (19, missing, 1),
+        ):
+            with self.subTest(code=code, error=error):
+
+                def evaluate(argv, **kwargs):
+                    kwargs["stderr"].write(error)
+                    return subprocess.CompletedProcess(argv, code)
+
+                with patch.object(
+                    profile_entry.subprocess, "run", side_effect=evaluate
+                ) as execute:
+                    with patch.object(profile_entry.os, "execvp") as payload:
+                        self.assertEqual(
+                            profile_entry.main(
+                                ["nix", "fixture#default", "profile", "fixture-command"]
+                            ),
+                            code,
+                        )
+                payload.assert_not_called()
+                self.assertEqual(execute.call_count, calls)
+
+    @unittest.skipUnless(
+        sys.platform == "linux", "container parent-death contract requires Linux"
+    )
+    def test_profile_preparation_child_ends_with_killed_entry_owner(self):
+        pid_file = self.base / "preparation-pid"
+        fake_nix = self.write(
+            "fixture-nix",
+            "#!"
+            + sys.executable
+            + "\nimport os, time\nfrom pathlib import Path\n"
+            + f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+            + "while True: time.sleep(0.05)\n",
+        )
+        fake_nix.chmod(0o755)
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(chainman.RUNTIME / "scripts/profile_entry.py"),
+                str(fake_nix),
+                "fixture#default",
+                str(self.base / "profile"),
+                "true",
+            ]
+        )
+        child = None
+        child_start = None
+        try:
+            deadline = time.monotonic() + 10
+            while not pid_file.exists() and process.poll() is None:
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            self.assertTrue(pid_file.exists(), "preparation child did not start")
+            child = int(pid_file.read_text())
+            child_start = (
+                Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[19]
+            )
+            process.kill()
+            process.wait(timeout=10)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    state = (
+                        Path(f"/proc/{child}/stat")
+                        .read_text()
+                        .rsplit(")", 1)[1]
+                        .split()[0]
+                    )
+                except FileNotFoundError:
+                    break
+                if state == "Z":
+                    break
+                self.assertLess(
+                    time.monotonic(), deadline, "preparation survived its killed owner"
+                )
+                time.sleep(0.01)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10)
+            if child is not None:
+                # Confirm this is still this test's child, never a reused PID.
+                try:
+                    identity = (
+                        Path(f"/proc/{child}/stat")
+                        .read_text()
+                        .rsplit(")", 1)[1]
+                        .split()[19]
+                    )
+                    if identity == child_start:
+                        os.kill(child, 9)
+                except (FileNotFoundError, ProcessLookupError):
+                    pass
+
     def test_fresh_profile_has_a_leased_root_until_command_completion(self):
         self.write("flake.nix", "{}")
         self.write(

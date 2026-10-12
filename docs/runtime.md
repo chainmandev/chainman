@@ -124,6 +124,12 @@ tools available after `nix develop` hands execution to the payload, including
 when the shared container daemon cannot inspect the client's process namespace.
 Caller-owned profile roots keep their caller's lifetime; matching active entries
 borrow their enclosing environment instead of provisioning another profile.
+Fresh container command profiles are realized with `nix print-dev-env` before
+the shell hook or application command is launched. An exact missing-derivation
+preparation error gets one fresh-evaluation retry; other failures stop. Both
+preparation attempts and command execution share the original timeout budget.
+Neither the shell hook nor an application command is retried based on its exit
+status or diagnostic text. Host Nix keeps its existing entry and cache policy.
 Runtime generations coexist across projects and updates. Cache cleanup
 must respect active operations and service ownership.
 

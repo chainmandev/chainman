@@ -445,6 +445,18 @@ def execute(
                 str(target),
                 *argv,
             ]
+            if selected.get("TOOLCHAIN_CONTAINER") == "1":
+                # Preparation and payload stay inside one managed invocation:
+                # timeout, cancellation, stdio and check=False retain their
+                # original semantics. Only the no-payload preparation retries.
+                command = [
+                    sys.executable,
+                    str(RUNTIME / "scripts/profile_entry.py"),
+                    tc.nix_command(selected),
+                    ref,
+                    str(gc_root),
+                    *command,
+                ]
         selected.update(CHAINMAN_ACTIVE_PROFILE=name, CHAINMAN_ACTIVE_FINGERPRINT=token)
         selected.pop("TOOLCHAIN_FRESH", None)
         try:
