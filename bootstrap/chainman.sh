@@ -475,8 +475,12 @@ update_worker() {
             CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
                 "$self" _verification-update-plan "$update_output/control/verify" \
                 "$update_output/candidate-bootstrap/chainman.sh" "$self" > "$update_output/control/verification-plan.json"
+            update_verification_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/verification
+            mkdir -p "$update_verification_cache"
+            update_verification_cache=$(CDPATH='' cd -P -- "$update_verification_cache" && pwd)
+            case "$update_verification_cache/" in "$root/"* | "$source_root/"*) fail 'Verification reports must be outside project and runtime.' ;; esac
             CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$CHAINMAN_UPDATE_HELPER" \
-                verification "$update_output/control/verification-plan.json" "$update_output/control" < /dev/null >&2 || exit $?
+                verification "$update_output/control/verification-plan.json" "$update_verification_cache" < /dev/null >&2 || exit $?
         else
             while IFS= read -r update_action && IFS= read -r update_task; do
                 # Bash runs EXIT traps before restoring a failed subshell function's

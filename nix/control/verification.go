@@ -199,8 +199,18 @@ func verificationRun(p VerificationPlan, directory string) (result int) {
 			}
 		}
 		fmt.Fprintln(os.Stderr, "\nVerification summary:")
+		if report.Reason != "" {
+			fmt.Fprintln(os.Stderr, "  stopped:", report.Reason)
+		}
 		for _, gate := range report.Gates {
-			fmt.Fprintf(os.Stderr, "  %-10s %s (%.1fs) %s\n", gate.Status, gate.Name, gate.Seconds, gate.Reason)
+			code := "not-run"
+			if gate.Code != nil {
+				code = fmt.Sprint(*gate.Code)
+			}
+			fmt.Fprintf(os.Stderr, "  %-10s %s (exit=%s, %.1fs) %s\n", gate.Status, gate.Name, code, gate.Seconds, gate.Reason)
+			if gate.Log != "" {
+				fmt.Fprintln(os.Stderr, "    log:", gate.Log)
+			}
 		}
 		fmt.Fprintln(os.Stderr, "Verification report:", path)
 	}()

@@ -557,15 +557,42 @@ commands=[["python3", "-c", "print('last verification gate executed')"]]
         self.assertIn("last verification gate executed", result.stdout + result.stderr)
         self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
         self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
-        reports = list(
-            self.update_cache.glob("candidate.*/control/verification-*/report.json")
-        )
+        reports = [
+            path
+            for path in (self.update_cache.parent.parent / "verification").glob(
+                "verification-*/report.json"
+            )
+            if json.loads(path.read_text())["identity"]["commit"] == before
+        ]
         self.assertEqual(len(reports), 1, result.stderr)
         report = json.loads(reports[0].read_text())
         self.assertEqual(
             [gate["status"] for gate in report["gates"]], ["passed", "failed", "passed"]
         )
         self.assertEqual(report["exit_code"], 1)
+
+    def test_public_keep_going_success_retains_report_after_candidate_collection(self):
+        before = self.update_lifecycle()
+        result = self.run_bootstrap(
+            "deps-update", "--skip-chainman", "--keep-going", "--json", timeout=600
+        )
+        accepted = json.loads(result.stdout)
+        self.assertEqual(accepted["verification"], "passed")
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "accepted\n")
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+        reports = [
+            path
+            for path in (self.update_cache.parent.parent / "verification").glob(
+                "verification-*/report.json"
+            )
+            if json.loads(path.read_text())["identity"]["commit"] == before
+        ]
+        self.assertEqual(len(reports), 1, result.stderr)
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(report["exit_code"], 0)
+        self.assertEqual([gate["status"] for gate in report["gates"]], ["passed"])
+        self.assertTrue(Path(report["gates"][0]["log"]).is_file())
 
     def test_public_keep_going_local_verification(self):
         self.use_real_runtime()

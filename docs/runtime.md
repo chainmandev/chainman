@@ -21,9 +21,10 @@ same aggregation for candidate qualification. A failed or incomplete sweep never
 adopts the candidate or automatically commits it. The coordinator consumes the
 option before invoking candidate runtimes, including older runtimes. Retained
 transactions remember it; use `just deps-update resume=/path/to/transaction` to
-retry the complete qualification. Update reports remain with their private
-transaction. Options after `--`, or used as another option's value, retain their
-normal meaning and are not interpreted as keep-going.
+retry the complete qualification. Update reports remain in the verification
+cache even after completed candidates are collected. Options after `--`, or used
+as another option's value, retain their normal meaning and are not interpreted
+as keep-going.
 
 ## Per-project runtime selection
 
