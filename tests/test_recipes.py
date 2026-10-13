@@ -228,6 +228,37 @@ class RecipeTests(unittest.TestCase):
                     Path("/fixture"), cfg, [["run", "test"]], "/entry", "/entry"
                 )
 
+    def test_keep_going_plan_rejects_waiting_prerequisites_before_identity(self):
+        cfg = {
+            "schema": 3,
+            "project": {"default_profile": "host"},
+            "tasks": {
+                "waiter": {
+                    "services": ["database"],
+                    "wait_for_services": True,
+                },
+                "middle": {"commands": [["true"]], "depends_on": ["waiter"]},
+                "test": {"commands": [["true"]]},
+                "last": {"commands": [["true"]]},
+            },
+            "services": {"database": {"command": ["true"]}},
+        }
+        for prerequisite in ("waiter", "middle"):
+            with (
+                self.subTest(prerequisite=prerequisite),
+                patch("recipes.verification_identity", return_value={}) as identity,
+            ):
+                cfg["tasks"]["test"]["depends_on"] = [prerequisite]
+                with self.assertRaisesRegex(ValueError, "finite verification tasks"):
+                    recipes.verification_plan(
+                        Path("/fixture"),
+                        cfg,
+                        [["run", "test"], ["run", "last"]],
+                        "/entry",
+                        "/entry",
+                    )
+                identity.assert_not_called()
+
     def test_verification_identity_tracks_raw_source_and_index_but_not_ignored_cache(
         self,
     ):

@@ -246,7 +246,10 @@ def verification_plan(
         len(argv) != 2 or argv[0] not in {"run", "_update-verify"} for argv in commands
     ):
         raise ValueError("Keep-going requires finite verification entries")
-    if any(tasks[name].get("wait_for_services", False) for name in selected):
+    if any(
+        tasks[name].get("wait_for_services", False)
+        for name in workflows.order(tasks, selected)
+    ):
         raise ValueError("Keep-going requires finite verification tasks")
     return {
         "schema": 1,
