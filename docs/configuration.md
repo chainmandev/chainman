@@ -850,7 +850,11 @@ is not a guarantee that execution will admit a mount. Port placeholders remain
 declarative in inspection; execution resolves and validates them against the
 selected environment. Both literal and resolved ports must be integers from 1
 through 65535, with a loopback binding and optional `/tcp` or `/udp` suffix. This
-also applies to explicit container-option port mappings. Host Nix
+also applies to explicit container-option port mappings and service container
+publications. A service publication such as
+`127.0.0.1:{env:TEST_DATABASE_PORT}:5432` uses the selected environment for both
+Docker's host binding and host `{service:database:5432}` addresses. Container
+addresses keep the internal service port. Host Nix
 ignores container transport, and ordinary launches remain headless by default.
 
 ## Formatter and hook declarations

@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 import re
+from collections.abc import Mapping
 
 import toolchain as tc
 from adapter_data import Table, strings, table, text
@@ -30,7 +31,13 @@ def alias(root: Path, name: str) -> str:
     return "cm-" + hashlib.sha256((scope + "\0" + name).encode()).hexdigest()[:24]
 
 
-def address(root: Path, name: str, port: str, container: bool) -> str:
+def address(
+    root: Path,
+    name: str,
+    port: str,
+    container: bool,
+    env: Mapping[str, str] | None = None,
+) -> str:
     if not port.isdecimal() or not 1 <= int(port) <= 65535:
         raise ValueError("Endpoint requires a TCP port from 1 to 65535")
     name, spec = owner(root, name)
@@ -41,6 +48,9 @@ def address(root: Path, name: str, port: str, container: bool) -> str:
     matches = []
     settings = table(spec["container"], f"Service {name} container")
     for binding in strings(settings.get("ports", []), "Service ports"):
+        from project_environment import transport_port
+
+        binding = transport_port(binding, {} if env is None else env)
         match = re.fullmatch(r"127\.0\.0\.1:([0-9]+):([0-9]+)(?:/tcp)?", binding)
         if match and int(match[2]) == int(port) and 1 <= int(match[1]) <= 65535:
             matches.append(match[1])

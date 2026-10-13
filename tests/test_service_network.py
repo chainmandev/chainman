@@ -12,6 +12,44 @@ import project_environment
 
 
 class ServiceNetworkTests(unittest.TestCase):
+    def test_configurable_service_ports_share_host_endpoint_and_publish_resolution(
+        self,
+    ):
+        root = Path("/fixture")
+        binding = "127.0.0.1:{env:TEST_DATABASE_PORT}:5432"
+        cfg = {"services": {"database": {"container": {"ports": [binding]}}}}
+        with patch.object(service_endpoints.tc, "config", return_value=cfg):
+            for selected in ("5433", "55433"):
+                env = {"TEST_DATABASE_PORT": selected}
+                self.assertEqual(
+                    project_environment.transport_port(binding, env),
+                    f"127.0.0.1:{selected}:5432",
+                )
+                self.assertEqual(
+                    project_environment.expand(
+                        {
+                            "DATABASE_URL": "postgresql://test@{service:database:5432}/test"
+                        },
+                        root,
+                        env,
+                    )["DATABASE_URL"],
+                    f"postgresql://test@127.0.0.1:{selected}/test",
+                )
+                self.assertTrue(
+                    service_endpoints.address(
+                        root, "database", "5432", True, env
+                    ).endswith(":5432")
+                )
+            for selected in ("0", "65536", "5433:evil", ""):
+                with self.subTest(selected=selected), self.assertRaises(ValueError):
+                    project_environment.expand(
+                        {
+                            "DATABASE_URL": "postgresql://test@{service:database:5432}/test"
+                        },
+                        root,
+                        {"TEST_DATABASE_PORT": selected},
+                    )
+
     def test_addresses_use_published_host_ports_and_stable_container_dns(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()

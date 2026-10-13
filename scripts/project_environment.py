@@ -313,7 +313,7 @@ def expand(values: object, root: Path, env: Mapping[str, str]) -> dict[str, str]
                 if len(parts) != 3:
                     raise ValueError("Service endpoints require {service:NAME:PORT}")
                 _, service, port = parts
-                return service_endpoints.address(root, service, port, container)
+                return service_endpoints.address(root, service, port, container, env)
             if not name.startswith("env:"):
                 return paths[name]
             name = name[4:]

@@ -819,9 +819,9 @@ def export(root: Path, arguments: list[str]) -> int:
             if "user" in item:
                 argv += ["--user", text(item["user"], "Container user")]
             for port in strings(item.get("ports", []), "Container ports"):
-                if not isinstance(port, str) or not port.startswith("127.0.0.1:"):
-                    raise ValueError("Service ports must explicitly bind loopback")
-                argv += ["--publish", port]
+                from project_environment import transport_port
+
+                argv += ["--publish", transport_port(port, planning_env)]
             for key_env, environment_value in literal_environment(
                 item.get("environment", {}), root, planning_env
             ).items():
