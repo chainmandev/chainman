@@ -33,27 +33,51 @@ func monitorServices(ctx context.Context, p Plan, development *developmentSessio
 			pool.Requested = resource.Requested
 			pools = append(pools, pool)
 		}
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			if _, e := os.Stat(filepath.Join(p.State, "stop-request.json")); e == nil {
-				result <- servicesStopped
-				return
-			}
-			for _, pool := range pools {
-				if e := serviceOutcome(pool, development); e != nil {
-					result <- e
-					return
-				}
-			}
+		err := monitorServicePools(ctx, p.State, pools, time.Second, func(pool Plan) error {
+			return serviceOutcome(pool, development)
+		})
+		if ctx.Err() != nil {
+			return
 		}
+		result <- err
 	}()
 	return result
+}
+
+// A single late read-only observation is inconclusive. Track consecutive
+// deadlines separately for each pool; other pools cannot reset its evidence.
+func monitorServicePools(ctx context.Context, state string, pools []Plan, interval time.Duration, outcome func(Plan) error) error {
+	consecutive := make([]bool, len(pools))
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+		if _, err := os.Stat(filepath.Join(state, "stop-request.json")); err == nil {
+			return servicesStopped
+		}
+		for index, pool := range pools {
+			if ctx.Err() != nil {
+				return nil
+			}
+			err := outcome(pool)
+			if err == nil {
+				consecutive[index] = false
+				continue
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				if !consecutive[index] {
+					consecutive[index] = true
+					continue
+				}
+				return fmt.Errorf("service controller %s failed two consecutive status-query deadlines; check controller responsiveness and host resource pressure: %w", pool.State, err)
+			}
+			return err
+		}
+	}
 }
 
 func serviceOutcome(p Plan, development *developmentSession) error {

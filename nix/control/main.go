@@ -312,6 +312,9 @@ func backendContext(ctx context.Context, p Plan, args ...string) ([]byte, error)
 	cmd := queryCommand(ctx, p.Backend, append(base, args...)...)
 	out, err := cmd.Output()
 	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return out, fmt.Errorf("Process Compose %s query exceeded its deadline: %w", strings.Join(args, " "), context.DeadlineExceeded)
+		}
 		var failure *exec.ExitError
 		detail := ""
 		if errors.As(err, &failure) {
