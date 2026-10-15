@@ -484,11 +484,12 @@ qualified version require the exact version string. Unknown qualifiers and
 prereleases are excluded from automatic selection. Their exact unchanged baseline
 artifacts can remain, with registry/checksum evidence and security constraints
 still enforced. New or changed such artifacts require explicit project migration.
-Compatible mode intersects the declared Maven constraints. A dedicated refresh
-of different exact versions in independent Gradle configurations can use an
-explicit aggressive adapter with exact pin bounds. Those bounds still constrain
-selection; artifact identities, security constraints and publication evidence
-undergo the final audit.
+Compatible mode intersects the declared Maven constraints. A resolution-only
+refresh of fixed SDK versions can declare their source files in `manifests`
+without selectable `pins` or `catalogs`. This reruns Gradle without registry
+version selection; the project can validate its resolved SDK identities in its
+resolve task. The complete graph still undergoes the artifact, security and
+publication audit.
 Google Maven scope includes Android's `com.android` artifacts and the exact
 `com.google.testing.platform` group used by AGP; unrelated Google groups remain
 outside that scope. Cross-version Gradle variant files (for example Guava's

@@ -69,6 +69,10 @@ class MavenVersionTests(unittest.TestCase):
         ]
         before = {
             "identities": identities,
+            "requirements": [],
+        }
+        conflicting = {
+            **before,
             "requirements": [
                 {"provider": "maven", "name": package, "range": "===" + v}
                 for v in versions
@@ -98,12 +102,12 @@ class MavenVersionTests(unittest.TestCase):
                 ecosystem_updates._audit(
                     root,
                     {"adapter": "gradle", "mode": "compatible"},
-                    before,
+                    conflicting,
                     policy,
                     now,
                 )
             ecosystem_updates._audit(
-                root, {"adapter": "gradle", "mode": "aggressive"}, before, policy, now
+                root, {"adapter": "gradle", "mode": "compatible"}, before, policy, now
             )
             original = next(iter(current))
             current.remove(original)
@@ -111,7 +115,7 @@ class MavenVersionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "compatibility constraint"):
                 ecosystem_updates._audit(
                     root,
-                    {"adapter": "gradle", "mode": "aggressive"},
+                    {"adapter": "gradle", "mode": "compatible"},
                     before,
                     policy,
                     now,
@@ -123,7 +127,7 @@ class MavenVersionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed its checksum"):
                 ecosystem_updates._audit(
                     root,
-                    {"adapter": "gradle", "mode": "aggressive"},
+                    {"adapter": "gradle", "mode": "compatible"},
                     before,
                     policy,
                     now,
