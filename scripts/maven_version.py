@@ -169,6 +169,7 @@ def compatible(value: str, constraint: str) -> bool:
             assert actual is not None  # MavenVersion validated the leading number.
             members = actual[0].split(".")
             expected = prefix.split(".")
+            members += ["0"] * max(0, len(expected) - len(members))
             equal = [int(x) for x in members[: len(expected)]] == [
                 int(x) for x in expected
             ]

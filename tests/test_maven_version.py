@@ -212,6 +212,9 @@ class MavenVersionTests(unittest.TestCase):
             ("1.9", "~=1.4", True),
             ("2", "~=1.4", False),
             ("1.2.3-jre", "==1.2.*", True),
+            ("1", "==1.0.*", True),
+            ("1", "!=1.0.0.*", False),
+            ("1", "==1.1.*", False),
             ("1.3", "!=1.2.*", True),
         ]:
             with self.subTest(value=value, bound=bound):
