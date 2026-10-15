@@ -2152,13 +2152,12 @@ def _audit(
                             provider, value, ad.text(bound["range"], "Package range")
                         )
                     )
-            # Cargo aliases and independent Gradle configurations/command roots
-            # can resolve several versions of the same package.
+            # Cargo aliases can resolve several versions of the same package.
             # Each locked version must match one declared family; selected pins
             # and exact Cargo identities are independently checked above.
             compatible = (
                 any(accepted_families)
-                if provider in ("crates", "maven")
+                if provider == "crates"
                 else all(accepted_families)
             )
             if accepted_families and not compatible:

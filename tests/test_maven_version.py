@@ -43,7 +43,7 @@ class MavenVersionTests(unittest.TestCase):
         ):
             updates.audit_identities(Path(temporary), {changed}, {old}, {}, now)
 
-    def test_independent_gradle_sdk_versions_keep_family_and_artifact_audits(self):
+    def test_independent_gradle_sdk_versions_keep_artifact_and_policy_audits(self):
         now = datetime(2026, 8, 1, tzinfo=timezone.utc)
         package = "org.robolectric:android-all-instrumented"
         versions = ["9-robolectric-4913185-2-i7", "15-robolectric-13954326-i7"]
@@ -75,6 +75,11 @@ class MavenVersionTests(unittest.TestCase):
             ],
         }
         current = set(identities)
+        policy = {
+            "constraints": {
+                "maven:" + package: {"range": ">=9,<16", "reason": "SDK family"}
+            }
+        }
         with (
             tempfile.TemporaryDirectory() as temporary,
             patch.object(
@@ -89,15 +94,27 @@ class MavenVersionTests(unittest.TestCase):
             patch("lock_adapters.evidence", return_value=evidence),
         ):
             root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, "compatible range"):
+                ecosystem_updates._audit(
+                    root,
+                    {"adapter": "gradle", "mode": "compatible"},
+                    before,
+                    policy,
+                    now,
+                )
             ecosystem_updates._audit(
-                root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
+                root, {"adapter": "gradle", "mode": "aggressive"}, before, policy, now
             )
             original = next(iter(current))
             current.remove(original)
             current.add(original._replace(version="16-robolectric-1-i7"))
-            with self.assertRaisesRegex(ValueError, "compatible range"):
+            with self.assertRaisesRegex(ValueError, "compatibility constraint"):
                 ecosystem_updates._audit(
-                    root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
+                    root,
+                    {"adapter": "gradle", "mode": "aggressive"},
+                    before,
+                    policy,
+                    now,
                 )
             current.clear()
             current.update(identities)
@@ -105,7 +122,11 @@ class MavenVersionTests(unittest.TestCase):
             current.add(original._replace(digest="sha256:" + "b" * 64))
             with self.assertRaisesRegex(ValueError, "changed its checksum"):
                 ecosystem_updates._audit(
-                    root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
+                    root,
+                    {"adapter": "gradle", "mode": "aggressive"},
+                    before,
+                    policy,
+                    now,
                 )
 
     def test_native_selector_uses_maven_order_for_qualified_literal_pins(self):

@@ -484,9 +484,10 @@ qualified version require the exact version string. Unknown qualifiers and
 prereleases are excluded from automatic selection. Their exact unchanged baseline
 artifacts can remain, with registry/checksum evidence and security constraints
 still enforced. New or changed such artifacts require explicit project migration.
-Independent Gradle configurations and command roots may retain different versions
-of one module. Each resolved version must satisfy a declared compatibility family;
-all its artifact identities, security constraints and publication evidence still
+Compatible mode intersects the declared Maven constraints. A dedicated refresh
+of different exact versions in independent Gradle configurations can use an
+explicit aggressive adapter with exact pin bounds. Those bounds still constrain
+selection; artifact identities, security constraints and publication evidence
 undergo the final audit.
 Google Maven scope includes Android's `com.android` artifacts and the exact
 `com.google.testing.platform` group used by AGP; unrelated Google groups remain
