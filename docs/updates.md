@@ -484,6 +484,10 @@ qualified version require the exact version string. Unknown qualifiers and
 prereleases are excluded from automatic selection. Their exact unchanged baseline
 artifacts can remain, with registry/checksum evidence and security constraints
 still enforced. New or changed such artifacts require explicit project migration.
+Independent Gradle configurations and command roots may retain different versions
+of one module. Each resolved version must satisfy a declared compatibility family;
+all its artifact identities, security constraints and publication evidence still
+undergo the final audit.
 
 JavaScript discovery includes workspaces, catalogs, aliases, scoped overrides and
 actual resolved peer relationships. Documented package/catalog/prefix constraints

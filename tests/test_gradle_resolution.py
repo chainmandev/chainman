@@ -26,31 +26,31 @@ class GradleResolutionTests(unittest.TestCase):
             "4.1.110.Final",
             "8.10.1-12782657",
             "9-robolectric-4913185-2-i7",
+            "15-robolectric-13954326-i7",
         ]
+        names = ["library0", "library1", "library2", "sdk", "sdk"]
         with tempfile.TemporaryDirectory(
             prefix="gradle qualified artifacts "
         ) as temporary:
             root = Path(temporary)
             repository = root / "repository"
-            for i, version in enumerate(versions):
-                directory = repository / "example" / f"library{i}" / version
+            for name, version in zip(names, versions, strict=True):
+                directory = repository / "example" / name / version
                 directory.mkdir(parents=True)
-                (directory / f"library{i}-{version}.pom").write_text(
-                    f"<project><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>library{i}</artifactId><version>{version}</version></project>"
+                (directory / f"{name}-{version}.pom").write_text(
+                    f"<project><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>{name}</artifactId><version>{version}</version></project>"
                 )
-                with zipfile.ZipFile(
-                    directory / f"library{i}-{version}.jar", "w"
-                ) as jar:
+                with zipfile.ZipFile(directory / f"{name}-{version}.jar", "w") as jar:
                     jar.writestr("identity.txt", version)
             (root / "settings.gradle").write_text("rootProject.name='qualified'\n")
             (root / "build.gradle").write_text(
                 "repositories { maven { url = uri('"
                 + repository.as_posix()
                 + "') } }\n"
-                "configurations { inventory { canBeResolved = true; canBeConsumed = false } }\n"
+                "configurations { inventory { canBeResolved = true; canBeConsumed = false }; compileSdk { canBeResolved = true; canBeConsumed = false } }\n"
                 "dependencies {\n"
                 + "\n".join(
-                    f"inventory 'example:library{i}:{v}'"
+                    f"{'inventory' if i < 4 else 'compileSdk'} 'example:{names[i]}:{v}'"
                     for i, v in enumerate(versions)
                 )
                 + "\n}\n"
@@ -90,6 +90,9 @@ class GradleResolutionTests(unittest.TestCase):
             spec = {"ecosystem": "maven", "directory": "."}
             identities = lock_adapters.identities(root, spec)
             self.assertEqual({item.version for item in identities}, set(versions))
+            locked = (root / "gradle.lockfile").read_text()
+            self.assertIn(f"example:sdk:{versions[3]}=inventory", locked)
+            self.assertIn(f"example:sdk:{versions[4]}=compileSdk", locked)
             paths = [
                 root / "gradle.lockfile",
                 root / "gradle/verification-metadata.xml",

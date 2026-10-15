@@ -15,6 +15,71 @@ import ecosystem_updates
 
 
 class MavenVersionTests(unittest.TestCase):
+    def test_independent_gradle_sdk_versions_keep_family_and_artifact_audits(self):
+        now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        package = "org.robolectric:android-all-instrumented"
+        versions = ["9-robolectric-4913185-2-i7", "15-robolectric-13954326-i7"]
+        identities = {
+            updates.Identity(
+                "maven",
+                package,
+                v,
+                f"https://repo.maven.apache.org/maven2/org/robolectric/android-all-instrumented/{v}/android-all-instrumented-{v}.jar",
+                "sha256:" + "a" * 64,
+            )
+            for v in versions
+        }
+        evidence = [
+            registry.Release(
+                x.version,
+                now - timedelta(days=40),
+                artifacts=(
+                    registry.Artifact(x.url, x.digest, now - timedelta(days=40)),
+                ),
+            )
+            for x in identities
+        ]
+        before = {
+            "identities": identities,
+            "requirements": [
+                {"provider": "maven", "name": package, "range": "===" + v}
+                for v in versions
+            ],
+        }
+        current = set(identities)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(
+                ecosystem_updates,
+                "specifications",
+                return_value={"sdk": {"ecosystem": "maven", "directory": "."}},
+            ),
+            patch.object(ecosystem_updates, "gradle_graph"),
+            patch.object(
+                updates, "lock_identities", side_effect=lambda *a, **k: current
+            ),
+            patch("lock_adapters.evidence", return_value=evidence),
+        ):
+            root = Path(temporary)
+            ecosystem_updates._audit(
+                root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
+            )
+            original = next(iter(current))
+            current.remove(original)
+            current.add(original._replace(version="16-robolectric-1-i7"))
+            with self.assertRaisesRegex(ValueError, "compatible range"):
+                ecosystem_updates._audit(
+                    root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
+                )
+            current.clear()
+            current.update(identities)
+            current.remove(original)
+            current.add(original._replace(digest="sha256:" + "b" * 64))
+            with self.assertRaisesRegex(ValueError, "absent from registry evidence"):
+                ecosystem_updates._audit(
+                    root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
+                )
+
     def test_native_selector_uses_maven_order_for_qualified_literal_pins(self):
         now = datetime(2026, 8, 1, tzinfo=timezone.utc)
         releases = [
