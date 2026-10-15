@@ -265,7 +265,12 @@ class NativeLockTests(unittest.TestCase):
                 self.lock(kind, checksum)
                 with self.assertRaisesRegex(ValueError, "identity|artifact"):
                     self.audit(kind, before)
-                with self.assertRaisesRegex(ValueError, "mature|eligible"):
+                # Maven coordinates are immutable even if the repository now
+                # advertises replacement bytes; age cannot admit that mutation.
+                expected = (
+                    "changed its checksum" if kind == "maven" else "mature|eligible"
+                )
+                with self.assertRaisesRegex(ValueError, expected):
                     self.audit(kind, before, days=1, checksum=checksum)
 
     def test_go_checks_recursive_work_sums_and_module_and_go_mod_hashes(self):
