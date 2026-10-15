@@ -488,6 +488,16 @@ Independent Gradle configurations and command roots may retain different version
 of one module. Each resolved version must satisfy a declared compatibility family;
 all its artifact identities, security constraints and publication evidence still
 undergo the final audit.
+Google Maven scope includes Android's `com.android` artifacts and the exact
+`com.google.testing.platform` group used by AGP; unrelated Google groups remain
+outside that scope. Cross-version Gradle variant files (for example Guava's
+Android JAR selected through its JRE module) retain the locked component version
+and the actual artifact URL. Reading such locks retrieves the official `.module`
+document and requires its recorded SHA-256 before following a variant location.
+Only a direct sibling version in the same official repository/package is allowed;
+the target artifact still needs independent checksum and publication evidence.
+Changed bytes at an unchanged Maven artifact identity are rejected even if the
+repository now advertises the changed checksum with an old publication date.
 
 JavaScript discovery includes workspaces, catalogs, aliases, scoped overrides and
 actual resolved peer relationships. Documented package/catalog/prefix constraints

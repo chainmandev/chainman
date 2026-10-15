@@ -4,6 +4,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -525,10 +526,114 @@ class NativeLockTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "scope"):
             registry.maven_prefix("org.example:artifact", "google")
+        for package in (
+            "com.android:zipflinger",
+            "com.android:signflinger",
+            "com.google.testing.platform:core-proto",
+        ):
+            self.assertEqual(
+                lock_adapters.maven_repository(
+                    {"maven_repositories": ["central", "google"]}, package
+                ),
+                "google",
+            )
+            self.assertTrue(
+                registry.maven_prefix(package, "google").startswith(
+                    "https://dl.google.com/"
+                )
+            )
+        for package in (
+            "com.google.testing.platform.evil:core",
+            "com.androidx:core",
+            "com.google:core",
+        ):
+            with self.assertRaisesRegex(ValueError, "scope"):
+                registry.maven_prefix(package, "google")
         with self.assertRaises(ValueError):
             lock_adapters.maven_repository(
                 {"maven_repositories": ["https://untrusted.invalid"]}, MAVEN
             )
+
+    def test_cross_version_maven_variant_uses_checksummed_module_location(self):
+        package, value = "com.google.guava:guava", "33.4.8-jre"
+        filename = "guava-33.4.8-android.jar"
+        document = {
+            "formatVersion": "1.1",
+            "component": {
+                "group": "com.google.guava",
+                "module": "guava",
+                "version": value,
+            },
+            "variants": [
+                {
+                    "name": "androidRuntimeElements",
+                    "files": [
+                        {"name": filename, "url": "../33.4.8-android/" + filename}
+                    ],
+                }
+            ],
+        }
+        body = json.dumps(document).encode()
+        digest = registry.digest("sha256:" + hashlib.sha256(body).hexdigest())
+        prefix = registry.maven_prefix(package)
+        metadata = self.root / "maven/gradle/verification-metadata.xml"
+        metadata.write_text(
+            '<verification-metadata xmlns="https://schema.gradle.org/dependency-verification"><configuration><verify-metadata>true</verify-metadata></configuration><components>'
+            f'<component group="com.google.guava" name="guava" version="{value}"><artifact name="guava-{value}.module"><sha256 value="{digest.split(":")[1]}"/></artifact><artifact name="{filename}"><sha256 value="{SHA}"/></artifact></component></components></verification-metadata>'
+        )
+        for path in (self.root / "maven").rglob("*.lockfile"):
+            path.write_text(f"{package}:{value}=runtimeClasspath\n")
+        with patch.object(registry, "fetch", return_value=(body, {})) as fetch:
+            identities = updates.lock_identities(self.root, ["maven"])
+            jar = next(item for item in identities if item.url.endswith(".jar"))
+            self.assertEqual(jar.version, value)
+            self.assertEqual(jar.url, f"{prefix}/33.4.8-android/{filename}")
+            fetch.assert_called_with(f"{prefix}/{value}/guava-{value}.module")
+
+            def artifact(package, actual, filename, repository):
+                return registry.Artifact(
+                    f"{prefix}/{actual}/{filename}",
+                    "sha256:" + SHA if filename.endswith(".jar") else digest,
+                    NOW,
+                )
+
+            with patch.object(
+                registry, "maven_artifact", side_effect=artifact
+            ) as evidence:
+                result = lock_adapters.evidence(self.root, "maven", package, identities)
+                self.assertEqual(result[0].version, value)
+                self.assertTrue(
+                    any(
+                        call.args[1] == "33.4.8-android"
+                        for call in evidence.call_args_list
+                    )
+                )
+            with self.assertRaisesRegex(ValueError, "checksum"):
+                lock_adapters.maven_artifact_location(
+                    package, value, filename, "central", None
+                )
+            with self.assertRaisesRegex(ValueError, "checksum changed"):
+                lock_adapters.maven_artifact_location(
+                    package, value, filename, "central", "sha256:" + "0" * 64
+                )
+        for url in (
+            "https://evil.invalid/" + filename,
+            "../../33.4.8-android/" + filename,
+            "../33.4.8-android/" + filename + "?query=1",
+            "../v33.4.8-android/" + filename,
+            "../33.4.8-android/other.jar",
+        ):
+            with self.subTest(url=url):
+                document["variants"][0]["files"][0]["url"] = url
+                body = json.dumps(document).encode()
+                digest = registry.digest("sha256:" + hashlib.sha256(body).hexdigest())
+                with (
+                    patch.object(registry, "fetch", return_value=(body, {})),
+                    self.assertRaises(ValueError),
+                ):
+                    lock_adapters.maven_artifact_location(
+                        package, value, filename, "central", digest
+                    )
 
     def test_symlink_nested_lock_is_not_followed(self):
         (self.root / "go/escape").symlink_to(

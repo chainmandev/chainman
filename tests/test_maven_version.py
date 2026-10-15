@@ -15,6 +15,34 @@ import ecosystem_updates
 
 
 class MavenVersionTests(unittest.TestCase):
+    def test_republished_maven_bytes_cannot_replace_a_baseline_identity(self):
+        now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        old = updates.Identity(
+            "maven",
+            "example:library",
+            "1.0.Final",
+            "https://repo.maven.apache.org/maven2/example/library/1.0.Final/library-1.0.Final.jar",
+            "sha256:" + "a" * 64,
+        )
+        changed = old._replace(digest="sha256:" + "b" * 64)
+        evidence = [
+            registry.Release(
+                old.version,
+                now - timedelta(days=100),
+                artifacts=(
+                    registry.Artifact(
+                        changed.url, changed.digest, now - timedelta(days=100)
+                    ),
+                ),
+            )
+        ]
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.object(updates.lock_adapters, "evidence", return_value=evidence),
+            self.assertRaisesRegex(ValueError, "changed its checksum"),
+        ):
+            updates.audit_identities(Path(temporary), {changed}, {old}, {}, now)
+
     def test_independent_gradle_sdk_versions_keep_family_and_artifact_audits(self):
         now = datetime(2026, 8, 1, tzinfo=timezone.utc)
         package = "org.robolectric:android-all-instrumented"
@@ -75,7 +103,7 @@ class MavenVersionTests(unittest.TestCase):
             current.update(identities)
             current.remove(original)
             current.add(original._replace(digest="sha256:" + "b" * 64))
-            with self.assertRaisesRegex(ValueError, "absent from registry evidence"):
+            with self.assertRaisesRegex(ValueError, "changed its checksum"):
                 ecosystem_updates._audit(
                     root, {"adapter": "gradle", "mode": "compatible"}, before, {}, now
                 )
@@ -253,7 +281,7 @@ class MavenVersionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "explicit project migration"):
                 updates.audit_identities(root, {identity}, set(), {}, now)
             changed = identity._replace(digest="sha256:" + "b" * 64)
-            with self.assertRaisesRegex(ValueError, "explicit project migration"):
+            with self.assertRaisesRegex(ValueError, "changed its checksum"):
                 updates.audit_identities(root, {changed}, {identity}, {}, now)
 
     def test_artifact_url_and_filename_keep_the_original_qualifier(self):

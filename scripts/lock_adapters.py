@@ -397,11 +397,7 @@ def maven_repository(spec: Mapping[str, object], package: str) -> str:
         "plugins",
     }:
         raise ValueError("Unsupported Maven repository declaration")
-    name = (
-        "google"
-        if package.split(":")[0].startswith(("androidx.", "com.android."))
-        else "central"
-    )
+    name = "google" if registry.google_maven_group(package.split(":")[0]) else "central"
     plugins = data.strings(
         spec.get("maven_plugin_packages", []), "Maven plugin packages"
     )
@@ -412,6 +408,52 @@ def maven_repository(spec: Mapping[str, object], package: str) -> str:
     if name not in declared:
         raise ValueError("Maven component requires an undeclared official repository")
     return name
+
+
+def maven_artifact_location(
+    package: str, value: str, filename: str, repository: str, module_digest: str | None
+) -> tuple[str, str]:
+    """Bind cross-version Gradle variant files to their checksummed module metadata."""
+    prefix = registry.maven_prefix(package, repository)
+    name = package.split(":")[1]
+    if filename.startswith((f"{name}-{value}.", f"{name}-{value}-")):
+        return value, f"{prefix}/{value}/{filename}"
+    if module_digest is None:
+        raise ValueError("Cross-version Maven artifact lacks module checksum evidence")
+    body = registry.fetch(f"{prefix}/{value}/{name}-{value}.module")[0]
+    if registry.digest("sha256:" + hashlib.sha256(body).hexdigest()) != module_digest:
+        raise ValueError("Maven variant module metadata checksum changed")
+    document = data.table(json.loads(body), "Maven module metadata")
+    component = data.table(document.get("component"), "Maven module component")
+    group, name = package.split(":")
+    if document.get("formatVersion") not in ("1.0", "1.1") or any(
+        component.get(key) != expected
+        for key, expected in (("group", group), ("module", name), ("version", value))
+    ):
+        raise ValueError("Maven variant module identity disagrees with its component")
+    locations = set()
+    for variant in data.array(document.get("variants"), "Maven variants"):
+        for raw_file in data.array(
+            data.table(variant, "Maven variant").get("files", []), "Maven variant files"
+        ):
+            file = data.table(raw_file, "Maven variant file")
+            if file.get("name") == filename:
+                locations.add(data.text(file.get("url"), "Maven variant URL"))
+    if len(locations) != 1:
+        raise ValueError("Maven variant artifact location is absent or ambiguous")
+    location = locations.pop()
+    parts = location.split("/")
+    if (
+        len(parts) != 3
+        or parts[0] != ".."
+        or parts[2] != filename
+        or registry.lock_version("maven", parts[1]) is None
+    ):
+        raise ValueError("Maven variant URL escapes its official package scope")
+    actual = parts[1]
+    if not filename.startswith((f"{name}-{actual}.", f"{name}-{actual}-")):
+        raise ValueError("Maven variant filename disagrees with its artifact version")
+    return actual, f"{prefix}/{actual}/{filename}"
 
 
 def local_gradle_projects(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
@@ -625,12 +667,24 @@ def identities(root: Path, spec: Mapping[str, object]) -> set[Identity]:
                 )
             value = element.get("version", "")
             repository = maven_repository(spec, package)
-            prefix = registry.maven_prefix(package, repository)
+            registry.maven_prefix(package, repository)
             if registry.lock_version("maven", value) is None:
                 raise ValueError("Unsupported Maven verification version")
             artifacts = element.findall(ns + "artifact")
             if not artifacts:
                 raise ValueError("Maven component lacks artifact checksums")
+            module_name = f"{element.get('name')}-{value}.module"
+            module_checksums = [
+                sha.get("value", "")
+                for artifact in artifacts
+                if artifact.get("name") == module_name
+                for sha in artifact.findall(ns + "sha256")
+            ]
+            module_digest = (
+                registry.digest("sha256:" + module_checksums[0])
+                if len(module_checksums) == 1
+                else None
+            )
             for artifact in artifacts:
                 filename = artifact.get("name", "")
                 if not re.fullmatch(r"[A-Za-z0-9_.+-]+", filename):
@@ -640,7 +694,9 @@ def identities(root: Path, spec: Mapping[str, object]) -> set[Identity]:
                     raise ValueError(
                         "Maven artifact requires exactly one SHA256 identity"
                     )
-                url = f"{prefix}/{value}/{filename}"
+                _, url = maven_artifact_location(
+                    package, value, filename, repository, module_digest
+                )
                 if url in seen:
                     raise ValueError("Duplicate Maven verification artifact")
                 seen.add(url)
@@ -705,10 +761,24 @@ def evidence(
                 if locked != value:
                     continue
                 repository = maven_source(url)
-                artifact = registry.maven_artifact(
-                    package, value, url.rsplit("/", 1)[1], repository
+                filename = url.rsplit("/", 1)[1]
+                module_name = f"{package.split(':')[1]}-{value}.module"
+                module_digests = [
+                    item[4]
+                    for item in identities
+                    if item[2] == value and item[3].rsplit("/", 1)[1] == module_name
+                ]
+                actual, expected_url = maven_artifact_location(
+                    package,
+                    value,
+                    filename,
+                    repository,
+                    module_digests[0] if len(module_digests) == 1 else None,
                 )
-                if artifact.url != url:
+                artifact = registry.maven_artifact(
+                    package, actual, filename, repository
+                )
+                if artifact.url != url or expected_url != url:
                     raise ValueError(
                         "Maven lock source differs from its official evidence"
                     )

@@ -798,10 +798,19 @@ def audit_identities(
     """Check actual immutable artifacts; only the observed baseline is age-exempt."""
     current = identity_inventory(current)
     before = identity_inventory(before)
+    maven_baseline = {item[:4]: item[4] for item in before if item[0] == "maven"}
     cutoff = now - timedelta(days=registry.minimum_age(policy))
     evidence: dict[tuple[str, str], tuple[list[registry.Release], set[str]]] = {}
     for identity in sorted(current):
         provider, package, value, url, digest = identity
+        if (
+            provider == "maven"
+            and identity[:4] in maven_baseline
+            and digest != maven_baseline[identity[:4]]
+        ):
+            raise ValueError(
+                "An unchanged Maven artifact identity changed its checksum"
+            )
         if provider == "swift":
             import swift_sources
 

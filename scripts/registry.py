@@ -888,6 +888,12 @@ def go_artifacts(package: str, value: str) -> tuple[Artifact, ...]:
     return tuple(result.values())
 
 
+def google_maven_group(group: str) -> bool:
+    return group in {"com.android", "com.google.testing.platform"} or group.startswith(
+        ("androidx.", "com.android.")
+    )
+
+
 def maven_prefix(package: str, repository: str = "central") -> str:
     if not isinstance(package, str) or not re.fullmatch(
         r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*:[A-Za-z0-9_.-]+", package
@@ -902,7 +908,7 @@ def maven_prefix(package: str, repository: str = "central") -> str:
         "plugins": "https://plugins.gradle.org/m2",
     }
     if repository not in bases or (
-        repository == "google" and not group.startswith(("androidx.", "com.android."))
+        repository == "google" and not google_maven_group(group)
     ):
         raise ValueError("Unsupported Maven repository or group scope")
     if repository == "plugins" and not name.endswith(
