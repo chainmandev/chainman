@@ -538,6 +538,14 @@ def choose(
     )
     if pin.get("pub_override"):
         return chosen  # An override is a constraint, not an installed-version template.
+    if provider == "maven":
+        current = registry.lock_version("maven", requirement)
+        if current is not None:
+            selected = registry.version("maven", chosen.version)
+            assert selected is not None  # Selection admitted a stable Maven release.
+            if selected < current:
+                return None
+        return chosen
     lower = re.search(
         r"(?<![\w.])v?(\d+(?:\.\d+){1,3}(?:-[A-Za-z0-9.]+)?)", requirement
     )

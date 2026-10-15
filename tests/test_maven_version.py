@@ -11,9 +11,35 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from maven_version import MavenVersion
 import registry
 import updates
+import ecosystem_updates
 
 
 class MavenVersionTests(unittest.TestCase):
+    def test_native_selector_uses_maven_order_for_qualified_literal_pins(self):
+        now = datetime(2026, 8, 1, tzinfo=timezone.utc)
+        releases = [
+            registry.Release(v, now - timedelta(days=40))
+            for v in ("33.4.7-jre", "33.4.8-jre", "33.5.0-jre", "34.0.0-jre")
+        ]
+        pin = {"provider": "maven", "name": "com.example:library", "bound": ">=33,<34"}
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch("ecosystem_updates.old_requirement", return_value="33.4.8-jre"),
+            patch("cargo_sources.read", return_value={}),
+            patch("swift_sources.read", return_value={}),
+            patch.object(registry, "maven_releases", return_value=releases),
+        ):
+            chosen = ecosystem_updates.choose(
+                Path(temporary), pin, {"mode": "compatible"}, {}, now
+            )
+            self.assertEqual(chosen.version, "33.5.0-jre")
+            pin["bound"] = "<33.4.8"
+            self.assertIsNone(
+                ecosystem_updates.choose(
+                    Path(temporary), pin, {"mode": "compatible"}, {}, now
+                )
+            )
+
     def test_maven_qualifier_and_nested_numeric_precedence(self):
         ordered = [
             "1.0-alpha1",
