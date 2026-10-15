@@ -420,10 +420,6 @@ def old_requirement(root: Path, pin: Config) -> str:
 
 
 def accepts(provider: str, version: str, requirement: str) -> bool:
-    if provider in {"pypi", "maven"}:
-        if provider == "maven" and re.fullmatch(r"\d+(?:\.\d+)*", requirement):
-            requirement = "==" + requirement
-        return registry.compatible(provider, version, requirement)
     if provider == "crates" and re.fullmatch(r"\d+(?:\.\d+){0,2}", requirement):
         requirement = "^" + requirement
     return registry.compatible(provider, version, requirement)

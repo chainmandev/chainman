@@ -475,6 +475,16 @@ that check without regenerating locks. Corresponding external lock or verificati
 is not a publication-age exemption for artifacts from Maven Local or a registry.
 The project owns its actual `includeBuild`/dependency-substitution configuration.
 
+Maven versions use Maven ComparableVersion ordering, including qualified release
+and build forms such as `.Final`, `-jre`, numeric AGP builds and Robolectric SDK
+builds. Coordinates, URLs and filenames always retain the exact original version;
+precedence equality does not equate their artifact identities. Comparison bounds
+retain `>=`, `<`, `==`, `!=`, numeric wildcards and `~=` syntax; `===` and a bare
+qualified version require the exact version string. Unknown qualifiers and
+prereleases are excluded from automatic selection. Their exact unchanged baseline
+artifacts can remain, with registry/checksum evidence and security constraints
+still enforced. New or changed such artifacts require explicit project migration.
+
 JavaScript discovery includes workspaces, catalogs, aliases, scoped overrides and
 actual resolved peer relationships. Documented package/catalog/prefix constraints
 remain effective during bounded resolution retries. Version-scoped overrides retain

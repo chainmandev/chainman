@@ -583,7 +583,10 @@ def identities(root: Path, spec: Mapping[str, object]) -> set[Identity]:
                 if component == "empty":
                     continue
                 fields = component.split(":")
-                if len(fields) != 3 or registry.version("maven", fields[2]) is None:
+                if (
+                    len(fields) != 3
+                    or registry.lock_version("maven", fields[2]) is None
+                ):
                     raise ValueError("Unsupported Gradle lock coordinates")
                 package = ":".join(fields[:2])
                 if package in local:
@@ -623,7 +626,7 @@ def identities(root: Path, spec: Mapping[str, object]) -> set[Identity]:
             value = element.get("version", "")
             repository = maven_repository(spec, package)
             prefix = registry.maven_prefix(package, repository)
-            if registry.version("maven", value) is None:
+            if registry.lock_version("maven", value) is None:
                 raise ValueError("Unsupported Maven verification version")
             artifacts = element.findall(ns + "artifact")
             if not artifacts:

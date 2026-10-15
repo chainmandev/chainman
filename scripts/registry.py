@@ -30,6 +30,8 @@ from packaging.utils import canonicalize_name
 from semantic_version import NpmSpec, Version as Semver
 import adapter_data
 from adapter_data import array, table, text
+import maven_version
+from maven_version import MavenVersion
 
 MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 MAX_RETRY_WAIT_SECONDS = 60
@@ -412,7 +414,7 @@ class VersionRank(Protocol):
 type SemanticProvider = Literal[
     "npm", "go", "github", "docker", "crates", "pub", "swift"
 ]
-type PythonProvider = Literal["pypi", "maven"]
+type PythonProvider = Literal["pypi"]
 
 
 @overload
@@ -420,16 +422,14 @@ def version(provider: SemanticProvider, text: str) -> Semver | None: ...
 @overload
 def version(provider: PythonProvider, text: str) -> PythonVersion | None: ...
 @overload
+def version(provider: Literal["maven"], text: str) -> MavenVersion | None: ...
+@overload
 def version(provider: str, text: str) -> VersionRank | None: ...
 def version(provider: str, text: str) -> VersionRank | None:
     try:
         if provider == "maven":
-            # Maven Central also publishes stable two- and four-component versions.
-            return (
-                PythonVersion(text)
-                if re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", text)
-                else None
-            )
+            maven = MavenVersion(text)
+            return maven if maven.stable else None
         if provider == "pypi":
             result = PythonVersion(text)
             if result.is_prerelease or result.is_devrelease:
@@ -459,7 +459,9 @@ def compatible(
         return all(candidate in NpmSpec(bound) for bound in constraint)
     if not constraint:
         return True
-    if provider in ("pypi", "maven"):
+    if provider == "maven":
+        return maven_version.compatible(value, constraint)
+    if provider == "pypi":
         return PythonVersion(value) in SpecifierSet(constraint)
     return Semver(value.removeprefix("v")) in NpmSpec(constraint)
 
@@ -469,9 +471,16 @@ def lock_version(provider: SemanticProvider, value: str) -> Semver | None: ...
 @overload
 def lock_version(provider: PythonProvider, value: str) -> PythonVersion | None: ...
 @overload
+def lock_version(provider: Literal["maven"], value: str) -> MavenVersion | None: ...
+@overload
 def lock_version(provider: str, value: str) -> VersionRank | None: ...
 def lock_version(provider: str, value: str) -> VersionRank | None:
-    """Parse existing npm prereleases without making them selectable releases."""
+    """Parse locked identities without making prereleases selectable releases."""
+    if provider == "maven":
+        try:
+            return MavenVersion(value)
+        except ValueError:
+            return None
     if provider != "npm":
         return version(provider, value)
     try:
@@ -512,6 +521,10 @@ def minimum_safe(
 def minimum_safe(
     provider: PythonProvider, policy: Mapping[str, object], name: str
 ) -> PythonVersion | None: ...
+@overload
+def minimum_safe(
+    provider: Literal["maven"], policy: Mapping[str, object], name: str
+) -> MavenVersion | None: ...
 @overload
 def minimum_safe(
     provider: str, policy: Mapping[str, object], name: str
@@ -920,7 +933,7 @@ def maven_content_digest(url: str, modified: str) -> str:
 def maven_artifact(
     package: str, value: str, filename: str, repository: str = "central"
 ) -> Artifact:
-    if version("maven", value) is None or not re.fullmatch(
+    if lock_version("maven", value) is None or not re.fullmatch(
         r"[A-Za-z0-9_.+-]+", filename
     ):
         raise ValueError("Unsupported Maven artifact identity")

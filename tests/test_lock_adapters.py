@@ -477,6 +477,27 @@ class NativeLockTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing"):
             updates.lock_identities(self.root, ["maven"])
 
+    def test_qualified_maven_locks_preserve_exact_artifact_identities(self):
+        paths = list((self.root / "maven").rglob("*.lockfile")) + [
+            self.root / "maven/gradle/verification-metadata.xml"
+        ]
+        originals = {p: p.read_text() for p in paths}
+        for value in (
+            "33.4.8-jre",
+            "4.1.110.Final",
+            "8.10.1-12782657",
+            "9-robolectric-4913185-2-i7",
+            "1.0.0-beta10",
+        ):
+            with self.subTest(value=value):
+                for path, body in originals.items():
+                    path.write_text(body.replace("0.9.4.2", value))
+                identities = updates.lock_identities(self.root, ["maven"])
+                self.assertEqual({x.version for x in identities}, {value})
+                self.assertTrue(
+                    all(f"/{value}/skiko-awt-{value}.jar" in x.url for x in identities)
+                )
+
     def test_maven_missing_or_multiple_checksum_and_source_traversal_fail(self):
         path = self.root / "maven/gradle/verification-metadata.xml"
         original = path.read_text()

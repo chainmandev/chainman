@@ -20,6 +20,96 @@ import toolchain
     os.environ.get("CHAINMAN_TEST_GRADLE") == "1", "requires the pinned Gradle profile"
 )
 class GradleResolutionTests(unittest.TestCase):
+    def test_qualified_artifacts_survive_real_resolution_and_strict_inspection(self):
+        versions = [
+            "33.4.8-jre",
+            "4.1.110.Final",
+            "8.10.1-12782657",
+            "9-robolectric-4913185-2-i7",
+        ]
+        with tempfile.TemporaryDirectory(
+            prefix="gradle qualified artifacts "
+        ) as temporary:
+            root = Path(temporary)
+            repository = root / "repository"
+            for i, version in enumerate(versions):
+                directory = repository / "example" / f"library{i}" / version
+                directory.mkdir(parents=True)
+                (directory / f"library{i}-{version}.pom").write_text(
+                    f"<project><modelVersion>4.0.0</modelVersion><groupId>example</groupId><artifactId>library{i}</artifactId><version>{version}</version></project>"
+                )
+                with zipfile.ZipFile(
+                    directory / f"library{i}-{version}.jar", "w"
+                ) as jar:
+                    jar.writestr("identity.txt", version)
+            (root / "settings.gradle").write_text("rootProject.name='qualified'\n")
+            (root / "build.gradle").write_text(
+                "repositories { maven { url = uri('"
+                + repository.as_posix()
+                + "') } }\n"
+                "configurations { inventory { canBeResolved = true; canBeConsumed = false } }\n"
+                "dependencies {\n"
+                + "\n".join(
+                    f"inventory 'example:library{i}:{v}'"
+                    for i, v in enumerate(versions)
+                )
+                + "\n}\n"
+            )
+            env = dict(os.environ, GRADLE_USER_HOME=str(root / "gradle-home"))
+            command = [
+                shutil.which("gradle"),
+                "--offline",
+                "--no-daemon",
+                "--max-workers=2",
+                "--console=plain",
+                "--init-script",
+                str(
+                    Path(__file__).resolve().parents[1]
+                    / "scripts/gradle-resolve.init.gradle"
+                ),
+            ]
+
+            def run(*args):
+                return subprocess.run(
+                    command + list(args),
+                    cwd=root,
+                    env=env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=120,
+                )
+
+            resolved = run(
+                "chainmanResolveAll",
+                "--write-locks",
+                "--write-verification-metadata",
+                "sha256",
+            )
+            self.assertEqual(resolved.returncode, 0, resolved.stdout)
+            spec = {"ecosystem": "maven", "directory": "."}
+            identities = lock_adapters.identities(root, spec)
+            self.assertEqual({item.version for item in identities}, set(versions))
+            paths = [
+                root / "gradle.lockfile",
+                root / "gradle/verification-metadata.xml",
+            ]
+            original = {p: p.read_bytes() for p in paths}
+            checked = run("--dependency-verification", "strict", "chainmanInspect")
+            self.assertEqual(checked.returncode, 0, checked.stdout)
+            self.assertEqual({p: p.read_bytes() for p in paths}, original)
+            artifact = (
+                repository
+                / "example/library0"
+                / versions[0]
+                / f"library0-{versions[0]}.jar"
+            )
+            artifact.write_bytes(b"changed bytes under the same qualified identity")
+            rejected = run("--dependency-verification", "strict", "chainmanInspect")
+            self.assertNotEqual(rejected.returncode, 0, rejected.stdout)
+            self.assertIn("Dependency verification failed", rejected.stdout)
+            self.assertEqual({p: p.read_bytes() for p in paths}, original)
+
     def test_optional_cinterop_variants_retain_required_resolution_integrity(self):
         with tempfile.TemporaryDirectory(
             prefix="gradle optional cinterop "

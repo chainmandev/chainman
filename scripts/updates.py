@@ -813,12 +813,17 @@ def audit_identities(
             javascript_sources.audit_identity(identity, before, policy, now)
             continue
         if (
-            provider == "npm"
+            provider in ("npm", "maven")
             and registry.version(provider, value) is None
             and identity not in before
         ):
+            kind = (
+                "prerelease"
+                if provider == "npm"
+                else "prerelease or unrecognized release qualifier"
+            )
             raise ValueError(
-                "A new or changed npm prerelease identity requires explicit project migration"
+                f"A new or changed {provider} {kind} identity requires explicit project migration"
             )
         safe = registry.minimum_safe(provider, policy, package)
         locked_rank = registry.lock_version(provider, value)
