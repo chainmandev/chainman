@@ -2273,8 +2273,25 @@ def export(root, arguments):
                 self.assertNotEqual(rejected.returncode, 0)
                 self.assertFalse((self.root / "host-tool-executed").exists())
         (tools / "podman").unlink()
+        # The runner may have its own Podman. Make this absence case explicit
+        # while keeping the fake Docker available to detect an invalid fallback.
+        missing_path = os.pathsep.join(
+            directory
+            for directory in environment["PATH"].split(os.pathsep)
+            if shutil.which("podman", path=directory) is None
+        )
+        self.assertIsNone(shutil.which("podman", path=missing_path))
+        self.assertEqual(
+            shutil.which("docker", path=missing_path), str(tools / "docker")
+        )
         self.run_bootstrap(
-            "run", "check", env=dict(environment, CHAINMAN_CONTAINER_ENGINE="podman")
+            "run",
+            "check",
+            env=dict(
+                environment,
+                PATH=missing_path,
+                CHAINMAN_CONTAINER_ENGINE="podman",
+            ),
         )
         observed = json.loads((self.root / "engine-observation.json").read_text())
         self.assertEqual(
