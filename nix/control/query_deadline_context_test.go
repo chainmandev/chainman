@@ -26,6 +26,9 @@ func TestQueryDeadlineContextAndExitClassification(t *testing.T) {
 	if err := atomic(filepath.Join(dir, "plan.json"), plan); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := socketPath(plan); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(dir, "task-cancelled")
 	task := exec.Command("sh", "-c", "trap 'echo cancelled > \"$1\"; exit 0' TERM; while :; do sleep 0.1; done", "fixture", marker)
 	if err := task.Start(); err != nil {

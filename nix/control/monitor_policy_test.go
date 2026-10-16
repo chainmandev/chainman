@@ -88,6 +88,9 @@ func TestMonitorActualServiceOutcomesRemainImmediate(t *testing.T) {
 				t.Fatal(err)
 			}
 			p := Plan{Root: dir, State: dir, Backend: backend, Services: map[string]Service{"healthy": {}}, Requested: []string{"healthy"}}
+			if _, err := socketPath(p); err != nil {
+				t.Fatal(err)
+			}
 			err := serviceOutcome(p, nil)
 			if status == "Running" {
 				if err != nil {
