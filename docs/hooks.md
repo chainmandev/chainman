@@ -84,6 +84,20 @@ owned bridges and their worktree setting. An unrelated common hook setting is
 preserved. Git, just and the chosen Nix/container engine must be on the Git
 client's PATH, including for graphical clients.
 
+A `core.hooksPath` setting can remain after its hook directory is removed. The
+conflict diagnostic reports a missing resolved path, but a missing directory alone
+does not establish that the setting is obsolete. Inspect its scope and source:
+
+```sh
+git config --show-origin --show-scope --get-all core.hooksPath
+```
+
+If the setting is obsolete, remove it from the reported configuration source,
+then retry `just setup` or `just hooks install`. Choose the configuration source
+deliberately: a worktree setting, shared repository setting, global setting, or
+included file can each select a hook path. Chainman preserves the existing
+configuration until you resolve the conflict.
+
 Ordinary checkouts use a relative hook path, so moving the checkout preserves its
 hooks. Linked worktrees use their Git administration directory; repair Git's
 worktree links after relocating the owning repository, then run `just hooks install`.

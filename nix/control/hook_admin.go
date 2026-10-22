@@ -99,7 +99,12 @@ func (p HookPlan) hookCheck() error {
 		}
 	}
 	if selected != "" && hookAbsolute(p.Root, selected) != target && !(intact && selected == ownership.Setting) {
-		return fmt.Errorf("Git hooks are managed at %q; resolve core.hooksPath before just hooks install; existing hooks were preserved", selected)
+		message := fmt.Sprintf("Git hooks are configured to be managed at %q via core.hooksPath.", selected)
+		resolved := hookAbsolute(p.Root, selected)
+		if _, err := os.Stat(resolved); os.IsNotExist(err) {
+			message += fmt.Sprintf("\nThe resolved path %q does not exist; Chainman cannot determine whether the setting is obsolete.", resolved)
+		}
+		return fmt.Errorf("%s\nInspect the setting's scope and source with:\n  git config --show-origin --show-scope --get-all core.hooksPath\nIf the setting is obsolete, remove it from the reported configuration source, then retry just setup or just hooks install. Existing hooks and configuration were preserved.", message)
 	}
 	common, e := p.query("rev-parse", "--path-format=absolute", "--git-common-dir")
 	if e != nil {
