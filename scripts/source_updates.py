@@ -897,6 +897,14 @@ def select_oci(
     if registry.stable_version("docker", chosen.version) < registry.stable_version(
         "docker", parsed[0]
     ):
+        if not registry.meets_safe_floor(
+            "docker", policy, repository, parsed[0]
+        ) or not registry.compatible(
+            "docker", parsed[0], registry.constraint("docker", policy, repository)
+        ):
+            raise ValueError(
+                "Retained OCI image violates its security floor or constraint"
+            )
         return result
     selected_tag, digest = chosen.identity.rsplit("@", 1)
     result["tag"] = selected_tag

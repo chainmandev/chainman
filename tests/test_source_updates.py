@@ -1001,6 +1001,35 @@ class OCITests(Fixture):
             selected, {**self.entry, "reason": "retained newer immutable image"}
         )
 
+    def test_scoped_floor_and_constraint_apply_to_newer_retained_image(self):
+        self.candidates([registry.Release("7.2.0-alpine", OLD, DB)])
+        current = {**self.entry, "tag": "8.1.0-alpine"}
+        exception = {
+            "package": "docker:sample/tool",
+            "version": "8.2.0",
+            "minimum_safe": "8.2.0",
+            "applies_to": ">=8.0.0 <9.0.0",
+            "reason": "Reviewed fix",
+            "advisory": "https://example.org/advisories/fix",
+            "expires": (NOW + timedelta(days=7)).isoformat(),
+        }
+        for policy in (
+            {"exceptions": [exception]},
+            {
+                "constraints": {
+                    "docker:sample/tool": {
+                        "range": "<8.0.0",
+                        "reason": "Supported line",
+                    }
+                }
+            },
+        ):
+            with (
+                self.subTest(policy=policy),
+                self.assertRaisesRegex(ValueError, "security floor or constraint"),
+            ):
+                sources.select_oci(current, self.spec, policy, NOW)
+
 
 class NixEvidenceTests(Fixture):
     def test_non_object_and_missing_hash_evidence_fail_explicitly(self):
