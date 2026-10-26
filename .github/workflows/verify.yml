@@ -36,7 +36,7 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 180}
+          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 360}
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
           - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
           - {runner: macos-15, mode: host-nix, module: core, engine: docker}
@@ -86,7 +86,14 @@ jobs:
       # and check those clients before bounded bootstrap command assertions.
       - name: Qualify effective runtime trust stores
         if: matrix.mode == 'host-nix' && matrix.module == 'core'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- trust-test
+        env:
+          CHAINMAN_SERIAL_TOOL_BUILDS: ${{ matrix.runner == 'macos-15-intel' }}
+        run: |
+          if [ "$CHAINMAN_SERIAL_TOOL_BUILDS" = true ]; then
+            NIX_CONFIG="$(printf '%s\nmax-jobs = 1\n' "${NIX_CONFIG:-}")"
+            export NIX_CONFIG
+          fi
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- trust-test
       - name: Verify using the local command
         run: |
           if [ "$TOOLCHAIN_MODE" = container-nix ]; then

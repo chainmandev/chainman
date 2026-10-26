@@ -24,8 +24,9 @@ realizes the pinned Node and uv clients and checks their actual trust stores bef
 bounded bootstrap commands use them. Intel macOS may compile reviewed versions
 from source when the Nix binary cache has no matching build; that preparation must
 finish before the scanner's 180-second command budget starts. For a cold developer
-store, use `just trust-test verify` for the same ordering. Intel runs first in the
-serial matrix to expose compatibility-build failures early; all fourteen lanes
+store, use `just trust-test verify` for the same ordering. CI serializes these cold
+builds on Intel to avoid concurrent Node and uv compiler workloads. Intel runs first
+in the serial matrix to expose compatibility-build failures early; all fourteen lanes
 remain required. Bootstrap command deadlines and scanner assertions are unchanged.
 
 ## Bootstrap and source identity

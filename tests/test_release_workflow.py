@@ -20,13 +20,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for lane in lanes:
             identity = (lane["runner"], lane["mode"], lane["module"], lane["engine"])
             expected = (
-                180
+                360
                 if identity == ("macos-15-intel", "host-nix", "core", "docker")
                 else 60
             )
             with self.subTest(lane=identity):
                 self.assertEqual(lane.get("timeout_minutes", 60), expected)
-            if expected == 180:
+            if expected == 360:
                 extended.append(identity)
         self.assertEqual(len(extended), 1)
 

@@ -39,11 +39,12 @@ lanes before publishing. It discovers the default branch at publication, require
 its expected old SHA and fast-forward ancestry, and uses an exact lease to reject
 concurrent movement. It then proves fresh public host/container initialization.
 
-The macOS Intel core lane has a 180-minute job limit: its cold bootstrap and source
-suite exceeded the previous 90-minute limit before reaching the starter and native
-suites. The other 13 lanes
-retain their 60-minute limits. This allowance does not skip tests or change the
-requirement that every lane succeeds before publication.
+The macOS Intel core lane has a 360-minute job limit for cold source builds of the
+reviewed Node and uv clients, followed by the complete source, starter, and native
+suites. Its trust preflight serializes those builds before bounded bootstrap
+commands run. The other 13 lanes retain their 60-minute limits. Per-command test
+deadlines and the requirement that every lane succeeds before publication remain
+unchanged.
 
 Repository Actions must permit the publication job's `contents: write`. Branch
 protection must allow that qualified workflow to advance the default branch. If
