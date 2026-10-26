@@ -865,6 +865,11 @@ class GoReplacementTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="go-replacement-contract-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name).resolve()
+        # Go's package inspection discovers VCS roots independently of Git's
+        # environment. Bound that search to the fixture, even when a caller's
+        # temporary-directory ancestor contains an unrelated .git directory.
+        with updates.preview_git_environment():
+            subprocess.run(["git", "init", "-q", str(self.root)], check=True)
         self.write(
             "go/sub/go.mod",
             f"module example.test/local\n\ngo 1.24\nrequire {GO} v1.6.0\n",
