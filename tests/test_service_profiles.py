@@ -57,6 +57,7 @@ class ServiceProfileTests(unittest.TestCase):
                     "nix-command flakes",
                     "flake",
                     "lock",
+                    services.tc.nix_path_reference(environment, "").removesuffix("#"),
                 ],
                 cwd=environment,
                 env=env,
