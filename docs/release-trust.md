@@ -39,3 +39,21 @@ Git is the sole chainman installation identity. Hashes for Nix inputs, container
 images, native backends, and external dependency artifacts remain necessary and
 are verified by their existing owners. The Git pin identifies chainman; these
 additional hashes identify the separate tools and dependencies it operates.
+
+Managed shells use a reviewed NSS certificate bundle with the compromised
+eMudhra/emSign roots and Comodo AAA Services root excluded for TLS server trust.
+The standard PEM form removes distrusted roots instead of relying on
+OpenSSL-specific trust attributes. Python, uv, Node, curl, Git and Nix downloads
+receive explicit CA configuration; an empty CA directory prevents an ambient
+directory from augmenting it. Node uses OpenSSL's configured store; uv's explicit
+certificate paths replace its embedded or native store. The Intel macOS
+compatibility channel uses the reviewed current CA and uv package definitions.
+
+`just trust-test` checks actual Python roots, Node's embedded roots and effective
+configuration, and the fixed uv release. Root checks use DER SHA-256 fingerprints.
+The Linux and Darwin qualification lanes run this check, and bootstrap tests
+inspect the effective trust store after host and container handoff. The initial
+public Git acquisition and a caller-provided host Nix installation remain trust
+inputs managed by the host; chainman does not rewrite global host certificate
+configuration. See the [NixOS incident mitigation](https://github.com/NixOS/nixpkgs/issues/576485)
+and [uv certificate semantics](https://docs.astral.sh/uv/concepts/authentication/certificates/).

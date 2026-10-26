@@ -7,9 +7,28 @@
 # package = "npm:some-package"
 # version = "2.3.4"
 # minimum_safe = "2.3.4"
+# applies_to = ">=2.0.0 <3.0.0" # Optional; omit for package-wide protection.
 # reason = "A reviewed security fix is required before its maturity window ends."
 # advisory = "https://example.invalid/advisory"
 # expires = "2030-01-01T00:00:00Z"
+
+[[nix_exceptions]]
+directory = "nix"
+input = "nixpkgs"
+repository = "NixOS/nixpkgs"
+revision = "3ec636362e1816bc2f0888fa0fa2c69f1bc9e504"
+reason = "Reviewed Node 26.12.1, uv 0.13.4 and NSS 3.131.1 security refresh; require this fix or a mature descendant."
+advisory = "https://github.com/NixOS/nixpkgs/issues/576485"
+expires = "2026-11-22T16:35:39Z"
+
+[[nix_exceptions]]
+directory = "nix"
+input = "nixpkgs-darwin"
+repository = "NixOS/nixpkgs"
+revision = "d592aacecd3575d7e11de963d9b20dd2ef4db603"
+reason = "Reviewed Intel macOS Node security refresh; the runtime also supplies current CA and uv definitions from its primary input."
+advisory = "https://nodejs.org/en/blog/vulnerability/october-2026-security-releases"
+expires = "2026-11-23T09:56:24Z"
 
 [constraints."pypi:uv-build"]
 range = ">=0.12.3,<0.13"

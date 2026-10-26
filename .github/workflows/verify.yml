@@ -101,6 +101,9 @@ jobs:
       - name: Qualify native JavaScript update validation
         if: matrix.mode == 'host-nix' && matrix.module == 'javascript'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
+      - name: Qualify effective runtime trust stores
+        if: matrix.mode == 'host-nix' && matrix.module == 'core'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- trust-test
       - name: Qualify native service ownership and backend
         if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test

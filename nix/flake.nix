@@ -32,6 +32,21 @@
       devShells = each (
         pkgs:
         let
+          # The Intel macOS compatibility channel lags these security fixes.
+          # Reuse the reviewed package definitions with its supported stdenv.
+          uv =
+            if pkgs.lib.versionOlder pkgs.uv.version "0.13.4" then
+              pkgs.callPackage (nixpkgs + "/pkgs/by-name/uv/uv/package.nix") { }
+            else
+              pkgs.uv;
+          trustedCacert = pkgs.callPackage (nixpkgs + "/pkgs/by-name/ca/cacert/package.nix") {
+            # NSS 3.131.1 already removed the three affected emSign roots.
+            # Complete the NixOS CVE-2026-111943 mitigation with the remaining root.
+            blacklist = [
+              "Comodo AAA Services root"
+            ];
+          };
+          emptyCertDirectory = pkgs.runCommand "chainman-empty-ca-directory" { } "mkdir -p $out";
           pythonPackages = p: [
             p.packaging
             p.tomlkit
@@ -91,7 +106,7 @@
             findutils
             diffutils
             curl
-            cacert
+            trustedCacert
           ];
           updateBase = [ python ] ++ runtimeBase;
           base = [
@@ -123,6 +138,18 @@
                   export PATH="$CHAINMAN_RUNTIME_NIX_BIN:$PATH"
                 fi
                 export PYTHONDONTWRITEBYTECODE=1
+                # Use the same reviewed store across OpenSSL, embedded-bundle
+                # clients and bootstrap downloads, including Intel macOS.
+                # Standard PEM omits distrusted roots instead of relying on
+                # OpenSSL-specific rejection attributes that other clients ignore.
+                export SSL_CERT_FILE=${trustedCacert}/etc/ssl/certs/ca-no-trust-rules-bundle.crt
+                export SSL_CERT_DIR=${emptyCertDirectory}
+                export NIX_SSL_CERT_FILE="$SSL_CERT_FILE"
+                export CURL_CA_BUNDLE="$SSL_CERT_FILE"
+                export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+                export GIT_SSL_CAINFO="$SSL_CERT_FILE"
+                export UV_SYSTEM_CERTS=true
+                export NODE_OPTIONS="--use-openssl-ca ''${NODE_OPTIONS:-}"
                 export UV_PYTHON_DOWNLOADS=never
                 UV_PYTHON=$(command -v python3)
                 export UV_PYTHON
@@ -159,6 +186,7 @@
           updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ ] "";
           release = shellWith pkgs.mkShellNoCC (updateBase ++ [ pkgs.gh ]) "release" [ ] "";
           core = shell "core" [ ] "";
+          trust = shellWith pkgs.mkShellNoCC updateBase "trust" [ nodejs uv pkgs.openssl ] "";
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";
           rust = shell "rust" [
@@ -170,7 +198,7 @@
             pkgs.sccache
             pkgs.stdenv.cc
           ] "";
-          python = shell "python" [ pkgs.uv pkgs.ruff ] "";
+          python = shell "python" [ uv pkgs.ruff ] "";
           go = shell "go" [ pkgs.go_latest pkgs.stdenv.cc ] "";
           control = shell "control" [ pkgs.go_latest pkgs.stdenv.cc pkgs.lefthook ] "";
           flutter = shell "flutter" [ flutterPkgs.flutter ] "";

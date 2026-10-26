@@ -11,7 +11,7 @@ if [ "${1:-}" = --project-root ]; then
     root=$(CDPATH='' cd -P -- "$2" && pwd)
     shift 2
 fi
-case "$profile" in core | bootstrap | updates | release | javascript | rust | python | go | flutter | swift | compose | browser | control | hooks | format-text | format-rust) ;; *)
+case "$profile" in core | bootstrap | updates | release | trust | javascript | rust | python | go | flutter | swift | compose | browser | control | hooks | format-text | format-rust) ;; *)
     echo 'Unknown development profile.' >&2
     exit 2
     ;;

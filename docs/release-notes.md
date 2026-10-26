@@ -24,6 +24,13 @@ the dependency has disappeared. Cleanup retains the original policy as transacti
 authority and does not maintain a second inventory of historical security floors.
 See the [exception lifecycle](updates.md#temporary-security-exceptions).
 
+Security age policy supports version-scoped package floors and exact Nix and
+artifact approvals. Policy reports expose inherited and shadowed declarations and
+offer read-only evidence checks. Vulnerability report schema 2 fails incomplete or
+empty selections and requires exact reviewed versions for JavaScript advisory
+waivers. Upgrade the runtime before using these fields; migrate old package-wide
+waivers using the [audit guidance](recipes.md).
+
 `VERSION` is descriptive package metadata. Expect interface changes during alpha;
 review candidate changes and preserve each project's acceptance criteria.
 

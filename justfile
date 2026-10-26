@@ -103,15 +103,21 @@ control-cancellation-diagnostic:
     @./scripts/enter.sh control python3 -B scripts/control_cancellation_diagnostic.py
 
 javascript-test:
+    @./scripts/enter.sh javascript env CHAINMAN_TEST_TRUST_NODE=1 python3 -B -m unittest discover -s tests -p test_trust_stores.py -v
     @./scripts/enter.sh javascript env CHAINMAN_TEST_PNPM=1 python3 -B -m unittest discover -s tests -p 'test_javascript*.py' -v
     @./scripts/enter.sh javascript python3 -B -m unittest discover -s tests -p test_pnpm_runtime.py -v
 
 python-test:
+    @./scripts/enter.sh python env CHAINMAN_TEST_TRUST_UV=1 python3 -B -m unittest discover -s tests -p test_trust_stores.py -v
     @./scripts/enter.sh python env CHAINMAN_TEST_UV=1 python3 -B -m unittest discover -s tests -p test_python_native.py -v
 
 # Real pinned scanners in disposable fixtures; no application audit or policy waiver.
 audit-test:
     @./scripts/enter.sh core env CHAINMAN_TEST_AUDIT=1 python3 -B -m unittest discover -s tests -p test_audit_native.py -v
+
+# Actual CA bundles and embedded-client configuration on each qualified platform.
+trust-test:
+    @./scripts/enter.sh trust env CHAINMAN_TEST_TRUST_NODE=1 CHAINMAN_TEST_TRUST_UV=1 python3 -B -m unittest discover -s tests -p test_trust_stores.py -v
 
 rust-test:
     @./scripts/enter.sh rust env CHAINMAN_TEST_CARGO=1 python3 -B -m unittest discover -s tests -p test_cargo_native.py -v

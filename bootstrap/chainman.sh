@@ -845,7 +845,7 @@ if [ -n "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then
 fi
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/chainman-bootstrap.XXXXXXXX")
 lifetime_directory=$temporary
-image=docker.io/nixos/nix:2.33.3@sha256:c2f7db70a432d00c6759af108ff4fbc74a4c00e2d4517162e72338e7b9449c1f
+image=docker.io/nixos/nix:2.35.4@sha256:f159a58f390677f41e8e900a74b6e2f9c7f27b364122ae6acf7a652ce6c551c0
 uid=$(id -u)
 gid=$(id -g)
 container_uid=$uid

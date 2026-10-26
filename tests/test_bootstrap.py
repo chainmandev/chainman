@@ -50,6 +50,33 @@ def run_captured(command, *, env, cwd=None, timeout=180):
 
 @unittest.skipUnless(NIX, "real Nix is required; no host-language bootstrap fallback")
 class BootstrapTests(unittest.TestCase):
+    def test_effective_bootstrap_tls_store_excludes_compromised_roots(self):
+        from test_trust_stores import BLOCKED
+
+        self.use_real_runtime()
+        program = (
+            "import hashlib,os,ssl; "
+            "roots={hashlib.sha256(c).hexdigest() for c in ssl.create_default_context().get_ca_certs(binary_form=True)}; "
+            f"assert len(roots)>100 and not roots.intersection({sorted(BLOCKED)!r}); "
+            "assert os.environ['SSL_CERT_FILE']==os.environ['NIX_SSL_CERT_FILE']==os.environ['CURL_CA_BUNDLE']==os.environ['GIT_SSL_CAINFO']; "
+            "print('verified TLS trust')"
+        )
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[profiles.host]\nruntime_profile="bootstrap"\n[tasks.check]\ncommands='
+            + json.dumps([["python3", "-c", program]])
+            + "\n"
+        )
+        modes = ["host-nix"]
+        if os.environ.get("CHAINMAN_TEST_CONTAINER") in {"docker", "podman"}:
+            modes.append("container-nix")
+        for mode in modes:
+            with self.subTest(mode=mode):
+                result = self.run_bootstrap(
+                    "run", "check", env=dict(self.env, CHAINMAN_MODE=mode), timeout=300
+                )
+                self.assertEqual(result.stdout.strip(), "verified TLS trust")
+
     @classmethod
     def setUpClass(cls):
         cls.shared = tempfile.TemporaryDirectory(prefix="chainman bootstrap assets ")
