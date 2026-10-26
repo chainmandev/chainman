@@ -122,6 +122,9 @@ trust-test:
 rust-test:
     @./scripts/enter.sh rust env CHAINMAN_TEST_CARGO=1 python3 -B -m unittest discover -s tests -p test_cargo_native.py -v
 
+pub-test:
+    @./scripts/enter.sh flutter env CHAINMAN_TEST_PUB=1 python3 -B -m unittest discover -s tests -p test_pub_sources.py -v
+
 swift-test:
     @./scripts/enter.sh swift env CHAINMAN_TEST_SWIFT=1 python3 -B -m unittest discover -s tests -p test_swift_native.py -v
     @./scripts/enter.sh swift env CHAINMAN_TEST_SWIFT=1 python3 -B -m unittest discover -s tests -p test_swift_sources.py -v

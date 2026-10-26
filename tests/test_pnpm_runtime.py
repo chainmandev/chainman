@@ -176,11 +176,19 @@ commands=[["node","-e","require('fs').writeFileSync('ran','yes')"]]
             prior_modules = modules.read_bytes()
             # Migrate an existing global layout through explicit installation,
             # with captured stdio and no terminal or blanket CI environment.
+            version = run("--version")
+            self.assertEqual(version.returncode, 0, version.stdout + version.stderr)
+            major = int(version.stdout.strip().split(".")[0])
             refused = run("install", "--offline")
-            self.assertNotEqual(refused.returncode, 0)
-            self.assertIn(
-                "ABORTED_REMOVE_MODULES_DIR_NO_TTY", refused.stdout + refused.stderr
-            )
+            if major >= 12:
+                # pnpm 12 removed the purge prompt for explicit installs. The
+                # no-install task and stale-setup assertions below still apply.
+                self.assertEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+            else:
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn(
+                    "ABORTED_REMOVE_MODULES_DIR_NO_TTY", refused.stdout + refused.stderr
+                )
             installed = run(
                 "install",
                 "--offline",

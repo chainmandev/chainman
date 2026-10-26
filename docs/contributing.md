@@ -32,6 +32,7 @@ just javascript-test
 just python-test
 just rust-test
 just swift-test
+just pub-test
 just gradle-test
 just module go verify
 ```

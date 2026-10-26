@@ -12,7 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
 
@@ -20,6 +20,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import javascript_updates as js
+import dependency_audit
 import registry
 
 
@@ -46,10 +47,21 @@ class NativeJavaScriptTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
         self.metadata = {}
+        self.advisories = {}
         self.requests = []
         fixture = self
 
         class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                fixture.requests.append(self.path)
+                self.send_response(
+                    200 if self.path.endswith("/advisories/bulk") else 404
+                )
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(fixture.advisories).encode())
+
             def do_GET(self):
                 name = unquote(urlsplit(self.path).path.lstrip("/"))
                 fixture.requests.append(name)
@@ -175,6 +187,63 @@ class NativeJavaScriptTests(unittest.TestCase):
                 result = self.native(manager, "config", "get", key)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.strip(), str(expected))
+
+    def test_native_audit_preserves_versions_and_scopes_reviewed_waiver(self):
+        self.add_release("neutral-leaf", "3.2.1")
+        self.add_release("neutral-leaf", "4.2.1")
+        self.add_release("neutral-parent", "1.0.0", {"neutral-leaf": "4.2.1"})
+        self.advisories = {
+            "neutral-leaf": [
+                {
+                    "id": 123,
+                    "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc",
+                    "title": "Synthetic fixture advisory",
+                    "severity": "high",
+                    "vulnerable_versions": "<5.0.0",
+                }
+            ]
+        }
+        for manager in ("npm", "pnpm"):
+            with self.subTest(manager=manager):
+                self.configure(
+                    manager,
+                    dependencies={"neutral-parent": "1.0.0", "neutral-leaf": "3.2.1"},
+                )
+                locked = self.native(
+                    manager,
+                    "install",
+                    "--package-lock-only" if manager == "npm" else "--lockfile-only",
+                    "--ignore-scripts",
+                )
+                self.assertEqual(locked.returncode, 0, locked.stdout + locked.stderr)
+                scanned = self.native(manager, "audit", "--json")
+                self.assertEqual(scanned.returncode, 1, scanned.stdout + scanned.stderr)
+                findings = dependency_audit.javascript(
+                    json.loads(scanned.stdout),
+                    dependency_audit.npm_installed(self.root),
+                )
+                self.assertEqual(
+                    {f["version"] for f in findings if f["package"] == "neutral-leaf"},
+                    {"3.2.1", "4.2.1"},
+                )
+                self.assertTrue(all(f["paths"] for f in findings))
+                remaining = dependency_audit.evaluate(
+                    findings,
+                    [
+                        {
+                            "id": "123",
+                            "package": "neutral-leaf",
+                            "versions": ["3.2.1"],
+                            "reason": "Reviewed synthetic fixture occurrence",
+                            "review_after": "2030-01-01",
+                        }
+                    ],
+                    date(2026, 10, 26),
+                )
+                self.assertEqual(
+                    {f["version"] for f in remaining if f["package"] == "neutral-leaf"},
+                    {"4.2.1"},
+                )
 
     def test_real_resolvers_accept_a_registry_transitive_graph(self):
         for manager in ("npm", "pnpm"):
