@@ -164,11 +164,12 @@ def mature_artifacts(
     else:
         releases = registry.releases(provider, package)
     cutoff = now - timedelta(days=registry.minimum_age(policy))
-    safe = registry.minimum_safe(provider, policy, package)
     mature = True
     for item in identities:
         rank = registry.lock_version(provider, item.version)
-        if rank is None or (safe is not None and rank < safe):
+        if rank is None or not registry.meets_safe_floor(
+            provider, policy, package, item.version
+        ):
             raise ValueError(
                 "Exception retirement found an artifact below its security safe floor"
             )
@@ -198,6 +199,7 @@ def mature_scope(
     provider: str,
     package: str,
     now: datetime,
+    applies_to: str = "",
 ) -> bool:
     kind = spec["adapter"]
     if kind in {"javascript", "rust", "python", "flutter", "swift", "gradle", "go"}:
@@ -211,7 +213,15 @@ def mature_scope(
             else raw
         )
         return mature_artifacts(
-            root, {i for i in actual if i[:2] == (provider, package)}, policy, now
+            root,
+            {
+                i
+                for i in actual
+                if i[:2] == (provider, package)
+                and registry.compatible(provider, i.version, applies_to)
+            },
+            policy,
+            now,
         )
     # Source adapters have already bound their selected identity during audit.
     evidence: list[tuple[str, datetime]] = []
@@ -262,9 +272,13 @@ def mature_scope(
             evidence.append((parsed[0], max(r.published for r in matching)))
     else:
         return False
-    safe = registry.minimum_safe(provider, policy, package)
+    evidence = [
+        (version, published)
+        for version, published in evidence
+        if registry.compatible(provider, version, applies_to)
+    ]
     for version, published in evidence:
-        if safe is not None and registry.stable_version(provider, version) < safe:
+        if not registry.meets_safe_floor(provider, policy, package, version):
             raise ValueError(
                 "Exception retirement found a source below its security safe floor"
             )
@@ -286,7 +300,7 @@ def retire(
 ) -> list[str]:
     """Called after all selected audits, before the candidate is frozen and verified."""
     configured = ad.table(settings.get("adapters", {}), "Adapters")
-    proofs: dict[tuple[str, str, str], bool] = {}
+    proofs: dict[tuple[str, str, str, str], bool] = {}
     plans: list[tuple[Document, bytes, bytes]] = []
     retired: list[str] = []
     for document in originals:
@@ -322,10 +336,17 @@ def retire(
                             False  # A shadowed declaration has no audited authority.
                         )
                         break
-                    proof_key = (name, provider, package)
+                    proof_key = (name, provider, package, exception.applies_to)
                     if proof_key not in proofs:
                         proofs[proof_key] = mature_scope(
-                            root, spec, baselines[name], policy, provider, package, now
+                            root,
+                            spec,
+                            baselines[name],
+                            policy,
+                            provider,
+                            package,
+                            now,
+                            exception.applies_to,
                         )
                     ready = ready and proofs[proof_key]
                 if ready:

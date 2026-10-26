@@ -127,7 +127,7 @@ def admission(
 
     def admit(group: str, name: str, relative: str, requirement: str) -> None:
         binding = bindings[name]
-        safe = registry.minimum_safe("pub", policy, name)
+        safe = registry.minimum_safe("pub", policy, name, binding.version)
         if (
             not native.accepts("pub", binding.version, requirement)
             or not registry.compatible(

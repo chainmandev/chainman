@@ -142,6 +142,38 @@ checksum = "'''
         self.assertEqual(self.retire(), [])
         self.assertEqual(self.policy_path.read_bytes(), old)
 
+    def test_scoped_retirement_keeps_other_young_line(self):
+        original = self.policy_path.read_text()
+        original = original.replace(
+            'minimum_safe = "1.2.3"',
+            'minimum_safe = "1.2.3"\napplies_to = ">=1.0.0 <2.0.0"',
+        )
+        original = original[: original.index("[constraints.")]
+        original += """
+[[exceptions]]
+package = "crates:demo"
+version = "2.2.3"
+minimum_safe = "2.2.3"
+applies_to = ">=2.0.0 <3.0.0"
+reason = "Keep the second supported line safe."
+advisory = "https://example.invalid/advisory"
+expires = "2026-09-16T00:00:00Z"
+"""
+        self.policy_path.write_text(original)
+        self.settings = api.policy(self.root)
+        self.originals = subject.documents(self.root)
+        _, _, self.audited = api.plan_steps(self.root, self.settings, [])
+        self.releases.append(self.release("2.2.3", 1))
+        self.write_lock("1.2.3", "2.2.3")
+        self.assertEqual(self.retire(), ["crates:demo@1.2.3"])
+        self.assertEqual(
+            [
+                e["version"]
+                for e in tomllib.loads(self.policy_path.read_text())["exceptions"]
+            ],
+            ["2.2.3"],
+        )
+
     def test_cleanup_preserves_candidate_comments_and_other_formatting(self):
         self.policy_path.write_text(
             self.policy_path.read_text() + "\n# Reconciled project comment.\n"

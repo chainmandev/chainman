@@ -546,7 +546,7 @@ def audit_identity(
         "npm", version, registry.constraint("npm", policy, package)
     ):
         raise ValueError("Retained source violates package compatibility")
-    safe = registry.minimum_safe("npm", policy, package)
+    safe = registry.minimum_safe("npm", policy, package, version)
     if safe is not None and Version(version) < safe:
         raise ValueError("Retained source is below its declared security safe floor")
     return content

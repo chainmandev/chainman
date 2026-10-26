@@ -337,7 +337,7 @@ def eligible_tool(
     mature = registry.maturity(provider, releases, policy, package, now)
     exceptions = registry.active_exceptions(provider, releases, policy, package, now)
     rank = registry.stable_version(provider, chosen.version)
-    safe = registry.minimum_safe(provider, policy, package)
+    safe = registry.minimum_safe(provider, policy, package, chosen.version)
     if (
         chosen.python == "unsupported"
         or not registry.compatible(

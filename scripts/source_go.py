@@ -419,7 +419,7 @@ def audit(
     local = {ad.GoFile.decode(body).module for body in after["members"].values()}
 
     def check_policy(package: str, value: str) -> None:
-        floor = registry.minimum_safe("go", policy, package)
+        floor = registry.minimum_safe("go", policy, package, value)
         if floor is not None and Version(value.removeprefix("v")) < floor:
             raise ValueError("Go identity is below its declared security safe floor")
         if not registry.compatible(

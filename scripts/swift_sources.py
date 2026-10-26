@@ -258,7 +258,7 @@ def admit(
 
 
 def check_version(binding: Binding, bound: str, policy: Mapping[str, object]) -> None:
-    safe = registry.minimum_safe("swift", policy, binding.package)
+    safe = registry.minimum_safe("swift", policy, binding.package, binding.version)
     if (
         not registry.compatible("swift", binding.version, bound)
         or not registry.compatible(
@@ -546,7 +546,7 @@ def audit_identity(
     ):
         return False
     binding = scope.bindings[identity.package]
-    safe = registry.minimum_safe("swift", policy, binding.package)
+    safe = registry.minimum_safe("swift", policy, binding.package, binding.version)
     if (
         identity.version != binding.version
         or lock_adapters.swift_repository(identity.url) != binding.package

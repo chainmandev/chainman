@@ -599,10 +599,13 @@ def transaction(
 
 
 def settings(root: Path) -> Table:
+    import security_policy
+
     cfg = config(root)
     policy = table(cfg["updates"], "Update settings")
     extra = tomllib.loads(contained(root, "dependencies.toml").read_text())
     policy.update(extra)
+    security_policy.validate(policy)
     return policy
 
 
@@ -834,7 +837,7 @@ def audit_identities(
             raise ValueError(
                 f"A new or changed {provider} {kind} identity requires explicit project migration"
             )
-        safe = registry.minimum_safe(provider, policy, package)
+        safe = registry.minimum_safe(provider, policy, package, value)
         locked_rank = registry.lock_version(provider, value)
         if safe is not None:
             assert locked_rank is not None  # The identity carries a parsed version.

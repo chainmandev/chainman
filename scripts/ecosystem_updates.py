@@ -436,7 +436,7 @@ def choose(
     sources = cargo_sources.read(root, spec)
     if provider == "crates" and package in sources:
         value = sources[package].version
-        safe = registry.minimum_safe(provider, policy, package)
+        safe = registry.minimum_safe(provider, policy, package, value)
         if (
             not accepts(provider, value, requirement)
             or not registry.compatible(
@@ -946,12 +946,11 @@ def pub_resolve(
                     "pub", releases, policy, package, now
                 ) + registry.active_exceptions("pub", releases, policy, package, now)
                 bound = registry.constraint("pub", policy, package)
-                safe = registry.minimum_safe("pub", policy, package)
 
                 def retainable(value: str) -> bool:
-                    return registry.compatible("pub", value, bound) and (
-                        safe is None or registry.stable_version("pub", value) >= safe
-                    )
+                    return registry.compatible(
+                        "pub", value, bound
+                    ) and registry.meets_safe_floor("pub", policy, package, value)
 
                 if (identity in baseline and retainable(version)) or version in {
                     r.version for r in allowed
@@ -1552,13 +1551,11 @@ def cargo_resolve(
                     provider, releases, policy, package, now
                 ) + registry.active_exceptions(provider, releases, policy, package, now)
                 bound = registry.constraint(provider, policy, package)
-                safe = registry.minimum_safe(provider, policy, package)
 
                 def retainable(version: str) -> bool:
-                    return registry.compatible(provider, version, bound) and (
-                        safe is None
-                        or registry.stable_version(provider, version) >= safe
-                    )
+                    return registry.compatible(
+                        provider, version, bound
+                    ) and registry.meets_safe_floor(provider, policy, package, version)
 
                 if (identity in baseline and retainable(value)) or any(
                     r.version == value for r in allowed

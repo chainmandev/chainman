@@ -515,22 +515,31 @@ def policy_exceptions(
 
 @overload
 def minimum_safe(
-    provider: SemanticProvider, policy: Mapping[str, object], name: str
+    provider: SemanticProvider,
+    policy: Mapping[str, object],
+    name: str,
+    candidate: str | None = None,
 ) -> Semver | None: ...
 @overload
 def minimum_safe(
-    provider: PythonProvider, policy: Mapping[str, object], name: str
+    provider: PythonProvider,
+    policy: Mapping[str, object],
+    name: str,
+    candidate: str | None = None,
 ) -> PythonVersion | None: ...
 @overload
 def minimum_safe(
-    provider: Literal["maven"], policy: Mapping[str, object], name: str
+    provider: Literal["maven"],
+    policy: Mapping[str, object],
+    name: str,
+    candidate: str | None = None,
 ) -> MavenVersion | None: ...
 @overload
 def minimum_safe(
-    provider: str, policy: Mapping[str, object], name: str
+    provider: str, policy: Mapping[str, object], name: str, candidate: str | None = None
 ) -> VersionRank | None: ...
 def minimum_safe(
-    provider: str, policy: Mapping[str, object], name: str
+    provider: str, policy: Mapping[str, object], name: str, candidate: str | None = None
 ) -> VersionRank | None:
     floors: list[VersionRank] = []
     for exception in policy_exceptions(provider, policy, name):
@@ -539,8 +548,30 @@ def minimum_safe(
         timestamp(exception.expires)
         if floor is None or admitted is None or admitted < floor:
             raise ValueError("Invalid exception safe floor")
+        if exception.applies_to:
+            validate_constraint(provider, exception.applies_to)
+            if not all(
+                compatible(provider, value, exception.applies_to)
+                for value in (exception.version, exception.minimum_safe)
+            ):
+                raise ValueError(
+                    "Exception version and safe floor must belong to applies_to"
+                )
+            if candidate is None or not compatible(
+                provider, candidate, exception.applies_to
+            ):
+                continue
         floors.append(floor)
     return max(floors) if floors else None
+
+
+def meets_safe_floor(
+    provider: str, policy: Mapping[str, object], name: str, value: str
+) -> bool:
+    """Evaluate every applicable floor against this exact installed/candidate version."""
+    floor = minimum_safe(provider, policy, name, value)
+    rank = lock_version(provider, value)
+    return floor is None or (rank is not None and rank >= floor)
 
 
 def latest_publications(releases: list[Release]) -> dict[str, datetime]:
@@ -560,7 +591,7 @@ def maturity(
     now: datetime,
 ) -> list[Release]:
     bound = constraint(provider, policy, name)
-    safe = minimum_safe(provider, policy, name)
+    minimum_safe(provider, policy, name)
     cutoff = now - timedelta(days=minimum_age(policy))
     candidates = []
     dates = latest_publications(releases)
@@ -568,7 +599,7 @@ def maturity(
         rank = version(provider, release.version)
         if (
             rank is None
-            or (safe is not None and rank < safe)
+            or not meets_safe_floor(provider, policy, name, release.version)
             or release.python == "unsupported"
             or release.deprecated
             or not compatible(provider, release.version, bound)
@@ -588,7 +619,6 @@ def active_exceptions(
 ) -> list[Release]:
     mature = maturity(provider, releases, policy, name, now)
     bound = constraint(provider, policy, name)
-    required_safe = minimum_safe(provider, policy, name)
     candidates = []
     dates = latest_publications(releases)
     # An exception admits one exact version only while a mature safe version is absent.
@@ -598,16 +628,26 @@ def active_exceptions(
         admitted = version(provider, exception.version)
         if safe is None or admitted is None or admitted < safe:
             raise ValueError("Invalid exception safe floor")
-        if any(stable_version(provider, release.version) >= safe for release in mature):
+        if exception.applies_to and not any(
+            version(provider, release.version) is not None
+            and compatible(provider, release.version, exception.applies_to)
+            and compatible(provider, release.version, bound)
+            for release in releases
+        ):
+            continue
+        if any(
+            stable_version(provider, release.version) >= safe
+            and compatible(provider, release.version, exception.applies_to)
+            for release in mature
+        ):
             continue
         if expiry <= now:
             raise ValueError(f"Expired security exception for {name}")
-        assert required_safe is not None  # This same exception contributed a floor.
         for release in releases:
             if (
                 release.version == exception.version
                 and dates[release.version] <= now
-                and stable_version(provider, release.version) >= required_safe
+                and meets_safe_floor(provider, policy, name, release.version)
                 and release.python != "unsupported"
                 and not release.deprecated
                 and compatible(provider, release.version, bound)
@@ -790,12 +830,11 @@ def go_releases(
     ):
         raise ValueError("Go did not return a canonical unretracted version inventory")
     restrictions = [validate_constraint("go", bound) for bound in bounds]
-    safe = None
     if policy is not None:
         if now is None:
             raise ValueError("Go ranked selection requires a frozen eligibility time")
         restrictions.append(constraint("go", policy, package))
-        safe = minimum_safe("go", policy, package)
+        minimum_safe("go", policy, package)
         minimum_age(policy)
     values = (
         fetch(f"https://proxy.golang.org/{go_path(package)}/@v/list", "text/plain")[0]
@@ -810,7 +849,7 @@ def go_releases(
             and version("go", value) is not None
             and (available is None or value in available)
             and (exact is None or value == exact)
-            and (safe is None or stable_version("go", value) >= safe)
+            and (policy is None or meets_safe_floor("go", policy, package, value))
             and all(compatible("go", value, bound) for bound in restrictions)
         },
         key=lambda value: (go_precedence(value), value),

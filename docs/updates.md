@@ -728,6 +728,19 @@ Compatible Cargo audits support aliases that deliberately retain different major
 
 ## Temporary security exceptions
 
+Package exceptions may set `applies_to` to an ecosystem version range. Omission
+preserves package-wide behavior. The admitted `version` and `minimum_safe` must
+both belong to that range. Each candidate and installed version must meet every
+applicable floor; overlapping rules use the strictest floor. For example, separate
+`>=7.0.0 <8.0.0` and `>=8.0.0 <9.0.0` rules can protect two supported major lines.
+A mature release outside a rule's range cannot deactivate it. Retirement checks
+every audited artifact inside that rule's scope, including retained versions;
+other release lines do not supply retirement evidence.
+
+Publish and adopt a runtime supporting these fields before adding them to a
+consumer policy. Older runtimes cannot enforce the new scopes. Age exceptions
+admit reviewed fresh artifacts; they do not waive vulnerability findings.
+
 An age exception lets a project take an exact security fix before the normal
 dependency maturity window ends. It does not suppress vulnerability checks or
 authorize arbitrary newer releases. Keep vulnerability detection in the complete

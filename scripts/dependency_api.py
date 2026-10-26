@@ -22,6 +22,7 @@ import registry
 import toolchain as tc
 import updates
 import configuration
+import security_policy
 from adapter_data import Table, array, table, text, strings
 
 
@@ -79,6 +80,7 @@ def policy(root: Path) -> Table:
         )
         result = merge(result, declared)
     registry.minimum_age(result)
+    security_policy.validate(result)
     return result
 
 
@@ -191,6 +193,7 @@ def effective_policy(
 ) -> Table:
     result = merge(settings, table(spec.get("policy", {}), "Adapter policy"))
     registry.minimum_age(result)
+    security_policy.validate(result)
     return result
 
 

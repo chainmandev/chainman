@@ -371,7 +371,7 @@ def select_action(
     if major is not None and type(major) is not int:
         raise ValueError("Actions tracking major must be an integer")
     bound = registry.constraint("github", policy, repository)
-    safe = registry.minimum_safe("github", policy, repository)
+    has_floors = bool(list(registry.policy_exceptions("github", policy, repository)))
     limit = cutoff(policy, now)
     exception_versions = {
         ad.text(item["version"], "Exception version")
@@ -386,7 +386,7 @@ def select_action(
         version = ".".join(map(str, rank))
         if (
             (not advance_major and major is not None and rank[0] != major)
-            or (safe is not None and registry.stable_version("github", version) < safe)
+            or not registry.meets_safe_floor("github", policy, repository, version)
             or not registry.compatible("github", version, bound)
         ):
             continue
@@ -465,7 +465,7 @@ def select_action(
         )
     )
     major_hold = not advance_major and major is not None
-    if retain and (bound or safe is not None or major_hold):
+    if retain and (bound or has_floors or major_hold):
         # Baseline age may be retained, but dates and annotations cannot waive an
         # operative version limit. Use the highest published identity of this SHA;
         # a lower alias must not hide a current major/floor violation.
@@ -491,7 +491,7 @@ def select_action(
         if current_version is None:
             raise ValueError("Actions current immutable version evidence is missing")
         retain = (
-            (safe is None or registry.stable_version("github", current_version) >= safe)
+            registry.meets_safe_floor("github", policy, repository, current_version)
             and registry.compatible("github", current_version, bound)
             and (not major_hold or action_rank(current_version)[0] == major)
         )

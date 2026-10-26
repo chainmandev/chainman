@@ -74,16 +74,33 @@ class AgeException:
     reason: str
     advisory: str
     expires: str
+    applies_to: str = ""
 
     @classmethod
     def decode(cls, value: object) -> "AgeException":
         entry = table(value, "Release age exception")
+        unknown = set(entry) - {
+            "package",
+            "version",
+            "minimum_safe",
+            "reason",
+            "advisory",
+            "expires",
+            "applies_to",
+        }
+        if unknown:
+            raise ValueError(
+                "Unknown release exception fields: " + ", ".join(sorted(unknown))
+            )
         return cls(
             version=nonempty(entry.get("version"), "Exception version"),
             minimum_safe=nonempty(entry.get("minimum_safe"), "Exception minimum_safe"),
             reason=nonempty(entry.get("reason"), "Exception reason"),
             advisory=nonempty(entry.get("advisory"), "Exception advisory"),
             expires=nonempty(entry.get("expires"), "Exception expires"),
+            applies_to=nonempty(entry["applies_to"], "Exception applies_to")
+            if "applies_to" in entry
+            else "",
         )
 
 
