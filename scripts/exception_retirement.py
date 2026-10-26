@@ -13,6 +13,7 @@ from pathlib import Path
 import stat
 import sys
 import tomllib
+import json
 from typing import cast
 
 import tomlkit
@@ -24,6 +25,7 @@ import lock_adapters
 import registry
 import toolchain as tc
 import configuration_files
+import security_policy
 
 
 @dataclass(frozen=True)
@@ -34,9 +36,12 @@ class Document:
 
 
 def has_exceptions(settings: Mapping[str, object]) -> bool:
-    return bool(settings.get("exceptions")) or any(
-        ad.table(ad.table(spec, "Adapter").get("policy", {}), "Adapter policy").get(
-            "exceptions"
+    return any(settings.get(kind) for kind in security_policy.KINDS) or any(
+        any(
+            ad.table(ad.table(spec, "Adapter").get("policy", {}), "Adapter policy").get(
+                kind
+            )
+            for kind in security_policy.KINDS
         )
         for spec in ad.table(settings.get("adapters", {}), "Adapters").values()
     )
@@ -66,16 +71,16 @@ def lists(document: Document) -> dict[tuple[str, ...], list[object]]:
     for key in document.prefix:
         value = ad.table(value.get(key, {}), "Policy")
     result = {}
-    if "exceptions" in value:
-        result[document.prefix + ("exceptions",)] = ad.array(
-            value["exceptions"], "Exceptions"
-        )
+    for kind in security_policy.KINDS:
+        if kind in value:
+            result[document.prefix + (kind,)] = ad.array(value[kind], "Exceptions")
     for name, raw in ad.table(value.get("adapters", {}), "Adapters").items():
         policy = ad.table(ad.table(raw, "Adapter").get("policy", {}), "Adapter policy")
-        if "exceptions" in policy:
-            result[document.prefix + ("adapters", name, "policy", "exceptions")] = (
-                ad.array(policy["exceptions"], "Exceptions")
-            )
+        for kind in security_policy.KINDS:
+            if kind in policy:
+                result[document.prefix + ("adapters", name, "policy", kind)] = ad.array(
+                    policy[kind], "Exceptions"
+                )
     return result
 
 
@@ -290,6 +295,43 @@ def mature_scope(
     )
 
 
+def mature_source_scope(
+    root: Path,
+    spec: ad.Table,
+    before: ad.Table,
+    policy: ad.Table,
+    kind: str,
+    entry: ad.Table,
+    now: datetime,
+) -> bool:
+    limit = now - timedelta(days=registry.minimum_age(policy))
+    if kind == "nix_exceptions":
+        import source_updates
+
+        identity = security_policy.nix_identity(entry)
+        plans = source_updates.nix_plan(before, spec, policy, now)
+        return all(
+            registry.timestamp(plan["published"]) <= limit
+            for plan in plans
+            if (plan.get("directory", "."), plan["input"], plan["repository"])
+            == identity
+        )
+    if kind == "artifact_exceptions":
+        import source_artifacts
+        import source_artifact
+
+        for item in source_artifacts.identities(root, spec):
+            if (item["url"], item["digest"]) != (entry["url"], entry["digest"]):
+                continue
+            observation = source_artifact.inspect(
+                item["url"], item["digest"], now, max_bytes=item["max_bytes"]
+            )
+            if registry.timestamp(observation["published"]) > limit:
+                return False
+        return True
+    raise ValueError("Unknown source exception kind")
+
+
 def retire(
     root: Path,
     originals: list[Document],
@@ -300,62 +342,84 @@ def retire(
 ) -> list[str]:
     """Called after all selected audits, before the candidate is frozen and verified."""
     configured = ad.table(settings.get("adapters", {}), "Adapters")
-    proofs: dict[tuple[str, str, str, str], bool] = {}
+    proofs: dict[tuple[str, str, str], bool] = {}
     plans: list[tuple[Document, bytes, bytes]] = []
     retired: list[str] = []
     for document in originals:
         allowed: dict[tuple[str, ...], set[int]] = {}
         for path, entries in lists(document).items():
             owner = path[-3] if len(path) >= 4 and path[-4] == "adapters" else None
+            kind = path[-1]
             for index, raw in enumerate(entries):
                 entry = ad.table(raw, "Exception")
-                exception = ad.AgeException.decode(entry)
-                provider, sep, name = ad.text(
-                    entry.get("package"), "Exception package"
-                ).partition(":")
-                if not sep or not name:
-                    raise ValueError("Exceptions require a provider:package identity")
-                package = registry.package_name(provider, name)
-                # Validate the entry even when its dependency has disappeared.
-                registry.minimum_safe(provider, {"exceptions": [entry]}, package)
+                security_policy.validate({kind: [entry]})
+                provider, package, applies_to = "", "", ""
+                if kind == "exceptions":
+                    exception = ad.AgeException.decode(entry)
+                    provider, _, package = ad.text(
+                        entry["package"], "Package"
+                    ).partition(":")
+                    package = registry.package_name(provider, package)
+                    applies_to = exception.applies_to
+                    label = (
+                        ad.text(entry["package"], "Package") + "@" + exception.version
+                    )
+                else:
+                    label = (
+                        "nix:"
+                        + "/".join(security_policy.nix_identity(entry))
+                        + "@"
+                        + ad.text(entry["revision"], "Revision")
+                        if kind == "nix_exceptions"
+                        else ad.text(entry["url"], "URL")
+                        + "@"
+                        + ad.text(entry["digest"], "Digest")
+                    )
                 scope = [
                     name
                     for name, spec in configured.items()
                     if (owner is None or owner == name)
-                    and affects(ad.table(spec, "Adapter"), provider, package)
+                    and (
+                        affects(ad.table(spec, "Adapter"), provider, package)
+                        if kind == "exceptions"
+                        else ad.table(spec, "Adapter").get("adapter")
+                        == {"nix_exceptions": "nix", "artifact_exceptions": "artifact"}[
+                            kind
+                        ]
+                    )
                 ]
                 if not scope or any(name not in audited for name in scope):
                     continue
                 ready = True
                 for name in scope:
                     spec, policy = audited[name]
-                    if entry not in ad.array(
-                        policy.get("exceptions", []), "Exceptions"
-                    ):
+                    if entry not in ad.array(policy.get(kind, []), "Exceptions"):
                         ready = (
                             False  # A shadowed declaration has no audited authority.
                         )
                         break
-                    proof_key = (name, provider, package, exception.applies_to)
+                    proof_key = (name, kind, json.dumps(entry, sort_keys=True))
                     if proof_key not in proofs:
-                        proofs[proof_key] = mature_scope(
-                            root,
-                            spec,
-                            baselines[name],
-                            policy,
-                            provider,
-                            package,
-                            now,
-                            exception.applies_to,
+                        proofs[proof_key] = (
+                            mature_scope(
+                                root,
+                                spec,
+                                baselines[name],
+                                policy,
+                                provider,
+                                package,
+                                now,
+                                applies_to,
+                            )
+                            if kind == "exceptions"
+                            else mature_source_scope(
+                                root, spec, baselines[name], policy, kind, entry, now
+                            )
                         )
                     ready = ready and proofs[proof_key]
                 if ready:
                     allowed.setdefault(path, set()).add(index)
-                    retired.append(
-                        ad.text(entry["package"], "Exception package")
-                        + "@"
-                        + exception.version
-                    )
+                    retired.append(label)
         current = tc.regular_input(root, document.path)
         if not permitted(document, current, allowed):
             raise ValueError(

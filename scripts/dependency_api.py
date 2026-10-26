@@ -68,6 +68,7 @@ def standard_resolver(
 
 def policy(root: Path) -> Table:
     result = deepcopy(table(tc.config(root).get("updates", {}), "Update policy"))
+    security_policy.validate(result)
     if result.get("policy_file"):
         authority = tc.configuration_root(root)
         declared = tomllib.loads(
@@ -78,6 +79,7 @@ def policy(root: Path) -> Table:
                 else text(result["policy_file"], "Policy file"),
             ).decode()
         )
+        security_policy.validate(declared)
         result = merge(result, declared)
     registry.minimum_age(result)
     security_policy.validate(result)
@@ -92,7 +94,12 @@ def instant() -> datetime:
 def inspection_policy(root: Path) -> Table:
     """Expose the same adapters used by optional module resolution to inspection."""
     result = policy(root)
-    if result.get("adapters") or result.get("steps") or result.get("resolver"):
+    if (
+        tc.config(root).get("schema") == 3
+        or result.get("adapters")
+        or result.get("steps")
+        or result.get("resolver")
+    ):
         return result
     import module_updates
 

@@ -101,6 +101,8 @@ class ScopedPolicyTests(unittest.TestCase):
             )
 
     def test_invalid_declarations_fail_even_for_unselected_packages(self):
+        with self.assertRaisesRegex(ValueError, "Unknown dependency policy"):
+            security_policy.validate({"minimum_ag_days": 30})
         for change in (
             {"unknown": True},
             {"applies_to": "garbage"},

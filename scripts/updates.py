@@ -604,6 +604,8 @@ def settings(root: Path) -> Table:
     cfg = config(root)
     policy = table(cfg["updates"], "Update settings")
     extra = tomllib.loads(contained(root, "dependencies.toml").read_text())
+    security_policy.validate(policy)
+    security_policy.validate(extra)
     policy.update(extra)
     security_policy.validate(policy)
     return policy

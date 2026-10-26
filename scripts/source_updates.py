@@ -18,6 +18,7 @@ import toolchain as tc
 import yaml
 import adapter_data as ad
 import manifests
+import security_policy
 
 ACTION_REF_LIMIT = 100_000
 
@@ -165,6 +166,10 @@ def cutoff(policy: Mapping[str, object], now: datetime) -> datetime:
     return now - timedelta(days=registry.minimum_age(policy))
 
 
+class NoMatureRevision(ValueError):
+    pass
+
+
 def nix_candidate(
     repository: str, branch: str, policy: Mapping[str, object], now: datetime
 ) -> SourceRevision:
@@ -177,8 +182,10 @@ def nix_candidate(
     entries = registry.data(
         f"https://api.github.com/repos/{repository}/commits?{query}"
     )
-    if not isinstance(entries, list) or not entries:
-        raise ValueError("No mature source revision with complete evidence")
+    if not isinstance(entries, list):
+        raise ValueError("Malformed source revision evidence")
+    if not entries:
+        raise NoMatureRevision("No mature source revision with complete evidence")
     selected = revision(
         ad.text(ad.table(entries[0], "GitHub commit").get("sha"), "GitHub commit SHA")
     )
@@ -186,6 +193,71 @@ def nix_candidate(
     if published > limit:
         raise ValueError("Selected branch revision is younger than its age policy")
     return {"revision": selected, "published": published.isoformat()}
+
+
+def descendant(repository: str, ancestor: str, target: str) -> bool:
+    """Bind ancestry to the declared repository, including branch reachability."""
+    repository_name(repository)
+    revision(ancestor)
+    from urllib.parse import quote
+
+    comparison = ad.table(
+        registry.data(
+            f"https://api.github.com/repos/{repository}/compare/{ancestor}...{quote(target, safe='')}"
+        ),
+        "GitHub ancestry",
+    )
+    status = comparison.get("status")
+    if status not in {"ahead", "identical", "behind", "diverged"}:
+        raise ValueError("GitHub ancestry evidence has an unknown status")
+    base = ad.table(comparison.get("base_commit"), "GitHub comparison base")
+    merge = ad.table(comparison.get("merge_base_commit"), "GitHub merge base")
+    if base.get("sha") != ancestor:
+        raise ValueError("GitHub ancestry evidence has a different base revision")
+    return status in {"ahead", "identical"} and merge.get("sha") == ancestor
+
+
+def nix_approval(
+    item: Mapping[str, object], policy: Mapping[str, object]
+) -> ad.Table | None:
+    identity = (item.get("directory", "."), item["input"], item["repository"])
+    for entry in security_policy.entries(policy, "nix_exceptions"):
+        scope = security_policy.nix_identity(entry)
+        if scope[:2] == identity[:2]:
+            if scope != identity:
+                raise ValueError("Nix exception differs from its declared repository")
+            return entry
+    return None
+
+
+def approved_nix_candidate(
+    item: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> SourceRevision:
+    repository = ad.text(item["repository"], "Nix repository")
+    branch = ad.text(item["branch"], "Nix branch")
+    approval = nix_approval(item, policy)
+    if approval is None:
+        return nix_candidate(repository, branch, policy, now)
+    approved = revision(ad.text(approval["revision"], "Approved Nix revision"))
+    published = commit_time(repository, approved)
+    if published > now:
+        raise ValueError("Approved Nix revision has a future commit date")
+    if not descendant(repository, approved, branch):
+        raise ValueError(
+            "Approved Nix revision is not reachable from its declared branch"
+        )
+    try:
+        selected = nix_candidate(repository, branch, policy, now)
+    except NoMatureRevision:
+        selected = None
+    if selected is not None and descendant(repository, approved, selected["revision"]):
+        return selected  # nix_candidate already proved ordinary maturity.
+    if (
+        published > cutoff(policy, now)
+        and registry.timestamp(approval["expires"]) <= now
+    ):
+        raise ValueError("Expired Nix security exception")
+    return {"revision": approved, "published": published.isoformat()}
 
 
 def action_version(tag: str) -> tuple[int, int, int] | None:
@@ -928,7 +1000,22 @@ def nix_plan(
     now: datetime,
 ) -> list[ad.Table]:
     plans: list[ad.Table] = []
+    security_policy.validate(policy)
     locks = ad.table(before["locks"], "Nix snapshot locks")
+    inputs = [
+        ad.table(raw, "Nix input") for raw in ad.array(spec["inputs"], "Nix inputs")
+    ]
+    directories = {item.get("directory", ".") for item in inputs}
+    for entry in security_policy.entries(policy, "nix_exceptions"):
+        scope = security_policy.nix_identity(entry)
+        if scope[0] in directories and not any(
+            (item.get("directory", "."), item["input"], item["repository"]) == scope
+            for item in inputs
+        ):
+            raise ValueError(
+                "Nix exception has no matching declared directory/input/repository"
+            )
+    approvals: dict[tuple[str, str], str | None] = {}
     for raw in ad.array(spec["inputs"], "Nix inputs"):
         item = ad.table(raw, "Nix input")
         path = str(
@@ -947,12 +1034,20 @@ def nix_plan(
             != repository
         ):
             raise ValueError("Nix input differs from its declared source repository")
-        selected = nix_candidate(
-            repository, ad.text(item["branch"], "Nix branch"), policy, now
+        approval = nix_approval(item, policy)
+        approved = (
+            ad.text(approval["revision"], "Approved revision") if approval else None
         )
+        key = (path, node)
+        if key in approvals and approvals[key] != approved:
+            raise ValueError("Nix aliases require identical security approvals")
+        approvals[key] = approved
+        selected = approved_nix_candidate(item, policy, now)
         current_revision = ad.text(current.get("rev"), "Nix current revision")
         at = commit_time(repository, current_revision)
-        if at >= registry.timestamp(selected["published"]):
+        if at > now:
+            raise ValueError("Nix baseline has a future commit date")
+        if approval is None and at >= registry.timestamp(selected["published"]):
             selected = {"revision": current_revision, "published": at.isoformat()}
         if any(
             p["file"] == path
@@ -1128,7 +1223,7 @@ def audit_nix(
                 raise ValueError(
                     "Nix final input differs from its selected immutable source"
                 )
-            if selected != node["locked"]:
+            if selected != node["locked"] or nix_approval(plan, policy) is not None:
                 if selected.get("lastModified") != int(
                     registry.timestamp(plan["published"]).timestamp()
                 ) or not re.fullmatch(

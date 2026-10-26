@@ -267,6 +267,39 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(result["age_basis"], "origin-artifact-last-modified")
         self.assertEqual(result["size"], len(BODY))
 
+    def test_exact_age_exception_preserves_identity_integrity_and_expiry(self):
+        entry = {
+            "url": URL,
+            "digest": DIGEST,
+            "reason": "Reviewed fix",
+            "advisory": "https://example.org/advisory",
+            "expires": "2027-01-01T00:00:00Z",
+        }
+        young = {"Last-Modified": "Sun, 06 Sep 2026 12:00:00 GMT"}
+        self.assertEqual(
+            self.result(Response(**young), {"artifact_exceptions": [entry]})["digest"],
+            DIGEST,
+        )
+        for change in (
+            {"url": URL + "other"},
+            {"digest": "sha256:" + "f" * 64},
+            {"expires": NOW.isoformat()},
+        ):
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(ValueError, "age|Expired"),
+            ):
+                self.result(
+                    Response(**young), {"artifact_exceptions": [{**entry, **change}]}
+                )
+        with self.assertRaisesRegex(ValueError, "immutable"):
+            self.result(
+                Response(b"changed redirect content", **young),
+                {"artifact_exceptions": [entry]},
+            )
+        with self.assertRaisesRegex(ValueError, "age"):
+            self.result(Response(**young))
+
     def test_changed_bytes_fail_even_when_old_date_is_retained(self):
         with self.assertRaisesRegex(ValueError, "immutable"):
             self.result(Response(b"a mutable upstream replacement"))

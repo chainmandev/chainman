@@ -728,6 +728,51 @@ Compatible Cargo audits support aliases that deliberately retain different major
 
 ## Temporary security exceptions
 
+The policy parser rejects unknown fields, malformed identities and ranges,
+duplicate approvals, invalid timestamps and blank review metadata before
+resolution. This includes declarations shadowed by a higher-priority policy file.
+
+`nix_exceptions` approve an exact declared input and repository revision:
+
+```toml
+[[nix_exceptions]]
+directory = "nix"
+input = "nixpkgs"
+repository = "NixOS/nixpkgs"
+revision = "0123456789abcdef0123456789abcdef01234567"
+reason = "Reviewed toolchain security fix; replace this illustrative SHA."
+advisory = "https://example.invalid/security/advisory"
+expires = "2026-11-01T12:00:00Z"
+```
+
+The revision must be reachable from the input's declared branch. A verified mature
+descendant may replace it. Timestamp-based baseline retention cannot override an
+approved fix. Aliases sharing a lock node require identical approvals. Repository,
+commit timestamp and Nix content-hash checks apply even to unchanged approved pins.
+
+`artifact_exceptions` approve an exact declared HTTPS `url` and a `digest` of the
+form `sha256:` followed by 64 lowercase hexadecimal digits. They require the same
+`reason`, `advisory` and timezone-qualified `expires` fields. They waive only age:
+HTTPS, public destinations, redirects, bounded size, modification timestamps and
+downloaded hashes remain verified. Nix age uses commit dates; raw artifact age uses
+the origin's modification date. Neither is a package release publication date.
+
+Both source exception types share package exceptions' frozen-policy and retirement
+protections. Retirement requires a complete declared, selected and audited adapter
+inventory. Standalone raw-artifact queries cannot prove that inventory and retain
+their exceptions. The legacy chainman source-update workflow also audits its Nix
+inputs before retiring their approvals.
+
+`deps-policy-report` schema 2 shows physical declarations, effective and inherited
+scopes, shadowed lists, expiry, retirement state, selected vulnerability-scanner
+coverage and each adapter's age basis. Lists still replace inherited lists. An
+explicit empty list remains meaningful. The default report performs no evidence
+queries. Add `--check` to inspect current registry/source evidence and retirement
+eligibility without resolving dependencies, retiring entries or changing project
+files. Evidence failures return a nonzero status. Runtime self-updates have no
+minimum-age filter; publish and adopt the supporting runtime before configuring
+new dependency-policy fields.
+
 Package exceptions may set `applies_to` to an ecosystem version range. Omission
 preserves package-wide behavior. The admitted `version` and `minimum_safe` must
 both belong to that range. Each candidate and installed version must meet every

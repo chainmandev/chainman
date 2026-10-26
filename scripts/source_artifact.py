@@ -27,6 +27,7 @@ from urllib.request import (
 )
 
 import registry
+import security_policy
 
 MAX_BYTES = 1024 * 1024 * 1024
 MAX_DECLARED_BYTES = 16 * MAX_BYTES
@@ -279,9 +280,18 @@ def audit(
     *,
     max_bytes: int | None = None,
 ) -> Observation:
+    security_policy.validate(policy)
     result = inspect(url, digest, now, max_bytes=max_bytes)
     if registry.timestamp(result["published"]) > now - timedelta(
         days=registry.minimum_age(policy)
     ):
-        raise ValueError("Artifact bytes lack the required origin modification age")
+        matched = [
+            entry
+            for entry in security_policy.entries(policy, "artifact_exceptions")
+            if entry["url"] == url and entry["digest"] == digest
+        ]
+        if not matched:
+            raise ValueError("Artifact bytes lack the required origin modification age")
+        if registry.timestamp(matched[0]["expires"]) <= now:
+            raise ValueError("Expired artifact security exception")
     return result

@@ -191,16 +191,29 @@ def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> No
                 raise ValueError("Runtime image drifted from its audited selection")
         sdk_versions.synchronize(root, selected, check=True)
         if policy_documents:
+            # The enclosing source phase selected Nix before starting this fresh
+            # runtime. Re-audit its immutable current pins before any retirement;
+            # the parent also rechecks against the original pre-update snapshot.
+            all_adapters = adapters(
+                root, strings(tc.config(root)["modules"], "Modules"), policy
+            )
+            audited = {name: (spec, policy) for name, spec in configured.items()}
+            nix = nix_spec(policy)
+            if nix is not None:
+                all_adapters["nix"] = nix
+                before["nix"] = table(
+                    source_updates.snapshot(root, nix), "Nix snapshot"
+                )
+                source_updates.audit(root, nix, before["nix"], policy, now)
+                audited["nix"] = (nix, policy)
             exception_retirement.retire(
                 root,
                 policy_documents,
                 dict(
                     policy,
-                    adapters=adapters(
-                        root, strings(tc.config(root)["modules"], "Modules"), policy
-                    ),
+                    adapters=all_adapters,
                 ),
-                {name: (spec, policy) for name, spec in configured.items()},
+                audited,
                 before,
                 now,
             )

@@ -1108,6 +1108,127 @@ class NixTests(Fixture):
             )
         self.json("flake.lock", changed)
 
+    def approval(self, **changes):
+        return {
+            "directory": ".",
+            "input": "pkgs",
+            "repository": "sample/packages",
+            "revision": B,
+            "reason": "Reviewed fix",
+            "advisory": "https://example.org/advisory",
+            "expires": (NOW + timedelta(days=7)).isoformat(),
+            **changes,
+        }
+
+    def test_approved_fix_overrides_newer_baseline_and_unrelated_mature_revision(self):
+        policy = {"nix_exceptions": [self.approval()]}
+        with (
+            patch.object(
+                sources,
+                "nix_candidate",
+                return_value={"revision": A, "published": OLD.isoformat()},
+            ),
+            patch.object(sources, "commit_time", return_value=YOUNG),
+            patch.object(
+                sources,
+                "descendant",
+                side_effect=lambda repo, base, head: head == "stable",
+            ),
+        ):
+            plan = sources.nix_plan(
+                sources.nix_snapshot(self.root, self.spec), self.spec, policy, NOW
+            )
+            self.assertEqual(plan[0]["revision"], B)
+
+    def test_approved_scope_rejects_wrong_input_repository_future_and_expiry(self):
+        before = sources.nix_snapshot(self.root, self.spec)
+        for changes in ({"input": "typo"}, {"repository": "other/repo"}):
+            with (
+                self.subTest(changes=changes),
+                self.assertRaisesRegex(ValueError, "matching declared"),
+            ):
+                sources.nix_plan(
+                    before,
+                    self.spec,
+                    {"nix_exceptions": [self.approval(**changes)]},
+                    NOW,
+                )
+        with (
+            patch.object(sources, "descendant", return_value=False),
+            self.assertRaisesRegex(ValueError, "reachable"),
+        ):
+            sources.nix_plan(
+                before, self.spec, {"nix_exceptions": [self.approval()]}, NOW
+            )
+        with (
+            patch.object(sources, "commit_time", return_value=NOW + timedelta(days=1)),
+            self.assertRaisesRegex(ValueError, "future"),
+        ):
+            sources.nix_plan(
+                before, self.spec, {"nix_exceptions": [self.approval()]}, NOW
+            )
+        with (
+            patch.object(sources, "commit_time", return_value=YOUNG),
+            patch.object(
+                sources,
+                "descendant",
+                side_effect=lambda repo, base, head: head == "stable",
+            ),
+            self.assertRaisesRegex(ValueError, "Expired"),
+        ):
+            sources.nix_plan(
+                before,
+                self.spec,
+                {"nix_exceptions": [self.approval(expires=NOW.isoformat())]},
+                NOW,
+            )
+
+    def test_mature_descendant_can_replace_approved_fix(self):
+        policy = {
+            "nix_exceptions": [self.approval(revision=A, expires=NOW.isoformat())]
+        }
+        with patch.object(sources, "descendant", return_value=True):
+            self.assertEqual(
+                sources.nix_plan(
+                    sources.nix_snapshot(self.root, self.spec), self.spec, policy, NOW
+                )[0]["revision"],
+                B,
+            )
+
+    def test_alias_approvals_must_agree(self):
+        self.lock["nodes"]["root"]["inputs"]["alias"] = "pkgs"
+        self.json("flake.lock", self.lock)
+        self.spec["inputs"].append({**self.spec["inputs"][0], "input": "alias"})
+        with (
+            patch.object(sources, "descendant", return_value=True),
+            self.assertRaisesRegex(ValueError, "aliases.*approvals"),
+        ):
+            sources.nix_plan(
+                sources.nix_snapshot(self.root, self.spec),
+                self.spec,
+                {"nix_exceptions": [self.approval()]},
+                NOW,
+            )
+
+    def test_unchanged_approved_revision_still_verifies_content_hash(self):
+        policy = {"nix_exceptions": [self.approval(revision=A)]}
+        before = sources.nix_snapshot(self.root, self.spec)
+        with (
+            patch.object(
+                sources,
+                "nix_candidate",
+                return_value={"revision": A, "published": OLD.isoformat()},
+            ),
+            patch.object(sources, "descendant", return_value=True),
+            patch.object(
+                sources,
+                "nix_tree",
+                return_value={"narHash": "sha256-" + "B" * 43 + "="},
+            ),
+            self.assertRaisesRegex(ValueError, "content hash differs"),
+        ):
+            sources.audit_nix(self.root, self.spec, before, policy, NOW)
+
     def test_multiple_inputs_are_exact_coordinated_overrides(self):
         before = sources.snapshot(self.root, self.spec)
         with patch.object(

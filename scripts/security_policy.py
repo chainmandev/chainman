@@ -10,6 +10,9 @@ import registry
 
 KINDS = ("exceptions", "nix_exceptions", "artifact_exceptions")
 METADATA = {"reason", "advisory", "expires"}
+POLICY_FIELDS = set(
+    "minimum_age_days policy_file constraints exceptions nix_exceptions artifact_exceptions adapters steps targets target_groups profile outputs resolver eligibility verify verify_task verify_tasks reconcile_tasks reconcile_outputs pins nix docker javascript".split()
+)
 
 
 def entries(policy: Mapping[str, object], kind: str) -> list[ad.Table]:
@@ -60,6 +63,12 @@ def nix_identity(entry: Mapping[str, object]) -> tuple[str, str, str]:
 
 def validate(policy: Mapping[str, object]) -> None:
     """Validate declarations even when their adapter/package is not selected."""
+    unknown = set(policy) - POLICY_FIELDS
+    if unknown:
+        raise ValueError(
+            "Unknown dependency policy fields: " + ", ".join(sorted(unknown))
+        )
+    registry.minimum_age(policy)
     seen: set[tuple[str, ...]] = set()
     for entry in entries(policy, "exceptions"):
         metadata(entry, {"package", "version", "minimum_safe", "applies_to"})
@@ -86,7 +95,13 @@ def validate(policy: Mapping[str, object]) -> None:
             raise ValueError("Exceptions require a supported provider:package identity")
         package = registry.package_name(provider, name)
         registry.minimum_safe(provider, {"exceptions": [entry]}, package)
-        key: tuple[str, ...] = ("package", provider, package, exception.version, exception.applies_to)
+        key: tuple[str, ...] = (
+            "package",
+            provider,
+            package,
+            exception.version,
+            exception.applies_to,
+        )
         if key in seen:
             raise ValueError("Duplicate package security exception")
         seen.add(key)
