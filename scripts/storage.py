@@ -112,6 +112,15 @@ def gate(pool: Path, *, create: bool = False) -> Iterator[None]:
 
 
 def receipt(entry: Path) -> Receipt:
+    # Admissions atomically replace receipts while lifetime leases are shared.
+    # Serialize reads too: replacement between open and fstat would otherwise
+    # make a valid reader's descriptor fail the single-link ownership check.
+    with gate(entry.parent):
+        return _receipt(entry)
+
+
+def _receipt(entry: Path) -> Receipt:
+    """Read with the pool admission gate already held."""
     private(entry)
     fd = regular(entry / ".receipt.json")
     with os.fdopen(fd) as stream:
@@ -321,7 +330,7 @@ def collect(
             rows.append(row)
             fd = None
             try:
-                saved = receipt(entry)
+                saved = _receipt(entry)
                 fd = regular(entry / ".lease")
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -508,7 +517,7 @@ def use(pool: Path, name: str, kind: str) -> Iterator[Path]:
                     schema=1, kind=kind, touched=time.time(), epoch=uuid.uuid4().hex
                 ),
             )
-        saved = receipt(entry)
+        saved = _receipt(entry)
         if saved["kind"] != kind:
             raise ValueError("Storage kind changed")
         if kind == "downloads":

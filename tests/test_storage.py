@@ -365,6 +365,49 @@ class StorageTests(unittest.TestCase):
                     storage.collect(self.pool, apply=True, all_idle=True)[1], []
                 )
 
+    def test_inherited_receipt_survives_concurrent_admission_refresh(self):
+        opened = threading.Event()
+        replaced = threading.Event()
+        errors = []
+        original_open = os.open
+        with storage.use(self.pool, "downloads", "downloads") as entry:
+            expected = storage.inherited()
+            path = entry / ".receipt.json"
+            saved = storage.receipt(entry)
+            refreshed = dict(saved, touched=saved["touched"] + 1)
+
+            def refresh():
+                try:
+                    if not opened.wait(5):
+                        raise AssertionError("Receipt reader did not open its file")
+                    with storage.gate(self.pool):
+                        tc.atomic_json(path, refreshed)
+                    replaced.set()
+                except BaseException as error:
+                    errors.append(error)
+
+            def pause_open(name, *args, **kwargs):
+                fd = original_open(name, *args, **kwargs)
+                if name == path:
+                    # Force a competing admission between open and fstat. Its
+                    # atomic replacement unlinks this descriptor unless the
+                    # reader participates in the pool admission gate.
+                    opened.set()
+                    replaced.wait(0.5)
+                return fd
+
+            writer = threading.Thread(target=refresh)
+            writer.start()
+            try:
+                with patch("storage.os.open", side_effect=pause_open):
+                    self.assertEqual(storage.inherited(), expected)
+            finally:
+                writer.join(timeout=5)
+            self.assertFalse(writer.is_alive())
+            self.assertFalse(errors, errors)
+            self.assertTrue(replaced.is_set())
+            self.assertEqual(storage.receipt(entry), refreshed)
+
     def test_age_and_status_are_non_destructive(self):
         entry = self.populated()
         saved = storage.receipt(entry)

@@ -213,6 +213,8 @@ the Pub payloads and records the reason while other cache families remain eligib
 Admission and completion perform maintenance. A shared admission gate and
 inherited lifetime leases protect all users of each managed download root,
 including native service/task children. Active caches can exceed the budget.
+Receipt reads share the admission gate with atomic receipt refreshes, so concurrent
+users retain strict ownership checks without observing an unlinked old receipt.
 Eviction changes the cache epoch before deleting any payload, invalidating setup
 evidence even after a partial failure; the ordinary setup policy controls repair.
 There is no background collector. `cache.automatic_prune` continues to control
