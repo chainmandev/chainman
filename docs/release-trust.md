@@ -48,6 +48,8 @@ receive explicit CA configuration; an empty CA directory prevents an ambient
 directory from augmenting it. Node uses OpenSSL's configured store; uv's explicit
 certificate paths replace its embedded or native store. The Intel macOS
 compatibility channel uses the reviewed current CA and uv package definitions.
+Its uv build uses the compatibility input's Rust 1.98 compiler to meet uv's
+minimum supported Rust version; the channel's default compiler is older.
 Both channels retain pnpm 11.27.0 on the fixed Node runtime, so pnpm uses the same
 configured OpenSSL store. The trust lane inspects the Node process launched by
 pnpm; pnpm 12's native TLS client requires separate qualification before adoption.

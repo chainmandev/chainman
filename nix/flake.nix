@@ -36,7 +36,11 @@
           # Reuse the reviewed package definitions with its supported stdenv.
           uv =
             if pkgs.lib.versionOlder pkgs.uv.version "0.13.4" then
-              pkgs.callPackage (nixpkgs + "/pkgs/by-name/uv/uv/package.nix") { }
+              pkgs.callPackage (nixpkgs + "/pkgs/by-name/uv/uv/package.nix") {
+                # uv 0.13 requires Rust >= 1.97; the compatibility channel's
+                # default compiler remains 1.95, but it also supplies 1.98.
+                rustPlatform = pkgs.rustPackages_1_98.rustPlatform;
+              }
             else
               pkgs.uv;
           trustedCacert = pkgs.callPackage (nixpkgs + "/pkgs/by-name/ca/cacert/package.nix") {
