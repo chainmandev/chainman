@@ -5,7 +5,9 @@ import hashlib
 import json
 from pathlib import Path
 import tomllib
+import subprocess
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Literal, NotRequired, TypedDict
 
 import adapter_data as ad
@@ -14,6 +16,9 @@ import dependency_api
 import source_toolchain_pin
 import toolchain as tc
 import updates
+import registry
+import security_policy
+import exception_retirement
 
 
 MANIFESTS = {
@@ -206,11 +211,191 @@ def coverage(root: Path) -> Coverage:
     )
 
 
-def report(root: Path, arguments: list[str]) -> ad.Table:
+def exception_report(
+    root: Path, settings: ad.Table, selected: set[str], check: bool, now: datetime
+) -> tuple[list[ad.Table], dict[str, str]]:
+    declarations: list[tuple[str, tuple[str, ...], str | None, list[object]]] = []
+    winners: dict[tuple[str | None, str], int] = {}
+    for document in exception_retirement.documents(root):
+        for path, entries in exception_retirement.lists(document).items():
+            owner = path[-3] if len(path) >= 4 and path[-4] == "adapters" else None
+            winners[(owner, path[-1])] = len(declarations)
+            declarations.append((document.path, path, owner, entries))
+    specs = {
+        name: dependency_api.configured(root, name, settings)
+        for name in ad.table(settings.get("adapters", {}), "Adapters")
+    }
+    audited: dict[str, tuple[ad.Table, ad.Table]] = {}
+    errors: dict[str, str] = {}
+    if check:
+        for name in sorted(selected & specs.keys()):
+            spec = specs[name]
+            policy = dependency_api.effective_policy(settings, spec)
+            try:
+                adapter = dependency_api.implementation(spec)
+                before = ad.table(adapter.snapshot(root, spec), "Snapshot")
+                adapter.audit(root, spec, before, policy, now)
+                audited[name] = (before, policy)
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                subprocess.CalledProcessError,
+            ) as error:
+                errors[name] = str(error)
+    result: list[ad.Table] = []
+    for index, (file, path, owner, entries) in enumerate(declarations):
+        kind = path[-1]
+        effective = [
+            name
+            for name in specs
+            if (owner is None or owner == name)
+            and winners.get((name, kind), winners.get((None, kind))) == index
+        ]
+        rows: list[ad.Table] = []
+        for raw in entries:
+            entry = ad.table(raw, "Exception")
+            security_policy.validate({kind: [entry]})
+            provider, package = "", ""
+            if kind == "exceptions":
+                provider, _, package = ad.text(entry["package"], "Package").partition(
+                    ":"
+                )
+                package = registry.package_name(provider, package)
+            scope = [
+                name
+                for name in effective
+                if (
+                    exception_retirement.affects(specs[name], provider, package)
+                    if kind == "exceptions"
+                    else specs[name]["adapter"]
+                    == {"nix_exceptions": "nix", "artifact_exceptions": "artifact"}[
+                        kind
+                    ]
+                )
+            ]
+            status = (
+                "unchecked"
+                if scope
+                else "shadowed"
+                if not effective and specs
+                else "no-declared-inventory"
+            )
+            evidence_errors = {name: errors[name] for name in scope if name in errors}
+            if scope and set(scope) - selected:
+                status = "incomplete-scope"
+            elif scope and check:
+                if evidence_errors:
+                    status = "evidence-failed"
+                else:
+                    mature = True
+                    for name in scope:
+                        before, policy = audited[name]
+                        try:
+                            mature = (
+                                exception_retirement.mature_scope(
+                                    root,
+                                    specs[name],
+                                    before,
+                                    policy,
+                                    provider,
+                                    package,
+                                    now,
+                                    ad.text(entry.get("applies_to", ""), "Scope"),
+                                )
+                                if kind == "exceptions"
+                                else exception_retirement.mature_source_scope(
+                                    root, specs[name], before, policy, kind, entry, now
+                                )
+                            ) and mature
+                        except (
+                            OSError,
+                            ValueError,
+                            KeyError,
+                            subprocess.CalledProcessError,
+                        ) as error:
+                            evidence_errors[name] = str(error)
+                    status = (
+                        "evidence-failed"
+                        if evidence_errors
+                        else "eligible"
+                        if mature
+                        else "needed"
+                    )
+            rows.append(
+                dict(
+                    declaration=entry,
+                    scope=scope,
+                    expired=registry.timestamp(entry["expires"]) <= now,
+                    retirement=status,
+                    errors=evidence_errors,
+                )
+            )
+        result.append(
+            dict(
+                file=file,
+                path=list(path),
+                owner=owner,
+                effective_in=effective,
+                inherited_in=effective if owner is None else [],
+                shadowed_in=[
+                    name
+                    for name in specs
+                    if (owner is None or owner == name) and name not in effective
+                ],
+                entries=rows,
+            )
+        )
+    return result, errors
+
+
+def report(root: Path, arguments: list[str], *, check: bool = False) -> ad.Table:
     settings = dependency_api.inspection_policy(root)
-    selected, modes = dependency_api.selection(settings, arguments)
+    selected, modes = (
+        dependency_api.selection(settings, arguments)
+        if dependency_api.target_names(settings) or arguments
+        else (set(), {})
+    )
+    exceptions, evidence_errors = exception_report(
+        root, settings, selected, check, dependency_api.instant()
+    )
     return dict(
-        schema=1,
+        schema=2,
+        evidence_checked=check,
+        evidence_errors=evidence_errors,
+        complete=not evidence_errors
+        and not any(
+            ad.table(entry, "Exception").get("retirement") == "evidence-failed"
+            for declaration in exceptions
+            for entry in ad.array(declaration["entries"], "Entries")
+        ),
+        exception_declarations=exceptions,
+        runtime_updates={
+            "age_basis": "none",
+            "minimum_age_days": None,
+            "note": "Runtime self-updates have no age filter",
+        },
+        audit_coverage={
+            name: {
+                "selected": name in selected,
+                "scanner": ad.table(spec, "Adapter")["adapter"]
+                in {"javascript", "rust", "python", "go"},
+                "status": "not-run",
+            }
+            for name, spec in ad.table(settings.get("adapters", {}), "Adapters").items()
+        },
+        age_bases={
+            name: {
+                "nix": "commit-date",
+                "artifact": "origin-artifact-last-modified",
+                "oci": "registry-tag-update-bound-to-digest",
+                "actions": "release-or-commit-date",
+            }.get(
+                ad.text(ad.table(spec, "Adapter")["adapter"], "Kind"),
+                "registry-artifact-publication",
+            )
+            for name, spec in ad.table(settings.get("adapters", {}), "Adapters").items()
+        },
         minimum_age_days=settings.get("minimum_age_days", 30),
         selected=sorted(selected),
         policies=modes,
@@ -318,6 +503,11 @@ def run(root: Path, action: str, args: list[str]) -> int:
             raise ValueError("deps-coverage takes no arguments")
         result = coverage(root)
     else:
-        result = report(root, recipes.selection_options(args))
+        check = "--check" in args
+        result = report(
+            root,
+            recipes.selection_options([arg for arg in args if arg != "--check"]),
+            check=check,
+        )
     print(json.dumps(result, indent=2))
     return 0 if result.get("complete", True) else 1

@@ -15,9 +15,72 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import dependency_audit
 import dependency_reports
 import updates
+import dependency_api
+import registry
+import tomlkit
 
 
 class ReportTests(unittest.TestCase):
+    def test_policy_report_explains_shadowed_lists_and_remains_read_only(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            entry = dict(
+                package="npm:demo",
+                version="1.2.3",
+                minimum_safe="1.2.3",
+                reason="Reviewed",
+                advisory="https://example.org/advisory",
+                expires="2027-01-01T00:00:00Z",
+            )
+            (root / "chainman.toml").write_text(
+                tomlkit.dumps(
+                    {
+                        "schema": 3,
+                        "updates": {
+                            "policy_file": "policy.toml",
+                            "exceptions": [entry],
+                            "adapters": {
+                                "js": {
+                                    "adapter": "javascript",
+                                    "policy": {"exceptions": []},
+                                }
+                            },
+                            "steps": [{"resolve": "js"}],
+                        },
+                    }
+                )
+            )
+            (root / "policy.toml").write_text(
+                tomlkit.dumps({"exceptions": [{**entry, "version": "1.2.4"}]})
+            )
+            (root / "package.json").write_text("{}")
+            updates.git(root, "init")
+            updates.git(root, "add", ".")
+            before = {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            with patch.object(registry, "releases") as network:
+                report = dependency_reports.report(root, [])
+                network.assert_not_called()
+            self.assertEqual(report["schema"], 2)
+            self.assertEqual(report["runtime_updates"]["age_basis"], "none")
+            self.assertTrue(report["audit_coverage"]["js"]["selected"])
+            declarations = report["exception_declarations"]
+            self.assertEqual(declarations[0]["shadowed_in"], ["js"])
+            self.assertEqual(declarations[-1]["shadowed_in"], ["js"])
+            self.assertEqual(declarations[1]["entries"], [])
+            self.assertEqual(declarations[1]["effective_in"], ["js"])
+            adapter = dependency_api.Adapter(
+                lambda *a: {},
+                lambda *a, **k: None,
+                lambda *a: (_ for _ in ()).throw(ValueError("Evidence unavailable")),
+            )
+            with patch.object(dependency_api, "implementation", return_value=adapter):
+                checked = dependency_reports.report(root, [], check=True)
+            self.assertFalse(checked["complete"])
+            self.assertEqual(checked["evidence_errors"], {"js": "Evidence unavailable"})
+            self.assertEqual(
+                before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            )
+
     def test_rust_audit_uses_absolute_manifest_and_preserves_scanner_status(self):
         for directory in (".", "server", "nested/server"):
             for scanner_status in (0, 1):
