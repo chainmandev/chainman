@@ -43,11 +43,14 @@ additional hashes identify the separate tools and dependencies it operates.
 Managed shells use a reviewed NSS certificate bundle with the compromised
 eMudhra/emSign roots and Comodo AAA Services root excluded for TLS server trust.
 The standard PEM form removes distrusted roots instead of relying on
-OpenSSL-specific trust attributes. Python, uv, Node, curl, Git and Nix downloads
+OpenSSL-specific trust attributes. Python, uv, Node, npm, pnpm, Cargo, curl, Git and Nix downloads
 receive explicit CA configuration; an empty CA directory prevents an ambient
 directory from augmenting it. Node uses OpenSSL's configured store; uv's explicit
 certificate paths replace its embedded or native store. The Intel macOS
 compatibility channel uses the reviewed current CA and uv package definitions.
+Both channels retain pnpm 11.27.0 on the fixed Node runtime, so pnpm uses the same
+configured OpenSSL store. The trust lane inspects the Node process launched by
+pnpm; pnpm 12's native TLS client requires separate qualification before adoption.
 Git environment isolation retains the explicit CA bundle while removing ambient
 repository routing, credentials and hooks.
 

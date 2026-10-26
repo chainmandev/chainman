@@ -8,6 +8,7 @@ import re
 import ssl
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -71,6 +72,9 @@ class TrustStoreTests(unittest.TestCase):
             "CURL_CA_BUNDLE",
             "REQUESTS_CA_BUNDLE",
             "GIT_SSL_CAINFO",
+            "CARGO_HTTP_CAINFO",
+            "NPM_CONFIG_CAFILE",
+            "npm_config_cafile",
         ):
             self.assertEqual(os.environ[key], bundle, key)
         self.assertEqual(list(Path(os.environ["SSL_CERT_DIR"]).iterdir()), [])
@@ -79,6 +83,10 @@ class TrustStoreTests(unittest.TestCase):
         os.environ.get("CHAINMAN_TEST_TRUST_NODE") == "1", "native Node trust lane"
     )
     def test_node_embedded_and_effective_configuration(self):
+        bundle = subprocess.check_output(
+            ["npm", "config", "get", "cafile"], text=True
+        ).strip()
+        self.assertEqual(bundle, os.environ["SSL_CERT_FILE"])
         result = json.loads(
             subprocess.check_output(
                 [
@@ -106,6 +114,42 @@ console.log(JSON.stringify({version: process.versions.node,
         # Node's API does not enumerate OpenSSL's store. The Python check above
         # independently loads the exact configured file and empty CA directory.
         self.assertIn("--use-openssl-ca", os.environ["NODE_OPTIONS"].split())
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_TRUST_NODE") == "1", "native pnpm trust lane"
+    )
+    def test_pnpm_runs_on_fixed_node_with_managed_trust(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            hook = root / "inspect.cjs"
+            result = root / "trust.json"
+            hook.write_text(
+                "const fs = require('node:fs'), tls = require('node:tls');\n"
+                "const {X509Certificate} = require('node:crypto');\n"
+                "fs.writeFileSync(process.env.CHAINMAN_TRUST_RESULT, JSON.stringify({\n"
+                "version: process.versions.node, options: process.env.NODE_OPTIONS,\n"
+                "bundle: process.env.SSL_CERT_FILE,\n"
+                "roots: tls.getCACertificates('bundled').map(c => "
+                "new X509Certificate(c).fingerprint256)}));\n"
+            )
+            environment = dict(os.environ)
+            environment["CHAINMAN_TRUST_RESULT"] = str(result)
+            environment["NODE_OPTIONS"] += " --require " + json.dumps(str(hook))
+            version = subprocess.check_output(
+                ["pnpm", "--version"], env=environment, text=True
+            ).strip()
+            self.assertEqual(version, "11.27.0")
+            inspected = json.loads(result.read_text())
+            self.assertGreaterEqual(
+                tuple(map(int, inspected["version"].split("."))), (26, 12, 1)
+            )
+            self.assertIn("--use-openssl-ca", inspected["options"].split())
+            self.assertEqual(inspected["bundle"], os.environ["SSL_CERT_FILE"])
+            self.assertGreater(len(inspected["roots"]), 100)
+            self.assertFalse(
+                {value.replace(":", "").lower() for value in inspected["roots"]}
+                & BLOCKED
+            )
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_TRUST_UV") == "1", "native uv trust lane"

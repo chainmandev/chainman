@@ -66,7 +66,9 @@
           # Package wrappers otherwise embed nixpkgs' default Node even when a
           # newer node executable leads PATH, splitting engine checks from builds.
           nodejs = pkgs.nodejs_latest;
-          pnpm = pkgs.pnpm.override { nodejs-slim = nodejs; };
+          # Retain the supported Node-based line on every platform. pnpm 12
+          # introduces a separate native TLS client with platform trust defaults.
+          pnpm = pkgs.pnpm_11.override { nodejs-slim = nodejs; };
           prettier = pkgs.prettier.override { inherit nodejs; };
           # Flutter's Linux wrapper references aapt even for non-Android commands.
           # Its aapt2 binary remains x86_64-only; this only enables those commands on ARM.
@@ -148,6 +150,9 @@
                 export CURL_CA_BUNDLE="$SSL_CERT_FILE"
                 export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
                 export GIT_SSL_CAINFO="$SSL_CERT_FILE"
+                export CARGO_HTTP_CAINFO="$SSL_CERT_FILE"
+                export NPM_CONFIG_CAFILE="$SSL_CERT_FILE"
+                export npm_config_cafile="$SSL_CERT_FILE"
                 export UV_SYSTEM_CERTS=true
                 export NODE_OPTIONS="--use-openssl-ca ''${NODE_OPTIONS:-}"
                 export UV_PYTHON_DOWNLOADS=never
@@ -186,7 +191,7 @@
           updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ ] "";
           release = shellWith pkgs.mkShellNoCC (updateBase ++ [ pkgs.gh ]) "release" [ ] "";
           core = shell "core" [ ] "";
-          trust = shellWith pkgs.mkShellNoCC updateBase "trust" [ nodejs uv pkgs.openssl ] "";
+          trust = shellWith pkgs.mkShellNoCC updateBase "trust" [ nodejs pnpm uv pkgs.openssl ] "";
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";
           rust = shell "rust" [
