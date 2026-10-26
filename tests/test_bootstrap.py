@@ -3054,6 +3054,9 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
     )
     def test_stock_image_builds_read_only_owned_outputs_without_capabilities(self):
         image = (SOURCE / "nix/container-image.txt").read_text().strip()
+        # Keep Bash as the builder until chmod exits. Tail-executing coreutils
+        # can close its log descriptors before process exit; Nix treats that EOF
+        # as completion and kills a still-exiting builder, racing this fixture.
         command = """chmod 0555 /
 mkdir -p "$HOME"
 SHELL=$(readlink -f "$(command -v sh)")
@@ -3064,7 +3067,7 @@ nix --extra-experimental-features nix-command build --no-link --impure --print-o
     system = builtins.currentSystem;
     builder = builtins.getEnv "SHELL";
     PATH = builtins.getEnv "PATH";
-    args = [ "-eu" "-c" "mkdir -p $out/owned; echo fixture > $out/owned/value; chmod 0555 $out/owned $out" ];
+    args = [ "-eu" "-c" "mkdir -p $out/owned; echo fixture > $out/owned/value; chmod 0555 $out/owned $out; exit 0" ];
   }'
 """
         result = subprocess.run(
