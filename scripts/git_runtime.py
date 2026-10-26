@@ -62,7 +62,9 @@ def pin(body: bytes) -> str:
 
 def git(*args: str, input: bytes | None = None) -> bytes:
     env = {
-        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_") or key == "GIT_SSL_CAINFO"
     }
     env.update(
         GIT_CONFIG_NOSYSTEM="1",

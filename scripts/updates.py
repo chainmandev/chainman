@@ -62,10 +62,12 @@ class PreviewResult(TransactionResult):
 def preview_git_environment() -> Iterator[None]:
     # Preview owns a disposable repository. Ambient Git routing, configuration,
     # identity, credentials and hooks must not target the original repository.
+    # The managed TLS store is transport trust, not repository routing.
     saved = {key: value for key, value in os.environ.items() if key.startswith("GIT_")}
     try:
         for key in saved:
-            del os.environ[key]
+            if key != "GIT_SSL_CAINFO":
+                del os.environ[key]
         os.environ.update(
             GIT_CONFIG_GLOBAL=os.devnull,
             GIT_CONFIG_SYSTEM=os.devnull,

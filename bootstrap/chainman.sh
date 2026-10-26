@@ -513,7 +513,7 @@ update_candidate() (
     # A disposable checkout must not inherit Git routing, hooks or identity that
     # target the original. Values never become shell code.
     for update_git in $(env | sed -n 's/^\(GIT_[A-Za-z0-9_]*\)=.*/\1/p'); do
-        unset "$update_git"
+        case "$update_git" in GIT_SSL_CAINFO) ;; *) unset "$update_git" ;; esac
     done
     exec env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=4 \
         GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \

@@ -275,7 +275,11 @@ def check_version(binding: Binding, bound: str, policy: Mapping[str, object]) ->
 
 
 def git_env() -> dict[str, str]:
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("GIT_") or k == "GIT_SSL_CAINFO"
+    }
     env.update(
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL=os.devnull,

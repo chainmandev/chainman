@@ -136,7 +136,7 @@ def verification_identity(root: Path) -> dict[str, str]:
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith("GIT_")
+            if not key.startswith("GIT_") or key == "GIT_SSL_CAINFO"
         }
         env.update(
             GIT_CONFIG_GLOBAL=os.devnull,

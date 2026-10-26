@@ -48,6 +48,8 @@ receive explicit CA configuration; an empty CA directory prevents an ambient
 directory from augmenting it. Node uses OpenSSL's configured store; uv's explicit
 certificate paths replace its embedded or native store. The Intel macOS
 compatibility channel uses the reviewed current CA and uv package definitions.
+Git environment isolation retains the explicit CA bundle while removing ambient
+repository routing, credentials and hooks.
 
 `just trust-test` checks actual Python roots, Node's embedded roots and effective
 configuration, and the fixed uv release. Root checks use DER SHA-256 fingerprints.

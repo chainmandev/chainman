@@ -7,7 +7,14 @@ from pathlib import Path
 import re
 import ssl
 import subprocess
+import sys
 import unittest
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import git_runtime
+import swift_sources
+import updates
 
 # SHA-256 of the exact DER roots covered by the NixOS incident mitigation.
 BLOCKED = {
@@ -19,6 +26,35 @@ BLOCKED = {
 
 
 class TrustStoreTests(unittest.TestCase):
+    def test_git_isolation_preserves_trust_without_routing_or_credentials(self):
+        bundle = os.environ["SSL_CERT_FILE"]
+        with patch.dict(
+            os.environ,
+            {
+                "GIT_SSL_CAINFO": bundle,
+                "GIT_DIR": "/unrelated/repository",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": "synthetic credential fixture",
+            },
+        ):
+
+            def check(environment):
+                self.assertEqual(environment["GIT_SSL_CAINFO"], bundle)
+                self.assertNotIn("GIT_DIR", environment)
+                self.assertNotIn("synthetic credential fixture", environment.values())
+
+            with updates.preview_git_environment():
+                check(os.environ)
+            check(swift_sources.git_env())
+            with patch.object(
+                git_runtime.tc,
+                "managed_run",
+                return_value=subprocess.CompletedProcess([], 0, b""),
+            ) as run:
+                git_runtime.git("--version")
+                check(run.call_args.kwargs["env"])
+
     def test_python_and_download_clients_share_filtered_store(self):
         context = ssl.create_default_context()
         roots = {

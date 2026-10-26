@@ -79,7 +79,9 @@ def execute(
     if not plan:
         return
     env = {
-        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("GIT_") or key == "GIT_SSL_CAINFO"
     }
     env.update(
         GIT_CONFIG_GLOBAL="/dev/null",
@@ -91,7 +93,7 @@ def execute(
         # tc.environment includes the caller environment; don't route a candidate
         # formatter back to the original index, even when called from commit -a.
         for key in list(env):
-            if key.startswith("GIT_"):
+            if key.startswith("GIT_") and key != "GIT_SSL_CAINFO":
                 env.pop(key)
         env.update(
             GIT_CONFIG_GLOBAL="/dev/null",
