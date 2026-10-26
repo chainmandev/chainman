@@ -121,12 +121,26 @@ the real pinned scanner fixtures without auditing an application or waiving poli
 The Python scanner binds pip-api's subprocess to its own pip-enabled interpreter;
 it does not rely on a project virtual environment or user-installed packages to start.
 `audits.exceptions.ADAPTER` for JavaScript
-accepts exact `id`, `package`, `reason`, and `review_after` entries; stale, mismatched
-or expired exceptions fail. Flutter, Swift and Gradle currently report unsupported
-vulnerability scanning and make the aggregate audit incomplete and nonzero; a
-project can document the limitation in `audits.unsupported`. Unsupported does not
-mean vulnerability-free. Application gates choose whether to require this separate
-network-dependent audit (or select `targets=js` for a narrower lane); release-age and source checks remain mandatory for updates.
+requires `id`, `package`, a nonempty `versions` list of exact reviewed versions,
+`reason`, and `review_after` (an ISO date). An optional `paths` list restricts the
+waiver to exact scanner dependency paths. Missing installed-version or requested
+path evidence cannot satisfy a waiver. One advisory can affect several installed
+versions: reviewing a 3.x occurrence does not waive a 4.x occurrence. Stale,
+overlapping, malformed or expired entries fail. Legacy package-wide entries fail
+with a migration error; inspect current structured findings and add only the exact
+versions and paths actually reviewed. These waivers do not grant age exceptions.
+
+Audit JSON schema 2 emits a `findings` array with `id`, `package`, nullable `version`,
+and `paths` for each JavaScript occurrence. Consumers of schema 1's advisory map
+must migrate. Every selected adapter appears in `lanes`; adapters without a scanner
+report `unassessed` or `unsupported`. An empty scope, scanner error, or any missing
+coverage makes `complete` and `passed` false. Assessed vulnerability failures may be
+complete but never pass. Exit status 0 requires complete, passing coverage; audit
+failure or incomplete coverage returns 1, and invalid configuration returns a
+nonzero CLI error. `audits.unsupported` documents a limitation without waiving it.
+Application gates can require this separate network-dependent audit, or explicitly
+select `targets=js` to bound required coverage. Release-age and source checks remain
+mandatory for updates.
 
 Use `just chainman config validate` to check the bindings. Keep generated project
 copies synchronized through the project's generator and acceptance gate.

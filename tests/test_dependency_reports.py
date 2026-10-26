@@ -173,7 +173,10 @@ class ReportTests(unittest.TestCase):
             self.assertEqual(execute.call_count, 1)
             report = json.loads(output.getvalue())
             self.assertEqual([row["adapter"] for row in report["lanes"]], ["js"])
-            self.assertEqual(report["lanes"][0]["findings"], {"123": "demo"})
+            self.assertEqual(
+                report["lanes"][0]["findings"],
+                [{"id": "123", "package": "demo", "version": None, "paths": []}],
+            )
 
     def test_coverage_distinguishes_managed_excluded_and_missing(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -211,7 +214,7 @@ exclusions=[{pattern="fixture/**",reason="Literal manifest fixture"}]
             dependency_audit.javascript(
                 {"advisories": {"123": {"module_name": "demo"}}}
             ),
-            {"123": "demo"},
+            [{"id": "123", "package": "demo", "version": None, "paths": []}],
         )
 
     def test_exceptions_match_identity_and_expire(self):
@@ -220,25 +223,132 @@ exclusions=[{pattern="fixture/**",reason="Literal manifest fixture"}]
             "package": "demo",
             "reason": "Reviewed unreachable path",
             "review_after": "2027-01-01",
+            "versions": ["3.2.1"],
+        }
+        finding = {
+            "id": "123",
+            "package": "demo",
+            "version": "3.2.1",
+            "paths": ["root>demo"],
         }
         self.assertEqual(
-            dependency_audit.evaluate({"123": "demo"}, [entry], date(2026, 9, 12)), {}
+            dependency_audit.evaluate([finding], [entry], date(2026, 9, 12)), []
         )
         for findings, today, diagnostic in (
-            ({}, date(2026, 9, 12), "Stale audit exception 123 \\(demo\\)"),
+            ([], date(2026, 9, 12), "Stale audit exception 123 \\(demo\\)"),
             (
-                {"123": "other"},
+                [{**finding, "package": "other"}],
                 date(2026, 9, 12),
-                "123 \\(demo\\) belongs to reported package other",
+                "Stale audit exception",
             ),
-            ({"123": "demo"}, date(2027, 1, 1), "123 \\(demo\\) requires review"),
+            ([finding], date(2027, 1, 1), "123 \\(demo\\) requires review"),
         ):
             with self.assertRaisesRegex(ValueError, diagnostic):
                 dependency_audit.evaluate(findings, [entry], today)
         with self.assertRaisesRegex(ValueError, "Duplicate audit exception: 123"):
-            dependency_audit.evaluate(
-                {"123": "demo"}, [entry, entry], date(2026, 9, 12)
-            )
+            dependency_audit.evaluate([finding], [entry, entry], date(2026, 9, 12))
+
+    def test_waiver_only_removes_reviewed_versions_and_paths(self):
+        findings = dependency_audit.javascript(
+            {
+                "advisories": {
+                    "123": {
+                        "module_name": "demo",
+                        "findings": [
+                            {
+                                "version": "3.2.1",
+                                "paths": ["root>a>demo", "root>b>demo"],
+                            },
+                            {"version": "4.0.1", "paths": ["root>demo"]},
+                        ],
+                    }
+                }
+            }
+        )
+        entry = {
+            "id": "123",
+            "package": "demo",
+            "versions": ["3.2.1"],
+            "reason": "Reviewed",
+            "review_after": "2027-01-01",
+        }
+        self.assertEqual(
+            dependency_audit.evaluate(findings, [entry], date(2026, 10, 26)),
+            [findings[1]],
+        )
+        entry["paths"] = ["root>a>demo"]
+        remaining = dependency_audit.evaluate(findings, [entry], date(2026, 10, 26))
+        self.assertEqual(
+            remaining, [{**findings[0], "paths": ["root>b>demo"]}, findings[1]]
+        )
+        for incomplete in (
+            {**findings[0], "version": None},
+            {**findings[0], "paths": []},
+        ):
+            with self.assertRaisesRegex(ValueError, "evidence"):
+                dependency_audit.evaluate([incomplete], [entry], date(2026, 10, 26))
+        del entry["versions"]
+        with self.assertRaisesRegex(ValueError, "Legacy.*migrate"):
+            dependency_audit.evaluate(findings, [entry], date(2026, 10, 26))
+
+    def test_empty_and_unassessed_scopes_fail(self):
+        for adapters in (
+            {},
+            {"sdk": {"adapter": "toolchain", "profile": "host", "tools": []}},
+            {
+                "js": {"adapter": "javascript", "profile": "host"},
+                "sdk": {"adapter": "toolchain", "profile": "host", "tools": []},
+            },
+        ):
+            cfg = {
+                "schema": 3,
+                "updates": {
+                    "adapters": adapters,
+                    "steps": [{"resolve": name} for name in adapters],
+                },
+            }
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                patch.object(dependency_audit.tc, "config", return_value=cfg),
+                patch.object(dependency_audit.tc, "environment", return_value={}),
+                patch.object(
+                    dependency_audit.chainman,
+                    "execute",
+                    return_value=subprocess.CompletedProcess(
+                        [], 0, '{"advisories":{}}', ""
+                    ),
+                ),
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(
+                        dependency_audit.run(Path(temporary).resolve(), []), 1
+                    )
+                report = json.loads(output.getvalue())
+                self.assertEqual(report["schema"], 2)
+                self.assertFalse(report["complete"])
+                self.assertFalse(report["passed"])
+                self.assertEqual(
+                    {row["adapter"] for row in report["lanes"]}, set(adapters)
+                )
+
+    def test_npm_ranges_are_not_installed_version_evidence(self):
+        document = {
+            "vulnerabilities": {
+                "demo": {
+                    "name": "demo",
+                    "nodes": ["node_modules/demo"],
+                    "via": [{"source": 123, "name": "demo", "range": "<5"}],
+                }
+            }
+        }
+        self.assertIsNone(dependency_audit.javascript(document)[0]["version"])
+        self.assertEqual(
+            dependency_audit.javascript(document, {"node_modules/demo": "3.2.1"})[0][
+                "version"
+            ],
+            "3.2.1",
+        )
 
 
 if __name__ == "__main__":
