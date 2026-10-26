@@ -19,6 +19,15 @@ Docker/Podman container lanes, and language/native-tool checks. A source commit 
 qualified only by the lanes actually executed successfully. Availability of a
 workflow definition is not evidence that it has passed.
 
+Host core qualification runs `just trust-test` before source verification. This
+realizes the pinned Node and uv clients and checks their actual trust stores before
+bounded bootstrap commands use them. Intel macOS may compile reviewed versions
+from source when the Nix binary cache has no matching build; that preparation must
+finish before the scanner's 180-second command budget starts. For a cold developer
+store, use `just trust-test verify` for the same ordering. Intel runs first in the
+serial matrix to expose compatibility-build failures early; all fourteen lanes
+remain required. Bootstrap command deadlines and scanner assertions are unchanged.
+
 ## Bootstrap and source identity
 
 The Git bootstrap tests exercise real Git objects with temporary repositories. Only

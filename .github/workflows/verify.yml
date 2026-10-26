@@ -36,10 +36,10 @@ jobs:
       max-parallel: 1
       matrix:
         include:
+          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 180}
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
           - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
           - {runner: macos-15, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 180}
           - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}
@@ -82,6 +82,11 @@ jobs:
       - name: Apple SDK preflight
         if: runner.os == 'macOS' && matrix.module == 'swift'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- sdk-doctor apple
+      # A reviewed tool can require a cold source build on Intel macOS. Realize
+      # and check those clients before bounded bootstrap command assertions.
+      - name: Qualify effective runtime trust stores
+        if: matrix.mode == 'host-nix' && matrix.module == 'core'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- trust-test
       - name: Verify using the local command
         run: |
           if [ "$TOOLCHAIN_MODE" = container-nix ]; then
@@ -101,9 +106,6 @@ jobs:
       - name: Qualify native JavaScript update validation
         if: matrix.mode == 'host-nix' && matrix.module == 'javascript'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
-      - name: Qualify effective runtime trust stores
-        if: matrix.mode == 'host-nix' && matrix.module == 'core'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- trust-test
       - name: Qualify native service ownership and backend
         if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test
