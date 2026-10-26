@@ -64,6 +64,9 @@ class NixReferenceTests(unittest.TestCase):
                     "nix-command flakes",
                     "flake",
                     "lock",
+                    # Keep the temporary source independent of any enclosing
+                    # Git directory, as the production runtime entry does.
+                    toolchain.nix_path_reference(root / "nix", "").removesuffix("#"),
                 ],
                 cwd=root / "nix",
                 check=True,
