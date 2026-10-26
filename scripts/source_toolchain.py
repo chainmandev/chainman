@@ -335,7 +335,9 @@ def eligible_tool(
     # Retention waives only age: constraints, known safe floors and malformed or
     # expired exceptions remain operative even when no newer release is selected.
     mature = registry.maturity(provider, releases, policy, package, now)
-    exceptions = registry.active_exceptions(provider, releases, policy, package, now)
+    exceptions = registry.active_exceptions(
+        provider, releases, policy, package, now, scope_versions={chosen.version}
+    )
     rank = registry.stable_version(provider, chosen.version)
     safe = registry.minimum_safe(provider, policy, package, chosen.version)
     if (

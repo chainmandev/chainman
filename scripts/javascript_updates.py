@@ -1848,7 +1848,12 @@ def audit_artifacts(
             if identity[0] != "npm":
                 continue
             for release in registry.active_exceptions(
-                "npm", registry.releases("npm", identity[1]), scoped, identity[1], now
+                "npm",
+                registry.releases("npm", identity[1]),
+                scoped,
+                identity[1],
+                now,
+                scope_versions={identity[2]},
             ):
                 if release.version == identity[2]:
                     exclusions.add(identity[1] + "@" + release.version)

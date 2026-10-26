@@ -616,6 +616,8 @@ def active_exceptions(
     policy: Mapping[str, object],
     name: str,
     now: datetime,
+    *,
+    scope_versions: set[str] | None = None,
 ) -> list[Release]:
     mature = maturity(provider, releases, policy, name, now)
     bound = constraint(provider, policy, name)
@@ -623,6 +625,15 @@ def active_exceptions(
     dates = latest_publications(releases)
     # An exception admits one exact version only while a mature safe version is absent.
     for exception in policy_exceptions(provider, policy, name):
+        if (
+            exception.applies_to
+            and scope_versions is not None
+            and not any(
+                compatible(provider, value, exception.applies_to)
+                for value in scope_versions
+            )
+        ):
+            continue
         expiry = timestamp(exception.expires)
         safe = version(provider, exception.minimum_safe)
         admitted = version(provider, exception.version)

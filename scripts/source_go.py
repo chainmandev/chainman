@@ -478,7 +478,15 @@ def audit(
                             "go", item.version, compatible_bound(previous)
                         )
                     ]
-        registry.active_exceptions("go", candidates, policy, package, now)
+        registry.active_exceptions(
+            "go",
+            candidates,
+            policy,
+            package,
+            now,
+            scope_versions={value for name, value, _, _ in observed if name == package}
+            | {item.version for item in public_requirements if item.path == package},
+        )
     for name, body in after["members"].items():
         previous_requirements = {
             item.path: item.version
@@ -565,6 +573,7 @@ def audit(
                     policy,
                     package,
                     now,
+                    scope_versions={value},
                 )
                 if value not in {r.version for r in allowed}:
                     raise ValueError("New Go checksum identity lacks mature evidence")

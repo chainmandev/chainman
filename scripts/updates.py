@@ -878,7 +878,12 @@ def audit_identities(
                     else registry.releases(provider, package)
                 )
             admitted = registry.active_exceptions(
-                provider, candidates, policy, package, now
+                provider,
+                candidates,
+                policy,
+                package,
+                now,
+                scope_versions={item.version for item in current if item[:2] == key},
             )
             evidence[key] = (candidates, {r.version for r in admitted})
         candidates, exceptions = evidence[key]

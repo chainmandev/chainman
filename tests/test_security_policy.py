@@ -117,6 +117,18 @@ class ScopedPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Duplicate"):
             security_policy.validate({"exceptions": [exception(7), exception(7)]})
 
+    def test_absent_scoped_line_does_not_block_auditing_other_installed_line(self):
+        self.policy["exceptions"][0]["expires"] = NOW.isoformat()
+        current = ("npm", "demo", "8.2.0", "", "sha256:" + "a" * 64)
+        from unittest.mock import patch
+
+        with patch.object(
+            registry,
+            "releases",
+            return_value=[release("7.2.0", 1), release("8.2.0", 40)],
+        ):
+            updates.audit_identities(Path("."), {current}, {current}, self.policy, NOW)
+
 
 if __name__ == "__main__":
     unittest.main()
