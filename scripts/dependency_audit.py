@@ -419,14 +419,18 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
                                 requirements,
                             ]
                         )
-                rows.append(
-                    dict(
-                        adapter=name,
-                        directory=directory,
-                        status="passed" if result.returncode == 0 else "failed",
-                        output=result.stdout + result.stderr,
-                    )
+                lane: Lane = dict(
+                    adapter=name,
+                    directory=directory,
+                    status="passed" if result.returncode == 0 else "failed",
+                    output=result.stdout + result.stderr,
                 )
+                if result.returncode:
+                    lane["error"] = (
+                        f"Native scanner exited with status {result.returncode}; "
+                        "text output cannot establish whether assessment completed"
+                    )
+                rows.append(lane)
             except (
                 OSError,
                 ValueError,

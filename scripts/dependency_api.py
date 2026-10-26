@@ -95,7 +95,7 @@ def inspection_policy(root: Path) -> Table:
     """Expose the same adapters used by optional module resolution to inspection."""
     result = policy(root)
     if (
-        tc.config(root).get("schema") == 3
+        tc.config(root).get("schema") in (2, 3)
         or result.get("adapters")
         or result.get("steps")
         or result.get("resolver")

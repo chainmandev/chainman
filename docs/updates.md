@@ -769,7 +769,8 @@ coverage and each adapter's age basis. Lists still replace inherited lists. An
 explicit empty list remains meaningful. The default report performs no evidence
 queries. Add `--check` to inspect current registry/source evidence and retirement
 eligibility without resolving dependencies, retiring entries or changing project
-files. Evidence failures return a nonzero status. Runtime self-updates have no
+files. Checks run in a disposable source copy; changes to that copy's source inputs
+invalidate the evidence. Evidence failures return a nonzero status. Runtime self-updates have no
 minimum-age filter; publish and adopt the supporting runtime before configuring
 new dependency-policy fields.
 

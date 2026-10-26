@@ -4,8 +4,10 @@ import fnmatch
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import tomllib
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from datetime import datetime
 from typing import Literal, NotRequired, TypedDict
@@ -212,6 +214,70 @@ def coverage(root: Path) -> Coverage:
 
 
 def exception_report(
+    root: Path, settings: ad.Table, selected: set[str], check: bool, now: datetime
+) -> tuple[list[ad.Table], dict[str, str]]:
+    if not check:
+        return inspect_exceptions(root, settings, selected, False, now)
+    # Native evidence checks may populate lock metadata or temporary source
+    # overrides. Keep all such work away from the inspected project and reject
+    # conclusions that depended on changed source inputs.
+    with (
+        tempfile.TemporaryDirectory(prefix="chainman-policy-check-") as temporary,
+        updates.preview_git_environment(),
+    ):
+        copy = Path(temporary).resolve()
+        inspection_copy(root, copy)
+        before = updates.snapshot(copy)
+        with dependency_api.transaction_environment(copy, now):
+            declarations, errors = inspect_exceptions(
+                copy, settings, selected, True, now
+            )
+        if updates.snapshot(copy) != before:
+            errors["inspection"] = (
+                "Evidence checks changed source inputs in the disposable inspection copy"
+            )
+        return declarations, errors
+
+
+def inspection_copy(root: Path, copy: Path) -> None:
+    if updates.git(root, "rev-parse", "--verify", "HEAD", check=False):
+        updates.prepare_preview(root, copy, updates.snapshot(root))
+        return
+    # Inspection also works before the first commit. There is no frozen Git
+    # submodule identity in that case; copy only the current regular sources.
+    names = updates.git(
+        root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"
+    ).split("\0")
+    for name in filter(None, names):
+        source = tc.contained(root, str(Path(name).parent)) / Path(name).name
+        target = copy / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_symlink():
+            target.symlink_to(updates.preview_link(root, source))
+        elif source.is_file():
+            shutil.copy2(source, target)
+        elif source.exists():
+            raise ValueError(
+                "Policy inspection requires a committed submodule identity"
+            )
+    updates.git(copy, "init", "-b", "inspection")
+    updates.git(copy, "add", "--force", ".")
+    updates.git(
+        copy,
+        "-c",
+        "user.name=Inspection",
+        "-c",
+        "user.email=inspection@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Disposable inspection source",
+    )
+
+
+def inspect_exceptions(
     root: Path, settings: ad.Table, selected: set[str], check: bool, now: datetime
 ) -> tuple[list[ad.Table], dict[str, str]]:
     declarations: list[tuple[str, tuple[str, ...], str | None, list[object]]] = []

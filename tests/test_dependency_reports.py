@@ -81,6 +81,21 @@ class ReportTests(unittest.TestCase):
                 before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
             )
 
+            def mutate(copy, *args):
+                self.assertNotEqual(copy, root)
+                (copy / "package.json").write_text('{"changed":true}')
+
+            adapter = dependency_api.Adapter(
+                lambda *a: {}, lambda *a, **k: None, mutate
+            )
+            with patch.object(dependency_api, "implementation", return_value=adapter):
+                checked = dependency_reports.report(root, [], check=True)
+            self.assertFalse(checked["complete"])
+            self.assertIn("inspection", checked["evidence_errors"])
+            self.assertEqual(
+                before, {p.name: p.read_bytes() for p in root.iterdir() if p.is_file()}
+            )
+
     def test_rust_audit_uses_absolute_manifest_and_preserves_scanner_status(self):
         for directory in (".", "server", "nested/server"):
             for scanner_status in (0, 1):
@@ -143,6 +158,7 @@ class ReportTests(unittest.TestCase):
                         self.assertEqual(dependency_audit.run(root, []), scanner_status)
                     report = json.loads(output.getvalue())
                     self.assertEqual(report["passed"], scanner_status == 0)
+                    self.assertEqual(report["complete"], scanner_status == 0)
                     self.assertEqual(report["lanes"][0]["output"], "scanner result")
 
     def test_native_audit_tools_remain_rooted_through_scanner_execution(self):
@@ -355,16 +371,20 @@ exclusions=[{pattern="fixture/**",reason="Literal manifest fixture"}]
             dependency_audit.evaluate(findings, [entry], date(2026, 10, 26))
 
     def test_empty_and_unassessed_scopes_fail(self):
-        for adapters in (
-            {},
-            {"sdk": {"adapter": "toolchain", "profile": "host", "tools": []}},
-            {
-                "js": {"adapter": "javascript", "profile": "host"},
-                "sdk": {"adapter": "toolchain", "profile": "host", "tools": []},
-            },
+        for schema, adapters in (
+            (2, {}),
+            (3, {}),
+            (3, {"sdk": {"adapter": "toolchain", "profile": "host", "tools": []}}),
+            (
+                3,
+                {
+                    "js": {"adapter": "javascript", "profile": "host"},
+                    "sdk": {"adapter": "toolchain", "profile": "host", "tools": []},
+                },
+            ),
         ):
             cfg = {
-                "schema": 3,
+                "schema": schema,
                 "updates": {
                     "adapters": adapters,
                     "steps": [{"resolve": name} for name in adapters],

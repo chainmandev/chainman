@@ -135,8 +135,10 @@ and `paths` for each JavaScript occurrence. Consumers of schema 1's advisory map
 must migrate. Every selected adapter appears in `lanes`; adapters without a scanner
 report `unassessed` or `unsupported`. An empty scope, scanner error, or any missing
 coverage makes `complete` and `passed` false. Assessed vulnerability failures may be
-complete but never pass. Exit status 0 requires complete, passing coverage; audit
-failure or incomplete coverage returns 1, and invalid configuration returns a
+complete but never pass. Native scanners currently return text diagnostics, so a
+nonzero native exit is conservatively incomplete until its output is investigated.
+Exit status 0 requires complete, passing coverage; audit failure or incomplete
+coverage returns 1, and invalid configuration returns a
 nonzero CLI error. `audits.unsupported` documents a limitation without waiving it.
 Application gates can require this separate network-dependent audit, or explicitly
 select `targets=js` to bound required coverage. Release-age and source checks remain
