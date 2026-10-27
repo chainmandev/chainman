@@ -21,6 +21,65 @@ import tomlkit
 
 
 class ReportTests(unittest.TestCase):
+    def test_report_and_audit_share_unavailable_coverage_and_reasons(self):
+        specs = {
+            "disabled": {"adapter": "javascript"},
+            "ready": {"adapter": "javascript"},
+            "empty": {"adapter": "go", "directories": []},
+            "mobile": {"adapter": "flutter"},
+            "sdk": {"adapter": "toolchain"},
+        }
+        cfg = {
+            "updates": {"adapters": specs},
+            "audits": {"unsupported": {"disabled": "Reviewed scanner limitation"}},
+        }
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(dependency_reports.tc, "config", return_value=cfg),
+            patch.object(dependency_reports, "exception_report", return_value=([], {})),
+            patch.object(dependency_reports, "coverage", return_value={}),
+            patch.object(dependency_reports, "declarations", return_value={}),
+            patch.object(dependency_audit.chainman, "execute") as execute,
+        ):
+            root = Path(directory).resolve()
+            report = dependency_reports.report(
+                root, ["--targets", "disabled,empty,mobile,sdk"]
+            )
+            coverage = report["audit_coverage"]
+            self.assertEqual(
+                coverage["ready"],
+                {"selected": False, "scanner": True, "status": "not-run"},
+            )
+            self.assertEqual(
+                coverage["disabled"]["reason"], "Reviewed scanner limitation"
+            )
+            self.assertEqual(coverage["disabled"]["status"], "unsupported")
+            self.assertEqual(coverage["mobile"]["status"], "unsupported")
+            self.assertEqual(coverage["sdk"]["status"], "unassessed")
+            self.assertEqual(coverage["empty"]["status"], "unassessed")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    dependency_audit.run(root, ["targets=disabled,empty,mobile,sdk"]), 1
+                )
+            for lane in json.loads(output.getvalue())["lanes"]:
+                self.assertEqual(lane["status"], coverage[lane["adapter"]]["status"])
+                self.assertEqual(lane["reason"], coverage[lane["adapter"]]["reason"])
+            execute.assert_not_called()
+
+    def test_policy_report_rejects_invalid_unsupported_declarations(self):
+        for unsupported in ({"missing": "reason"}, {"js": " "}):
+            cfg = {
+                "updates": {"adapters": {"js": {"adapter": "javascript"}}},
+                "audits": {"unsupported": unsupported},
+            }
+            with (
+                tempfile.TemporaryDirectory() as directory,
+                patch.object(dependency_reports.tc, "config", return_value=cfg),
+                self.assertRaisesRegex(ValueError, "adapter and reason"),
+            ):
+                dependency_reports.report(Path(directory).resolve(), [])
+
     def test_policy_report_explains_shadowed_lists_and_remains_read_only(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

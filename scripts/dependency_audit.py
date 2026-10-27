@@ -235,17 +235,12 @@ def run(root: Path, arguments: list[str]) -> int:
         return run_retained(root, arguments, Path(directory))
 
 
-def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
-    import recipes
+SCANNERS = {"javascript", "rust", "python", "go"}
 
-    cfg = tc.config(root)
-    settings = dependency_api.inspection_policy(root)
-    adapters = ad.table(settings.get("adapters", {}), "Dependency adapters")
-    selected = (
-        dependency_api.selection(settings, recipes.selection_options(arguments))[0]
-        if adapters or arguments
-        else set()
-    )
+
+def configuration(
+    cfg: Mapping[str, object], adapters: Mapping[str, object]
+) -> tuple[ad.Table, dict[str, str]]:
     audit = cfg.get("audits", {})
     if not isinstance(audit, dict) or set(audit) - {"exceptions", "unsupported"}:
         raise ValueError(
@@ -273,6 +268,51 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
     ):
         raise ValueError("Unsupported audit declarations require an adapter and reason")
     unsupported_reasons = ad.string_map(unsupported, "Unsupported audit declarations")
+    return exception_entries, unsupported_reasons
+
+
+def unavailable(
+    name: str, spec: Mapping[str, object], unsupported: Mapping[str, str]
+) -> Lane | None:
+    """Classify coverage without executing a scanner, shared by audit and report."""
+    kind = ad.text(spec["adapter"], "Adapter kind")
+    if name in unsupported or kind in {"flutter", "swift", "gradle"}:
+        return dict(
+            adapter=name,
+            status="unsupported",
+            reason=unsupported.get(
+                name, "No shared vulnerability scanner is configured for this ecosystem"
+            ),
+        )
+    if kind not in SCANNERS:
+        return dict(
+            adapter=name,
+            status="unassessed",
+            reason="No vulnerability assessment is implemented for this adapter",
+        )
+    if not ad.strings(
+        spec.get("directories", [spec.get("directory", ".")]), "Adapter directories"
+    ):
+        return dict(
+            adapter=name,
+            status="unassessed",
+            reason="The selected adapter has an empty audit scope",
+        )
+    return None
+
+
+def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
+    import recipes
+
+    cfg = tc.config(root)
+    settings = dependency_api.inspection_policy(root)
+    adapters = ad.table(settings.get("adapters", {}), "Dependency adapters")
+    selected = (
+        dependency_api.selection(settings, recipes.selection_options(arguments))[0]
+        if adapters or arguments
+        else set()
+    )
+    exception_entries, unsupported_reasons = configuration(cfg, adapters)
     rows: list[Lane] = []
     binaries: dict[str, Path] = {}
     for name in adapters:
@@ -280,46 +320,13 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
             continue
         spec = dependency_api.configured(root, name, settings)
         kind = ad.text(spec["adapter"], "Adapter kind")
-        if kind not in {
-            "javascript",
-            "rust",
-            "python",
-            "go",
-            "flutter",
-            "swift",
-            "gradle",
-        }:
-            rows.append(
-                dict(
-                    adapter=name,
-                    status="unassessed",
-                    reason="No vulnerability assessment is implemented for this adapter",
-                )
-            )
-            continue
-        if kind in {"flutter", "swift", "gradle"} or name in unsupported_reasons:
-            rows.append(
-                dict(
-                    adapter=name,
-                    status="unsupported",
-                    reason=unsupported_reasons.get(
-                        name,
-                        "No shared vulnerability scanner is configured for this ecosystem",
-                    ),
-                )
-            )
+        missing = unavailable(name, spec, unsupported_reasons)
+        if missing is not None:
+            rows.append(missing)
             continue
         directories = ad.strings(
             spec.get("directories", [spec.get("directory", ".")]), "Adapter directories"
         )
-        if not directories:
-            rows.append(
-                dict(
-                    adapter=name,
-                    status="unassessed",
-                    reason="The selected adapter has an empty audit scope",
-                )
-            )
         for directory in directories:
             try:
                 cwd = tc.contained(root, directory)

@@ -15,6 +15,7 @@ from typing import Literal, NotRequired, TypedDict
 import adapter_data as ad
 import chainman_updates
 import dependency_api
+import dependency_audit
 import source_toolchain_pin
 import toolchain as tc
 import updates
@@ -422,6 +423,21 @@ def report(root: Path, arguments: list[str], *, check: bool = False) -> ad.Table
         if dependency_api.target_names(settings) or arguments
         else (set(), {})
     )
+    adapters = ad.table(settings.get("adapters", {}), "Adapters")
+    _, unsupported = dependency_audit.configuration(tc.config(root), adapters)
+    audit_coverage: ad.Table = {}
+    for name in adapters:
+        spec = dependency_api.configured(root, name, settings)
+        missing = dependency_audit.unavailable(name, spec, unsupported)
+        audit_coverage[name] = {
+            "selected": name in selected,
+            "scanner": spec["adapter"] in dependency_audit.SCANNERS,
+            **(
+                {key: value for key, value in missing.items() if key != "adapter"}
+                if missing is not None
+                else {"status": "not-run"}
+            ),
+        }
     exceptions, evidence_errors = exception_report(
         root, settings, selected, check, dependency_api.instant()
     )
@@ -441,15 +457,7 @@ def report(root: Path, arguments: list[str], *, check: bool = False) -> ad.Table
             "minimum_age_days": None,
             "note": "Runtime self-updates have no age filter",
         },
-        audit_coverage={
-            name: {
-                "selected": name in selected,
-                "scanner": ad.table(spec, "Adapter")["adapter"]
-                in {"javascript", "rust", "python", "go"},
-                "status": "not-run",
-            }
-            for name, spec in ad.table(settings.get("adapters", {}), "Adapters").items()
-        },
+        audit_coverage=audit_coverage,
         age_bases={
             name: {
                 "nix": "commit-date",
