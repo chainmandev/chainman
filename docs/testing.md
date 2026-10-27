@@ -29,6 +29,13 @@ builds on Intel to avoid concurrent Node and uv compiler workloads. Intel runs f
 in the serial matrix to expose compatibility-build failures early; all fourteen lanes
 remain required. Bootstrap command deadlines and scanner assertions are unchanged.
 
+The Go language lane also runs `just go-test`, including the native workspace
+fixtures. The Linux x86-64 host core lane runs `just audit-test` to exercise actual
+pinned scanner startup and project policy discovery. These are required steps in
+the existing qualification lanes. Paired Node/Nix transaction fixtures in the
+source suite cover independent maturity, exception cleanup, expiry, interruption,
+resumed auditing, and preservation of original policy when an audit fails.
+
 ## Bootstrap and source identity
 
 The Git bootstrap tests exercise real Git objects with temporary repositories. Only

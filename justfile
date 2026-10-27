@@ -111,6 +111,9 @@ python-test:
     @./scripts/enter.sh python env CHAINMAN_TEST_TRUST_UV=1 python3 -B -m unittest discover -s tests -p test_trust_stores.py -v
     @./scripts/enter.sh python env CHAINMAN_TEST_UV=1 python3 -B -m unittest discover -s tests -p test_python_native.py -v
 
+go-test:
+    @./scripts/enter.sh go env CHAINMAN_TEST_GO_NATIVE=1 python3 -B -m unittest discover -s tests -p test_source_updates.py -k Go -v
+
 # Real pinned scanners in disposable fixtures; no application audit or policy waiver.
 audit-test:
     @./scripts/enter.sh core env CHAINMAN_TEST_AUDIT=1 python3 -B -m unittest discover -s tests -p test_audit_native.py -v

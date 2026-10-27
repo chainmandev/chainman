@@ -747,7 +747,9 @@ expires = "2026-11-01T12:00:00Z"
 
 The revision must be reachable from the input's declared branch. A verified mature
 descendant may replace it. Timestamp-based baseline retention cannot override an
-approved fix. Aliases sharing a lock node require identical approvals. Repository,
+approved fix. Aliases sharing a lock node require identical approvals across all
+selected adapters, including agreement when no approval is present. Conflicting
+approvals or selected revisions fail before any resolver or hook executes. Repository,
 commit timestamp and Nix content-hash checks apply even to unchanged approved pins.
 
 `artifact_exceptions` approve an exact declared HTTPS `url` and a `digest` of the
@@ -765,7 +767,14 @@ inputs before retiring their approvals.
 
 `deps-policy-report` schema 2 shows physical declarations, effective and inherited
 scopes, shadowed lists, expiry, retirement state, selected vulnerability-scanner
-coverage and each adapter's age basis. Lists still replace inherited lists. An
+coverage and each adapter's age basis. Coverage uses `unsupported` with the declared
+reason for explicitly unavailable scanners and unsupported ecosystems, `unassessed`
+for adapters without an assessment or with an empty scope, and `not-run` for
+supported scanners awaiting execution. The `selected` field bounds the requested
+scope; `scanner` identifies ecosystem capability, not a successful assessment.
+These statuses also appear for unselected adapters. Neither report mode executes
+vulnerability scanners; use the audit command for assessment results.
+Lists still replace inherited lists. An
 explicit empty list remains meaningful. The default report performs no evidence
 queries. Add `--check` to inspect current registry/source evidence and retirement
 eligibility without resolving dependencies, retiring entries or changing project
@@ -872,6 +881,20 @@ policy, formatting and file permissions are preserved. Policy files containing
 exceptions are automatically admitted to the update's output inventory for this
 narrow cleanup; unrelated configuration changes remain forbidden. Formatting and
 runtime-only updates do not remove dependency exceptions.
+
+A Node SDK declared as `github:nodejs/node` can need two independent exceptions:
+an exact package release exception under the SDK adapter's policy and an exact
+`nix_exceptions` entry for the input revision supplying that release. Configure
+both only after adopting a runtime that supports them. The package exception uses
+the later of the Node release publication and its source commit date; the Nix
+exception uses the containing Nix revision's commit date. If Node is 30 days old
+and the Nix revision is 29 days old under a 30-day policy, a successful update can
+retire the Node entry while retaining the Nix approval. A later successful update
+can retire the Nix entry once its audited revision is mature. Select and audit the
+complete relevant scope for each entry. Cleanup happens during a dependency update,
+not on a timer, during setup, or through `deps-policy-report --check`. Failed
+verification leaves the original entries intact; resume rechecks the original
+policy even when the candidate has already removed mature entries.
 
 Retirement is reported in the update output and the policy file appears in its
 changed paths. Preview, explicit commit policy, concurrent-edit protection and
