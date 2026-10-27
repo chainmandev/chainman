@@ -336,6 +336,11 @@ def plan_steps(
         or names - covered
     ):
         raise ValueError("Selected update targets are missing from updates.steps")
+    return names, modes, adapters
+
+
+def preflight_nix(root: Path, adapters: Mapping[str, tuple[Table, Table]]) -> None:
+    """Bind selected Nix approvals before execution, independently of static plans."""
     import source_updates
 
     source_updates.validate_nix_aliases(
@@ -348,7 +353,6 @@ def plan_steps(
             if spec["adapter"] == "nix" and spec.get("inputs")
         },
     )
-    return names, modes, adapters
 
 
 def run_steps(
@@ -356,6 +360,7 @@ def run_steps(
 ) -> None:
     """Resolve in order, then audit every selected adapter after all project hooks."""
     names, modes, adapters = plan_steps(root, settings, extra)
+    preflight_nix(root, adapters)
     import exception_retirement
 
     policy_documents = (

@@ -751,6 +751,8 @@ approved fix. Aliases sharing a lock node require identical approvals across all
 selected adapters, including agreement when no approval is present. Conflicting
 approvals or selected revisions fail before any resolver or hook executes. Repository,
 commit timestamp and Nix content-hash checks apply even to unchanged approved pins.
+Static plan inspection describes adapter selection without loading source inventory;
+execution and resumed auditing bind approvals to the actual original lock nodes.
 
 `artifact_exceptions` approve an exact declared HTTPS `url` and a `digest` of the
 form `sha256:` followed by 64 lowercase hexadecimal digits. They require the same

@@ -479,6 +479,7 @@ def reaudit(root: Path, at: str, args: list[str]) -> None:
                 "Re-audit requires declared adapters; an opaque resolver cannot certify an edited candidate"
             )
         _, _, adapters = dependency_api.plan_steps(baseline, settings, opts.extra)
+        dependency_api.preflight_nix(baseline, adapters)
         with dependency_api.transaction_environment(root, now):
             baselines = {}
             for name, (spec, policy) in adapters.items():

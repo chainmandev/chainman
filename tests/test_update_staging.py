@@ -581,7 +581,7 @@ expires="2026-12-01T00:00:00Z"
             patch.object(
                 subject.dependency_api,
                 "plan_steps",
-                return_value=([], {}, {"js": ({}, {})}),
+                return_value=([], {}, {"js": ({"adapter": "javascript"}, {})}),
             ),
             patch.object(
                 subject.dependency_api,
