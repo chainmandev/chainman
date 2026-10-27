@@ -1001,13 +1001,13 @@ def nix_snapshot(root: Path, spec: Mapping[str, object]) -> NixSnapshot:
     return {"adapter": "nix", "locks": locks}
 
 
-def nix_plan(
+def nix_bindings(
     before: Mapping[str, object],
     spec: Mapping[str, object],
     policy: Mapping[str, object],
-    now: datetime,
 ) -> list[ad.Table]:
-    plans: list[ad.Table] = []
+    """Bind declarations to lock nodes without consulting registry evidence."""
+    bindings: list[ad.Table] = []
     security_policy.validate(policy)
     locks = ad.table(before["locks"], "Nix snapshot locks")
     inputs = [
@@ -1050,12 +1050,63 @@ def nix_plan(
         if key in approvals and approvals[key] != approved:
             raise ValueError("Nix aliases require identical security approvals")
         approvals[key] = approved
+        bindings.append(
+            {
+                **item,
+                "file": path,
+                "node": node,
+                "approval": approved,
+                "baseline": ad.text(current.get("rev"), "Nix current revision"),
+            }
+        )
+    return bindings
+
+
+def validate_nix_aliases(
+    root: Path, bindings: Mapping[str, list[ad.Table]], field: str = "approval"
+) -> None:
+    """Check every selected adapter sharing a physical lock node before mutation."""
+    seen: dict[tuple[Path, str], tuple[str, object, object]] = {}
+    for name, rows in bindings.items():
+        for item in rows:
+            file = ad.text(item["file"], "Nix lock file")
+            key = (
+                tc.contained(root, file).resolve(),
+                ad.text(item["node"], "Nix node"),
+            )
+            label = f"{name}:{file}:{item['input']}"
+            value = (label, item["repository"], item[field])
+            if key in seen and seen[key][1:] != value[1:]:
+                raise ValueError(
+                    f"Nix aliases {seen[key][0]} and {label} require identical "
+                    f"repositories and {field}s"
+                )
+            seen[key] = value
+
+
+def nix_plan(
+    before: Mapping[str, object],
+    spec: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> list[ad.Table]:
+    plans: list[ad.Table] = []
+    for binding in nix_bindings(before, spec, policy):
+        item = {
+            key: value
+            for key, value in binding.items()
+            if key not in {"file", "node", "approval", "baseline"}
+        }
+        path, node = binding["file"], binding["node"]
+        repository = ad.text(item["repository"], "Nix repository")
         selected = approved_nix_candidate(item, policy, now)
-        current_revision = ad.text(current.get("rev"), "Nix current revision")
+        current_revision = ad.text(binding["baseline"], "Nix current revision")
         at = commit_time(repository, current_revision)
         if at > now:
             raise ValueError("Nix baseline has a future commit date")
-        if approval is None and at >= registry.timestamp(selected["published"]):
+        if binding["approval"] is None and at >= registry.timestamp(
+            selected["published"]
+        ):
             selected = {"revision": current_revision, "published": at.isoformat()}
         if any(
             p["file"] == path

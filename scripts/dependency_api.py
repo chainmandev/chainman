@@ -336,6 +336,18 @@ def plan_steps(
         or names - covered
     ):
         raise ValueError("Selected update targets are missing from updates.steps")
+    import source_updates
+
+    source_updates.validate_nix_aliases(
+        root,
+        {
+            name: source_updates.nix_bindings(
+                source_updates.nix_snapshot(root, spec), spec, chosen_policy
+            )
+            for name, (spec, chosen_policy) in adapters.items()
+            if spec["adapter"] == "nix" and spec.get("inputs")
+        },
+    )
     return names, modes, adapters
 
 
@@ -360,6 +372,17 @@ def run_steps(
         name: table(implementation(spec).snapshot(root, spec), "Adapter snapshot")
         for name, (spec, _) in adapters.items()
     }
+    import source_updates
+
+    source_updates.validate_nix_aliases(
+        root,
+        {
+            name: source_updates.nix_plan(baselines[name], spec, chosen_policy, now)
+            for name, (spec, chosen_policy) in adapters.items()
+            if spec["adapter"] == "nix" and spec.get("inputs")
+        },
+        "revision",
+    )
     with transaction_environment(root, now):
         for step in steps:
             if "resolve" in step:
