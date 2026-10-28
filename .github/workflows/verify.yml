@@ -29,7 +29,47 @@ name: Deliberate toolchain verification
 permissions:
   contents: read
 jobs:
+  prepare-intel-runtime:
+    if: ${{ !inputs.diagnose_stopped_cancellation && !inputs.diagnose_bootstrap_scan }}
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      sha256: ${{ steps.export.outputs.sha256 }}
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/checkout with spaces
+    env:
+      CHAINMAN_SETUP: auto
+      TOOLCHAIN_MODE: host-nix
+      EXPECTED: ${{ inputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: checkout with spaces
+      - name: Confirm exact preparation source
+        env:
+          EVENT: ${{ github.sha }}
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = "$EXPECTED"
+          test "$EVENT" = "$EXPECTED"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Build and export the Intel runtime closure
+        id: export
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-runtime-closure export "$RUNNER_TEMP/intel runtime" "$EXPECTED"
+      - name: Retain the exact runtime closure for qualification
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: intel-runtime-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/intel runtime/runtime.nar
+          if-no-files-found: error
+          compression-level: 1
+          retention-days: 7
   verify:
+    needs: prepare-intel-runtime
     if: ${{ !inputs.diagnose_stopped_cancellation && !inputs.diagnose_bootstrap_scan }}
     strategy:
       fail-fast: false
@@ -74,6 +114,28 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           test "$EVENT" = "$EXPECTED"
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Validate Intel preparation outputs
+        if: matrix.runner == 'macos-15-intel'
+        env:
+          ARTIFACT_ID: ${{ needs.prepare-intel-runtime.outputs.artifact_id }}
+          ARCHIVE_SHA256: ${{ needs.prepare-intel-runtime.outputs.sha256 }}
+        run: |
+          set -eu
+          case "$ARTIFACT_ID" in ''|0|*[!0-9]*) echo 'Missing exact runtime artifact ID' >&2; exit 1;; esac
+          printf '%s\n' "$ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
+      - name: Download this run's prepared Intel runtime
+        if: matrix.runner == 'macos-15-intel'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare-intel-runtime.outputs.artifact_id }}
+          path: ${{ runner.temp }}/intel runtime
+          digest-mismatch: error
+      - name: Verify and import the exact Intel runtime closure
+        if: matrix.runner == 'macos-15-intel'
+        env:
+          EXPECTED: ${{ inputs.candidate_sha }}
+          ARCHIVE_SHA256: ${{ needs.prepare-intel-runtime.outputs.sha256 }}
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-runtime-closure import "$RUNNER_TEMP/intel runtime" "$EXPECTED" "$ARCHIVE_SHA256"
       - name: Optional disposable SDK cleanup
         if: inputs.prune_hosted_sdks && runner.os == 'Linux'
         env:

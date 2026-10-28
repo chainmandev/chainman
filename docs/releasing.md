@@ -39,12 +39,15 @@ lanes before publishing. It discovers the default branch at publication, require
 its expected old SHA and fast-forward ancestry, and uses an exact lease to reject
 concurrent movement. It then proves fresh public host/container initialization.
 
-The macOS Intel core lane has a 360-minute job limit for cold source builds of the
-reviewed Node and uv clients, followed by the complete source, starter, and native
-suites. Its trust preflight serializes those builds before bounded bootstrap
-commands run. The other 13 lanes retain their 60-minute limits. Per-command test
-deadlines and the requirement that every lane succeeds before publication remain
-unchanged.
+Intel runtime preparation and the macOS Intel core lane each have a 360-minute job
+limit. Preparation serially builds the reviewed Node and uv clients and transfers
+their Nix closure by exact artifact ID and independently supplied SHA-256 to the
+verification job in the same workflow run. The receiving job verifies the candidate
+and closure before running all trust, source, starter, and native suites. This keeps
+cold compilation outside the verification job's time budget. Preparation failure,
+missing artifacts, or integrity failures prevent qualification. The other 13 lanes
+retain their 60-minute limits. Per-command test deadlines and the requirement that
+every lane succeeds before publication remain unchanged.
 
 Repository Actions must permit the publication job's `contents: write`. Branch
 protection must allow that qualified workflow to advance the default branch. If

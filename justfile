@@ -78,6 +78,12 @@ doctor:
 ci-prune *args:
     @./scripts/enter.sh core python3 scripts/ci_cleanup.py "$@"
 
+ci-runtime-closure +args:
+    @./scripts/enter.sh core python3 scripts/ci_runtime_closure.py "$@"
+
+ci-runtime-test:
+    @./scripts/enter.sh core env CHAINMAN_TEST_CI_RUNTIME=1 python3 -B -m unittest discover -s tests -p test_ci_runtime_closure.py -v
+
 sdk-doctor platform:
     @case "$1" in apple) profile=swift;; android) profile=flutter;; *) exit 2;; esac; ./scripts/enter.sh "$profile" python3 scripts/native_sdks.py "$1"
 

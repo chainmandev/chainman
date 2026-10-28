@@ -24,10 +24,25 @@ realizes the pinned Node and uv clients and checks their actual trust stores bef
 bounded bootstrap commands use them. Intel macOS may compile reviewed versions
 from source when the Nix binary cache has no matching build; that preparation must
 finish before the scanner's 180-second command budget starts. For a cold developer
-store, use `just trust-test verify` for the same ordering. CI serializes these cold
-builds on Intel to avoid concurrent Node and uv compiler workloads. Intel runs first
-in the serial matrix to expose compatibility-build failures early; all fourteen lanes
-remain required. Bootstrap command deadlines and scanner assertions are unchanged.
+store, use `just trust-test verify` for the same ordering.
+
+CI first builds the Intel trust profile in a required preparation job, serializing
+Node and uv compilation. It exports the complete Nix closure as a temporary Actions
+artifact. The Intel lane downloads the preparation job's exact artifact ID from
+the same workflow run and checks a SHA-256 supplied separately through job outputs
+before importing it. Both jobs require the exact clean candidate checkout. The
+receiving lane independently evaluates its expected runtime path and verifies the
+imported store contents, then runs the ordinary trust, source, initializer, and
+native service checks. A missing or invalid transfer fails the lane; it does not
+fall back to a cold build or skip qualification. Artifacts are not shared between
+workflow runs. Failed-job retries can reuse the successful preparation job's
+immutable artifact and outputs while that artifact is retained.
+
+Preparation and Intel verification each have a 360-minute job limit; the other
+thirteen lanes retain their 60-minute limits. Intel runs first in the serial matrix;
+all fourteen lanes and preparation must succeed. Bootstrap command deadlines and
+scanner assertions are unchanged. `just ci-runtime-test` verifies the transfer in
+isolated local Nix stores, including refusal of changed content before import.
 
 The Go language lane also runs `just go-test`, including the native workspace
 fixtures. The Linux x86-64 host core lane runs `just audit-test` to exercise actual

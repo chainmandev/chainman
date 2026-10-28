@@ -10,6 +10,64 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_intel_preparation_is_required_and_transferred_by_exact_id_and_digest(self):
+        jobs = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())[
+            "jobs"
+        ]
+        prepare = jobs["prepare-intel-runtime"]
+        verify = jobs["verify"]
+        self.assertEqual(verify["needs"], "prepare-intel-runtime")
+        self.assertEqual(prepare["runs-on"], "macos-15-intel")
+        self.assertEqual(prepare["timeout-minutes"], 360)
+        self.assertEqual(prepare["if"], verify["if"])
+        self.assertEqual(
+            prepare["outputs"],
+            {
+                "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
+                "sha256": "${{ steps.export.outputs.sha256 }}",
+            },
+        )
+        for job in (prepare, verify):
+            self.assertNotIn("continue-on-error", job)
+            for step in job["steps"]:
+                self.assertNotIn("continue-on-error", step)
+        upload = next(s for s in prepare["steps"] if s.get("id") == "upload")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        self.assertNotIn("overwrite", upload["with"])
+        download = next(
+            s
+            for s in verify["steps"]
+            if s.get("uses", "").startswith("actions/download-artifact@")
+        )
+        self.assertEqual(download["if"], "matrix.runner == 'macos-15-intel'")
+        self.assertEqual(
+            download["with"]["artifact-ids"],
+            "${{ needs.prepare-intel-runtime.outputs.artifact_id }}",
+        )
+        self.assertEqual(download["with"]["digest-mismatch"], "error")
+        for field in ("name", "pattern", "github-token", "repository", "run-id"):
+            self.assertNotIn(field, download["with"])
+        imported = next(
+            s
+            for s in verify["steps"]
+            if s.get("name") == "Verify and import the exact Intel runtime closure"
+        )
+        self.assertEqual(
+            imported["env"]["ARCHIVE_SHA256"],
+            "${{ needs.prepare-intel-runtime.outputs.sha256 }}",
+        )
+        names = [s.get("name") for s in verify["steps"]]
+        self.assertLess(
+            names.index("Validate Intel preparation outputs"),
+            names.index(download["name"]),
+        )
+        self.assertLess(
+            names.index(imported["name"]),
+            names.index("Qualify effective runtime trust stores"),
+        )
+        self.assertIn("Qualify initialization and standalone starter", names)
+        self.assertIn("Qualify native service ownership and backend", names)
+
     def test_only_intel_core_receives_extended_time(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
         job = workflow["jobs"]["verify"]
