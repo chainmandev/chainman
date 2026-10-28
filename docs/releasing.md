@@ -41,7 +41,8 @@ concurrent movement. It then proves fresh public host/container initialization.
 
 Intel runtime preparation and the macOS Intel core lane each have a 360-minute job
 limit. Preparation serially builds the reviewed Node and uv clients and transfers
-their Nix closure by exact artifact ID and independently supplied SHA-256 to the
+their Nix closure by exact artifact ID and independently supplied ZIP and Nix
+archive SHA-256 values to the
 verification job in the same workflow run. The receiving job verifies the candidate
 and closure before running all trust, source, starter, and native suites. This keeps
 cold compilation outside the verification job's time budget. Preparation failure,

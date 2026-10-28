@@ -36,6 +36,7 @@ jobs:
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       sha256: ${{ steps.export.outputs.sha256 }}
+      zip_sha256: ${{ steps.upload.outputs.artifact-digest }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}/checkout with spaces
@@ -70,6 +71,9 @@ jobs:
           retention-days: 7
   verify:
     needs: prepare-intel-runtime
+    permissions:
+      contents: read
+      actions: read
     if: ${{ !inputs.diagnose_stopped_cancellation && !inputs.diagnose_bootstrap_scan }}
     strategy:
       fail-fast: false
@@ -114,22 +118,15 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED"
           test "$EVENT" = "$EXPECTED"
       - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
-      - name: Validate Intel preparation outputs
+      - name: Download and verify this run's prepared Intel runtime
         if: matrix.runner == 'macos-15-intel'
         env:
+          EXPECTED: ${{ inputs.candidate_sha }}
           ARTIFACT_ID: ${{ needs.prepare-intel-runtime.outputs.artifact_id }}
           ARCHIVE_SHA256: ${{ needs.prepare-intel-runtime.outputs.sha256 }}
-        run: |
-          set -eu
-          case "$ARTIFACT_ID" in ''|0|*[!0-9]*) echo 'Missing exact runtime artifact ID' >&2; exit 1;; esac
-          printf '%s\n' "$ARCHIVE_SHA256" | grep -Eq '^[0-9a-f]{64}$'
-      - name: Download this run's prepared Intel runtime
-        if: matrix.runner == 'macos-15-intel'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          artifact-ids: ${{ needs.prepare-intel-runtime.outputs.artifact_id }}
-          path: ${{ runner.temp }}/intel runtime
-          digest-mismatch: error
+          ZIP_SHA256: ${{ needs.prepare-intel-runtime.outputs.zip_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-runtime-download "$RUNNER_TEMP/intel runtime" "$EXPECTED" "$ARTIFACT_ID" "$ARCHIVE_SHA256" "$ZIP_SHA256"
       - name: Verify and import the exact Intel runtime closure
         if: matrix.runner == 'macos-15-intel'
         env:

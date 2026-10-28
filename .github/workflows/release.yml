@@ -18,6 +18,9 @@ concurrency:
 jobs:
   qualify:
     if: github.repository == 'chainmandev/chainman'
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/verify.yml
     with:
       candidate_sha: ${{ inputs.candidate_sha }}

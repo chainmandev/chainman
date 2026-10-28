@@ -29,8 +29,12 @@ store, use `just trust-test verify` for the same ordering.
 CI first builds the Intel trust profile in a required preparation job, serializing
 Node and uv compilation. It exports the complete Nix closure as a temporary Actions
 artifact. The Intel lane downloads the preparation job's exact artifact ID from
-the same workflow run and checks a SHA-256 supplied separately through job outputs
-before importing it. Both jobs require the exact clean candidate checkout. The
+the same workflow run using the pinned Python runtime. The download checks GitHub's
+artifact ID, run ID, candidate SHA, expiry, and size, plus the ZIP and Nix archive
+SHA-256 values supplied separately through job outputs. Credentials go only to the
+initial GitHub API requests; HTTPS storage redirects receive no authorization
+header. Extraction accepts one regular `runtime.nar` member. Both jobs require the
+exact clean candidate checkout. The
 receiving lane independently evaluates its expected runtime path and verifies the
 imported store contents, then runs the ordinary trust, source, initializer, and
 native service checks. A missing or invalid transfer fails the lane; it does not

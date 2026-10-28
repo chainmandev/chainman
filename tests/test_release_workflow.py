@@ -25,6 +25,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             {
                 "artifact_id": "${{ steps.upload.outputs.artifact-id }}",
                 "sha256": "${{ steps.export.outputs.sha256 }}",
+                "zip_sha256": "${{ steps.upload.outputs.artifact-digest }}",
             },
         )
         for job in (prepare, verify):
@@ -37,16 +38,30 @@ class ReleaseWorkflowTests(unittest.TestCase):
         download = next(
             s
             for s in verify["steps"]
-            if s.get("uses", "").startswith("actions/download-artifact@")
+            if s.get("name") == "Download and verify this run's prepared Intel runtime"
         )
         self.assertEqual(download["if"], "matrix.runner == 'macos-15-intel'")
         self.assertEqual(
-            download["with"]["artifact-ids"],
+            download["env"]["ARTIFACT_ID"],
             "${{ needs.prepare-intel-runtime.outputs.artifact_id }}",
         )
-        self.assertEqual(download["with"]["digest-mismatch"], "error")
-        for field in ("name", "pattern", "github-token", "repository", "run-id"):
-            self.assertNotIn(field, download["with"])
+        self.assertEqual(
+            download["env"]["ZIP_SHA256"],
+            "${{ needs.prepare-intel-runtime.outputs.zip_sha256 }}",
+        )
+        self.assertEqual(
+            download["env"]["ARCHIVE_SHA256"],
+            "${{ needs.prepare-intel-runtime.outputs.sha256 }}",
+        )
+        self.assertEqual(download["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertIn("ci-runtime-download", download["run"])
+        self.assertEqual(verify["permissions"], {"contents": "read", "actions": "read"})
+        self.assertFalse(
+            any(
+                s.get("uses", "").startswith("actions/download-artifact@")
+                for s in verify["steps"]
+            )
+        )
         imported = next(
             s
             for s in verify["steps"]
@@ -58,8 +73,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         names = [s.get("name") for s in verify["steps"]]
         self.assertLess(
-            names.index("Validate Intel preparation outputs"),
             names.index(download["name"]),
+            names.index(imported["name"]),
         )
         self.assertLess(
             names.index(imported["name"]),
@@ -92,6 +107,9 @@ class ReleaseWorkflowTests(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
         jobs = workflow["jobs"]
         self.assertEqual(jobs["qualify"]["uses"], "./.github/workflows/verify.yml")
+        self.assertEqual(
+            jobs["qualify"]["permissions"], {"contents": "read", "actions": "read"}
+        )
         self.assertEqual(jobs["publish"]["needs"], "qualify")
         self.assertEqual(jobs["readback"]["needs"], "publish")
         for name in ("publish", "readback"):
