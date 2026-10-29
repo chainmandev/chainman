@@ -50,8 +50,9 @@ isolated local Nix stores, including refusal of changed content before import.
 
 The Go language lane also runs `just go-test`, including the native workspace
 fixtures. The Linux x86-64 host core lane runs `just audit-test` to exercise actual
-pinned scanner startup and project policy discovery. These are required steps in
-the existing qualification lanes. Paired Node/Nix transaction fixtures in the
+pinned scanner startup and project policy discovery, and `just ci-runtime-test`
+for isolated-store transfer and tamper rejection. These are required steps in the
+existing qualification lanes. Paired Node/Nix transaction fixtures in the
 source suite cover independent maturity, exception cleanup, expiry, interruption,
 resumed auditing, and preservation of original policy when an audit fails.
 

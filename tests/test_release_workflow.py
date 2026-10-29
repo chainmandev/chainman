@@ -116,6 +116,25 @@ class ReleaseWorkflowTests(unittest.TestCase):
             self.assertNotIn("if", jobs[name])
             self.assertNotIn("continue-on-error", jobs[name])
 
+    def test_native_runtime_transfer_is_required_in_linux_host_core_lane(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
+        job = workflow["jobs"]["verify"]
+        step = next(
+            s
+            for s in job["steps"]
+            if s.get("name") == "Qualify runtime closure transfer"
+        )
+        self.assertEqual(
+            step["if"],
+            "matrix.mode == 'host-nix' && matrix.module == 'core' && matrix.runner == 'ubuntu-24.04'",
+        )
+        self.assertEqual(
+            step["run"],
+            "nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-runtime-test",
+        )
+        self.assertNotIn("continue-on-error", job)
+        self.assertNotIn("continue-on-error", step)
+
 
 if __name__ == "__main__":
     unittest.main()

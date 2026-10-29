@@ -184,6 +184,9 @@ jobs:
       - name: Qualify pinned vulnerability scanners
         if: matrix.mode == 'host-nix' && matrix.module == 'core' && matrix.runner == 'ubuntu-24.04'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- audit-test
+      - name: Qualify runtime closure transfer
+        if: matrix.mode == 'host-nix' && matrix.module == 'core' && matrix.runner == 'ubuntu-24.04'
+        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- ci-runtime-test
       - name: Qualify native Gradle update validation
         if: matrix.mode == 'host-nix' && matrix.module == 'compose'
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- gradle-test
