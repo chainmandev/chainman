@@ -987,6 +987,8 @@ run --rm --user 0:0 --label dev.chainman.store.schema=1 --mount "type=volume,src
 # Local-store writers assume one PID namespace. A single upstream Nix daemon
 # owns this volume's store state; isolated project containers are daemon clients.
 # Its Unix socket and managed temporary roots are visible through the Nix volume.
+# New daemons default to deduplication. Both client entrypoints also send the
+# trusted setting, so compatible older daemons need no restart or identity change.
 if ! lifetime_run "$engine_executable" container inspect "$daemon_name" > /dev/null 2>&1; then
     run --detach --name "$daemon_name" --init --read-only --network bridge \
         --user "$container_uid:$container_gid" --security-opt no-new-privileges --cap-drop ALL \
@@ -996,6 +998,7 @@ if ! lifetime_run "$engine_executable" container inspect "$daemon_name" > /dev/n
         --env HOME=/nix/var/nix/chainman-daemon-home --env TMPDIR=/nix/tmp \
         --env 'NIX_CONFIG=build-users-group =
 trusted-users = *
+auto-optimise-store = true
 min-free = 8589934592
 max-free = 17179869184' \
         "$image" sh -eu -c 'mkdir -p "$HOME" "$TMPDIR"; exec nix-daemon --daemon' \
@@ -1030,7 +1033,8 @@ plan_options() {
         --mount "type=bind,src=$source_root,dst=$source_root,readonly" --env HOME=/tmp/chainman-home \
         --mount "type=bind,src=$temporary/host-environment,dst=$temporary/host-environment,readonly" --env "CHAINMAN_BOOTSTRAP_INPUTS=$temporary" \
         --env 'NIX_CONFIG=build-users-group =
-store = daemon' --env NIX_REMOTE=daemon \
+store = daemon
+auto-optimise-store = true' --env NIX_REMOTE=daemon \
         --env "CHAINMAN_BOOTSTRAP_HELPER=$helper" --env "CHAINMAN_SOURCE_ROOT=$source_root" --env CHAINMAN_SOURCE_REVISION \
         --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
         --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK --env CHAINMAN_REQUEST_PROFILE --env CHAINMAN_HOST_PLATFORM --env CHAINMAN_PREFLIGHT_TASKS \
@@ -1383,7 +1387,8 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
     --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION --env CHAINMAN_HOST_PLATFORM \
     --env 'NIX_CONFIG=build-users-group =
-store = daemon' --env NIX_REMOTE=daemon \
+store = daemon
+auto-optimise-store = true' --env NIX_REMOTE=daemon \
     --env "CHAINMAN_PROJECT_ROOT=$root" --env TOOLCHAIN_CONTAINER=1 --env "GIT_CONFIG_COUNT=$count" \
     --env CI --env TERM "$@"
 if [ -t 0 ] && [ -t 1 ]; then set -- --tty "$@"; fi

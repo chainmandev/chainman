@@ -28,7 +28,8 @@ class ProjectEnvironmentTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("nix"), "requires real Nix configuration parsing")
     def test_effective_store_ignores_external_shell_configuration_in_containers(self):
-        env = dict(os.environ, NIX_REMOTE="daemon", NIX_CONFIG="store = local")
+        host_config = "store = local\nauto-optimise-store = false"
+        env = dict(os.environ, NIX_REMOTE="daemon", NIX_CONFIG=host_config)
         command = [
             shutil.which("nix"),
             "--extra-experimental-features",
@@ -45,10 +46,17 @@ class ProjectEnvironmentTests(unittest.TestCase):
         env["TOOLCHAIN_CONTAINER"] = "1"
         pe.tc.runtime_nix_environment(env)
         self.assertEqual(effective_store(), "daemon")
+        self.assertEqual(
+            subprocess.check_output(
+                [*command[:-1], "auto-optimise-store"], env=env, text=True
+            ).strip(),
+            "true",
+        )
         # Compatible installed host Nix retains its operator configuration.
-        env.update(TOOLCHAIN_CONTAINER="0", NIX_CONFIG="store = local")
+        env.update(TOOLCHAIN_CONTAINER="0", NIX_CONFIG=host_config)
         pe.tc.runtime_nix_environment(env)
         self.assertEqual(effective_store(), "local")
+        self.assertEqual(env["NIX_CONFIG"], host_config)
 
     def test_conditional_files_do_not_load_an_unselected_provider(self):
         with tempfile.TemporaryDirectory() as temporary:

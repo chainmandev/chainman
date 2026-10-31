@@ -103,7 +103,7 @@ class ExecutionTests(ConsumerFixture):
                 self.assertNotIn("--no-eval-cache", argv)
                 self.assertEqual(
                     execute.call_args.kwargs["env"]["NIX_CONFIG"],
-                    "build-users-group =\nstore = daemon"
+                    "build-users-group =\nstore = daemon\nauto-optimise-store = true"
                     if container
                     else "fixture-setting = unchanged",
                 )
@@ -113,6 +113,27 @@ class ExecutionTests(ConsumerFixture):
                         argv[1], str(chainman.RUNTIME / "scripts/profile_entry.py")
                     )
                     self.assertEqual(argv[4], argv[argv.index("--profile") + 1])
+                    # Execute the post-shell-hook handoff with an overridden
+                    # policy, without entering Nix or realizing a profile.
+                    restored = subprocess.check_output(
+                        [
+                            "sh",
+                            "-eu",
+                            "-c",
+                            argv[argv.index("-c") + 1],
+                            "sh",
+                            "",
+                            str(self.root),
+                            sys.executable,
+                            "-c",
+                            "import os; print(os.environ['NIX_CONFIG'])",
+                        ],
+                        env=inherited,
+                        text=True,
+                    ).strip()
+                    self.assertEqual(
+                        restored, execute.call_args.kwargs["env"]["NIX_CONFIG"]
+                    )
                 else:
                     self.assertNotIn(
                         str(chainman.RUNTIME / "scripts/profile_entry.py"), argv

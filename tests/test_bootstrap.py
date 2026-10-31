@@ -105,6 +105,23 @@ class BootstrapTests(unittest.TestCase):
             "record.update(nix=shutil.which('nix'), uid=os.getuid(), nix_config=os.environ.get('NIX_CONFIG'), tmpdir=os.environ.get('TMPDIR'))\n"
             "record['nix_remote'] = os.environ.get('NIX_REMOTE')\n"
             "if record['container'] == '1': record['nix_store'] = subprocess.check_output(['nix', '--extra-experimental-features', 'nix-command', 'config', 'show', 'store'], text=True).strip()\n"
+            "if '--deduplicate-source' in sys.argv:\n"
+            " paths = []\n"
+            " for name in ('first', 'second'):\n"
+            "  source = root / ('dedup-' + name); source.mkdir()\n"
+            "  (source / 'shared').write_text('shared payload ' + str(root))\n"
+            "  (source / 'different').write_text(name)\n"
+            # These isolated imports outlive their CLI temporary roots. Disable
+            # pressure GC per import so the second cannot collect the first;
+            # the separate daemon-default assertions still verify its GC policy.
+            "  output = subprocess.check_output(['nix', '--extra-experimental-features', 'nix-command', '--option', 'min-free', '0', 'store', 'add-path', '--name', 'source', str(source)], text=True).strip()\n"
+            "  paths.append(pathlib.Path(output))\n"
+            " assert paths[0] != paths[1], paths\n"
+            " assert (paths[0] / 'shared').read_bytes() == (paths[1] / 'shared').read_bytes()\n"
+            " first, second = [(path / 'shared').stat() for path in paths]\n"
+            " assert (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino), (first, second)\n"
+            " assert first.st_nlink >= 3, first\n"
+            " record['source_deduplicated'] = True\n"
             "record.update(active_profile=os.environ.get('CHAINMAN_ACTIVE_PROFILE'), active_fingerprint=os.environ.get('CHAINMAN_ACTIVE_FINGERPRINT'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['cap_eff'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('CapEff:'))\n"
             "if pathlib.Path('/proc/self/status').exists(): record['no_new_privs'] = next(line.split()[1] for line in pathlib.Path('/proc/self/status').read_text().splitlines() if line.startswith('NoNewPrivs:'))\n"
@@ -3011,7 +3028,10 @@ transport={ports=["127.0.0.1:{env:PREVIEW_PORT}:{env:PREVIEW_PORT}"]}
         self.run_bootstrap("status", env=env)
         record = self.records()[0]
         self.assertEqual(record["uid"], 0)
-        self.assertEqual(record["nix_config"], "build-users-group =\nstore = daemon")
+        self.assertEqual(
+            record["nix_config"],
+            "build-users-group =\nstore = daemon\nauto-optimise-store = true",
+        )
         self.assertEqual(record["nix_store"], "daemon")
         self.assertEqual(record["container"], "1")
         self.assertFalse(record["tmpdir"].startswith(str(host_temporary)))
@@ -3896,13 +3916,14 @@ print('injected preparation failure recovered; hook and payload ran exactly once
         os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
         "requires the selected real container engine",
     )
-    def test_container_store_is_owned_and_has_pressure_gc(self):
+    def test_container_store_is_owned_and_has_pressure_gc_and_deduplication(self):
         env = dict(
             self.env,
             CHAINMAN_MODE="container-nix",
             CHAINMAN_CONTAINER_ENGINE=self.test_engine,
         )
-        self.run_bootstrap("gc-policy", env=env)
+        self.run_bootstrap("--deduplicate-source", env=env)
+        self.assertTrue(self.records()[0]["source_deduplicated"])
         daemon = self.test_volume + "-daemon"
         result = subprocess.check_output(
             [
@@ -3921,6 +3942,136 @@ print('injected preparation failure recovered; hook and payload ran exactly once
         settings = json.loads(result)
         self.assertEqual(settings["min-free"]["value"], 8 * 1024**3)
         self.assertEqual(settings["max-free"]["value"], 16 * 1024**3)
+        self.assertTrue(settings["auto-optimise-store"]["value"])
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") == "docker",
+        "requires Docker for the isolated existing-daemon fixture",
+    )
+    def test_container_deduplicates_through_existing_daemon_with_live_client(self):
+        volume = (
+            "chainman-dedup-fixture-"
+            + hashlib.sha256(str(self.root).encode()).hexdigest()[:16]
+        )
+        daemon = volume + "-daemon"
+        env = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_CONTAINER_ENGINE="docker",
+            CHAINMAN_NIX_VOLUME=volume,
+        )
+        # Model the previous policy without changing the pinned Nix image or
+        # daemon identity. Keep the old command running during the new bootstrap.
+        older = self.root / "older-runtime"
+        shutil.copytree(self.tree, older)
+        for relative in (
+            "bootstrap/chainman.sh",
+            "scripts/toolchain.py",
+        ):
+            path = older / relative
+            path.write_text(
+                path.read_text().replace(
+                    "auto-optimise-store = true", "auto-optimise-store = false"
+                )
+            )
+        self.pin_runtime(older)
+        self.prepare_cache(env)
+        process = None
+
+        def engine(*arguments):
+            return subprocess.check_output(
+                ["docker", *arguments], text=True, timeout=60
+            ).strip()
+
+        try:
+            process = subprocess.Popen(
+                [str(self.launcher), "--hold-managed-root"],
+                cwd="/",
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            deadline = time.monotonic() + 180
+            while (
+                not (self.root / "managed-root").exists()
+                and process.poll() is None
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.1)
+            self.assertTrue((self.root / "managed-root").exists())
+            before = engine(
+                "inspect", "--format", "{{.Id}} {{.State.StartedAt}}", daemon
+            )
+            self.assertEqual(
+                engine(
+                    "exec",
+                    daemon,
+                    "nix",
+                    "--extra-experimental-features",
+                    "nix-command",
+                    "config",
+                    "show",
+                    "auto-optimise-store",
+                ),
+                "false",
+            )
+            self.pin_runtime(self.tree)
+            self.run_bootstrap("--deduplicate-source", env=env)
+            self.assertTrue(
+                any(record.get("source_deduplicated") for record in self.records())
+            )
+            self.assertIsNone(process.poll())
+            self.assertEqual(
+                engine("inspect", "--format", "{{.Id}} {{.State.StartedAt}}", daemon),
+                before,
+            )
+            engine(
+                "exec",
+                daemon,
+                "test",
+                "-d",
+                (self.root / "managed-root").read_text(),
+            )
+        finally:
+            (self.root / "release-managed-root").touch()
+            try:
+                if process is not None:
+                    try:
+                        stdout, stderr = process.communicate(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        process.terminate()
+                        try:
+                            stdout, stderr = process.communicate(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            stdout, stderr = process.communicate(timeout=30)
+            finally:
+                # Even a failed or timed-out bootstrap may leave a fixture
+                # client running. Resolve only this test's private volume.
+                try:
+                    clients = engine(
+                        "ps",
+                        "--all",
+                        "--filter",
+                        f"volume={volume}",
+                        "--format",
+                        "{{.ID}}",
+                    ).split()
+                    if clients:
+                        engine("rm", "--force", "--volumes", *clients)
+                finally:
+                    existing = set(
+                        engine("volume", "ls", "--format", "{{.Name}}").splitlines()
+                    )
+                    owned = [
+                        name
+                        for name in (volume, volume + "-downloads")
+                        if name in existing
+                    ]
+                    if owned:
+                        engine("volume", "rm", *owned)
+        self.assertEqual(process.returncode, 0, stdout + stderr)
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_CONTAINER") == "docker",

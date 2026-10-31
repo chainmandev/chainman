@@ -162,9 +162,24 @@ and reuse the matching Nix-store runtime. A fresh temporary Git export does not
 invalidate setup readiness. A changed pin or mismatched runtime requires leaving
 the active environment and entering it again.
 
-The owned container daemon uses pressure garbage collection. Host Nix retains its
-own configuration. Nix collection does not prune package-manager downloads or
-project outputs. Inspect project caches explicitly:
+The owned container daemon uses pressure garbage collection and automatic store
+deduplication (`auto-optimise-store = true`). Nix hard-links identical immutable
+files as new paths enter the store; this adds hashing work at import/build time
+and does not change store paths, contents, or GC roots. Existing duplicated paths
+are not retroactively scanned by this setting.
+
+Planning and execution clients also send this setting to the trusted daemon, so
+new clients can deduplicate writes through an existing compatible daemon without
+restarting it. On that daemon, older runtime clients and already-running commands
+keep their existing policy; update their runtime to get the client setting. To
+change an older daemon's default for clients that do not override it, first
+coordinate stopping all clients, then remove only its daemon container and let
+bootstrap recreate it while retaining the Nix volume. Bootstrap does not require
+this migration solely for deduplication or replace a running daemon. Existing
+image and isolation identity checks still apply.
+
+Host Nix retains its own configuration. Nix collection does not prune
+package-manager downloads or project outputs. Inspect project caches explicitly:
 
 ```sh
 just chainman cache-status
