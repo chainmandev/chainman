@@ -91,8 +91,11 @@ jobs:
           - {runner: ubuntu-24.04, mode: host-nix, module: flutter, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: swift, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: compose, engine: docker}
-          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: docker}
-          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: podman}
+          # The complete container bootstrap suite includes real update/resume
+          # transactions. Keep their individual deadlines within a bounded job
+          # allowance that also covers cold setup and starter qualification.
+          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: docker, timeout_minutes: 90}
+          - {runner: ubuntu-24.04, mode: container-nix, module: core, engine: podman, timeout_minutes: 90}
           - {runner: macos-15, mode: host-nix, module: swift, engine: docker}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes || 60 }}

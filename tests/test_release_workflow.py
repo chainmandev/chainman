@@ -83,25 +83,29 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Qualify initialization and standalone starter", names)
         self.assertIn("Qualify native service ownership and backend", names)
 
-    def test_only_intel_core_receives_extended_time(self):
+    def test_extended_time_is_limited_to_intel_and_container_core(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
         job = workflow["jobs"]["verify"]
         self.assertEqual(job["timeout-minutes"], "${{ matrix.timeout_minutes || 60 }}")
         lanes = job["strategy"]["matrix"]["include"]
         self.assertEqual(len(lanes), 14)
+        allowances = {
+            ("macos-15-intel", "host-nix", "core", "docker"): 360,
+            ("ubuntu-24.04", "container-nix", "core", "docker"): 90,
+            ("ubuntu-24.04", "container-nix", "core", "podman"): 90,
+        }
+        identities = []
         extended = []
         for lane in lanes:
             identity = (lane["runner"], lane["mode"], lane["module"], lane["engine"])
-            expected = (
-                360
-                if identity == ("macos-15-intel", "host-nix", "core", "docker")
-                else 60
-            )
+            identities.append(identity)
+            expected = allowances.get(identity, 60)
             with self.subTest(lane=identity):
                 self.assertEqual(lane.get("timeout_minutes", 60), expected)
-            if expected == 360:
+            if expected != 60:
                 extended.append(identity)
-        self.assertEqual(len(extended), 1)
+        self.assertEqual(len(set(identities)), 14)
+        self.assertCountEqual(extended, allowances)
 
     def test_publication_and_readback_still_require_qualification(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
