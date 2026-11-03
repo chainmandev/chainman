@@ -300,6 +300,40 @@ def config(root: Path) -> Table:
     )[0]
 
 
+def verification_arguments(arguments: list[str]) -> tuple[bool, bool, list[str]]:
+    """Read invocation-only consent without consuming option values or resolver args."""
+    force = False
+    no_verify = False
+    remaining = []
+    value = False
+    passthrough = False
+    for argument in arguments:
+        if value:
+            remaining.append(argument)
+            value = False
+        elif passthrough:
+            remaining.append(argument)
+        elif argument == "--":
+            passthrough = True
+            remaining.append(argument)
+        elif argument == "--force":
+            force = True
+        elif argument == "--no-verify":
+            no_verify = True
+        else:
+            remaining.append(argument)
+            value = argument in {
+                "--message",
+                "--targets",
+                "--policy",
+                "--target-policy",
+                "--export-candidate",
+            }
+    if force and no_verify:
+        raise ValueError("--force and --no-verify are mutually exclusive")
+    return force, no_verify, remaining
+
+
 def options(arguments: list[str]) -> list[str]:
     """Normalize public options without interpreting values as options or code."""
     main: list[str | None] = []

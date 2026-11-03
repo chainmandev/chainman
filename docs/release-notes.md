@@ -18,6 +18,12 @@ The SHA stays frozen through failure and resume. Project dependency updates reta
 their configurable 30-day policy. Successful updates commit by default; preview
 and no-commit modes remain available.
 
+Both update commands accept `--force` to apply after an ordinary project verification
+failure, or the separate `--no-verify` option to skip the project gate. Both work
+on resume. Results distinguish `"forced"` from `"skipped"`; resolution, eligibility
+audits and transaction integrity checks remain mandatory. Consent is not retained
+for later retries. See [update controls](updates.md).
+
 Temporary security age exceptions are removed from TOML during verified dependency
 updates once all resolved artifacts in the audited scope are mature and safe, or
 the dependency has disappeared. Cleanup retains the original policy as transaction

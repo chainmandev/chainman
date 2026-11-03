@@ -16,6 +16,7 @@ import update_staging as staging
 import updates
 import update_cache
 import candidate_export as export
+import recipes
 from adapter_data import strings
 
 
@@ -42,7 +43,14 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         raise ValueError("Expected format or deps-update")
     if os.environ.get("CHAINMAN_UPDATE_ACTIVE"):
         raise ValueError("An update hook must not recursively start an update")
+    force, no_verify, arguments = recipes.verification_arguments(arguments)
+    if (force or no_verify) and action != "deps-update":
+        raise ValueError(
+            "--force and --no-verify are available only for dependency or runtime updates"
+        )
     export_target, arguments = export.split_arguments(arguments)
+    if (force or no_verify) and export_target is not None:
+        raise ValueError("--force and --no-verify cannot combine with candidate export")
     if export_target is not None and action != "deps-update":
         raise ValueError("Only dependency updates support candidate export")
     if action == "format" and arguments == ["commit=off"]:
@@ -64,7 +72,12 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
             updates.repository(root, clean=True)
             export_target = str(export.directory(root / export_target))
             arguments = ["--export-candidate", export_target, *arguments]
-        update_cache.run(root, action, arguments)
+        update_cache.run(
+            root,
+            action,
+            (["--force"] if force else ["--no-verify"] if no_verify else [])
+            + arguments,
+        )
         return
     if resumed:
         destination = staging.directory(Path(arguments[0].split("=", 1)[1]))
@@ -136,20 +149,32 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         export.capture(root, destination)
         state, candidate = staging.read_state(root, destination)
         export.stage(destination, "verification")
-        if state.require_inspection().paths:
-            with updates.preview_git_environment(), updates.operation(candidate):
-                if opts.format:
-                    format_source(candidate, check=True, staged=opts.staged)
-                else:
-                    updates.verify(
-                        candidate, strings(tc.config(candidate)["modules"], "Modules")
-                    )
+        verification_exit_code = 0
+        if state.require_inspection().paths and not no_verify:
+            try:
+                with updates.preview_git_environment(), updates.operation(candidate):
+                    if opts.format:
+                        format_source(candidate, check=True, staged=opts.staged)
+                    else:
+                        updates.verify(
+                            candidate,
+                            strings(tc.config(candidate)["modules"], "Modules"),
+                        )
+            except subprocess.CalledProcessError as error:
+                if not force or not 0 < error.returncode < 128:
+                    raise
+                verification_exit_code = error.returncode
         if export_target is not None:
             code = export.finish(root, destination, 0)
             if code:
                 raise SystemExit(code)
         else:
-            staging.finalize(root, destination)
+            staging.finalize(
+                root,
+                destination,
+                forced_verification_exit_code=verification_exit_code,
+                verification_skipped=no_verify,
+            )
     except BaseException as error:
         if export_target is not None:
             code = (

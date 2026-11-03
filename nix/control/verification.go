@@ -178,6 +178,7 @@ func verificationInterrupted(signals <-chan os.Signal) int {
 }
 
 func verificationRun(p VerificationPlan, directory string) (result int) {
+	completed := false
 	report := VerificationReport{Schema: 1, Root: p.Root, Identity: p.Identity, Started: time.Now().UTC(), Code: 1}
 	for _, gate := range p.Gates {
 		report.Gates = append(report.Gates, VerificationResult{Name: gate.Name, Status: "unrun"})
@@ -190,12 +191,17 @@ func verificationRun(p VerificationPlan, directory string) (result int) {
 		if code := verificationInterrupted(signals); code != 0 {
 			result = code
 		}
+		// Exit 1 identifies a completed sweep with ordinary failed gates. An
+		// aborted or unrecorded sweep must never authorize a forced update.
+		if !completed && result > 0 && result < 128 {
+			result = 2
+		}
 		now := time.Now().UTC()
 		report.Ended, report.Code = &now, result
 		if err := atomic(path, report); err != nil {
 			fmt.Fprintln(os.Stderr, "Verification report:", err)
-			if result == 0 {
-				result = 1
+			if result < 128 {
+				result = 2
 			}
 		}
 		fmt.Fprintln(os.Stderr, "\nVerification summary:")
@@ -280,7 +286,7 @@ func verificationRun(p VerificationPlan, directory string) (result int) {
 			row.Status, report.Reason = "interrupted", "interrupted"
 			return interrupted
 		}
-		if code == 129 || code == 130 || code == 143 {
+		if code >= 128 {
 			row.Status, report.Reason = "interrupted", "interrupted"
 			return code
 		}
@@ -299,6 +305,7 @@ func verificationRun(p VerificationPlan, directory string) (result int) {
 			return 1
 		}
 	}
+	completed = true
 	return result
 }
 func verificationAction(args []string) int {
@@ -307,21 +314,26 @@ func verificationAction(args []string) int {
 	}
 	var plan VerificationPlan
 	if err := readJSON(args[0], &plan); err != nil {
-		return exitCode(err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
 	if err := verificationValidate(plan); err != nil {
-		return exitCode(err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
 	if err := existingPrivate(args[1]); err != nil {
-		return exitCode(err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
 	relative, err := filepath.Rel(plan.Root, args[1])
 	if err != nil || relative == "." || (relative != ".." && !filepath.IsAbs(relative) && !bytes.HasPrefix([]byte(relative), []byte("../"))) {
-		return exitCode(fmt.Errorf("verification reports must be outside the project"))
+		fmt.Fprintln(os.Stderr, "verification reports must be outside the project")
+		return 2
 	}
 	directory, err := os.MkdirTemp(args[1], "verification-")
 	if err != nil {
-		return exitCode(err)
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
 	return verificationRun(plan, directory)
 }

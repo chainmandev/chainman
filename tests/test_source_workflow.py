@@ -2,9 +2,11 @@
 
 import contextlib
 import io
+import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -49,7 +51,7 @@ class SourceWorkflows(unittest.TestCase):
         # update_cache_test.go and through real bootstrap tests.
         def supervise(root, action, arguments):
             destination = self.base / "cache/chainman/updates/v1/candidate.fixture"
-            destination.mkdir(parents=True)
+            destination.mkdir(parents=True, exist_ok=True)
             with patch.dict(os.environ, CHAINMAN_UPDATE_TRANSACTION=str(destination)):
                 source_workflow.run(root, action, arguments)
 
@@ -92,6 +94,161 @@ class SourceWorkflows(unittest.TestCase):
             source_workflow.run(self.root, "deps-update", [])
         self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
         self.assertEqual(updates.git(self.root, "status", "--porcelain"), "")
+
+    def test_force_runs_verification_and_reports_override_after_failure(self):
+        with (
+            patch.object(updates, "perform", side_effect=self.resolve),
+            patch.object(
+                updates,
+                "verify",
+                side_effect=subprocess.CalledProcessError(19, ["verify"]),
+            ) as verify,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as diagnostics,
+        ):
+            source_workflow.run(self.root, "deps-update", ["--force"])
+        verify.assert_called_once()
+        record = json.loads(output.getvalue())
+        self.assertEqual(record["verification"], "forced")
+        self.assertEqual(record["verification_exit_code"], 19)
+        self.assertEqual(record["commit"], updates.git(self.root, "rev-parse", "HEAD"))
+        self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
+        self.assertIn("--force", diagnostics.getvalue())
+
+    def test_no_verify_skips_gate_but_still_resolves_and_reports(self):
+        with (
+            patch.object(updates, "perform", side_effect=self.resolve) as resolve,
+            patch.object(
+                updates, "verify", side_effect=AssertionError("gate ran")
+            ) as verify,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()) as diagnostics,
+        ):
+            source_workflow.run(self.root, "deps-update", ["--no-verify"])
+        resolve.assert_called_once()
+        verify.assert_not_called()
+        record = json.loads(output.getvalue())
+        self.assertEqual(record["verification"], "skipped")
+        self.assertNotIn("verification_exit_code", record)
+        self.assertEqual(
+            record["commit"], updates.git(self.root, "rev-parse", "HEAD").strip()
+        )
+        self.assertIn("--no-verify", diagnostics.getvalue())
+
+    def test_no_verify_resume_reaudits_and_does_not_reuse_consent(self):
+        with (
+            patch.object(updates, "perform", side_effect=self.resolve) as resolve,
+            patch.object(
+                updates,
+                "verify",
+                side_effect=subprocess.CalledProcessError(1, ["verify"]),
+            ) as verify,
+        ):
+            with self.assertRaises(subprocess.CalledProcessError):
+                source_workflow.run(self.root, "deps-update", [])
+            destination = self.base / "cache/chainman/updates/v1/candidate.fixture"
+            with (
+                patch.object(source_workflow.staging, "reaudit") as audit,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                source_workflow.run(
+                    self.root, "deps-update", [f"resume={destination}", "--no-verify"]
+                )
+            resolve.assert_called_once()
+            verify.assert_called_once()
+            audit.assert_called_once()
+            self.assertEqual(json.loads(output.getvalue())["verification"], "skipped")
+            self.assertNotIn(
+                "no_verify",
+                json.loads((destination / "control/state.json").read_text())["options"],
+            )
+
+    def test_no_verify_does_not_bypass_resolution_or_inspection(self):
+        for phase, error in (
+            ("perform", subprocess.CalledProcessError(17, ["resolve"])),
+            ("inspect", ValueError("rejected output scope")),
+        ):
+            with (
+                self.subTest(phase=phase),
+                patch.object(updates, "perform", side_effect=self.resolve),
+                patch.object(updates, "verify") as verify,
+                patch.object(
+                    updates if phase == "perform" else source_workflow.staging,
+                    phase,
+                    side_effect=error,
+                ),
+                self.assertRaises(type(error)),
+            ):
+                destination = self.base / ("skip-failed-" + phase)
+                destination.mkdir()
+                with patch.dict(
+                    os.environ, CHAINMAN_UPDATE_TRANSACTION=str(destination)
+                ):
+                    source_workflow.run(self.root, "deps-update", ["--no-verify"])
+            verify.assert_not_called()
+            self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_force_can_resume_without_reresolving_or_persisting_consent(self):
+        with (
+            patch.object(updates, "perform", side_effect=self.resolve) as resolve,
+            patch.object(
+                updates,
+                "verify",
+                side_effect=subprocess.CalledProcessError(19, ["verify"]),
+            ),
+        ):
+            with self.assertRaises(subprocess.CalledProcessError):
+                source_workflow.run(self.root, "deps-update", [])
+            destination = self.base / "cache/chainman/updates/v1/candidate.fixture"
+            with (
+                patch.object(source_workflow.staging, "reaudit") as audit,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                source_workflow.run(
+                    self.root, "deps-update", ["--force", f"resume={destination}"]
+                )
+            resolve.assert_called_once()
+            audit.assert_called_once()
+            self.assertEqual(json.loads(output.getvalue())["verification"], "forced")
+            checkpoint = json.loads((destination / "control/state.json").read_text())
+            self.assertNotIn("force", checkpoint["options"])
+
+    def test_force_preserves_resolver_validation_and_cancellation_failures(self):
+        for phase, error in (
+            ("perform", subprocess.CalledProcessError(17, ["resolve"])),
+            ("verify", subprocess.CalledProcessError(130, ["verify"])),
+            ("verify", ValueError("invalid verification inputs")),
+        ):
+            with (
+                self.subTest(phase=phase, error=error),
+                patch.object(updates, "perform", side_effect=self.resolve),
+                patch.object(updates, "verify"),
+                patch.object(updates, phase, side_effect=error),
+                self.assertRaises(type(error)),
+            ):
+                # Each failed attempt owns its own disposable transaction.
+                destination = self.base / ("failed-" + str(id(error)))
+                destination.mkdir()
+                with patch.dict(
+                    os.environ, CHAINMAN_UPDATE_TRANSACTION=str(destination)
+                ):
+                    source_workflow.run(self.root, "deps-update", ["--force"])
+            self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_force_cannot_accept_verifier_source_changes(self):
+        def verify(root, selected):
+            (root / "dependency.lock").write_text("changed during verification\n")
+            raise subprocess.CalledProcessError(19, ["verify"])
+
+        with (
+            patch.object(updates, "perform", side_effect=self.resolve),
+            patch.object(updates, "verify", side_effect=verify),
+            self.assertRaisesRegex(ValueError, "Verification changed candidate"),
+        ):
+            source_workflow.run(self.root, "deps-update", ["--force"])
+        self.assertEqual(updates.snapshot(self.root), self.before)
 
     def test_full_source_update_does_not_select_a_self_pin(self):
         import chainman_updates

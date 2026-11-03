@@ -557,6 +557,68 @@ format-check=["format-check"]
         self.lifecycle_git("commit", "-m", "Initial fixture")
         return self.lifecycle_git("rev-parse", "HEAD")
 
+    def container_update_transport(self):
+        if self.test_engine not in {"docker", "podman"}:
+            return
+        self.env.update(
+            CHAINMAN_MODE="container-nix", CHAINMAN_CONTAINER_ENGINE=self.test_engine
+        )
+        # Inspection uses the container's private Git cache. Publish fixture
+        # objects only through a real bare repository inside its project mount.
+        remote = self.root / "fixture.git"
+        runtime = self.root / "real-runtime"
+        resolver = runtime / "scripts/git_runtime.py"
+        resolver.write_text(
+            resolver.read_text().replace(
+                'REPOSITORY = "https://github.com/chainmandev/chainman.git"',
+                "REPOSITORY = " + json.dumps(remote.as_uri()),
+            )
+        )
+        with (self.root / ".gitignore").open("a") as stream:
+            stream.write("fixture.git/\n")
+        self.pin_runtime(runtime)
+        shutil.copytree(self.repositories[self.lock], remote)
+        self.lifecycle_git("add", "chainman.lock", ".gitignore")
+        self.lifecycle_git("commit", "-qm", "Declare mounted runtime fixture transport")
+
+    def test_public_no_verify_skips_gate_and_reports_no_changes_truthfully(self):
+        self.update_lifecycle(reject=True)
+        self.container_update_transport()
+        before = self.lifecycle_git("rev-parse", "HEAD")
+        result = self.run_bootstrap(
+            "deps-update", "--skip-chainman", "--keep-going", "--no-verify", timeout=600
+        )
+        record = json.loads(result.stdout)
+        self.assertEqual(record["verification"], "skipped")
+        self.assertEqual(record["commit"], self.lifecycle_git("rev-parse", "HEAD"))
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+        self.assertIn("fixture phase: resolve", result.stderr)
+        self.assertNotIn("fixture verification rejected", result.stderr)
+        self.assertIn("--no-verify", result.stderr)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "rejected\n")
+        unchanged = self.run_bootstrap(
+            "deps-update", "--skip-chainman", "--no-verify", timeout=600
+        )
+        self.assertEqual(json.loads(unchanged.stdout)["verification"], "no changes")
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+
+    def test_public_no_verify_resumes_without_running_project_gate(self):
+        self.update_lifecycle(reject=True)
+        self.container_update_transport()
+        rejected = self.run_bootstrap(
+            "deps-update", "--skip-chainman", check=False, timeout=600
+        )
+        self.assertIn("fixture verification rejected", rejected.stderr)
+        (candidate,) = self.update_cache.glob("candidate.*")
+        result = self.run_bootstrap(
+            "deps-update", f"resume={candidate}", "--no-verify", timeout=600
+        )
+        self.assertEqual(json.loads(result.stdout)["verification"], "skipped")
+        self.assertNotIn("fixture verification rejected", result.stderr)
+        self.assertNotIn("fixture phase: resolve", result.stderr)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "rejected\n")
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+
     def test_public_update_lifecycle_commits_and_cleans_up(self):
         before = self.update_lifecycle()
         result = self.run_bootstrap("deps-update", "--skip-chainman", "--json")
@@ -576,6 +638,62 @@ format-check=["format-check"]
         self.assertEqual(unchanged["verification"], "no changes")
         self.assertIsNone(unchanged["commit"])
         self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+
+    def test_public_force_resumes_failed_dependency_verification(self):
+        self.update_lifecycle(reject=True)
+        self.container_update_transport()
+        before = self.lifecycle_git("rev-parse", "HEAD")
+        rejected = self.run_bootstrap(
+            "deps-update", "--skip-chainman", check=False, timeout=600
+        )
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("fixture verification rejected", rejected.stderr)
+        candidates = list(self.update_cache.glob("candidate.*"))
+        self.assertEqual(len(candidates), 1)
+        result = self.run_bootstrap(
+            "deps-update", "--force", f"resume={candidates[0]}", timeout=600
+        )
+        record = json.loads(result.stdout)
+        self.assertEqual(record["verification"], "forced")
+        self.assertEqual(record["verification_exit_code"], 1)
+        self.assertEqual(record["commit"], self.lifecycle_git("rev-parse", "HEAD"))
+        self.assertEqual(self.lifecycle_git("rev-parse", "HEAD^"), before)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "rejected\n")
+        self.assertIn("fixture verification rejected", result.stderr)
+        self.assertNotIn("fixture phase: resolve", result.stderr)
+        self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
+
+    def test_public_force_keeps_complete_failed_sweep_diagnostics(self):
+        self.update_lifecycle(reject=True)
+        self.container_update_transport()
+        config = self.root / "chainman.toml"
+        config.write_text(
+            config.read_text().replace(
+                'verify_task="verify"', 'verify_tasks=["verify","last"]'
+            )
+            + """
+[tasks.last]
+commands=[["python3","-c","print('last forced gate executed')"]]
+"""
+        )
+        self.lifecycle_git("add", "chainman.toml")
+        self.lifecycle_git("commit", "-qm", "Declare both verification gates")
+        result = self.run_bootstrap(
+            "deps-update", "--skip-chainman", "--keep-going", "--force", timeout=600
+        )
+        self.assertEqual(json.loads(result.stdout)["verification"], "forced")
+        self.assertIn("last forced gate executed", result.stderr)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "rejected\n")
+        reports = list(
+            (self.update_cache.parent.parent / "verification").glob(
+                "verification-*/report.json"
+            )
+        )
+        self.assertEqual(len(reports), 1)
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(
+            [gate["status"] for gate in report["gates"]], ["failed", "passed"]
+        )
 
     def test_public_keep_going_candidate_collects_failures_without_adoption(self):
         self.update_lifecycle()
@@ -1097,6 +1215,12 @@ verify=[["python3", "verify.py"]]
 
     def test_public_runtime_update_lifecycle_switches_only_after_verification(self):
         self.runtime_update_lifecycle("chainman-update")
+
+    def test_public_force_adopts_runtime_after_failed_project_verification(self):
+        self.runtime_update_lifecycle("chainman-update", reject=True, force=True)
+
+    def test_public_no_verify_adopts_runtime_without_running_project_gate(self):
+        self.runtime_update_lifecycle("chainman-update", reject=True, no_verify=True)
 
     def test_public_hook_config_is_readonly_inside_managed_profile(self):
         self.use_real_runtime()
@@ -1963,7 +2087,15 @@ check=["true"]
     def test_public_candidate_export_reports_selected_runtime(self):
         self.runtime_update_lifecycle("deps-update", export_candidate=True)
 
-    def runtime_update_lifecycle(self, action, *, reject=False, export_candidate=False):
+    def runtime_update_lifecycle(
+        self,
+        action,
+        *,
+        reject=False,
+        export_candidate=False,
+        force=False,
+        no_verify=False,
+    ):
         self.update_lifecycle()
         temporary = tempfile.TemporaryDirectory(prefix="chainman release fixture ")
         self.addCleanup(temporary.cleanup)
@@ -2048,7 +2180,13 @@ check=["true"]
             if export_candidate
             else ["--json"]
         )
-        result = self.run_bootstrap(action, *arguments, check=not reject)
+        if force:
+            arguments.append("--force")
+        if no_verify:
+            arguments.append("--no-verify")
+        result = self.run_bootstrap(
+            action, *arguments, check=not reject or force or no_verify
+        )
         if export_candidate:
             self.assertEqual(json.loads(result.stdout)["outcome"], "verified_success")
             manifest = json.loads((target / "snapshot.json").read_text())
@@ -2071,7 +2209,7 @@ check=["true"]
             )
             self.assertIn("fixture phase: verify", result.stderr)
             return
-        if reject:
+        if reject and not (force or no_verify):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("fixture runtime verification rejected", result.stderr)
             self.assertEqual(self.lifecycle_git("rev-parse", "HEAD"), before)
@@ -2120,6 +2258,10 @@ check=["true"]
             self.assertNotIn("fixture phase: resolve", result.stderr)
         accepted = json.loads(result.stdout)
         self.assertEqual(
+            accepted["verification"],
+            "skipped" if no_verify else "forced" if reject and force else "passed",
+        )
+        self.assertEqual(
             set(accepted["changed"]),
             {"chainman.lock"}
             | ({"dependency.lock"} if action == "deps-update" else set()),
@@ -2137,7 +2279,17 @@ check=["true"]
         self.assertNotEqual(old_path, new_path)
         self.assertEqual((old_path / "VERSION").read_text(), "0.1.0\n")
         self.assertEqual((new_path / "VERSION").read_text(), "0.1.0\n")
-        self.assertIn("fixture phase: verify", result.stderr)
+        if no_verify:
+            self.assertNotIn("fixture runtime verification rejected", result.stderr)
+            self.assertNotIn("fixture phase: verify", result.stderr)
+        self.assertIn(
+            "--no-verify"
+            if no_verify
+            else "fixture runtime verification rejected"
+            if reject and force
+            else "fixture phase: verify",
+            result.stderr,
+        )
         self.assertEqual(list(self.update_cache.glob("candidate.*")), [])
 
     def schema_three_recovery(self, mode):

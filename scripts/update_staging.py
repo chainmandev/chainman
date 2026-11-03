@@ -14,6 +14,7 @@ import json
 import hashlib
 import os
 import stat
+import sys
 import tempfile
 import shutil
 import shlex
@@ -625,10 +626,29 @@ def inspect(root: Path, destination: Path) -> None:
         tc.atomic_bytes(control / "verify", ("\n".join(state.verify) + "\n").encode())
 
 
-def finalize(root: Path, destination: Path) -> None:
+def finalize(
+    root: Path,
+    destination: Path,
+    *,
+    forced_verification_exit_code: int = 0,
+    verification_skipped: bool = False,
+) -> None:
+    if (
+        type(forced_verification_exit_code) is not int
+        or not 0 <= forced_verification_exit_code < 128
+    ):
+        raise ValueError("Cannot force an interrupted or invalid verification result")
+    if type(verification_skipped) is not bool or (
+        verification_skipped and forced_verification_exit_code
+    ):
+        raise ValueError("Skipped and forced verification are mutually exclusive")
     if (destination / "control/export.json").exists():
         raise ValueError("Export transactions cannot apply or commit")
     state, candidate = read_state(root, destination)
+    if (forced_verification_exit_code or verification_skipped) and state.options.format:
+        raise ValueError(
+            "--force and --no-verify are available only for dependency or runtime updates"
+        )
     inspected = state.require_inspection()
     with updates.preview_git_environment(), tc.operation(candidate):
         candidate_unchanged(candidate, state)
@@ -649,6 +669,17 @@ def finalize(root: Path, destination: Path) -> None:
         unchanged(root, state)
         opts = state.options
         commit = None
+        if verification_skipped and inspected.paths:
+            print(
+                "Chainman: project verification skipped because --no-verify was specified.",
+                file=sys.stderr,
+            )
+        if forced_verification_exit_code:
+            print(
+                f"Chainman: verification failed with exit status {forced_verification_exit_code}; "
+                "continuing because --force was specified.",
+                file=sys.stderr,
+            )
         if not opts.preview and inspected.paths:
             for name, output in outputs.items():
                 target = tc.contained(root, name)
@@ -686,8 +717,18 @@ def finalize(root: Path, destination: Path) -> None:
             schema=1,
             changed=inspected.paths,
             commit=commit,
-            verification="passed" if inspected.paths else "no changes",
+            verification=(
+                "forced"
+                if forced_verification_exit_code
+                else "skipped"
+                if verification_skipped and inspected.paths
+                else "passed"
+                if inspected.paths
+                else "no changes"
+            ),
         )
+        if forced_verification_exit_code:
+            result["verification_exit_code"] = forced_verification_exit_code
         if opts.preview:
             result["preview"] = True
         print(json.dumps(result, indent=2))
@@ -762,6 +803,14 @@ def run(root: Path, action: str, args: list[str]) -> int:
         inspect(root, destination)
     elif action == "_update-finalize" and len(args) == 1:
         finalize(root, destination)
+    elif action == "_update-finalize" and len(args) == 2 and args[1] == "--no-verify":
+        finalize(root, destination, verification_skipped=True)
+    elif (
+        action == "_update-finalize"
+        and len(args) == 3
+        and args[1] == "--force-verification"
+    ):
+        finalize(root, destination, forced_verification_exit_code=int(args[2]))
     else:
         raise ValueError("Invalid update phase")
     return 0

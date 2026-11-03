@@ -16,6 +16,7 @@ import toolchain as tc
 def run(root: Path, action: str, arguments: list[str]) -> None:
     import candidate_export
     import git_runtime
+    import recipes
     import updates
 
     export_target, _ = candidate_export.split_arguments(arguments)
@@ -40,9 +41,11 @@ def run(root: Path, action: str, arguments: list[str]) -> None:
         if action in {"status", "prune"}:
             argv = [str(helper), "update-cache", action, str(base), *arguments]
         else:
+            _, _, resume_arguments = recipes.verification_arguments(arguments)
             resume = (
-                arguments[0].split("=", 1)[1]
-                if len(arguments) == 1 and arguments[0].startswith("resume=")
+                resume_arguments[0].split("=", 1)[1]
+                if len(resume_arguments) == 1
+                and resume_arguments[0].startswith("resume=")
                 else "-"
             )
             worker = [sys.executable, str(tc.RUNTIME / "scripts/source_workflow.py")]

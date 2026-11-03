@@ -90,10 +90,99 @@ commands=[["true"]]
         (self.candidate / "dependency.lock").write_text("new\n")
         subject.inspect(self.root, self.stage)
 
-    def finish(self):
+    def finish(self, **kwargs):
         with contextlib.redirect_stdout(io.StringIO()) as stream:
-            subject.finalize(self.root, self.stage)
+            subject.finalize(self.root, self.stage, **kwargs)
         return json.loads(stream.getvalue())
+
+    def test_forced_verification_is_reported_without_changing_commit_controls(self):
+        self.update("--no-commit")
+        before = updates.git(self.root, "rev-parse", "HEAD")
+        record = self.finish(forced_verification_exit_code=19)
+        self.assertEqual(record["verification"], "forced")
+        self.assertEqual(record["verification_exit_code"], 19)
+        self.assertIsNone(record["commit"])
+        self.assertEqual(updates.git(self.root, "rev-parse", "HEAD"), before)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
+
+    def test_skipped_verification_reports_truthfully_and_preserves_no_commit(self):
+        self.update("--no-commit")
+        record = self.finish(verification_skipped=True)
+        self.assertEqual(record["verification"], "skipped")
+        self.assertNotIn("verification_exit_code", record)
+        self.assertIsNone(record["commit"])
+        self.assertEqual((self.root / "dependency.lock").read_text(), "new\n")
+
+    def test_skipped_preview_never_applies(self):
+        self.update("--preview")
+        record = self.finish(verification_skipped=True)
+        self.assertEqual(record["verification"], "skipped")
+        self.assertTrue(record["preview"])
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_no_changes_does_not_claim_skipped_verification(self):
+        self.prepare()
+        subject.inspect(self.root, self.stage)
+        self.assertEqual(
+            self.finish(verification_skipped=True)["verification"], "no changes"
+        )
+
+    def test_skipping_preserves_candidate_and_original_integrity_guards(self):
+        self.update()
+        path = self.candidate / "dependency.lock"
+        path.write_text("unexpected mutation\n")
+        with self.assertRaisesRegex(ValueError, "Verification changed"):
+            self.finish(verification_skipped=True)
+        path.write_text("new\n")
+        (self.root / "source.txt").write_text("concurrent edit\n")
+        with self.assertRaisesRegex(ValueError, "Original checkout changed"):
+            self.finish(verification_skipped=True)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
+
+    def test_skipped_and_forced_results_cannot_combine(self):
+        self.update()
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            self.finish(verification_skipped=True, forced_verification_exit_code=1)
+
+    def test_forced_preview_never_applies_or_commits(self):
+        self.update("--preview")
+        record = self.finish(forced_verification_exit_code=19)
+        self.assertEqual(record["verification"], "forced")
+        self.assertTrue(record["preview"])
+        self.assertIsNone(record["commit"])
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_force_rejects_interrupted_or_invalid_exit_codes(self):
+        self.update()
+        for code in (-9, 128, 130, 143, 256, True):
+            with (
+                self.subTest(code=code),
+                self.assertRaisesRegex(ValueError, "interrupted or invalid"),
+            ):
+                self.finish(forced_verification_exit_code=code)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_force_does_not_accept_verifier_source_or_git_mutations(self):
+        self.update()
+        path = self.candidate / "dependency.lock"
+        path.write_text("verifier mutation\n")
+        with self.assertRaisesRegex(ValueError, "Verification changed"):
+            self.finish(forced_verification_exit_code=19)
+        path.write_text("new\n")
+        updates.git(self.candidate, "config", "fixture.changed", "true")
+        with self.assertRaisesRegex(ValueError, "Git administration"):
+            self.finish(forced_verification_exit_code=19)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_force_preserves_concurrent_original_edits(self):
+        self.update()
+        (self.root / "source.txt").write_text("concurrent user edit\n")
+        with self.assertRaisesRegex(ValueError, "Original checkout changed"):
+            self.finish(forced_verification_exit_code=19)
+        self.assertEqual((self.root / "dependency.lock").read_text(), "old\n")
+        self.assertEqual(
+            (self.root / "source.txt").read_text(), "concurrent user edit\n"
+        )
 
     def test_finalize_requires_inspection_and_resume_discards_old_inspection(self):
         self.prepare("--no-commit")

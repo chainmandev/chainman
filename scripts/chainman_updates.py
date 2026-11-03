@@ -389,6 +389,16 @@ def options(args: list[str]) -> Options:
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--no-commit", action="store_true")
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Apply after a failed project verification command; also available on resume",
+    )
+    parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help="Skip project verification; also available on resume",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Write one schema-1 JSON result; send command output to stderr",
@@ -411,6 +421,14 @@ def options(args: list[str]) -> Options:
     )
     parser.add_argument("extra", nargs=argparse.REMAINDER)
     opts = parser.parse_args(args)
+    # The host coordinator consumes this consent before entering candidate code.
+    # Never persist it in a checkpoint or pass it to an older selected runtime.
+    if opts.force or opts.no_verify:
+        raise ValueError(
+            "Start --force or --no-verify updates through the host update coordinator"
+        )
+    del opts.force
+    del opts.no_verify
     if opts.staged:
         raise ValueError(
             "Use just format-staged (or just chainman format-staged); update transactions cannot format the index"

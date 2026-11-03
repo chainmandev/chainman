@@ -273,6 +273,26 @@ verification_dispatch() {
     lifetime_supervise "$verification_helper/chainman-control" verification "$verification_output/plan.json" "$verification_output"
     exit $?
 }
+update_resume_argument() {
+    update_resume_argument_path=-
+    for update_resume_argument_value in "$@"; do
+        case "$update_resume_argument_value" in
+            --force | --no-verify | --keep-going) ;;
+            resume=*)
+                [ "$update_resume_argument_path" = - ] || {
+                    printf '%s\n' -
+                    return
+                }
+                update_resume_argument_path=${update_resume_argument_value#resume=}
+                ;;
+            *)
+                printf '%s\n' -
+                return
+                ;;
+        esac
+    done
+    printf '%s\n' "$update_resume_argument_path"
+}
 update_dispatch() {
     # Export the same small native supervisor used by hooks, including on a
     # container-only host. Never require a host Python or an engine in a worker.
@@ -297,8 +317,7 @@ update_dispatch() {
             lifetime_supervise "$CHAINMAN_UPDATE_HELPER" update-cache "$update_maintenance" "$update_cache" "$@"
             ;;
         *)
-            update_resume_path=-
-            case "${1:-}" in resume=*) update_resume_path=${1#resume=} ;; esac
+            update_resume_path=$(update_resume_argument "$@")
             # Legacy transactions have no lifetime protocol; allow explicit
             # resumption in place but never adopt them into automatic collection.
             case "$update_resume_path" in
@@ -315,6 +334,9 @@ update_worker() {
     umask 077
     update_export=
     update_keep_going=0
+    update_force=0
+    update_no_verify=0
+    update_format=0
     update_passthrough=0
     update_option_value=0
     update_count=$#
@@ -343,6 +365,12 @@ update_worker() {
             --keep-going)
                 if [ "$update_passthrough" = 1 ]; then set -- "$@" "$update_arg"; else update_keep_going=1; fi
                 ;;
+            --force) update_force=1 ;;
+            --no-verify) update_no_verify=1 ;;
+            --format)
+                update_format=1
+                set -- "$@" "$update_arg"
+                ;;
             --export-candidate)
                 [ -z "$update_export" ] && [ "$update_count" -gt 0 ] || fail 'Specify one --export-candidate DIR.'
                 update_export=$1
@@ -358,6 +386,13 @@ update_worker() {
             *) set -- "$@" "$update_arg" ;;
         esac
     done
+    if [ "$update_force" = 1 ] && [ "$update_no_verify" = 1 ]; then
+        fail '--force and --no-verify are mutually exclusive.'
+    fi
+    if [ "$update_force" = 1 ] || [ "$update_no_verify" = 1 ]; then
+        [ -z "$update_export" ] || fail '--force and --no-verify cannot combine with candidate export.'
+        [ "$update_format" = 0 ] || fail '--force and --no-verify are available only for dependency or runtime updates.'
+    fi
     if [ -n "$update_export" ]; then
         case "$update_export" in /*) ;; *) update_export=$root/$update_export ;; esac
         single_line "$update_export"
@@ -470,7 +505,8 @@ update_worker() {
         update_export_stage verification
     fi
     IFS= read -r update_changed < "$update_output/control/changed"
-    if [ "$update_changed" = yes ]; then
+    update_verification_code=0
+    if [ "$update_changed" = yes ] && [ "$update_no_verify" = 0 ]; then
         if [ "$update_keep_going" = 1 ]; then
             CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
                 "$self" _verification-update-plan "$update_output/control/verify" \
@@ -480,20 +516,30 @@ update_worker() {
             update_verification_cache=$(CDPATH='' cd -P -- "$update_verification_cache" && pwd)
             case "$update_verification_cache/" in "$root/"* | "$source_root/"*) fail 'Verification reports must be outside project and runtime.' ;; esac
             CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate "$CHAINMAN_UPDATE_HELPER" \
-                verification "$update_output/control/verification-plan.json" "$update_verification_cache" < /dev/null >&2 || exit $?
+                verification "$update_output/control/verification-plan.json" "$update_verification_cache" < /dev/null >&2 || update_verification_code=$?
         else
             while IFS= read -r update_action && IFS= read -r update_task; do
                 # Bash runs EXIT traps before restoring a failed subshell function's
                 # redirections under errexit. Exit after restoration so export JSON
                 # keeps stdout while verifier output remains on stderr.
                 CHAINMAN_SETUP=auto CHAINMAN_UPDATE_ACTIVE=1 update_candidate \
-                    "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2 || exit $?
+                    "$update_output/candidate-bootstrap/chainman.sh" "$update_action" "$update_task" < /dev/null >&2 || {
+                    update_verification_code=$?
+                    break
+                }
             done < "$update_output/control/verify"
         fi
     fi
+    if [ "$update_verification_code" != 0 ]; then
+        if [ "$update_force" = 0 ] || [ "$update_verification_code" -ge 128 ]; then exit "$update_verification_code"; fi
+        if [ "$update_keep_going" = 1 ] && [ "$update_verification_code" != 1 ]; then exit "$update_verification_code"; fi
+    fi
     if [ -n "$update_export" ]; then exit 0; fi
+    set -- "$update_output"
+    if [ "$update_verification_code" != 0 ]; then set -- "$@" --force-verification "$update_verification_code"; fi
+    if [ "$update_no_verify" = 1 ]; then set -- "$@" --no-verify; fi
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
-        CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-finalize "$update_output"
+        CHAINMAN_PROJECT_ROOT=$root "$update_launcher" _update-finalize "$@"
     if [ -z "${CHAINMAN_UPDATE_TRANSACTION:-}" ]; then rm -rf -- "$update_output"; fi
     trap - EXIT
     exit 0
@@ -640,7 +686,7 @@ case "$CHAINMAN_REQUEST_ACTION" in
         [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] || fail 'Start updates through the host launcher so candidate verification can control its own services.'
         [ -z "${CHAINMAN_UPDATE_ACTIVE:-}" ] || fail 'An update hook must not recursively start another update.'
         shift
-        case "${1:-}" in resume=*) update_dispatch "$@" ;; esac
+        if [ "$(update_resume_argument "$@")" != - ]; then update_dispatch "$@"; fi
         if [ "$CHAINMAN_REQUEST_ACTION" = chainman-update ]; then set -- --only-chainman "$@"; fi
         if [ "$CHAINMAN_REQUEST_ACTION" = format ]; then
             for format_option in "$@"; do

@@ -77,15 +77,19 @@ Values remain arguments, never shell code. The defaults are apply and auto-commi
 Untargeted updates and `targets=all` update chainman together with project
 dependencies. Explicit application targets retain the runtime; `--skip-chainman`
 also opts out of runtime updates. Both generations remain separate immutable
-runtimes, and the combined candidate must pass verification before application.
+runtimes, and the combined candidate must pass verification before application
+unless that invocation explicitly uses `--force` to accept a failed project gate
+or `--no-verify` to skip the gate.
 `chainman-update` does not accept dependency selection options. `format commit=off`
 runs the complete generate/format/check/hygiene sequence in place; `format-write`
 is the narrower formatter-only operation. Native API flags remain available to
 programmatic callers; there are no compatibility recipe aliases.
 
-Automatic commits require a clean starting checkout. They bypass Git hooks because
-the candidate has already passed its declared gate, retain configured commit signing
-and identity, and never push. All intended generated and formatted additions,
+Automatic commits require a clean starting checkout, retain configured commit signing
+and identity, and never push. They bypass Git hooks after the candidate passes its
+declared gate or the caller explicitly forces its verification failure or skips
+project verification with `--no-verify`.
+All intended generated and formatted additions,
 modifications and deletions are eligible; runtime files and submodules have separate
 ownership. The original HEAD, index and source bytes must remain unchanged throughout.
 Verification cannot mutate the frozen candidate. Staged formatting has a separate
@@ -98,9 +102,17 @@ Reconcile there, including project-required semantic review, then use
 `just chainman deps-update resume=/absolute/transaction/directory`. Resume checks the original
 checkout and candidate Git identity again, reruns declared reconciliation, obtains
 fresh dependency eligibility evidence, freezes the candidate again and reruns the
-complete original gate. Previous verification is never reused. `updates.reconcile_tasks`
+complete original gate by default. Previous verification is never reused. `updates.reconcile_tasks`
 names mechanical tasks that must precede freezing; `reconcile_outputs` extends the
 runtime-update output scope for generated metadata. Hash refresh is not human review.
+Use `--force` on either update command, including `--force resume=/path/to/transaction`,
+to apply after an ordinary verification failure. It still runs verification and
+preserves integrity checks; results report `verification: "forced"` and the failing
+exit code. Use the separate `--no-verify` option to skip the project gate and report
+`verification: "skipped"`. Neither option bypasses resolution, eligibility audits
+or transaction integrity checks; they cannot combine with each other, formatting
+or detached export. Consent is never retained for a later invocation.
+See [update controls](updates.md).
 
 Dependency coverage discovers tracked manifests and declared adapter inputs.
 `dependencies.exclusions` requires a `pattern` and technical `reason`; it cannot

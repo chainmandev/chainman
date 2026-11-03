@@ -61,7 +61,13 @@ def split_arguments(args: list[str]) -> tuple[str | None, list[str]]:
         index += 1
     if target is not None:
         from chainman_updates import options
+        from recipes import verification_arguments
 
+        force, no_verify, _ = verification_arguments(rest)
+        if force or no_verify:
+            raise ValueError(
+                "--force and --no-verify cannot combine with candidate export"
+            )
         if any(value.startswith("resume=") for value in rest):
             raise ValueError("Export cannot resume a retained transaction")
         opts = options(rest)

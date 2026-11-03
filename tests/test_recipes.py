@@ -20,6 +20,35 @@ import update_staging
 
 
 class RecipeTests(unittest.TestCase):
+    def test_force_consent_is_invocation_only_and_values_remain_opaque(self):
+        self.assertEqual(
+            recipes.verification_arguments(["--force", "resume=/retained", "--force"]),
+            (True, False, ["resume=/retained"]),
+        )
+        for arguments in (
+            ["--message", "--force"],
+            ["message=--force"],
+            ["--targets", "--force"],
+            ["--export-candidate", "--force"],
+            ["--", "--force"],
+        ):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(
+                    recipes.verification_arguments(arguments), (False, False, arguments)
+                )
+
+    def test_no_verify_consent_is_explicit_and_exclusive(self):
+        self.assertEqual(
+            recipes.verification_arguments(["resume=/retained", "--no-verify"]),
+            (False, True, ["resume=/retained"]),
+        )
+        for arguments in (["--message", "--no-verify"], ["--", "--no-verify"]):
+            self.assertEqual(
+                recipes.verification_arguments(arguments), (False, False, arguments)
+            )
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            recipes.verification_arguments(["--force", "--no-verify"])
+
     def test_explicit_setup_validates_all_groups_before_project_tasks(self):
         cfg = {
             "tasks": {"hooks": {"commands": [["true"]]}},

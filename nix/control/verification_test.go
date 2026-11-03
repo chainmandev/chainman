@@ -26,7 +26,7 @@ func verificationFixture(t *testing.T, names ...string) (VerificationPlan, strin
 		"_verification-identity) if [ -e changed ]; then printf '{}'; else printf '%s' " + quote(string(body)) + "; fi ;;\n" +
 		"services-status) if [ -e unsafe ]; then printf '{}'; else printf '%s' " + quote(health) + "; fi ;;\n" +
 		"run) printf '%s\\n' \"$2\" >> events; printf 'output %s\\n' \"$2\"; case \"$2\" in\n" +
-		"fail) exit 7 ;; unsafe) touch unsafe; exit 8 ;; mutate) touch changed ;;\n" +
+		"fail) exit 7 ;; killed) exit 137 ;; unsafe) touch unsafe; exit 8 ;; mutate) touch changed ;;\n" +
 		"slow) trap 'exit 0' TERM INT HUP; touch ready; while :; do sleep 1; done ;;\n" +
 		"esac ;; *) exit 2 ;; esac\n"
 	if err := os.WriteFile(entry, []byte(script), 0700); err != nil {
@@ -88,14 +88,24 @@ func TestVerificationStopsOnUnsafeCleanupAndSourceDrift(t *testing.T) {
 	for _, name := range []string{"unsafe", "mutate"} {
 		t.Run(name, func(t *testing.T) {
 			plan, output := verificationFixture(t, name, "last")
-			if code := verificationRun(plan, output); code != 1 {
+			if code := verificationRun(plan, output); code != 2 {
 				t.Fatalf("code %d", code)
 			}
 			report := verificationReadReport(t, output)
-			if report.Reason == "" || report.Gates[1].Status != "unrun" {
+			if report.Code != 2 || report.Reason == "" || report.Gates[1].Status != "unrun" {
 				t.Fatalf("report %+v", report)
 			}
 		})
+	}
+}
+func TestVerificationKilledGateCannotAuthorizeForce(t *testing.T) {
+	plan, output := verificationFixture(t, "killed", "last")
+	if code := verificationRun(plan, output); code != 137 {
+		t.Fatalf("code %d", code)
+	}
+	report := verificationReadReport(t, output)
+	if report.Reason != "interrupted" || report.Gates[0].Status != "interrupted" || report.Gates[1].Status != "unrun" {
+		t.Fatalf("report %+v", report)
 	}
 }
 func TestVerificationRejectsMalformedPlanAndUnsafeOutput(t *testing.T) {

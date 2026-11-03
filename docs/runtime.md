@@ -17,10 +17,16 @@ fingerprint, runtime pin, gate outcomes, durations and log paths. They are
 diagnostic artifacts, not reusable acceptance receipts; do not commit them.
 
 `just chainman-update --keep-going` and `just deps-update --keep-going` use the
-same aggregation for candidate qualification. A failed or incomplete sweep never
-adopts the candidate or automatically commits it. The coordinator consumes the
-option before invoking candidate runtimes, including older runtimes. Retained
-transactions remember it; use `just deps-update resume=/path/to/transaction` to
+same aggregation for candidate qualification. A failed sweep does not adopt the
+candidate or automatically commit it unless the same invocation includes `--force`.
+Incomplete sweeps always stop. The coordinator consumes `--keep-going`
+before invoking candidate runtimes, including older runtimes. Retained
+transactions remember aggregation, while `--force` must be explicit on each invocation.
+The separate, invocation-only `--no-verify` option skips project verification,
+including a retained aggregated gate, and reports `verification: "skipped"`.
+It cannot combine with `--force`; both preserve resolution, eligibility and
+transaction integrity checks. See [update controls](updates.md).
+Use `just deps-update resume=/path/to/transaction` to
 retry the complete qualification. Update reports remain in the verification
 cache even after completed candidates are collected. Options after `--`, or used
 as another option's value, retain their normal meaning and are not interpreted

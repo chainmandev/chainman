@@ -19,6 +19,25 @@ import updates
 
 
 class UpdateCacheEntry(unittest.TestCase):
+    def test_force_resume_acquires_the_retained_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for arguments in (
+                ["--force", "resume=/retained"],
+                ["resume=/retained", "--force"],
+                ["--no-verify", "resume=/retained"],
+                ["resume=/retained", "--no-verify"],
+            ):
+                with (
+                    patch.dict(os.environ, XDG_CACHE_HOME=str(root / "cache")),
+                    patch.object(update_cache.hook_worker, "export_binary"),
+                    patch.object(update_cache.tc, "managed_run") as run,
+                ):
+                    run.return_value.returncode = 0
+                    update_cache.run(root, "deps-update", arguments)
+                    self.assertEqual(run.call_args.args[0][4], "/retained")
+                    self.assertEqual(run.call_args.args[0][-2:], arguments)
+
     def test_export_rejects_existing_destination_without_replaying_result(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

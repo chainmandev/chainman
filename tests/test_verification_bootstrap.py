@@ -39,7 +39,7 @@ _update-inspect)
 _verification-update-plan) printf '{}\\n' ;;
 verification) test -z "$(cat)"; printf 'coordinated\\n' >> "$TEST_BASE/events"; exit "$TEST_RESULT" ;;
 run) printf '%s\\n' "$2" >> "$TEST_BASE/events"; exit "$TEST_RESULT" ;;
-_update-finalize) touch "$TEST_BASE/finalized" ;;
+_update-finalize) printf '%s\\n' "$@" > "$TEST_BASE/finalize-arguments"; touch "$TEST_BASE/finalized" ;;
 *) exit 2 ;;
 esac
 """)
@@ -98,6 +98,113 @@ esac
         result, base = self.worker(["--keep-going"], result=1)
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertFalse((base / "finalized").exists())
+
+    def test_force_is_consumed_before_older_candidate_and_records_failed_status(self):
+        result, base = self.worker(["--only-chainman", "--force"], result=7)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("--force", (base / "arguments").read_text())
+        self.assertEqual((base / "events").read_text(), "first\n")
+        self.assertEqual(
+            (base / "finalize-arguments").read_text().splitlines()[-2:],
+            ["--force-verification", "7"],
+        )
+
+    def test_no_verify_skips_all_gates_and_is_consumed_before_older_runtime(self):
+        for arguments in (
+            ["--only-chainman", "--no-verify"],
+            ["--keep-going", "--no-verify"],
+        ):
+            result, base = self.worker(arguments, result=7)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("--no-verify", (base / "arguments").read_text())
+            self.assertFalse((base / "events").exists())
+            self.assertEqual(
+                (base / "finalize-arguments").read_text().splitlines()[-1],
+                "--no-verify",
+            )
+
+    def test_no_verify_value_and_passthrough_are_not_consent(self):
+        for arguments in (["--message", "--no-verify"], ["--", "--no-verify"]):
+            result, base = self.worker(arguments, result=7)
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertIn("--no-verify", (base / "arguments").read_text())
+            self.assertFalse((base / "finalized").exists())
+
+    def test_no_verify_rejects_export_format_and_force(self):
+        for arguments in (
+            ["--no-verify", "--export-candidate", "/unused-export"],
+            ["--format", "--no-verify"],
+            ["--force", "--no-verify"],
+        ):
+            result, base = self.worker(arguments)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("--no-verify", result.stderr)
+            self.assertFalse((base / "finalized").exists())
+
+    def test_force_preserves_passed_verification_and_does_not_swallow_cancellation(
+        self,
+    ):
+        result, base = self.worker(["--force"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(
+            "--force-verification", (base / "finalize-arguments").read_text()
+        )
+        result, base = self.worker(["--force"], result=130)
+        self.assertEqual(result.returncode, 130, result.stderr)
+        self.assertFalse((base / "finalized").exists())
+
+    def test_force_accepts_completed_failed_sweep_but_not_an_aborted_sweep(self):
+        result, base = self.worker(["--keep-going", "--force"], result=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((base / "events").read_text(), "coordinated\n")
+        self.assertTrue((base / "finalized").exists())
+        result, base = self.worker(["--keep-going", "--force"], result=2)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertFalse((base / "finalized").exists())
+
+    def test_force_value_and_passthrough_do_not_authorize_override(self):
+        for arguments in (["--message", "--force"], ["--", "--force"]):
+            result, base = self.worker(arguments, result=7)
+            self.assertEqual(result.returncode, 7, result.stderr)
+            self.assertIn("--force", (base / "arguments").read_text())
+            self.assertFalse((base / "finalized").exists())
+
+    def test_force_rejects_export_and_format(self):
+        for arguments in (
+            ["--force", "--export-candidate", "/unused-export"],
+            ["--format", "--force"],
+        ):
+            result, base = self.worker(arguments)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("--force", result.stderr)
+            self.assertFalse((base / "finalized").exists())
+
+    def test_resume_selection_accepts_force_before_or_after_the_path(self):
+        bootstrap = (SOURCE / "bootstrap/chainman.sh").read_text()
+        helper = bootstrap[
+            bootstrap.index("update_resume_argument() {") : bootstrap.index(
+                "\nupdate_dispatch() {"
+            )
+        ]
+        for arguments in (
+            ["--force", "resume=/retained candidate"],
+            ["resume=/retained candidate", "--force"],
+            ["--keep-going", "--force", "resume=/retained candidate"],
+            ["--no-verify", "resume=/retained candidate"],
+            ["resume=/retained candidate", "--no-verify"],
+        ):
+            result = subprocess.check_output(
+                [
+                    "sh",
+                    "-eu",
+                    "-c",
+                    helper + '\nupdate_resume_argument "$@"',
+                    "sh",
+                    *arguments,
+                ],
+                text=True,
+            )
+            self.assertEqual(result.strip(), "/retained candidate")
 
     def test_default_is_fail_fast_and_argument_values_are_not_options(self):
         result, base = self.worker(["--message", "--keep-going"], result=7)

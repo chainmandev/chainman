@@ -286,6 +286,8 @@ class CandidateExports(unittest.TestCase):
 
     def test_options_reject_resume_and_apply_controls(self):
         for args in (
+            ["--force"],
+            ["--no-verify"],
             ["resume=/tmp/x"],
             ["mode=dry-run"],
             ["commit=off"],

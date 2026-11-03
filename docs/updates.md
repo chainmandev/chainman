@@ -109,7 +109,7 @@ Projects with mutually exclusive service configurations can instead declare
 runs each finite task in order and releases its service claims before the next
 task starts. This differs from one task's `depends_on`, whose service graph is
 acquired together. The first failure stops verification and preserves the
-candidate; all tasks must pass against the same frozen candidate before apply.
+candidate; by default all tasks must pass against the same frozen candidate before apply.
 Update verification is noninteractive and receives closed input (`/dev/null`).
 Declare exactly one verification form.
 
@@ -131,7 +131,7 @@ checkouts so concurrent inspection cannot race packfile replacement. Inspection
 freezes the allowed candidate files before verification and exports a bootstrap from
 the verified runtime for host execution; it never executes the candidate's mutable
 justfile on the host. Finalization checks the original HEAD, index and raw source
-snapshot again before applying anything. A resolver failure, verification failure,
+snapshot again before applying anything. By default, a resolver failure, verification failure,
 out-of-scope change or concurrent original edit leaves the original unchanged and
 preserves the candidate under the host's chainman update cache for inspection.
 Candidate source changes during verification are failures. Failures while applying
@@ -162,6 +162,45 @@ Interrupted waits propagate; exhausted requests fail without cached substitute e
 `--json` for exactly one schema-1 JSON result on stdout, with command output on
 stderr. The result includes `changed` (an array of project-relative paths), `commit`
 (an identity or null), and `verification`; previews additionally include `preview`.
+
+Use `--force` to apply an update despite a failing project verification command:
+
+```sh
+just chainman deps-update --force
+just chainman chainman-update --force
+just chainman deps-update --force resume=/absolute/transaction/directory
+```
+
+Verification still runs. A forced update returns success after applying its files
+and committing unless `commit=off` is selected. Its JSON result reports
+`verification: "forced"` and `verification_exit_code`, and stderr identifies the
+override. A passing gate still reports `"passed"`. Dry runs remain non-applying.
+`--keep-going --force` can accept a completed sweep with failed gates while retaining
+its report; an interrupted or aborted sweep still stops. Resolver and dependency
+eligibility failures, candidate source/Git mutations, concurrent original edits,
+and signing or application errors remain failures. `--force` is explicit for each
+invocation and is never remembered by a retained candidate; repeat it when resuming.
+It does not combine with formatting or detached candidate export. In the chainman
+source checkout, the corresponding command is `just deps-update --force`.
+
+Use the separate `--no-verify` option to skip project verification entirely:
+
+```sh
+just chainman deps-update --no-verify
+just chainman chainman-update --no-verify
+just chainman deps-update resume=/absolute/transaction/directory --no-verify
+```
+
+The result reports `verification: "skipped"`, with a warning on stderr and no
+verification exit code. A transaction without changed files still reports
+`"no changes"`. Resolution, reconciliation, dependency eligibility audits, output
+scope and source/Git integrity checks still run. Preview and no-commit controls
+keep their usual behavior. `--no-verify` skips an aggregated gate too, including
+when a resumed candidate remembers `--keep-going`. It is mutually exclusive with
+`--force`, cannot combine with formatting or detached candidate export, and must
+be explicit on every invocation. In the source checkout use
+`just deps-update --no-verify`. These options affect consumer or source updates;
+they do not change Chainman's publication qualification requirements.
 
 Tracked submodules remain frozen, read-only inputs. Uninitialized submodules stay
 empty; chainman never fetches them. Initialized inputs must match their recorded
