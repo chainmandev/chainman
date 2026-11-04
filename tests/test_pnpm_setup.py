@@ -106,7 +106,9 @@ class ActualPnpmTests(unittest.TestCase):
                     }
                 )
             )
-            (root / "pnpm-workspace.yaml").write_text("pmOnFail: download\n")
+            (root / "pnpm-workspace.yaml").write_text(
+                "packages: []\npmOnFail: download\n"
+            )
             options = (
                 ["--pm-on-fail=ignore"]
                 if int(version.split(".")[0]) >= 11
