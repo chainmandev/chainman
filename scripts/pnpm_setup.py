@@ -23,16 +23,49 @@ def expand(spec: Mapping[str, object]) -> Table:
     }
 
 
+def required_version(
+    manifest: Mapping[str, object], *, required: bool = True
+) -> str | None:
+    if not required and "packageManager" not in manifest:
+        return None
+    selected = manifest.get("packageManager")
+    match = (
+        re.fullmatch(
+            r"pnpm@(\d+\.\d+\.\d+)(?:\+sha(?:224|256|384|512)\.[a-zA-Z0-9+/=]+)?",
+            selected,
+        )
+        if isinstance(selected, str)
+        else None
+    )
+    if match is None:
+        raise ValueError("Declare an exact pnpm version in package.json packageManager")
+    return match[1]
+
+
+def options(actual: str, expected: str | None) -> list[str]:
+    if re.fullmatch(r"\d+\.\d+\.\d+", actual) is None:
+        raise ValueError("The selected profile lacks one exact pnpm version")
+    if expected is not None and actual != expected:
+        raise ValueError(
+            f"pnpm mismatch: packageManager requires {expected}, selected profile provides {actual}. Reconcile the project flake and packageManager; chainman will not download a replacement."
+        )
+    # Identity was checked above. pnpm 12's error mode also locks and resolves
+    # packageManagerDependencies, including for a matching binary.
+    return (
+        ["--pm-on-fail=ignore"]
+        if int(actual.split(".")[0]) >= 11
+        else [
+            "--config.manage-package-manager-versions=false",
+            "--config.package-manager-strict-version=true",
+        ]
+    )
+
+
 def run(action: str, root: Path) -> int:
     if action not in {"install", "check"}:
         raise ValueError("pnpm setup accepts install or check")
     manifest = json.loads((root / "package.json").read_bytes())
-    selected = manifest.get("packageManager", "")
-    match = re.fullmatch(
-        r"pnpm@(\d+\.\d+\.\d+)(?:\+sha(?:224|256|384|512)\.[a-zA-Z0-9+/=]+)?", selected
-    )
-    if match is None:
-        raise ValueError("Declare an exact pnpm version in package.json packageManager")
+    selected = required_version(manifest)
     env = dict(os.environ)
     # pnpm 10 and 11 recognize these spellings differently. Explicit command
     # options also prevent workspace settings from requesting a silent download.
@@ -65,18 +98,7 @@ def run(action: str, root: Path) -> int:
         capture_output=True,
         timeout=15,
     ).stdout.strip()
-    if actual != match[1]:
-        raise ValueError(
-            f"pnpm mismatch: packageManager requires {match[1]}, selected profile provides {actual}. Reconcile the project flake and packageManager; chainman will not download a replacement."
-        )
-    command = ["pnpm"] + (
-        ["--pm-on-fail=error"]
-        if int(actual.split(".")[0]) >= 11
-        else [
-            "--config.manage-package-manager-versions=false",
-            "--config.package-manager-strict-version=true",
-        ]
-    )
+    command = ["pnpm", *options(actual, selected)]
     arguments = (
         ["install", "--frozen-lockfile", "--config.confirmModulesPurge=false"]
         if action == "install"

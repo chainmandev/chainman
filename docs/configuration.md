@@ -884,6 +884,8 @@ artifacts = ["node_modules/.modules.yaml"]
 The helper checks the selected profile's pnpm against the exact `packageManager`
 version, disables pnpm's automatic package-manager download, installs with a frozen
 lockfile, and asks pnpm to validate dependencies before a harmless Node command.
+The package manager stays supplied by the profile; setup does not add pnpm 12's
+separate `packageManagerDependencies` lock metadata.
 A mismatch names both versions and requires reconciliation of the project flake
 and manifest. Normal dependency age, integrity and build-approval policies still
 apply. No global Corepack shims are created. Custom installers can retain explicit

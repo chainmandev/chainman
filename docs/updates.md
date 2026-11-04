@@ -628,6 +628,11 @@ Compatible updates retain each moved override's original range through its exact
 selector and package identity. Final audit rejects widened override declarations
 even when the current lock still falls inside the original range.
 
+Before resolution, chainman probes the profile's pnpm outside the project and
+checks any declared `packageManager` version. A mismatch fails before dependency
+files change. The resolver uses that binary directly without downloading or
+locking another package-manager environment.
+
 After exact resolution, pnpm normalizes the restored declarations before the
 candidate is frozen. Only importer/catalog specifiers and override metadata may
 change; every selected identity, artifact and dependency edge must stay unchanged.

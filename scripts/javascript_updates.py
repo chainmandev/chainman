@@ -39,6 +39,7 @@ from urllib.parse import quote
 import chainman
 import adapter_data as inputs
 import manifests
+import pnpm_setup
 import registry
 from dependency_identity import Identity, inventory as identity_inventory
 import toolchain as tc
@@ -2085,6 +2086,24 @@ def resolve(
         return javascript_npm.resolve(
             workspace, before, evidence, selected, policy, now
         )
+    # Probe the declared profile outside every project before disabling pnpm's
+    # own manager resolution. Nix supplies the binary; an exact manifest pin
+    # must agree without adding a second manager lock or downloading a manager.
+    expected = pnpm_setup.required_version(
+        workspace.documents["package.json"][0], required=False
+    )
+    observed = chainman.execute(
+        root,
+        inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),
+        ["pnpm", "--version"],
+        cwd=Path("/"),
+        env=tc.environment(root),
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    manager_options = pnpm_setup.options(observed.stdout.strip(), expected)
     options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
     attempts = bounded(options, "fallback_attempts", 20, 100)
     if not workspace.settings:
@@ -2141,6 +2160,7 @@ def resolve(
                     "--lockfile-only",
                     "--ignore-scripts",
                     "--strict-peer-dependencies=false",
+                    *manager_options,
                 ],
                 cwd=temporary,
                 env=tc.environment(root),
@@ -2210,6 +2230,7 @@ def resolve(
                 "--lockfile-only",
                 "--ignore-scripts",
                 "--strict-peer-dependencies=false",
+                *manager_options,
                 "--no-frozen-lockfile",
             ],
             cwd=temporary,
@@ -2261,6 +2282,7 @@ def resolve(
                 "--lockfile-only",
                 "--ignore-scripts",
                 "--strict-peer-dependencies=false",
+                *manager_options,
                 "--frozen-lockfile",
             ],
             cwd=temporary,

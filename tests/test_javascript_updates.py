@@ -308,10 +308,35 @@ class JavaScriptTests(unittest.TestCase):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     def resolve(self, execute=None):
-        with patch.object(
-            js.chainman, "execute", side_effect=execute or self.fake_pnpm
-        ):
+        def run(root, profile, argv, *, cwd, **kwargs):
+            if argv == ["pnpm", "--version"]:
+                self.assertEqual(cwd, Path("/"))
+                return subprocess.CompletedProcess(argv, 0, "12.9.1\n", "")
+            return (execute or self.fake_pnpm)(root, profile, argv, cwd=cwd, **kwargs)
+
+        with patch.object(js.chainman, "execute", side_effect=run):
             return js.resolve(self.root, self.spec, self.policy, self.now)
+
+    def test_package_manager_mismatch_fails_before_resolution_or_file_changes(self):
+        self.manifest("package.json", {}, packageManager="pnpm@12.9.0")
+        original = {
+            name: (self.root / name).read_bytes()
+            for name in ("package.json", "pnpm-workspace.yaml")
+        }
+        with patch.object(
+            js.chainman,
+            "execute",
+            return_value=subprocess.CompletedProcess([], 0, "12.9.1\n", ""),
+        ) as execute:
+            with self.assertRaisesRegex(ValueError, "pnpm mismatch"):
+                js.resolve(self.root, self.spec, self.policy, self.now)
+        self.assertEqual(execute.call_count, 1)
+        self.assertEqual(execute.call_args.args[2], ["pnpm", "--version"])
+        self.assertEqual(execute.call_args.kwargs["cwd"], Path("/"))
+        self.assertEqual(
+            original, {name: (self.root / name).read_bytes() for name in original}
+        )
+        self.assertFalse((self.root / "pnpm-lock.yaml").exists())
 
     def test_malformed_native_graph_stops_at_each_boundary_without_publication(self):
         self.manifest("package.json", {"library": "^1.0.0"})
@@ -2968,6 +2993,32 @@ class JavaScriptTests(unittest.TestCase):
         result = js.resolve(self.root, self.spec, self.policy, self.now)
         self.assertIn("pnpm-lock.yaml", result["changed_files"])
         self.assertEqual(result["resolution_attempts"], 1)
+
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_PNPM") == "1",
+        "explicit pinned JavaScript profile integration lane",
+    )
+    def test_real_pnpm_does_not_resolve_or_lock_the_profile_package_manager(self):
+        version = subprocess.check_output(
+            ["pnpm", "--version"], cwd="/", text=True
+        ).strip()
+        self.manifest("package.json", {}, packageManager="pnpm@" + version)
+        self.write("pnpm-workspace.yaml", "packages: []\npmOnFail: download\n")
+        with patch.dict(
+            os.environ,
+            PNPM_CONFIG_PM_ON_FAIL="error",
+            npm_config_registry="http://127.0.0.1:1",
+            PNPM_CONFIG_REGISTRY="http://127.0.0.1:1",
+            PNPM_HOME=str(self.root / "manager-home"),
+            XDG_DATA_HOME=str(self.root / "data"),
+        ):
+            result = js.resolve(self.root, self.spec, self.policy, self.now)
+        self.assertIn("pnpm-lock.yaml", result["changed_files"])
+        self.assertNotIn(
+            b"packageManagerDependencies:", (self.root / "pnpm-lock.yaml").read_bytes()
+        )
+        self.assertFalse((self.root / "manager-home/.tools").exists())
+        self.assertFalse((self.root / "data/pnpm/.tools").exists())
 
     @unittest.skipUnless(
         os.environ.get("CHAINMAN_TEST_PNPM") == "1",
