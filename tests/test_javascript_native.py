@@ -261,6 +261,66 @@ class NativeJavaScriptTests(unittest.TestCase):
                 self.assertIn("neutral-parent", self.requests)
                 self.assertIn("neutral-leaf", self.requests)
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_GITHUB_SOURCE") == "1",
+        "explicit pinned JavaScript and public source integration lane",
+    )
+    def test_retained_transitive_source_freezes_with_default_exotic_guard(self):
+        # Reuse small public immutable archives while the fixture registry
+        # supplies the exact transitive Git declaration exercised by the policy.
+        parent = "is-odd"
+        version = "3.0.1"
+        source = {
+            "manifest": "package.json",
+            "package": "is-number",
+            "repository": "jonschlinkert/is-number",
+            "commit": "98e8ff1da1a89f93d1397a24d7413ed15421c139",
+            "sha256": "4e169d1ea361d1b92907a6ab2dd6bcd781c85027858d99df1596a712aab49506",
+            "parent": parent + "@" + version,
+            "parent_specifier": "git+https://github.com/jonschlinkert/is-number.git",
+            "reason": "Small immutable source fixture for the isolated resolver exception.",
+        }
+        self.metadata[parent] = json.loads(
+            registry.fetch("https://registry.npmjs.org/" + parent)[0]
+        )
+        parent_info = self.metadata[parent]["versions"][version]
+        parent_info["dependencies"] = {source["package"]: source["parent_specifier"]}
+        self.configure("pnpm", dependencies={parent: version})
+        self.spec["retained_sources"] = [source]
+        self.write(
+            "pnpm-workspace.yaml",
+            "packages: []\noverrides:\n  'is-odd@3.0.1>is-number': github:"
+            + source["repository"]
+            + "#"
+            + source["commit"]
+            + "\n",
+        )
+        refused = self.native("pnpm", "install", "--lockfile-only", "--ignore-scripts")
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("EXOTIC_SUBDEP", refused.stdout + refused.stderr)
+
+        def data(url):
+            if url.startswith("https://api.github.com/"):
+                return json.loads(registry.fetch(url)[0])
+            if url.endswith("/" + parent + "/" + version):
+                return parent_info
+            return self.fetch(url)
+
+        with patch.object(registry, "data", side_effect=data):
+            result = js.resolve(self.root, self.spec, self.policy, self.now)
+        self.assertIn("pnpm-lock.yaml", result["changed_files"])
+        self.assertNotIn(
+            "blockExoticSubdeps",
+            yaml.safe_load((self.root / "pnpm-workspace.yaml").read_text()),
+        )
+        lock = (self.root / "pnpm-lock.yaml").read_bytes()
+        installed = self.native(
+            "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"
+        )
+        self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+        self.assertEqual((self.root / "pnpm-lock.yaml").read_bytes(), lock)
+        self.assertTrue((self.root / "node_modules/is-odd/package.json").is_file())
+
     def test_frozen_checks_and_audit_reject_an_incompatible_transitive_version(self):
         for manager in ("npm", "pnpm"):
             with self.subTest(manager=manager):

@@ -667,6 +667,14 @@ compatibility and peer audits cover every child, including nested registry child
 source retention does not exempt new child artifacts. Bundled dependencies and
 nested remote or local sources remain unsupported.
 
+For a declared transitive source, chainman validates its parent metadata, commit
+age, archive hash and dependency graph before fresh resolution. Only that
+scripts-disabled command in the disposable resolver directory may bypass pnpm's
+exotic-subdependency guard. The complete resulting graph must still pass all
+source and registry audits. Normalization, frozen verification and ordinary setup
+keep the default guard, and the workspace never receives a guard override.
+Direct retained sources alone do not enable this resolver option.
+
 Native integrations use `just chainman deps-query`: one JSON request on stdin,
 one schema-versioned JSON response on stdout. Schema 1 supports `select`, `metadata`
 and `audit`; providers include npm, PyPI, crates, pub, GitHub, Docker, Go, Swift and

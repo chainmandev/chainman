@@ -318,25 +318,43 @@ class JavaScriptTests(unittest.TestCase):
             return js.resolve(self.root, self.spec, self.policy, self.now)
 
     def test_package_manager_mismatch_fails_before_resolution_or_file_changes(self):
+        import javascript_sources
+
         self.manifest("package.json", {}, packageManager="pnpm@12.9.0")
         original = {
             name: (self.root / name).read_bytes()
             for name in ("package.json", "pnpm-workspace.yaml")
         }
-        with patch.object(
-            js.chainman,
-            "execute",
-            return_value=subprocess.CompletedProcess([], 0, "12.9.1\n", ""),
-        ) as execute:
+        with (
+            patch.object(
+                js.chainman,
+                "execute",
+                return_value=subprocess.CompletedProcess([], 0, "12.9.1\n", ""),
+            ) as execute,
+            patch.object(javascript_sources, "resolution_options") as sources,
+        ):
             with self.assertRaisesRegex(ValueError, "pnpm mismatch"):
                 js.resolve(self.root, self.spec, self.policy, self.now)
         self.assertEqual(execute.call_count, 1)
+        sources.assert_not_called()
         self.assertEqual(execute.call_args.args[2], ["pnpm", "--version"])
         self.assertEqual(execute.call_args.kwargs["cwd"], Path("/"))
         self.assertEqual(
             original, {name: (self.root / name).read_bytes() for name in original}
         )
         self.assertFalse((self.root / "pnpm-lock.yaml").exists())
+
+    def test_default_resolution_keeps_the_exotic_source_guard(self):
+        commands = []
+
+        def execute(root, profile, argv, *, cwd, **kwargs):
+            commands.append(argv)
+            return self.fake_pnpm(root, profile, argv, cwd=cwd, **kwargs)
+
+        self.resolve(execute)
+        self.assertTrue(commands)
+        for command in commands:
+            self.assertNotIn("--config.block-exotic-subdeps=false", command)
 
     def test_malformed_native_graph_stops_at_each_boundary_without_publication(self):
         self.manifest("package.json", {"library": "^1.0.0"})
@@ -2785,6 +2803,7 @@ class JavaScriptTests(unittest.TestCase):
         )
 
         def execute(root, profile, argv, *, cwd, **kwargs):
+            self.assertNotIn("--config.block-exotic-subdeps=false", argv)
             if "--frozen-lockfile" not in argv:
                 (cwd / "pnpm-lock.yaml").write_text(
                     "# native source metadata\n" + json.dumps(lock)
@@ -2887,6 +2906,112 @@ class JavaScriptTests(unittest.TestCase):
                     self.policy,
                     self.now,
                 )
+
+    def test_transitive_source_resolution_option_is_scoped_to_fresh_resolution(self):
+        item, body, lock, data = self.transitive_source_fixture()
+        calls = []
+
+        def execute(root, profile, argv, *, cwd, **kwargs):
+            calls.append(argv)
+            (cwd / "pnpm-lock.yaml").write_text(json.dumps(lock))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(registry, "data", side_effect=data),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            result = self.resolve(execute)
+        self.assertEqual(result["resolution_attempts"], 1)
+        self.assertEqual(len(calls), 3)
+        self.assertIn("--config.block-exotic-subdeps=false", calls[0])
+        for command in calls[1:]:
+            self.assertNotIn("--config.block-exotic-subdeps=false", command)
+        settings = js.Workspace(self.root, self.spec).settings
+        self.assertNotIn("blockExoticSubdeps", settings)
+
+    def test_transitive_source_validation_failure_precedes_native_install(self):
+        for fault in ("hash", "parent", "age"):
+            with self.subTest(fault=fault):
+                item, body, lock, data = self.transitive_source_fixture()
+                if fault == "hash":
+                    body += b"tampered"
+                elif fault == "parent":
+                    self.metadata["renderer"]["versions"]["1.0.0"]["dependencies"][
+                        "native-leaf"
+                    ] = "github:different/source#" + "a" * 40
+                else:
+                    del lock["packages"]["native-leaf@" + item["url"]]["resolution"][
+                        "integrity"
+                    ]
+                    self.write("pnpm-lock.yaml", json.dumps(lock))
+                    original_data = data
+
+                    def data(url):
+                        if "api.github.com" in url:
+                            return {
+                                "sha": item["commit"],
+                                "commit": {
+                                    "committer": {
+                                        "date": (
+                                            self.now - timedelta(days=1)
+                                        ).isoformat()
+                                    }
+                                },
+                            }
+                        return original_data(url)
+
+                original = {
+                    name: (self.root / name).read_bytes()
+                    for name in (
+                        "package.json",
+                        "pnpm-workspace.yaml",
+                        "pnpm-lock.yaml",
+                    )
+                }
+                with (
+                    patch.object(registry, "data", side_effect=data),
+                    patch.object(registry, "fetch", return_value=(body, {})),
+                    patch.object(
+                        js.chainman,
+                        "execute",
+                        return_value=subprocess.CompletedProcess([], 0, "12.9.1\n", ""),
+                    ) as execute,
+                    self.assertRaisesRegex(ValueError, "SHA-256|parent|commit-age"),
+                ):
+                    js.resolve(self.root, self.spec, self.policy, self.now)
+                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(execute.call_args.args[2], ["pnpm", "--version"])
+                self.assertEqual(
+                    original,
+                    {name: (self.root / name).read_bytes() for name in original},
+                )
+
+    def test_transitive_source_resolution_still_rejects_undeclared_sources(self):
+        item, body, lock, data = self.transitive_source_fixture()
+        poisoned = deepcopy(lock)
+        url = "https://codeload.github.com/unknown/source/tar.gz/" + "b" * 40
+        poisoned["packages"]["unapproved@" + url] = {
+            "version": "1.0.0",
+            "resolution": {
+                "tarball": url,
+                "gitHosted": True,
+                "integrity": item["integrity"],
+            },
+        }
+        poisoned["snapshots"]["unapproved@" + url] = {}
+        original = (self.root / "pnpm-lock.yaml").read_bytes()
+
+        def execute(root, profile, argv, *, cwd, **kwargs):
+            (cwd / "pnpm-lock.yaml").write_text(json.dumps(poisoned))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(registry, "data", side_effect=data),
+            patch.object(registry, "fetch", return_value=(body, {})),
+            self.assertRaises(ValueError),
+        ):
+            self.resolve(execute)
+        self.assertEqual((self.root / "pnpm-lock.yaml").read_bytes(), original)
 
     def test_transitive_source_parent_graph_and_override_changes_fail(self):
         for fault in (

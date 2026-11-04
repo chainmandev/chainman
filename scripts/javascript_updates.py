@@ -2086,6 +2086,8 @@ def resolve(
         return javascript_npm.resolve(
             workspace, before, evidence, selected, policy, now
         )
+    import javascript_sources
+
     # Probe the declared profile outside every project before disabling pnpm's
     # own manager resolution. Nix supplies the binary; an exact manifest pin
     # must agree without adding a second manager lock or downloading a manager.
@@ -2104,6 +2106,9 @@ def resolve(
         stderr=subprocess.PIPE,
     )
     manager_options = pnpm_setup.options(observed.stdout.strip(), expected)
+    source_options = javascript_sources.resolution_options(
+        workspace, before, policy, now
+    )
     options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
     attempts = bounded(options, "fallback_attempts", 20, 100)
     if not workspace.settings:
@@ -2161,6 +2166,7 @@ def resolve(
                     "--ignore-scripts",
                     "--strict-peer-dependencies=false",
                     *manager_options,
+                    *source_options,
                 ],
                 cwd=temporary,
                 env=tc.environment(root),

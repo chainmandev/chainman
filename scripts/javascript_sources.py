@@ -195,6 +195,57 @@ def configured(workspace: "Workspace") -> None:
                 )
 
 
+def audit_parent(item: RetainedSource) -> None:
+    if "parent" not in item:
+        return
+    parent, _, version = item["parent"].rpartition("@")
+    parent_info = table(
+        registry.data(f"https://registry.npmjs.org/{quote(parent, safe='')}/{version}"),
+        "Registry parent package",
+    )
+    declared = {
+        **string_map(parent_info.get("dependencies", {}), "Parent dependencies"),
+        **string_map(
+            parent_info.get("optionalDependencies", {}), "Parent optional dependencies"
+        ),
+    }
+    if (
+        parent_info.get("name") != parent
+        or parent_info.get("version") != version
+        or declared.get(item["package"]) != item["parent_specifier"]
+    ):
+        raise ValueError("Retained source parent registry declaration changed")
+
+
+def resolution_options(
+    workspace: "Workspace",
+    before: Mapping[str, object],
+    policy: Mapping[str, object],
+    now: datetime,
+) -> list[str]:
+    items = [item for item in declarations(workspace.spec) if "parent" in item]
+    if not items:
+        return []
+    configured(workspace)
+    baseline = identity_inventory(before["identities"])
+    for item in items:
+        manifest_entries(workspace.directory, item)
+        audit_parent(item)
+        digest = "sha256:" + item["sha256"]
+        content = archive_manifest(item["package"], item["url"], digest)
+        identity = Identity(
+            "github-source",
+            item["package"],
+            text(content["version"], "Retained source version") + "@" + item["commit"],
+            item["url"],
+            digest,
+        )
+        audit_identity(identity, baseline, policy, now)
+    # Only the disposable, scripts-disabled fresh resolver receives this option.
+    # Complete source, parent-edge and registry graph audits still precede freeze.
+    return ["--config.block-exotic-subdeps=false"]
+
+
 def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> None:
     importer = str(Path(item["manifest"]).parent)
     importers = table(lock.get("importers", {}), "pnpm importers")
@@ -415,29 +466,7 @@ def audit(
         ):
             raise ValueError("Retained source lock must bind its declared archive hash")
         bound_edges(item, lock)
-        if "parent" in item:
-            parent, _, version = item["parent"].rpartition("@")
-            parent_info = table(
-                registry.data(
-                    f"https://registry.npmjs.org/{quote(parent, safe='')}/{version}"
-                ),
-                "Registry parent package",
-            )
-            declared = {
-                **string_map(
-                    parent_info.get("dependencies", {}), "Parent dependencies"
-                ),
-                **string_map(
-                    parent_info.get("optionalDependencies", {}),
-                    "Parent optional dependencies",
-                ),
-            }
-            if (
-                parent_info.get("name") != parent
-                or parent_info.get("version") != version
-                or declared.get(item["package"]) != item["parent_specifier"]
-            ):
-                raise ValueError("Retained source parent registry declaration changed")
+        audit_parent(item)
         identity = Identity(
             "github-source",
             item["package"],
@@ -494,6 +523,20 @@ def audit_identity(
         and published > now - timedelta(days=registry.minimum_age(policy))
     ):
         raise ValueError("Retained source lacks eligible commit-age evidence")
+    content = archive_manifest(package, url, digest)
+    if content.get("version") != version:
+        raise ValueError("Retained source archive package identity differs from lock")
+    if not registry.compatible(
+        "npm", version, registry.constraint("npm", policy, package)
+    ):
+        raise ValueError("Retained source violates package compatibility")
+    safe = registry.minimum_safe("npm", policy, package, version)
+    if safe is not None and Version(version) < safe:
+        raise ValueError("Retained source is below its declared security safe floor")
+    return content
+
+
+def archive_manifest(package: str, url: str, digest: str) -> Table:
     body = registry.fetch(url, "application/octet-stream")[0]
     if len(body) > 8 * 1024 * 1024 or hashlib.sha256(
         body
@@ -520,8 +563,9 @@ def audit_identity(
     content = manifests[0]
     if (
         content.get("name") != package
-        or content.get("version") != version
-        or registry.version("npm", version) is None
+        or not isinstance(content.get("version"), str)
+        or registry.version("npm", text(content["version"], "Retained source version"))
+        is None
     ):
         raise ValueError("Retained source archive package identity differs from lock")
     if content.get("bundledDependencies") or content.get("bundleDependencies"):
@@ -542,11 +586,4 @@ def audit_identity(
                 raise ValueError(
                     "Retained source graphs cannot introduce nested local or remote sources"
                 )
-    if not registry.compatible(
-        "npm", version, registry.constraint("npm", policy, package)
-    ):
-        raise ValueError("Retained source violates package compatibility")
-    safe = registry.minimum_safe("npm", policy, package, version)
-    if safe is not None and Version(version) < safe:
-        raise ValueError("Retained source is below its declared security safe floor")
     return content
