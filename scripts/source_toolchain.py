@@ -300,6 +300,7 @@ def observe(
             chosen.artifacts,
         )
     registry.timestamp(bound.published.isoformat())
+    bound = source_pin.bind(tool, bound)
     return bound, [bound if r.version == chosen.version else r for r in releases]
 
 
@@ -394,6 +395,7 @@ def plan(
                 releases,
                 previous_source["version"],
                 ad.text(spec.get("mode", "aggressive"), "SDK selection mode"),
+                tool=tool,
             )
         observed = evidence(tool, chosen, value)
         pins = []

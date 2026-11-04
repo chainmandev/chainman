@@ -382,6 +382,27 @@ be regular files inside the project; writes preserve unrelated fields and file
 permissions and reject observed concurrent changes. Disable package-manager
 self-switching so the declared Nix source remains the runtime authority.
 
+For npm tools distributed as native optional packages, add `platform_packages`
+to `source_pin`, mapping each supported Nix system to its npm package. For example,
+`platform_packages = { x86_64-linux = "@sample/tool.linux-x64",
+aarch64-darwin = "@sample/tool.darwin-arm64" }`. The source record then also holds
+`platforms`, with one entry per declared system containing `package`, `version`,
+`url` and `hash`. Each parent `optionalDependencies` entry must reference the exact
+selected parent version, and the corresponding platform package must publish that
+same version with a canonical npm tarball and a strong registry hash. Nix should
+fetch the declared system's pinned tarball directly; running the parent installer
+to download a native executable does not provide an immutable Nix source.
+
+All declared platform artifacts participate in selection, publication-age checks,
+retention and final audit, including platforms other than the current host. A
+candidate's age is measured from its latest parent or platform publication. Native
+source candidates never downgrade the existing version. Adding a platform or
+changing its URL, hash or date requires normal eligibility; an unchanged parent
+cannot grant a newly selected platform the existing-age exemption. The refreshed
+Nix binary must still report the selected parent version on the current host.
+Ordinary `deps-update` refreshes the complete platform record. Omitting
+`platform_packages` preserves the original three-field source format.
+
 Rust, Python and Flutter may adopt an initially missing lockfile, but their final
 audit requires the resolved Cargo, uv or pub lock. A resolver or reconciliation
 hook cannot turn a deleted lock into an empty artifact inventory. Go and Swift

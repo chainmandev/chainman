@@ -1,6 +1,7 @@
 """Source selection precedes SDK refresh and cannot waive changed artifact age."""
 
 import copy
+import base64
 import json
 from pathlib import Path
 import stat
@@ -335,6 +336,273 @@ class SourcePinTests(unittest.TestCase):
         tool["pins"][0].update(file="sources.json", pointer=["sdk", "version"])
         with self.assertRaisesRegex(ValueError, "overlaps"):
             sdk.tools({"tools": [tool]})
+
+
+class PlatformSourcePinTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="SDK platform fixture ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.packages = {
+            "x86_64-linux": "@sample/native.linux-x64",
+            "aarch64-darwin": "@sample/native.darwin-arm64",
+        }
+        self.tool = {
+            "provider": "npm",
+            "name": "sample-native",
+            "command": ["sample-native", "--version"],
+            "version_pattern": r"^(?P<version>\d+\.\d+\.\d+)$",
+            "source_pin": {
+                "file": "sources.json",
+                "pointer": ["sdk"],
+                "platform_packages": self.packages,
+            },
+            "pins": [{"file": "package.json", "pointer": ["sdk"]}],
+        }
+        self.spec = {"adapter": "toolchain", "tools": [self.tool]}
+        self.metadata = {}
+        self.add_release("1.0.0")
+        data = patch.object(
+            registry,
+            "data",
+            side_effect=lambda url: self.metadata[url.rsplit("/", 1)[1]],
+        )
+        data.start()
+        self.addCleanup(data.stop)
+        probe = patch.object(
+            sdk,
+            "probe",
+            side_effect=lambda root, spec, tool: source.read(root, tool)["version"],
+        )
+        probe.start()
+        self.addCleanup(probe.stop)
+        self.write("sources.json", {"sdk": self.record("1.0.0"), "other": 1})
+        self.write("package.json", {"sdk": "1.0.0"})
+
+    def add_release(self, value, *, parent_date=OLD, child_date=OLD):
+        from urllib.parse import quote
+
+        for package in ["sample-native", *self.packages.values()]:
+            body = self.metadata.setdefault(
+                quote(package, safe=""), {"versions": {}, "time": {}}
+            )
+            body["versions"][value] = {
+                "name": package,
+                "version": value,
+                "dist": {
+                    "tarball": f"https://registry.npmjs.org/{package}/-/"
+                    f"{package.rsplit('/', 1)[-1]}-{value}.tgz",
+                    "integrity": "sha512-" + base64.b64encode(b"a" * 64).decode(),
+                },
+            }
+            body["time"][value] = (
+                parent_date if package == "sample-native" else child_date
+            ).isoformat()
+        self.metadata["sample-native"]["versions"][value]["optionalDependencies"] = {
+            package: value for package in self.packages.values()
+        }
+
+    def write(self, file, value):
+        (self.root / file).write_text(json.dumps(value, indent=2) + "\n")
+
+    def child(self, system="x86_64-linux"):
+        from urllib.parse import quote
+
+        return self.metadata[quote(self.packages[system], safe="")]
+
+    def record(self, value):
+        chosen, _ = sdk.observe(self.tool, value)
+        return source.record(self.tool, chosen)
+
+    def resolve(self, before=None, policy=None):
+        before = sdk.snapshot(self.root, self.spec) if before is None else before
+        before["resolution"] = sdk.resolve(
+            self.root, self.spec, policy or {}, NOW, before=before
+        )
+        sdk.audit(self.root, self.spec, before, policy or {}, NOW)
+        return before
+
+    def test_all_platform_records_are_selected_and_audited_with_parent(self):
+        self.add_release("2.0.0")
+        before = self.resolve()
+        selected = before["resolution"]["tools"][0]
+        self.assertEqual(selected["version"], "2.0.0")
+        self.assertEqual(selected["source"], self.record("2.0.0"))
+        self.assertEqual(set(selected["source"]["platforms"]), set(self.packages))
+        self.assertEqual(len(selected["artifacts"]), 3)
+        self.assertEqual(
+            before["resolution"]["changed"], ["package.json", "sources.json"]
+        )
+        self.assertEqual(
+            json.loads((self.root / "sources.json").read_text())["other"], 1
+        )
+
+    def test_newer_parent_waits_for_every_platform_publication(self):
+        self.add_release("2.0.0", child_date=YOUNG)
+        before = self.resolve()
+        self.assertEqual(before["resolution"]["changed"], [])
+        self.assertEqual(before["resolution"]["tools"][0]["version"], "1.0.0")
+
+    def test_older_mature_native_release_retires_changed_young_source_exception(self):
+        self.add_release("2.0.0", child_date=YOUNG)
+        self.write("sources.json", {"sdk": self.record("2.0.0")})
+        self.write("package.json", {"sdk": "2.0.0"})
+        before = sdk.snapshot(self.root, self.spec)
+        self.child()["versions"]["2.0.0"]["dist"]["integrity"] = (
+            "sha512-" + base64.b64encode(b"b" * 64).decode()
+        )
+        policy = {
+            "exceptions": [
+                {
+                    "package": "npm:sample-native",
+                    "version": "2.0.0",
+                    "minimum_safe": "1.0.0",
+                    "reason": "Required fix",
+                    "advisory": "https://example.invalid/fix",
+                    "expires": (NOW + timedelta(days=7)).isoformat(),
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "eligible dated"):
+            self.resolve(before, policy)
+
+    def test_older_parent_without_platform_packages_is_not_required_or_selected(self):
+        self.add_release("0.9.0")
+        del self.metadata["sample-native"]["versions"]["0.9.0"]["optionalDependencies"]
+        self.add_release("1.0.0", child_date=YOUNG)
+        before = self.resolve()
+        self.assertEqual(before["resolution"]["changed"], [])
+        self.assertEqual(before["resolution"]["tools"][0]["version"], "1.0.0")
+
+    def test_changed_young_platform_digest_or_date_cannot_retain_age(self):
+        for change in ("digest", "date"):
+            with self.subTest(change=change):
+                self.add_release("1.0.0")
+                before = sdk.snapshot(self.root, self.spec)
+                self.child()["time"]["1.0.0"] = YOUNG.isoformat()
+                if change == "digest":
+                    self.child()["versions"]["1.0.0"]["dist"]["integrity"] = (
+                        "sha512-" + base64.b64encode(b"b" * 64).decode()
+                    )
+                with self.assertRaisesRegex(ValueError, "eligible dated"):
+                    self.resolve(before)
+
+    def test_newly_declared_young_platforms_do_not_inherit_parent_age(self):
+        del self.tool["source_pin"]["platform_packages"]
+        self.write("sources.json", {"sdk": self.record("1.0.0")})
+        before = sdk.snapshot(self.root, self.spec)
+        self.tool["source_pin"]["platform_packages"] = self.packages
+        self.child()["time"]["1.0.0"] = YOUNG.isoformat()
+        with self.assertRaisesRegex(ValueError, "eligible dated"):
+            self.resolve(before)
+
+    def test_unchanged_young_platforms_can_retain_exact_existing_evidence(self):
+        self.add_release("1.0.0", child_date=YOUNG)
+        self.assertEqual(self.resolve()["resolution"]["changed"], [])
+
+    def test_missing_or_inexact_parent_reference_is_rejected(self):
+        for reference in (None, "^1.0.0", "1.0.1", "npm:other@1.0.0"):
+            with self.subTest(reference=reference):
+                optional = self.metadata["sample-native"]["versions"]["1.0.0"][
+                    "optionalDependencies"
+                ]
+                optional[self.packages["x86_64-linux"]] = reference
+                with self.assertRaisesRegex(ValueError, "exact version"):
+                    sdk.snapshot(self.root, self.spec)
+
+    def test_missing_child_release_and_malformed_or_weak_integrity_are_rejected(self):
+        for integrity in (
+            None,
+            "sha512-bad",
+            "sha1-" + base64.b64encode(b"a" * 20).decode(),
+        ):
+            with self.subTest(integrity=integrity):
+                self.add_release("1.0.0")
+                self.child()["versions"]["1.0.0"]["dist"]["integrity"] = integrity
+                with self.assertRaises(ValueError):
+                    sdk.snapshot(self.root, self.spec)
+        self.add_release("1.0.0")
+        del self.child()["versions"]["1.0.0"]
+        with self.assertRaisesRegex(ValueError, "matching dated release"):
+            sdk.snapshot(self.root, self.spec)
+
+    def test_platform_tarball_must_be_canonical_and_package_identities_must_match(self):
+        self.child()["versions"]["1.0.0"]["dist"]["tarball"] = (
+            "https://example.invalid/native.tgz"
+        )
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            sdk.snapshot(self.root, self.spec)
+        for package in ("parent", "child"):
+            for field, changed in (("version", "2.0.0"), ("name", "other")):
+                with self.subTest(package=package, field=field):
+                    self.add_release("1.0.0")
+                    body = (
+                        self.metadata["sample-native"]
+                        if package == "parent"
+                        else self.child()
+                    )
+                    body["versions"]["1.0.0"][field] = changed
+                    with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                        sdk.snapshot(self.root, self.spec)
+
+    def test_final_audit_detects_non_host_platform_hash_and_date_drift(self):
+        for change in ("digest", "date"):
+            with self.subTest(change=change):
+                self.add_release("1.0.0")
+                before = self.resolve()
+                if change == "digest":
+                    self.child("aarch64-darwin")["versions"]["1.0.0"]["dist"][
+                        "integrity"
+                    ] = "sha512-" + base64.b64encode(b"b" * 64).decode()
+                else:
+                    self.child("aarch64-darwin")["time"]["1.0.0"] = (
+                        OLD + timedelta(days=1)
+                    ).isoformat()
+                with self.assertRaisesRegex(
+                    ValueError, "differs|changed after resolution"
+                ):
+                    sdk.audit(self.root, self.spec, before, {}, NOW)
+
+    def test_binary_probe_must_agree_with_selected_parent_and_platforms(self):
+        before = sdk.snapshot(self.root, self.spec)
+        self.add_release("2.0.0")
+        with patch.object(sdk, "probe", return_value="1.0.0"):
+            with self.assertRaisesRegex(ValueError, "differs"):
+                self.resolve(before)
+
+    def test_platform_record_validation_and_declaration_projection(self):
+        projected = source.declaration(self.tool)
+        projected["platform_packages"]["x86_64-linux"] = "other"
+        self.assertEqual(self.tool["source_pin"]["platform_packages"], self.packages)
+        current = source.read(self.root, self.tool)
+        self.assertEqual(source.decode(current), current)
+        for change in ("version", "missing", "extra", "weak"):
+            with self.subTest(change=change):
+                value = copy.deepcopy(current)
+                child = value["platforms"]["x86_64-linux"]
+                if change == "version":
+                    child["version"] = "2.0.0"
+                elif change == "missing":
+                    del child["package"]
+                elif change == "extra":
+                    child["extra"] = "field"
+                else:
+                    child["hash"] = "sha1-" + base64.b64encode(b"a" * 20).decode()
+                with self.assertRaises(ValueError):
+                    source.decode(value)
+
+    def test_invalid_or_empty_platform_package_declarations_are_rejected(self):
+        for packages in (
+            {},
+            [],
+            {"../linux": "sample"},
+            {"x86_64-linux": "../sample"},
+            {"x86_64-linux": "sample-native"},
+        ):
+            with self.subTest(packages=packages):
+                self.tool["source_pin"]["platform_packages"] = packages
+                with self.assertRaises(ValueError):
+                    source.declaration(self.tool)
 
 
 if __name__ == "__main__":
