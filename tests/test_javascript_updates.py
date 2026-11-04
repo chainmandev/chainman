@@ -2907,6 +2907,114 @@ class JavaScriptTests(unittest.TestCase):
                     self.now,
                 )
 
+    def contextual_source_fixture(self):
+        import javascript_sources as sources
+
+        item, body, lock, data = self.transitive_source_fixture()
+        suffixes = ("(utility@1.1.0(nested@1.0.0))", "(opaque-peer-context-hash)")
+        parent = lock["snapshots"].pop("renderer@1.0.0")
+        source_key = item["package"] + "@" + item["url"]
+        source = lock["snapshots"].pop(source_key)
+        source["dependencies"]["utility"] = "1.1.0(nested@1.0.0)"
+        lock["snapshots"]["utility@1.1.0(nested@1.0.0)"] = lock["snapshots"].pop(
+            "utility@1.1.0"
+        )
+        self.metadata["utility"]["versions"]["1.1.0"]["peerDependencies"] = {
+            "nested": "^1.0.0"
+        }
+        for suffix in suffixes:
+            node = deepcopy(parent)
+            node["dependencies"][item["package"]] = item["url"] + suffix
+            lock["snapshots"][item["parent"] + suffix] = node
+            lock["snapshots"][source_key + suffix] = deepcopy(source)
+        lock["importers"]["."]["dependencies"]["renderer"]["version"] = (
+            "1.0.0" + suffixes[0]
+        )
+        self.spec["manifests"] = ["package.json", "packages/*/package.json"]
+        self.manifest("packages/consumer/package.json", {"renderer": "^1.0.0"})
+        lock["importers"]["packages/consumer"] = {
+            "dependencies": {
+                "renderer": {"specifier": "^1.0.0", "version": "1.0.0" + suffixes[1]}
+            }
+        }
+        self.write("pnpm-lock.yaml", json.dumps(lock))
+        return (
+            item,
+            body,
+            lock,
+            data,
+            sources,
+            {source_key + suffix for suffix in suffixes},
+        )
+
+    def test_retained_source_contexts_preserve_identity_and_audit_each_graph(self):
+        item, body, lock, data, sources, contexts = self.contextual_source_fixture()
+        before = js.snapshot(self.root, self.spec)
+        source_identity = next(
+            value for value in before["identities"] if value[0] == "github-source"
+        )
+        self.assertEqual(
+            source_identity[-2:], [item["url"], "sha256:" + item["sha256"]]
+        )
+        with (
+            patch.object(registry, "data", side_effect=data),
+            patch.object(registry, "fetch", return_value=(body, {})),
+        ):
+            workspace = js.Workspace(self.root, self.spec)
+            self.assertEqual(
+                set(sources.audit(workspace, before, self.policy, self.now)), contexts
+            )
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+
+    def test_retained_source_context_base_target_and_graph_mutations_fail(self):
+        for fault in (
+            "url",
+            "missing-target",
+            "malformed",
+            "trailing",
+            "parent-target",
+            "second-graph",
+            "orphan",
+        ):
+            with self.subTest(fault=fault):
+                item, body, lock, data, sources, contexts = (
+                    self.contextual_source_fixture()
+                )
+                before = js.snapshot(self.root, self.spec)
+                parent_key = item["parent"] + "(utility@1.1.0(nested@1.0.0))"
+                source_key = item["package"] + "@" + item["url"]
+                edge = lock["snapshots"][parent_key]["dependencies"]
+                if fault == "url":
+                    edge[item["package"]] = edge[item["package"]].replace(
+                        item["commit"], "b" * 40
+                    )
+                elif fault == "missing-target":
+                    del lock["snapshots"][source_key + "(utility@1.1.0(nested@1.0.0))"]
+                elif fault == "malformed":
+                    edge[item["package"]] = item["url"] + "(utility@1.1.0(nested@1.0.0)"
+                elif fault == "trailing":
+                    edge[item["package"]] += "unexpected"
+                elif fault == "parent-target":
+                    lock["importers"]["."]["dependencies"]["renderer"]["version"] = (
+                        "1.0.0(absent-context)"
+                    )
+                elif fault == "second-graph":
+                    lock["snapshots"][source_key + "(opaque-peer-context-hash)"][
+                        "dependencies"
+                    ]["utility"] = "4.0.0"
+                else:
+                    lock["snapshots"][source_key + "(unreferenced-context)"] = {}
+                self.write("pnpm-lock.yaml", json.dumps(lock))
+                with (
+                    patch.object(registry, "data", side_effect=data),
+                    patch.object(registry, "fetch", return_value=(body, {})),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        "Retained source|retained source|resolved package context|pnpm lock lacks",
+                    ),
+                ):
+                    js.audit(self.root, self.spec, before, self.policy, self.now)
+
     def test_transitive_source_resolution_option_is_scoped_to_fresh_resolution(self):
         item, body, lock, data = self.transitive_source_fixture()
         calls = []

@@ -1614,6 +1614,13 @@ def audit_peers(
         )[0]
     )
     packages, snapshots = lock["packages"], lock["snapshots"]
+    required_sources = {
+        context
+        for item in javascript_sources.declarations(workspace.spec)
+        if "parent" in item
+        for context in javascript_sources.bound_edges(item, lock)
+    }
+    audited_sources: set[str] = set()
     scopes: dict[tuple[str, str], list[str]] = {}
     for importer, info in lock["importers"].items():
         manifest = "package.json" if importer == "." else importer + "/package.json"
@@ -1671,6 +1678,7 @@ def audit_peers(
                 for alias, raw in dependencies.items()
             }
             if source_content is not None:
+                audited_sources.add(context)
                 peers, metadata = (
                     inputs.string_map(
                         source_content.get("peerDependencies", {}),
@@ -1811,6 +1819,10 @@ def audit_peers(
                         f"Incompatible resolved peer {actual}>{peer} in {manifest}"
                     )
             queue.extend(t for t in children.values() if t)
+    if required_sources - audited_sources:
+        raise ValueError(
+            "Retained source snapshot context lacks a complete graph audit"
+        )
     return scopes
 
 

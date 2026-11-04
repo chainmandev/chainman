@@ -666,6 +666,11 @@ registry dependency and peer graphs from the hashed archive. Normal identity, ag
 compatibility and peer audits cover every child, including nested registry children;
 source retention does not exempt new child artifacts. Bundled dependencies and
 nested remote or local sources remain unsupported.
+Retained sources may have several pnpm snapshots for different peer contexts.
+Their package identity keeps the exact archive URL, commit and hash; each parent
+edge must reference its exact source snapshot. Every referenced context receives
+the same archive checks and a complete dependency and peer audit. Missing targets,
+changed archive bases, malformed contexts and unreferenced source snapshots fail.
 
 For a declared transitive source, chainman validates its parent metadata, commit
 age, archive hash and dependency graph before fresh resolution. Only that

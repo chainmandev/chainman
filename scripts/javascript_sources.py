@@ -246,10 +246,50 @@ def resolution_options(
     return ["--config.block-exotic-subdeps=false"]
 
 
-def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> None:
+def base_context(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) > 65536
+        or any(c in value for c in "\0\r\n")
+    ):
+        raise ValueError("Retained source has a malformed peer context")
+    base, marker, suffix = value.partition("(")
+    if not marker:
+        return value
+    # Peer labels are opaque: pnpm may hash long contexts or include workspace
+    # peers. Validate complete grouping and bind the exact snapshot below.
+    depth, previous = 0, ""
+    for char in marker + suffix:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0 or previous == "(":
+                raise ValueError("Retained source has a malformed peer context")
+            depth -= 1
+        elif depth == 0:
+            raise ValueError("Retained source has a malformed peer context")
+        previous = char
+    if depth:
+        raise ValueError("Retained source has a malformed peer context")
+    return base
+
+
+def source_context(
+    item: RetainedSource, raw: object, snapshots: Mapping[str, object]
+) -> str:
+    if base_context(raw) != item["url"]:
+        raise ValueError("Retained source edge differs from its immutable declaration")
+    context = item["package"] + "@" + text(raw, "Retained source edge")
+    if context not in snapshots:
+        raise ValueError("Retained source edge lacks its exact snapshot context")
+    return context
+
+
+def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> set[str]:
     importer = str(Path(item["manifest"]).parent)
     importers = table(lock.get("importers", {}), "pnpm importers")
     imports = table(importers.get(importer, {}), "pnpm importer")
+    snapshots = table(lock.get("snapshots", {}), "pnpm snapshots")
     if "parent" in item:
         parent_name, _, parent_version = item["parent"].rpartition("@")
         incoming = [
@@ -267,16 +307,21 @@ def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> None:
             in (v := table(imports.get(section, {}), "pnpm importer dependencies"))
         ]
         if not incoming or any(
-            value.partition("(")[0] != parent_version for value in incoming
+            base_context(value) != parent_version for value in incoming
         ):
-            raise ValueError("Retained source registry parent changed")
-        parents = [
-            table(node, "pnpm snapshot")
-            for context, node in table(
-                lock.get("snapshots", {}), "pnpm snapshots"
-            ).items()
-            if context.partition("(")[0] == item["parent"]
-        ]
+            raise ValueError(
+                f"Retained source registry parent changed: {item['parent']}"
+            )
+        parents = {
+            context: table(node, "pnpm snapshot")
+            for context, node in snapshots.items()
+            if (context == item["parent"] or context.startswith(item["parent"] + "("))
+            and base_context(context) == item["parent"]
+        }
+        if any(parent_name + "@" + value not in parents for value in incoming):
+            raise ValueError(
+                f"Retained source parent lacks its exact snapshot: {item['parent']}"
+            )
         edges = [
             table(node.get("dependencies", {}), "pnpm snapshot dependencies").get(
                 item["package"],
@@ -285,12 +330,18 @@ def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> None:
                     "pnpm snapshot optional dependencies",
                 ).get(item["package"]),
             )
-            for node in parents
+            for node in parents.values()
         ]
-        if not edges or any(value != item["url"] for value in edges):
+        if not edges:
             raise ValueError(
-                "Retained source parent edge differs from its immutable declaration"
+                f"Retained source parent edge is missing: {item['parent']}>{item['package']}"
             )
+        try:
+            return {source_context(item, value, snapshots) for value in edges}
+        except ValueError as error:
+            raise ValueError(
+                f"Retained source parent edge {item['parent']}>{item['package']}: {error}"
+            ) from error
     else:
         importer_edges = [
             section_values[item["package"]]
@@ -312,12 +363,15 @@ def bound_edges(item: RetainedSource, lock: Mapping[str, object]) -> None:
             for edge in importer_edges
         ):
             raise ValueError("Retained source importer differs from its declaration")
+        return {source_context(item, item["url"], snapshots)}
 
 
 def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Table:
     document = table(lock, "pnpm lock")
     entries = table(document.get("packages", {}), "pnpm packages")
     snapshots = table(document.get("snapshots", {}), "pnpm snapshots")
+    source_contexts: dict[str, set[str]] = {}
+    removed: set[str] = set()
     directory = tc.contained(
         root, text(spec.get("directory", "."), "JavaScript directory")
     )
@@ -347,13 +401,24 @@ def registry_entries(root: Path, spec: Mapping[str, object], lock: object) -> Ta
             raise ValueError(
                 "Retained source lock must declare a stable package version"
             )
-        bound_edges(item, document)
-        if key not in snapshots:
-            raise ValueError("Retained source lacks its locked dependency graph")
-        if "parent" not in item and snapshots[key] != {}:
+        contexts = bound_edges(item, document)
+        source_contexts.setdefault(key, set()).update(contexts)
+        if "parent" not in item and any(
+            snapshots[context] != {} for context in contexts
+        ):
             raise ValueError(
                 "Retained source must have an empty declared dependency graph"
             )
+        removed.add(key)
+    for key, contexts in source_contexts.items():
+        actual = {
+            context
+            for context in snapshots
+            if context == key or context.startswith(key + "(")
+        }
+        if actual != contexts:
+            raise ValueError("Retained source has an unreferenced snapshot context")
+    for key in removed:
         del entries[key]
     return entries
 
@@ -465,7 +530,7 @@ def audit(
             != item["integrity"]
         ):
             raise ValueError("Retained source lock must bind its declared archive hash")
-        bound_edges(item, lock)
+        contexts = bound_edges(item, lock)
         audit_parent(item)
         identity = Identity(
             "github-source",
@@ -486,7 +551,7 @@ def audit(
             raise ValueError(
                 "Direct retained source dependency graphs require an explicit registry parent"
             )
-        contents[key] = content
+        contents.update({context: content for context in contexts})
     return contents
 
 
