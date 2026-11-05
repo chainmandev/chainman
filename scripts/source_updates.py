@@ -18,6 +18,7 @@ import toolchain as tc
 import yaml
 import adapter_data as ad
 import manifests
+import nix_channels
 import security_policy
 
 ACTION_REF_LIMIT = 100_000
@@ -34,6 +35,8 @@ class SourceSelection(TypedDict):
 class SourceRevision(TypedDict):
     revision: str
     published: str
+    channel_publication: NotRequired[str]
+    channel_release: NotRequired[str]
 
 
 class ActionRecord(TypedDict):
@@ -230,14 +233,51 @@ def nix_approval(
     return None
 
 
+def published_nix_revision(
+    item: Mapping[str, object], publication: nix_channels.Publication
+) -> SourceRevision:
+    repository = ad.text(item["repository"], "Nix repository")
+    commit = nix_channels.revision(publication)
+    at = commit_time(repository, commit)
+    if at > publication.published or not descendant(
+        repository, commit, ad.text(item["branch"], "Nix branch")
+    ):
+        raise ValueError("Nix channel publication differs from its source branch/date")
+    return {
+        "revision": commit,
+        "published": at.isoformat(),
+        "channel_publication": publication.published.isoformat(),
+        "channel_release": publication.url,
+    }
+
+
+def selected_nix_candidate(
+    item: Mapping[str, object], policy: Mapping[str, object], now: datetime
+) -> SourceRevision:
+    channel = nix_channels.channel(item)
+    if channel is None:
+        return nix_candidate(
+            ad.text(item["repository"], "Nix repository"),
+            ad.text(item["branch"], "Nix branch"),
+            policy,
+            now,
+        )
+    for publication in nix_channels.publications(channel):
+        if publication.published <= cutoff(policy, now):
+            # Publication follows its source commit, so this proves both ages.
+            return published_nix_revision(item, publication)
+    raise NoMatureRevision("No mature official Nix channel publication")
+
+
 def approved_nix_candidate(
     item: Mapping[str, object], policy: Mapping[str, object], now: datetime
 ) -> SourceRevision:
     repository = ad.text(item["repository"], "Nix repository")
     branch = ad.text(item["branch"], "Nix branch")
+    channel = nix_channels.channel(item)
     approval = nix_approval(item, policy)
     if approval is None:
-        return nix_candidate(repository, branch, policy, now)
+        return selected_nix_candidate(item, policy, now)
     approved = revision(ad.text(approval["revision"], "Approved Nix revision"))
     published = commit_time(repository, approved)
     if published > now:
@@ -247,17 +287,25 @@ def approved_nix_candidate(
             "Approved Nix revision is not reachable from its declared branch"
         )
     try:
-        selected = nix_candidate(repository, branch, policy, now)
+        selected = selected_nix_candidate(item, policy, now)
     except NoMatureRevision:
         selected = None
     if selected is not None and descendant(repository, approved, selected["revision"]):
-        return selected  # nix_candidate already proved ordinary maturity.
+        return selected  # The selected source already proved ordinary maturity.
+    result: SourceRevision = {"revision": approved, "published": published.isoformat()}
+    eligibility_date = published
+    if channel is not None:
+        publication = nix_channels.approved_publication(channel, approved)
+        if publication.published > now:
+            raise ValueError("Approved Nix channel publication has a future date")
+        result = published_nix_revision(item, publication)
+        eligibility_date = publication.published
     if (
-        published > cutoff(policy, now)
+        eligibility_date > cutoff(policy, now)
         and registry.timestamp(approval["expires"]) <= now
     ):
         raise ValueError("Expired Nix security exception")
-    return {"revision": approved, "published": published.isoformat()}
+    return result
 
 
 def action_version(tag: str) -> tuple[int, int, int] | None:
@@ -955,6 +1003,7 @@ def nix_specs(root: Path, spec: Mapping[str, object]) -> list[ad.Table]:
         tc.regular_input(root, str(Path(directory) / "flake.nix"))
         repository_name(ad.text(item.get("repository"), "Nix repository"))
         name = item.get("input")
+        nix_channels.channel(item)
         if not isinstance(name, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", name
         ):
@@ -1104,8 +1153,10 @@ def nix_plan(
         at = commit_time(repository, current_revision)
         if at > now:
             raise ValueError("Nix baseline has a future commit date")
-        if binding["approval"] is None and at >= registry.timestamp(
-            selected["published"]
+        if (
+            nix_channels.channel(item) is None
+            and binding["approval"] is None
+            and at >= registry.timestamp(selected["published"])
         ):
             selected = {"revision": current_revision, "published": at.isoformat()}
         if any(
@@ -1282,7 +1333,11 @@ def audit_nix(
                 raise ValueError(
                     "Nix final input differs from its selected immutable source"
                 )
-            if selected != node["locked"] or nix_approval(plan, policy) is not None:
+            if (
+                selected != node["locked"]
+                or nix_approval(plan, policy) is not None
+                or nix_channels.channel(plan) is not None
+            ):
                 if selected.get("lastModified") != int(
                     registry.timestamp(plan["published"]).timestamp()
                 ) or not re.fullmatch(

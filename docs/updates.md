@@ -256,6 +256,38 @@ targets = ["javascript", "assets"]
 commands = [["node", "scripts/generate-labels.mjs"]]
 ```
 
+Nix inputs default to `selection = "git"`, which selects a mature commit from
+the declared branch's ancestry. That commit need not have been published as a
+channel. For official NixOS/nixpkgs channels, opt into publication selection:
+
+```toml
+[[updates.adapters.nix.inputs]]
+directory = "nix"
+input = "nixpkgs"
+repository = "NixOS/nixpkgs"
+branch = "nixos-unstable"
+selection = "published-channel"
+```
+
+This selects the latest official release whose channel publication and source
+commit both meet the minimum age. Supported branches are `nixos-unstable`,
+`nixos-unstable-small`, `nixpkgs-unstable`, `nixos-YY.MM`, `nixos-YY.MM-small`, and
+`nixpkgs-YY.MM-darwin` for May/November releases. The resolver reads the complete,
+bounded official release index, binds its release name and publication date to
+the immutable `git-revision` artifact and its HTTP modification date, and checks
+the full commit's declared repository/branch relationship. Missing, inconsistent,
+or incomplete evidence fails. The final lock still uses the Git commit timestamp
+and independently verified Nix content hash; results record `channel_publication`
+and `channel_release` separately.
+
+Publication selection does not retain a newer unpublished baseline through the
+Git mode's timestamp comparison. Security revision floors still apply: a mature
+published descendant may replace an approved revision; otherwise the exact
+approved revision must itself have an official publication, with an unexpired
+exception when either age is below the minimum. Publication is evidence of a
+channel release, not a guarantee that every package is available in a binary cache;
+normal project environment preparation and verification remain required.
+
 `just chainman deps-update targets=javascript,assets` selects these
 targets. For JavaScript, `--policy compatible` preserves original caret/tilde and
 complex dependency ranges, including their lower and `0.x` compatibility bounds.
