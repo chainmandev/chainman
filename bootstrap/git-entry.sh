@@ -65,17 +65,18 @@ for entry_fd in 9 8 7 6 5 4 3; do
         break
     fi
 done
+# Both handoffs must suppress startup-file and shell-option overrides.
+unset BASH_ENV ENV
+# Bash owns readonly option variables; remove their export rather than
+# attempting to unset them when this entry was itself invoked with Bash.
+# The non-POSIX builtin is probed in a subshell before use.
+# shellcheck disable=SC3045
+if (export -n SHELLOPTS BASHOPTS) 2> /dev/null; then
+    export -n SHELLOPTS BASHOPTS
+else
+    unset SHELLOPTS BASHOPTS
+fi
 if [ "$entry_needs_bash" = 1 ] && entry_bash=$(command -v bash); then
-    unset BASH_ENV ENV
-    # Bash owns readonly option variables; remove their export rather than
-    # attempting to unset them when this entry was itself invoked with Bash.
-    # The non-POSIX builtin is probed in a subshell before use.
-    # shellcheck disable=SC3045
-    if (export -n SHELLOPTS BASHOPTS) 2> /dev/null; then
-        export -n SHELLOPTS BASHOPTS
-    else
-        unset SHELLOPTS BASHOPTS
-    fi
     # The replacement shell expands its own positional parameters.
     # shellcheck disable=SC2016
     exec "$entry_bash" --noprofile --norc -c '

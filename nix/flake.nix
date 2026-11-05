@@ -120,6 +120,7 @@
           ]
           ++ runtimeBase
           ++ (with pkgs; [
+            dash
             nixfmt
             shellcheck
             shfmt

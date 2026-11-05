@@ -420,11 +420,15 @@ class GitBootstrapTests(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_public_entry_preserves_full_descriptor_table_with_bash(self):
+        shell = shutil.which("dash")
+        self.assertIsNotNone(shell, "requires the pinned POSIX-only test shell")
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "requires the pinned allocating test shell")
         for name in ("git-entry.sh", "lifetime.sh"):
             shutil.copyfile(
                 SOURCE / "bootstrap" / name, self.origin / "bootstrap" / name
             )
-        (self.binaries / "bash").symlink_to(shutil.which("bash"))
+        (self.binaries / "bash").symlink_to(bash)
         (self.binaries / "dirname").symlink_to(shutil.which("dirname"))
         runtime = self.origin / "bootstrap/chainman.sh"
         runtime.write_text(
@@ -479,9 +483,15 @@ raise SystemExit(result.returncode)
             BASHOPTS="extquote",
             TMPDIR=str(self.root),
         )
-        for bash_available in (True, False):
-            with self.subTest(bash_available=bash_available):
-                if not bash_available:
+        for entry_shell, bash_available in (
+            (shell, True),
+            (shell, False),
+            (bash, False),
+        ):
+            with self.subTest(entry_shell=entry_shell, bash_available=bash_available):
+                (self.binaries / "sh").unlink()
+                (self.binaries / "sh").symlink_to(entry_shell)
+                if not bash_available and (self.binaries / "bash").exists():
                     (self.binaries / "bash").unlink()
                 result = subprocess.run(
                     [sys.executable, "-c", runner],
@@ -490,7 +500,7 @@ raise SystemExit(result.returncode)
                     capture_output=True,
                     timeout=30,
                 )
-                if bash_available:
+                if bash_available or entry_shell == bash:
                     self.assertEqual(result.returncode, 37, result.stderr)
                     self.assertEqual(
                         result.stdout, b"['literal $() spaces', '']\npiped input\n"
@@ -503,6 +513,8 @@ raise SystemExit(result.returncode)
                 self.assertEqual(list(self.root.glob("chainman-source.*")), [])
 
     def test_full_descriptor_table_fails_without_starting_or_closing_leases(self):
+        shell = shutil.which("dash")
+        self.assertIsNotNone(shell, "requires the pinned POSIX-only test shell")
         check = self.project / "check-descriptors.py"
         check.write_text(
             "import os,sys\n"
@@ -516,7 +528,7 @@ raise SystemExit(result.returncode)
             "import os,subprocess,sys\n"
             "fd=os.open(sys.argv[1],os.O_RDONLY)\n"
             "for target in range(3,10): os.dup2(fd,target)\n"
-            "result=subprocess.run(['sh','-c',sys.argv[2]], pass_fds=tuple(range(3,10)))\n"
+            "result=subprocess.run([sys.argv[2],'-c',sys.argv[3]], pass_fds=tuple(range(3,10)))\n"
             "raise SystemExit(result.returncode)\n"
         )
         result = subprocess.run(
@@ -525,6 +537,7 @@ raise SystemExit(result.returncode)
                 "-c",
                 runner,
                 str(self.project / "chainman.lock"),
+                shell,
                 '. "$FIXTURE_LIFETIME"; lifetime_run sh -c "echo unexpected"; '
                 'result=$?; exec "$FIXTURE_PYTHON" "$FIXTURE_CHECK" '
                 '"$FIXTURE_INPUT" "$result"',
