@@ -1219,14 +1219,27 @@ def prepare_requested(root: Path, arguments: list[str]) -> int:
     import admission
 
     admission.graph(root, cfg, arguments)
-    env = workflows.context_environment(
-        root, cfg, arguments[0], tc.environment(root, create=False)
-    )
-    expected = config_fingerprint(root, cfg, include_volume_inputs=False, env=env)
-    result = prepare_setup(root, cfg, entries, arguments[0])
-    if config_fingerprint(root, cfg, include_volume_inputs=False, env=env) != expected:
-        raise ValueError("Service configuration changed during preparation")
-    return result
+    # Setup fingerprints include the download-cache epoch. Admit its lifetime
+    # before the snapshot so cold-cache initialization is not mistaken for drift.
+    with tc.operation(
+        root,
+        exclusive=False,
+        automatic_prune=table(cfg.get("cache", {}), "Cache").get(
+            "automatic_prune", True
+        )
+        is True,
+    ):
+        env = workflows.context_environment(
+            root, cfg, arguments[0], tc.environment(root, create=False)
+        )
+        expected = config_fingerprint(root, cfg, include_volume_inputs=False, env=env)
+        result = prepare_setup(root, cfg, entries, arguments[0])
+        if (
+            config_fingerprint(root, cfg, include_volume_inputs=False, env=env)
+            != expected
+        ):
+            raise ValueError("Service configuration changed during preparation")
+        return result
 
 
 def prepare_setup(

@@ -58,6 +58,209 @@ commands=[["python3","task.py"]]
     def write_config(self):
         (self.root / "chainman.toml").write_text(self.body)
 
+    def managed_service_preparation(self):
+        # Exercise the default managed cache, without touching the caller's HOME
+        # or shared download pool. The ordinary fixture override is unmanaged.
+        os.environ.pop("TOOLCHAIN_DOWNLOAD_CACHE")
+        os.environ.update(
+            CHAINMAN_MODE="host-nix", XDG_CACHE_HOME=str(self.root / "cache")
+        )
+        self.body += """
+[cache]
+automatic_prune=false
+[tasks.main]
+services=["demo"]
+commands=[["true"]]
+[services.demo]
+setup=["dependencies"]
+command=["python3","task.py"]
+readiness={command=["python3","task.py"]}
+"""
+        self.write_config()
+
+    def test_cold_managed_service_preparation_retains_epoch_and_child_leases(self):
+        import services
+        import storage
+
+        self.managed_service_preparation()
+        pool = storage.download_base() / storage.POOL
+        self.assertTrue(storage.managed_downloads())
+        self.assertEqual(storage.download_epoch(), "uninitialized")
+        with (self.root / "install.py").open("a") as script:
+            script.write(f"""
+import json, os, sys
+sys.path.insert(0, {str(Path(tc.__file__).parent)!r})
+import storage, toolchain as tc
+root=Path.cwd()
+pool=storage.download_base()/storage.POOL
+payload=storage.download_path(os.environ)/'cargo/registry/package'
+payload.parent.mkdir(parents=True,exist_ok=True)
+payload.write_text('real cached payload')
+lease=storage.inherited()
+with tc.operation(root,exclusive=False,new_execution=True):
+    rows,removed=storage.collect(pool,apply=True,all_idle=True)
+    Path('lease-proof.json').write_text(json.dumps({{
+        'epoch':storage.download_epoch(),
+        'same_lease':storage.inherited()==lease,
+        'leased':bool(lease[1]),
+        'active_operations':len(tc.active_operations(root)),
+        'cache_active':all(row['active'] for row in rows),
+        'removed':removed,
+        'payload_exists':payload.is_file()
+    }}))
+""")
+        observations = []
+        fingerprint = services.config_fingerprint
+
+        def observe(*args, **kwargs):
+            observations.append(
+                (storage.download_epoch(), bool(storage.inherited()[1]))
+            )
+            return fingerprint(*args, **kwargs)
+
+        with patch.object(services, "config_fingerprint", side_effect=observe):
+            self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+        epoch = storage.download_epoch()
+        self.assertNotEqual(epoch, "uninitialized")
+        self.assertTrue(observations)
+        self.assertTrue(all(item == (epoch, True) for item in observations))
+        proof = json.loads((self.root / "lease-proof.json").read_text())
+        self.assertEqual(proof["epoch"], epoch)
+        self.assertTrue(proof["same_lease"])
+        self.assertTrue(proof["leased"])
+        self.assertGreaterEqual(proof["active_operations"], 3)
+        self.assertTrue(proof["cache_active"])
+        self.assertEqual(proof["removed"], [])
+        self.assertTrue(proof["payload_exists"])
+        self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+
+        # Use the actual planning fingerprint contract and internal target lanes;
+        # this fixture does not start the native controller or a persistent server.
+        cfg = workflows.configuration(self.root)
+        expected = services.config_fingerprint(self.root, cfg)
+        for action, name in (
+            ("_workflow-prepare", "main"),
+            ("_workflow-task", "build"),
+            ("_workflow-service", "demo"),
+            ("_workflow-probe", "demo"),
+        ):
+            self.assertEqual(
+                services.execute_internal(self.root, action, [name, expected]), 0
+            )
+        self.assertEqual(storage.download_epoch(), epoch)
+        self.assertEqual((self.root / "install-count").read_text(), "1")
+        self.assertEqual(storage.inherited()[1], ())
+        self.assertEqual(tc.active_operations(self.root), set())
+
+        # Real idle-payload eviction still changes epoch, invalidates setup and
+        # rejects the old plan. A new admission must reinstall before execution.
+        self.assertTrue(storage.collect(pool, apply=True, all_idle=True)[1])
+        self.assertNotEqual(storage.download_epoch(), epoch)
+        spec = workflows.group_specs(self.root, cfg, ["dependencies"])["dependencies"]
+        self.assertFalse(
+            workflows.current(
+                self.root, "dependencies", spec, tc.environment(self.root, create=False)
+            )
+        )
+        with self.assertRaisesRegex(
+            ValueError, "Service inputs changed after planning"
+        ):
+            services.execute_internal(
+                self.root, "_workflow-service", ["demo", expected]
+            )
+        self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+        self.assertEqual((self.root / "install-count").read_text(), "2")
+
+    def test_managed_service_preparation_preserves_outer_lease_and_prune_policy(self):
+        import services
+        import storage
+
+        self.managed_service_preparation()
+        for automatic in (False, True):
+            with self.subTest(automatic=automatic):
+                self.body = self.body.replace(
+                    f"automatic_prune={str(not automatic).lower()}",
+                    f"automatic_prune={str(automatic).lower()}",
+                )
+                self.write_config()
+                with patch.object(tc, "prune", wraps=tc.prune) as prune:
+                    self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+                    self.assertEqual(prune.call_count, int(automatic))
+                with tc.operation(self.root, exclusive=False):
+                    owner = tc.inherited_operation()
+                    lease = storage.inherited()
+                    with patch.object(tc, "prune", wraps=tc.prune) as prune:
+                        self.assertEqual(
+                            services.prepare_requested(self.root, ["main"]), 0
+                        )
+                        self.assertEqual(prune.call_count, 0)
+                    self.assertEqual(tc.inherited_operation(), owner)
+                    self.assertEqual(storage.inherited(), lease)
+                    self.assertEqual(len(tc.active_operations(self.root)), 1)
+                self.assertEqual(tc.active_operations(self.root), set())
+                self.assertEqual(storage.inherited()[1], ())
+
+    def test_managed_service_preparation_still_rejects_source_drift(self):
+        import services
+        import storage
+
+        self.managed_service_preparation()
+        (self.root / "other.lock").write_text("original")
+        self.body += """
+[setup.other]
+inputs=["other.lock"]
+artifacts=["other-installed"]
+commands=[["true"]]
+[tasks.other]
+services=["other"]
+commands=[["true"]]
+[services.other]
+setup=["other"]
+command=["true"]
+"""
+        self.write_config()
+        with (self.root / "install.py").open("a") as script:
+            script.write("Path('other.lock').write_text('changed during setup')\n")
+        with self.assertRaisesRegex(
+            ValueError, "Service configuration changed during preparation"
+        ):
+            services.prepare_requested(self.root, ["main"])
+        self.assertNotEqual(storage.download_epoch(), "uninitialized")
+        self.assertEqual(tc.active_operations(self.root), set())
+        self.assertEqual(storage.inherited()[1], ())
+
+    def test_cold_managed_service_without_setup_reaches_internal_lanes(self):
+        import services
+        import storage
+
+        self.managed_service_preparation()
+        # The unrelated build still declares setup, so its epoch participates in
+        # the service fingerprint even though this task installs nothing.
+        self.body = self.body.replace(
+            'setup=["dependencies"]\ncommand=["python3","task.py"]\nreadiness={command=["python3","task.py"]}',
+            'setup=[]\ncommand=["true"]\nreadiness={command=["true"]}',
+        )
+        self.write_config()
+        self.assertEqual(storage.download_epoch(), "uninitialized")
+        self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+        epoch = storage.download_epoch()
+        self.assertNotEqual(epoch, "uninitialized")
+        expected = services.config_fingerprint(
+            self.root, workflows.configuration(self.root)
+        )
+        for action, name in (
+            ("_workflow-prepare", "main"),
+            ("_workflow-task", "main"),
+            ("_workflow-service", "demo"),
+            ("_workflow-probe", "demo"),
+        ):
+            self.assertEqual(
+                services.execute_internal(self.root, action, [name, expected]), 0
+            )
+        self.assertEqual(storage.download_epoch(), epoch)
+        self.assertFalse((self.root / "install-count").exists())
+
     def test_readiness_uses_service_profile_without_starting_compiler_cache(self):
         import services
 
