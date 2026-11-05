@@ -1398,8 +1398,14 @@ def prepare_profile(
         reference, _ = chainman.profile(root, profile, cfg=cfg)
         if not reference:
             raise ValueError("Service profile preparation requires a Nix profile")
+        # This holder only realizes a Nix profile. Global package-cache scans
+        # belong to ordinary operations, outside its bounded root-release wait.
         with tc.operation(
-            root, exclusive=False, new_execution=True, automatic_prune=False
+            root,
+            exclusive=False,
+            new_execution=True,
+            automatic_prune=False,
+            maintain_downloads=False,
         ):
             selected = tc.environment(root)
             tc.runtime_nix_environment(selected)

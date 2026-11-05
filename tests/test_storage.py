@@ -946,6 +946,23 @@ input()
         self.assertTrue((entry / "unrecognized").exists())
         self.assertTrue((entry / ".lease").exists())
 
+    def test_downloads_without_maintenance_still_protects_and_releases_payloads(self):
+        entry = self.populated()
+        collect = storage.collect
+        with patch.object(storage, "collect", wraps=collect) as maintenance:
+            with storage.downloads(maintain=False):
+                paths, descriptors = storage.inherited()
+                self.assertIn(entry, paths)
+                self.assertTrue(descriptors)
+                rows, removed = collect(self.pool, apply=True, all_idle=True)
+                self.assertTrue(rows[0]["active"])
+                self.assertFalse(removed)
+                self.assertTrue((entry / "data/cargo/registry").exists())
+            maintenance.assert_not_called()
+        rows, removed = collect(self.pool, apply=True, all_idle=True)
+        self.assertFalse(rows[0]["active"])
+        self.assertEqual(removed, [str(entry / "data/cargo/registry")])
+
     def test_environment_initialization_creates_a_recognized_private_pool(self):
         (self.root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
         env = tc.environment(self.root)

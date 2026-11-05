@@ -2861,5 +2861,123 @@ raise SystemExit(7)
         self.assertFalse(self.alive(pid))
 
 
+@unittest.skipUnless(CONTROL and BACKEND, "run just control-test for native ownership")
+class ServiceProfileMaintenanceTests(unittest.TestCase):
+    def setUp(self):
+        self.fixture = ServiceControlTests("run")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        fixture = self.fixture
+        (fixture.root / "toolchain.toml").write_text('schema=1\nmodules=["core"]\n')
+        temporary = fixture.root / "tmp"
+        temporary.mkdir()
+        helper = fixture.root / "profile.py"
+        # Keep the real profile preparation, operation, storage lease, cache
+        # collector and Nix-root lifetimes. Replace only Nix realization and the
+        # directory-size cost; a large cache must not extend holder teardown.
+        helper.write_text(
+            "import sys; sys.path.insert(0, "
+            + repr(str(services.tc.RUNTIME / "scripts"))
+            + ")\n"
+            + """import os,subprocess,time
+from pathlib import Path
+from unittest.mock import patch
+import services,storage,toolchain as tc
+root=Path.cwd()
+channel=Path(os.environ['CHAINMAN_PROFILE_CHANNEL'])
+roots=root/'profile-roots'
+roots.mkdir(exist_ok=True)
+root_record=roots/channel.name
+original_size=tc.size
+
+def size(path,*args,**kwargs):
+    (root/'cache-scan-started').touch()
+    time.sleep(4)
+    return original_size(path,*args,**kwargs)
+
+def realize(argv,**kwargs):
+    profile=Path(argv[argv.index('--profile')+1])
+    profile.write_text('fixture profile root')
+    root_record.write_text(str(profile.parent))
+    payload=storage.download_base()/storage.POOL/'downloads/data/go-mod/module'
+    payload.mkdir(parents=True,exist_ok=True)
+    (payload/'payload').write_bytes(b'fixture cache bytes')
+    return subprocess.CompletedProcess(argv,0)
+
+with (
+    patch.object(services.chainman,'profile',return_value=('fixture#shell',{})),
+    patch.object(services,'config_fingerprint',return_value='fixture'),
+    patch.object(tc,'managed_run',side_effect=realize),
+    patch.object(tc,'size',side_effect=size),
+    patch.object(storage,'seed_homes'),
+):
+    raise SystemExit(services.prepare_profile(root,{}, {'profile':'tools'}, 'fixture',{}))
+"""
+        )
+        fixture.plan.update(own_task=True, task_shutdown_seconds=1)
+        fixture.plan["profile_preparations"] = []
+        for _ in range(4):
+            command = fixture.command([sys.executable, str(helper)])
+            command["environment"] = {
+                "CHAINMAN_MODE": "host-nix",
+                "XDG_CACHE_HOME": str(fixture.root / "cache"),
+                "TMPDIR": str(temporary),
+                "TOOLCHAIN_DOWNLOAD_CACHE": str(
+                    fixture.root / "cache/nix-just-downloads"
+                ),
+            }
+            fixture.plan["profile_preparations"].append(command)
+
+    def assert_roots_released(self):
+        records = list((self.fixture.root / "profile-roots").iterdir())
+        self.assertEqual(len(records), 4)
+        for record in records:
+            self.assertFalse(Path(record.read_text()).exists())
+        self.assertFalse((self.fixture.root / "cache-scan-started").exists())
+
+    def test_successful_task_releases_all_same_profile_holders_without_cache_scan(self):
+        self.fixture.plan["task"] = self.fixture.command(
+            [sys.executable, "-c", "print('APPLICATION_PASSED',flush=True)"]
+        )
+        result = self.fixture.run_control("run", check=0)
+        self.assertIn("APPLICATION_PASSED", result.stdout)
+        self.assert_roots_released()
+
+    def test_failed_task_keeps_its_status_after_profile_release(self):
+        self.fixture.run_control("run", check=7)
+        self.assert_roots_released()
+
+    def test_genuine_cancellation_keeps_143_after_profile_release(self):
+        fixture = self.fixture
+        fixture.plan["task"] = fixture.command(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; import time; Path('task-started').touch(); time.sleep(60)",
+            ]
+        )
+        fixture.path.write_text(json.dumps(fixture.plan))
+        process = subprocess.Popen(
+            [CONTROL, "run", str(fixture.path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 15
+            while not (fixture.root / "task-started").exists():
+                self.assertIsNone(process.poll())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.02)
+            process.send_signal(signal.SIGTERM)
+            output, error = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 143, (output, error))
+            self.assert_roots_released()
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.communicate(timeout=10)
+
+
 if __name__ == "__main__":
     unittest.main()

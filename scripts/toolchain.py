@@ -608,6 +608,7 @@ def operation(
     exclusive: bool = True,
     automatic_prune: bool = False,
     new_execution: bool = False,
+    maintain_downloads: bool = True,
 ) -> Iterator[bool]:
     cache_root(root).mkdir(parents=True, exist_ok=True)
     contained(root, ".cache/toolchain/operations").mkdir(exist_ok=True)
@@ -720,7 +721,7 @@ def operation(
         ):
             import storage
 
-            with storage.downloads():
+            with storage.downloads(maintain=maintain_downloads):
                 yield not nested_project
 
 

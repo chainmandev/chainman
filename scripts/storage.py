@@ -590,26 +590,29 @@ def download_epoch(env: Mapping[str, str] | None = None) -> str:
 
 
 @contextmanager
-def downloads() -> Iterator[None]:
+def downloads(*, maintain: bool = True) -> Iterator[None]:
     if tc.host_mode() or not managed_downloads():
         yield
         return
     pool = download_base() / POOL
-    collect(pool, apply=True)
+    if maintain:
+        collect(pool, apply=True)
     try:
         with use(pool, "downloads", "downloads") as entry:
             private(entry / "data", create=True)
             yield
     finally:
-        try:
-            rows, _ = collect(pool, apply=True)
-            for row in rows:
-                if row["error"]:
-                    print(
-                        "Chainman storage maintenance: " + row["error"], file=sys.stderr
-                    )
-        except (OSError, ValueError) as error:
-            print(f"Chainman storage maintenance: {error}", file=sys.stderr)
+        if maintain:
+            try:
+                rows, _ = collect(pool, apply=True)
+                for row in rows:
+                    if row["error"]:
+                        print(
+                            "Chainman storage maintenance: " + row["error"],
+                            file=sys.stderr,
+                        )
+            except (OSError, ValueError) as error:
+                print(f"Chainman storage maintenance: {error}", file=sys.stderr)
 
 
 def runtime_child(argv: list[str], env: dict[str, str]) -> int:
