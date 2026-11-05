@@ -271,13 +271,18 @@ extends="base"
             path.write_text(body)
             cfg = config_inspection.validated(root)
             self.assertEqual(cfg["profiles"]["tools"]["runtime_profile"], "core")
-            before = workflows.fingerprint(root, workflows.group_spec(cfg, "deps"), {})
+            environment = {"XDG_CACHE_HOME": str(root / "cache")}
+            before = workflows.fingerprint(
+                root, workflows.group_spec(cfg, "deps"), environment
+            )
             profile_before = chainman.profile_fingerprint(root, "host", None)
             path.write_text(body.replace('commands=[["true"]]', 'commands=[["false"]]'))
             cfg = config_inspection.validated(root)
             self.assertNotEqual(
                 before,
-                workflows.fingerprint(root, workflows.group_spec(cfg, "deps"), {}),
+                workflows.fingerprint(
+                    root, workflows.group_spec(cfg, "deps"), environment
+                ),
             )
             self.assertNotEqual(
                 profile_before, chainman.profile_fingerprint(root, "host", None)

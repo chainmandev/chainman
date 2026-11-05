@@ -35,6 +35,8 @@ class NativeHookTests(unittest.TestCase):
         self.control.mkdir()
         self.env = dict(
             os.environ,
+            XDG_CACHE_HOME=str(self.base / "cache"),
+            TOOLCHAIN_DOWNLOAD_CACHE=str(self.base / "cache/nix-just-downloads"),
             GIT_CONFIG_GLOBAL="/dev/null",
             GIT_CONFIG_NOSYSTEM="1",
             GIT_ATTR_NOSYSTEM="1",
