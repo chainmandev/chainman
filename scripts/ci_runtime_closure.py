@@ -49,6 +49,7 @@ def runtime_path(root: Path, *, build: bool) -> str:
             root,
             *NIX,
             "build",
+            "--print-build-logs",
             "--no-update-lock-file",
             "--max-jobs",
             "1",

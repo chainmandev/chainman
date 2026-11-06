@@ -107,6 +107,84 @@ class RuntimeClosureTests(unittest.TestCase):
                         closure.import_closure(self.root, self.root, SHA, self.digest)
                     runtime.assert_not_called()
 
+    def test_only_runtime_build_streams_full_logs(self):
+        for build in (True, False):
+            with self.subTest(build=build):
+                with patch.object(
+                    closure, "output", side_effect=["x86_64-darwin", STORE_PATH]
+                ) as output:
+                    self.assertEqual(
+                        closure.runtime_path(self.root, build=build), STORE_PATH
+                    )
+                    command = output.call_args.args[1:]
+                    self.assertEqual("--print-build-logs" in command, build)
+                    self.assertIn("--no-update-lock-file", command)
+                    if build:
+                        self.assertIn("build", command)
+                        self.assertIn("--no-link", command)
+                        self.assertIn("--print-out-paths", command)
+                        self.assertEqual(command[command.index("--max-jobs") + 1], "1")
+                        self.assertEqual(
+                            command[-1], "path:./nix#devShells.x86_64-darwin.trust"
+                        )
+                    else:
+                        self.assertIn("eval", command)
+                        self.assertNotIn("build", command)
+                        self.assertEqual(
+                            command[-1],
+                            "path:./nix#devShells.x86_64-darwin.trust.outPath",
+                        )
+
+    def test_runtime_build_logs_leave_path_stdout_clean(self):
+        nix = self.root / "fixture nix.py"
+        nix.write_text(
+            "import sys\n"
+            "if '--expr' in sys.argv:\n"
+            "    print('x86_64-darwin')\n"
+            "elif 'build' in sys.argv:\n"
+            "    if '--print-build-logs' in sys.argv:\n"
+            "        print('fixture upstream build diagnostic', file=sys.stderr)\n"
+            f"    print({STORE_PATH!r})\n"
+            "else:\n"
+            "    assert 'eval' in sys.argv\n"
+            "    assert '--print-build-logs' not in sys.argv\n"
+            f"    print({STORE_PATH!r})\n"
+        )
+        command = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import ci_runtime_closure as closure\n"
+            "closure.NIX[:] = [sys.executable, '-I', '-B', sys.argv[2]]\n"
+            "print(closure.runtime_path(Path(sys.argv[3]), "
+            "build=sys.argv[4] == 'build'))\n"
+        )
+        for operation in ("build", "eval"):
+            with self.subTest(operation=operation):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        command,
+                        str(Path(closure.__file__).resolve().parent),
+                        str(nix),
+                        str(self.root),
+                        operation,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                )
+                self.assertEqual(result.stdout, STORE_PATH + "\n")
+                self.assertEqual(
+                    result.stderr,
+                    "fixture upstream build diagnostic\n"
+                    if operation == "build"
+                    else "",
+                )
+
 
 @unittest.skipUnless(
     os.environ.get("CHAINMAN_TEST_CI_RUNTIME") == "1",
