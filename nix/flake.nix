@@ -69,7 +69,18 @@
           );
           # Package wrappers otherwise embed nixpkgs' default Node even when a
           # newer node executable leads PATH, splitting engine checks from builds.
-          nodejs = pkgs.nodejs_latest;
+          nodejs =
+            if pkgs.stdenv.hostPlatform.system == "x86_64-darwin" then
+              pkgs.nodejs_latest.override {
+                # Node's test runner ignores Nix's serial make-check setting.
+                # Keep every upstream check and its deadline while giving its
+                # large SQLite string tests the Intel runner's memory alone.
+                nodejs-slim = pkgs.nodejs-slim_latest.overrideAttrs (old: {
+                  checkFlags = (old.checkFlags or [ ]) ++ [ "JOBS=1" ];
+                });
+              }
+            else
+              pkgs.nodejs_latest;
           # Retain the supported Node-based line on every platform. pnpm 12
           # introduces a separate native TLS client with platform trust defaults.
           pnpm = pkgs.pnpm_11.override { nodejs-slim = nodejs; };
