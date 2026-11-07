@@ -2249,6 +2249,7 @@ def resolve(
                 "--ignore-scripts",
                 "--strict-peer-dependencies=false",
                 *manager_options,
+                *source_options,
                 "--no-frozen-lockfile",
             ],
             cwd=temporary,
@@ -2259,7 +2260,18 @@ def resolve(
             stderr=subprocess.PIPE,
         )
         if normalized.returncode:
-            raise ValueError("pnpm lock normalization rejected restored declarations")
+            codes = sorted(
+                set(
+                    re.findall(
+                        r"ERR_PNPM_[A-Z_]+",
+                        normalized.stderr + "\n" + normalized.stdout,
+                    )
+                )
+            )
+            raise ValueError(
+                "pnpm lock normalization rejected restored declarations "
+                f"(exit {normalized.returncode}; {', '.join(codes) or 'unclassified error'})"
+            )
         normalized_lock = document(
             lock_path, tc.regular_input(temporary, workspace.lock).decode()
         )[0]
