@@ -118,6 +118,15 @@ if [ "${CHAINMAN_BOOTSTRAP_CONTAINER:-0}" != 1 ] && [ "${CHAINMAN_HOST_ENGINES_C
     CHAINMAN_HOST_ENGINES_CAPTURED=1
     export CHAINMAN_HOST_DOCKER_BIN CHAINMAN_HOST_PODMAN_BIN CHAINMAN_HOST_ENGINES_CAPTURED
 fi
+# Native service owners retain a verified runtime lease, not an active project
+# profile. Revalidate that handoff without provisioning bootstrap during health.
+case "${1:-}" in
+    _workflow-service | _workflow-probe)
+        if [ -n "${CHAINMAN_INTERNAL_ENTRY:-}" ]; then
+            exec "$script_dir/reenter.sh" "$root" --entry "$@"
+        fi
+        ;;
+esac
 if [ -n "${CHAINMAN_ACTIVE_PROFILE:-}" ] && [ -n "${CHAINMAN_ROOT:-}" ]; then
     if [ "$#" = 2 ] && [ "$1" = hooks ] && [ "$2" = config ]; then
         exec "$script_dir/reenter.sh" "$root" --entry hooks config
