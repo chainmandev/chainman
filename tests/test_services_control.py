@@ -1,5 +1,7 @@
 """Native ownership contracts against the actual Process Compose backend."""
 
+from contextlib import ExitStack, contextmanager
+import hashlib
 import json
 import fcntl
 import os
@@ -25,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import native_tasks
 import services
 import storage
+from internal_service_fixture import immutable_runtime
 
 CONTROL = os.environ.get("CHAINMAN_TEST_CONTROL")
 BACKEND = os.environ.get("CHAINMAN_TEST_PROCESS_COMPOSE")
@@ -618,24 +621,135 @@ print('CLEANUP FINISHED', signals, flush=True)
                 client.terminate()
                 client.communicate(timeout=5)
 
-    def test_exported_plan_runs_after_readiness_and_preserves_task_exit(self):
+    @contextmanager
+    def exported_plan(self, *, entry_delay=0):
         output = self.base / "exported"
         output.mkdir(mode=0o700)
         (output / "host-environment").write_bytes(b"")
-        launcher = self.root / "launch"
-        launcher.write_text(
-            "#!/bin/sh\nexec "
-            + shlex.join(
-                [
-                    sys.executable,
-                    str(services.chainman.RUNTIME / "scripts/chainman.py"),
-                    "--root",
-                    str(self.root),
+        with ExitStack() as lifetime:
+            runtime_base, runtime, interpreter = immutable_runtime(lifetime.callback)
+            nix = shutil.which(services.tc.nix_command())
+            self.assertIsNotNone(nix)
+            pin = "a" * 40
+            (self.root / "chainman.lock").write_text(pin + "\n")
+            fixture_env = {
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+            }
+            fixture_env.update(
+                CHAINMAN_MODE="host-nix",
+                CHAINMAN_SETUP="auto",
+                CHAINMAN_ROOT=str(self.root),
+                CHAINMAN_PROJECT_ROOT=str(self.root),
+                CHAINMAN_RUNTIME=str(runtime),
+                CHAINMAN_RUNTIME_PYTHON=interpreter,
+                CHAINMAN_RUNTIME_NIX_BIN=str(Path(nix).resolve().parent),
+                CHAINMAN_RUNTIME_STORAGE_ACTIVE=pin,
+                CHAINMAN_ACTIVE_MODE="host-nix",
+                CHAINMAN_ACTIVE_PIN=pin,
+                XDG_CACHE_HOME=str(self.root / "cache"),
+            )
+            lifetime.enter_context(patch.dict(os.environ, fixture_env, clear=True))
+            pool = self.root / "cache/chainman/runtime-roots" / storage.POOL
+            entry = lifetime.enter_context(storage.use(pool, pin, "runtime"))
+            (entry / "source").symlink_to(runtime)
+            (entry / "bootstrap").symlink_to((runtime_base / "bootstrap").resolve())
+            fixture_env = dict(os.environ)
+            # The synthetic fixture pin has real held source/bootstrap roots.
+            # Only service/probe use checked public reentry; task/setup keep the
+            # existing immutable Python CLI and its configuration validation.
+            launcher = self.root / "launch"
+            launcher.write_text(
+                "#!/bin/sh\n"
+                + 'if [ "${1:-}" = _workflow-probe ]; then '
+                + shlex.join(
+                    [interpreter, "-c", f"import time;time.sleep({entry_delay})"]
+                )
+                + '; fi\ncase "${1:-}" in\n'
+                + "_workflow-service|_workflow-probe) exec "
+                + shlex.quote(str(runtime / "bootstrap/chainman.sh"))
+                + ' "$@";;\n*) exec '
+                + shlex.join(
+                    [
+                        interpreter,
+                        str(runtime / "scripts/chainman.py"),
+                        "--root",
+                        str(self.root),
+                    ]
+                )
+                + ' "$@";;\nesac\n'
+            )
+            launcher.chmod(0o700)
+            target = (
+                platform.system().lower()
+                + "-"
+                + {"aarch64": "arm64", "arm64": "arm64", "x86_64": "amd64"}[
+                    platform.machine()
                 ]
             )
-            + ' "$@"\n'
-        )
-        launcher.chmod(0o700)
+            arguments = [
+                str(output),
+                target,
+                str(self.base / "cache"),
+                "",
+                str(launcher),
+                "run",
+                "check",
+            ]
+            export_code = (
+                f"import sys;sys.path.insert(0,{str(runtime / 'scripts')!r});"
+                "import json,services;from pathlib import Path;"
+                "raise SystemExit(services.export(Path(sys.argv[1]),json.loads(sys.argv[2])))"
+            )
+            exported = services.tc.managed_run(
+                [
+                    interpreter,
+                    "-I",
+                    "-B",
+                    "-c",
+                    export_code,
+                    str(self.root),
+                    json.dumps(arguments),
+                ],
+                env=fixture_env,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+            )
+            self.assertEqual(exported.returncode, 0, exported.stdout + exported.stderr)
+            self.assertEqual(
+                hashlib.sha256((output / "chainman-control").read_bytes()).digest(),
+                hashlib.sha256(Path(CONTROL).read_bytes()).digest(),
+            )
+            self.plan = json.loads((output / "plan.json").read_text())
+            self.state = Path(self.plan["state"])
+            self.path.write_text(json.dumps(self.plan))
+            for kind, command in (
+                ("service", self.plan["services"]["worker"]["command"]),
+                ("probe", self.plan["services"]["worker"]["readiness"]["command"]),
+            ):
+                with self.subTest(exported_metadata=kind):
+                    actual = command["environment"]
+                    self.assertEqual(actual["CHAINMAN_INTERNAL_ENTRY"], "1")
+                    self.assertEqual(actual["CHAINMAN_RUNTIME"], str(runtime))
+                    self.assertEqual(actual["CHAINMAN_ROOT"], str(self.root))
+                    self.assertEqual(actual["CHAINMAN_RUNTIME_PYTHON"], interpreter)
+                    self.assertEqual(actual["CHAINMAN_ACTIVE_PIN"], pin)
+                    self.assertIn(str(entry), json.loads(actual[storage.PATHS]))
+                    self.assertEqual((entry / "source").readlink(), runtime)
+                    self.assertEqual(
+                        (entry / "bootstrap").resolve(),
+                        (runtime_base / "bootstrap").resolve(),
+                    )
+            self.assertEqual(
+                self.plan["services"]["worker"]["readiness"]["entry_seconds"], 10
+            )
+            yield fixture_env
+
+    def test_exported_plan_runs_after_readiness_and_preserves_task_exit(self):
         task = [
             sys.executable,
             "-c",
@@ -657,48 +771,105 @@ print('CLEANUP FINISHED', signals, flush=True)
             + json.dumps(readiness)
             + ",period_seconds=1,timeout_seconds=2,failure_threshold=10}\n"
         )
-        fixture_env = dict(os.environ, CHAINMAN_MODE="host-nix")
-        # The fixture is a separate project. Its controller gets its own leases;
-        # it cannot advertise the outer Just process's non-inherited descriptors.
-        for key in (
-            "TOOLCHAIN_LOCK_FD",
-            "TOOLCHAIN_GATE_FD",
-            "TOOLCHAIN_COMPAT_FD",
-            "TOOLCHAIN_OPERATION_ID",
-            "TOOLCHAIN_ANCESTOR_FDS",
-        ):
-            fixture_env.pop(key, None)
-        target = (
-            platform.system().lower()
-            + "-"
-            + {
-                "aarch64": "arm64",
-                "arm64": "arm64",
-                "x86_64": "amd64",
-            }[platform.machine()]
-        )
-        with patch.dict(os.environ, fixture_env, clear=True):
-            services.export(
-                self.root,
-                [
-                    str(output),
-                    target,
-                    str(self.base / "cache"),
-                    "",
-                    str(launcher),
-                    "run",
-                    "check",
-                ],
-            )
-            self.plan = json.loads((output / "plan.json").read_text())
-            self.state = Path(self.plan["state"])
-            self.run_control("run", check=7)
-            self.assertEqual(
-                (self.root / "task-result").read_text(), "observed readiness"
-            )
-            pid = self.pid()
-            self.run_control("stop", check=0)
+        with self.exported_plan(entry_delay=3) as fixture_env:
+            try:
+                # Native readiness allows 195s, controller start 15s, plus a 30s
+                # finite fixture return margin; this is not a universal bound.
+                result = services.tc.managed_run(
+                    [CONTROL, "run", str(self.path)],
+                    env=fixture_env,
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=240,
+                )
+                self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+                self.assertEqual(
+                    (self.root / "task-result").read_text(), "observed readiness"
+                )
+                pid = self.pid()
+            finally:
+                stopped = services.tc.managed_run(
+                    [CONTROL, "stop", str(self.state)],
+                    env=fixture_env,
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
             self.wait_until(lambda: not self.alive(pid))
+
+    def test_exported_probe_app_deadline_reaps_descendants(self):
+        (self.root / "chainman.toml").write_text(
+            'schema=3\n[project]\ndefault_profile="host"\n'
+            '[tasks.check]\nservices=["worker"]\ncommands=[["true"]]\n'
+            "[services.worker]\ncommand="
+            + json.dumps([sys.executable, str(self.root / "worker.py")])
+            + "\nshutdown_seconds=1\nreadiness={command="
+            + json.dumps([sys.executable, str(self.root / "hang.py")])
+            + ",period_seconds=1,timeout_seconds=2,failure_threshold=10}\n"
+        )
+        (self.root / "hang.py").write_text(
+            "import json,os,subprocess,sys,time; from pathlib import Path; "
+            "child=subprocess.Popen([sys.executable,'-c',"
+            "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)']); "
+            "Path('probe-start.next').write_text(json.dumps({'pid':os.getpid(),'child':child.pid,'at':time.monotonic()})); "
+            "os.replace('probe-start.next','probe-start');time.sleep(60)"
+        )
+        with self.exported_plan(entry_delay=3) as fixture_env:
+            record = dict(self.plan["services"]["worker"], generation="probe-fixture")
+            self.state.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (self.state / "worker.command.json").write_text(json.dumps(record))
+            (self.state / "plan.json").write_text(json.dumps(self.plan))
+            worker = subprocess.Popen(
+                [CONTROL, "exec", str(self.state), "worker", "probe-fixture"],
+                **services.tc.managed_options(
+                    {
+                        "env": fixture_env,
+                        "cwd": self.root,
+                        "stdout": subprocess.PIPE,
+                        "stderr": subprocess.PIPE,
+                        "text": True,
+                    }
+                ),
+            )
+            try:
+                self.wait_file(self.root / "ready")
+                worker_pid = self.pid()
+                result = services.tc.managed_run(
+                    [CONTROL, "probe", str(self.state), "worker", "probe-fixture"],
+                    env=fixture_env,
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=20,
+                )
+                finished = time.monotonic()
+                self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+                marker = json.loads((self.root / "probe-start").read_text())
+                self.assertLess(finished - marker["at"], 7)
+                self.assertFalse(self.alive(marker["pid"]))
+                self.assertFalse(self.alive(marker["child"]))
+                self.assertIsNone(worker.poll())
+                self.assertTrue(self.alive(worker_pid))
+                self.assertFalse((self.state / "worker.probe.owner.json").exists())
+            finally:
+                stopped = services.tc.managed_run(
+                    [CONTROL, "stop", str(self.state)],
+                    env=fixture_env,
+                    cwd=self.root,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertEqual(stopped.returncode, 0, stopped.stdout + stopped.stderr)
+                worker.communicate(timeout=10)
+            self.assertFalse(self.alive(worker_pid))
 
     def test_finite_command_retains_its_nix_package_until_context_exits(self):
         for fail in (False, True):
@@ -896,15 +1067,48 @@ else: raise AssertionError(sys.argv)
         self.run_control("stop", check=0)
 
     def test_probe_timeout_reaps_descendants_and_preserves_service(self):
-        child = "import os,signal,time; from pathlib import Path; signal.signal(signal.SIGTERM,signal.SIG_IGN); Path('probe-child').write_text(str(os.getpid())); time.sleep(120)"
-        parent = "import os,signal,subprocess,sys,time; from pathlib import Path;\nif Path('probe-child').exists(): sys.exit(0)\nsignal.signal(signal.SIGTERM,signal.SIG_IGN); Path('probe-parent').write_text(str(os.getpid())); subprocess.Popen([sys.executable,'-c',sys.argv[1]]); time.sleep(120)"
+        tools = {}
+        paths = {}
+        for name in ("bash", "mv", "sleep"):
+            executable = shutil.which(name)
+            self.assertIsNotNone(executable)
+            path = Path(executable)
+            self.assertTrue(path.is_relative_to("/nix/store"))
+            self.assertTrue(path.resolve(strict=True).is_relative_to("/nix/store"))
+            paths[name] = str(path)
+            tools[name] = shlex.quote(paths[name])
+        # Exercise the native one-second deadline and group cleanup, without
+        # spending that deadline importing a Python fixture's modules.
+        child = (
+            "trap '' TERM; pending=probe-child.$$.pending; "
+            'printf \'%s\' "$$" > "$pending"; '
+            + tools["mv"]
+            + ' -- "$pending" probe-child; exec '
+            + tools["sleep"]
+            + " 120"
+        )
+        parent = (
+            "if [ -f probe-child ]; then exit 0; fi; trap '' TERM; "
+            "pending=probe-parent.$$.pending; "
+            'printf \'%s\' "$$" > "$pending"; '
+            + tools["mv"]
+            + ' -- "$pending" probe-parent; '
+            + tools["bash"]
+            + ' -p -c "$1" chainman-probe-child & wait'
+        )
         readiness = self.plan["services"]["worker"]["readiness"]
-        readiness["command"] = self.command([sys.executable, "-c", parent, child])
+        readiness["command"] = self.command(
+            [paths["bash"], "-p", "-c", parent, "chainman-probe", child]
+        )
         readiness["timeout_seconds"] = 1
         readiness["failure_threshold"] = 5
         self.run_control("up", check=0)
         for name in ("probe-parent", "probe-child"):
             self.assertFalse(self.alive(int((self.root / name).read_text())))
+        self.assertNotEqual(
+            (self.root / "probe-parent").read_text(),
+            (self.root / "probe-child").read_text(),
+        )
         self.assertTrue(self.alive(int((self.root / "pid").read_text())))
         self.run_control("stop", check=0)
 
@@ -3023,7 +3227,9 @@ with (
             text=True,
         )
         try:
-            deadline = time.monotonic() + 15
+            # Admit the prepared profiles and start the task before testing
+            # cancellation; the cancellation deadline below remains unchanged.
+            deadline = time.monotonic() + 30
             while not (fixture.root / "task-started").exists():
                 self.assertIsNone(process.poll())
                 self.assertLess(time.monotonic(), deadline)

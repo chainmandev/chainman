@@ -35,6 +35,8 @@ type Probe struct {
 	Period   int        `json:"period_seconds"`
 	Timeout  int        `json:"timeout_seconds"`
 	Failures int        `json:"failure_threshold"`
+	// Only exported internal launchers need entry time before the app deadline.
+	Entry int `json:"entry_seconds,omitempty"`
 }
 type HTTPProbe struct {
 	Port               int               `json:"port"`
@@ -431,6 +433,15 @@ func validate(p Plan) error {
 		}
 		if s.Readiness != nil {
 			r := s.Readiness
+			if r.Entry != 0 {
+				probe, service := r.Command.Argv, s.Command.Argv
+				if r.Entry != 10 || r.HTTPGet != nil || len(probe) < 4 || len(service) < 4 ||
+					probe[len(probe)-3] != "_workflow-probe" || probe[len(probe)-2] != name ||
+					service[len(service)-3] != "_workflow-service" || service[len(service)-2] != name ||
+					probe[len(probe)-1] == "" || probe[len(probe)-1] != service[len(service)-1] {
+					return fmt.Errorf("invalid internal probe entry allowance")
+				}
+			}
 			if r.HTTPGet != nil {
 				if len(r.Command.Argv) != 0 || r.Command.Directory != "" || len(r.Command.Environment) != 0 || validateHTTPProbe(r.HTTPGet) != nil {
 					return fmt.Errorf("invalid HTTP readiness declaration")
@@ -1353,7 +1364,7 @@ func owned(state, name string, probe bool, generation string) int {
 	if probe {
 		// Probes have the same process-group ownership as services, with a
 		// distinct receipt so timeout or recovery cannot stop the application.
-		s.Timeout = s.Readiness.Timeout
+		s.Timeout = s.Readiness.Timeout + s.Readiness.Entry
 		s.Shutdown = 1
 		s.Container = nil
 	}
