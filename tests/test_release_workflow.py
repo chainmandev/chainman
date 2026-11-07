@@ -83,7 +83,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("Qualify initialization and standalone starter", names)
         self.assertIn("Qualify native service ownership and backend", names)
 
-    def test_extended_time_is_limited_to_intel_and_container_core(self):
+    def test_extended_time_is_limited_to_macos_and_container_core(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
         job = workflow["jobs"]["verify"]
         self.assertEqual(job["timeout-minutes"], "${{ matrix.timeout_minutes || 60 }}")
@@ -91,6 +91,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(len(lanes), 14)
         allowances = {
             ("macos-15-intel", "host-nix", "core", "docker"): 360,
+            ("macos-15", "host-nix", "core", "docker"): 90,
             ("ubuntu-24.04", "container-nix", "core", "docker"): 90,
             ("ubuntu-24.04", "container-nix", "core", "podman"): 90,
         }
