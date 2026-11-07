@@ -819,11 +819,15 @@ commands=[["sh","-c","cat > received"]]
                 trigger = self.base / (action + "-trigger")
                 late = self.base / (action + "-late-write")
                 child = self.control / "lingering.py"
+                # Publish the complete PID before either waiter sees the marker.
                 child.write_text(
                     "import os,signal,time\nfrom pathlib import Path\n"
                     "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
                     "signal.signal(signal.SIGINT,signal.SIG_IGN)\n"
-                    f"Path({str(marker)!r}).write_text(str(os.getpid()))\n"
+                    f"marker=Path({str(marker)!r})\n"
+                    "pending=marker.with_name(marker.name+'.pending-'+str(os.getpid()))\n"
+                    "pending.write_text(str(os.getpid()))\n"
+                    "pending.replace(marker)\n"
                     f"while not Path({str(trigger)!r}).exists(): time.sleep(.01)\n"
                     f"Path({str(late)!r}).write_text('late write')\n"
                 )
