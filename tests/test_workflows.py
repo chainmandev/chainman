@@ -172,6 +172,107 @@ with tc.operation(root,exclusive=False,new_execution=True):
         self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
         self.assertEqual((self.root / "install-count").read_text(), "2")
 
+    def test_service_and_probe_skip_maintenance_but_retain_child_leases(self):
+        import services
+        import storage
+
+        self.managed_service_preparation()
+        self.body = self.body.replace(
+            'command=["python3","task.py"]\nreadiness={command=["python3","task.py"]}',
+            "command="
+            + json.dumps([sys.executable, "lifetime.py", "service"])
+            + "\nreadiness={command="
+            + json.dumps([sys.executable, "lifetime.py", "probe"])
+            + "}",
+        )
+        self.write_config()
+        (self.root / "lifetime.py").write_text(
+            "import fcntl,json,os,sys\nfrom pathlib import Path\n"
+            + f"sys.path.insert(0,{str(Path(tc.__file__).parent)!r})\n"
+            + """import storage, toolchain as tc
+root=Path.cwd()
+pool=storage.download_base()/storage.POOL
+entry=pool/'downloads'
+payload=entry/'data/cargo/registry/package'
+paths,storage_fds=storage.inherited()
+descriptor,_,identity,compat,_=tc.inherited_operation()
+assert descriptor is not None and compat is not None
+operation=root/'.cache/toolchain/operations'/identity
+def locked(path):
+    with path.open('rb') as independent:
+        try:fcntl.flock(independent,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:return True
+        fcntl.flock(independent,fcntl.LOCK_UN)
+        return False
+rows,removed=storage.collect(pool,apply=True,all_idle=True)
+proof={
+    'project_matches':tc.descriptor_matches(descriptor,operation),
+    'compat_matches':tc.descriptor_matches(compat,root/'.cache/toolchain/operation.lock'),
+    'storage_matches':os.path.samestat(os.fstat(storage_fds[paths.index(entry)]),(entry/'.lease').stat()),
+    'project_locked':locked(operation),
+    'compat_locked':locked(root/'.cache/toolchain/operation.lock'),
+    'storage_locked':locked(entry/'.lease'),
+    'cache_active':any(row['path']==str(entry) and row['active'] for row in rows),
+    'removed':removed,
+    'payload_exists':payload.is_file(),
+}
+Path(sys.argv[1]+'-proof.json').write_text(json.dumps(proof))
+"""
+        )
+        self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
+        pool = storage.download_base() / storage.POOL
+        self.assertTrue(pool.is_relative_to(self.root))
+        payload = pool / "downloads/data/cargo/registry/package"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_text("real leased payload")
+        expected = services.config_fingerprint(
+            self.root, workflows.configuration(self.root)
+        )
+        collect = storage.collect
+        # Real internal operations and children must reach their payloads without
+        # global scans, regardless of the caller's cache size or scheduling.
+        with patch.object(
+            storage,
+            "collect",
+            side_effect=AssertionError("Service startup ran download maintenance"),
+        ) as maintenance:
+            for lane in ("service", "probe"):
+                with self.subTest(lane=lane):
+                    self.assertEqual(
+                        services.execute_internal(
+                            self.root, "_workflow-" + lane, ["demo", expected]
+                        ),
+                        0,
+                    )
+                    proof = json.loads((self.root / (lane + "-proof.json")).read_text())
+                    for key in (
+                        "project_matches",
+                        "compat_matches",
+                        "storage_matches",
+                        "project_locked",
+                        "compat_locked",
+                        "storage_locked",
+                        "cache_active",
+                        "payload_exists",
+                    ):
+                        self.assertTrue(proof[key], key)
+                    self.assertEqual(proof["removed"], [])
+            maintenance.assert_not_called()
+        self.assertEqual(storage.inherited()[1], ())
+        self.assertEqual(tc.active_operations(self.root), set())
+
+        # Ordinary operations still maintain storage, and the payload becomes
+        # collectible once both internal command lifetimes have ended.
+        with patch.object(storage, "collect", wraps=collect) as maintenance:
+            with tc.operation(self.root, exclusive=False, new_execution=True):
+                self.assertTrue(storage.inherited()[1])
+            self.assertEqual(maintenance.call_count, 2)
+            maintenance.assert_any_call(pool, apply=True)
+        rows, removed = collect(pool, apply=True, all_idle=True)
+        self.assertFalse(rows[0]["active"])
+        self.assertEqual(removed, [str(payload.parent)])
+        self.assertFalse(payload.exists())
+
     def test_managed_service_preparation_preserves_outer_lease_and_prune_policy(self):
         import services
         import storage
