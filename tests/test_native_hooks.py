@@ -1200,6 +1200,20 @@ commands=[["sh","-c","cat > received"]]
         self.plan["git"] = str(wrapper)
         self.save_plan()
         self.env["CHAINMAN_HOOK_REMOTE_URL"] = "/unused"
+
+        def assert_transport_stopped(pid):
+            # A reaped or zombie child cannot retain a running transport.
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                pass
+            else:
+                stat = Path(f"/proc/{pid}/stat")
+                self.assertTrue(
+                    stat.exists()
+                    and stat.read_text().split(") ", 1)[1].startswith("Z ")
+                )
+
         for cancel in (False, True, "after-deadline"):
             child_pid.unlink(missing_ok=True)
             process = subprocess.Popen(
@@ -1221,24 +1235,27 @@ commands=[["sh","-c","cat > received"]]
                     time.sleep(10.5)
                 if cancel:
                     process.terminate()
-                stdout, stderr = process.communicate(timeout=25)
+                transport_pid = None
+                communicate_started = time.monotonic()
+                try:
+                    stdout, stderr = process.communicate(timeout=25)
+                except subprocess.TimeoutExpired:
+                    if cancel:
+                        raise
+                    transport_pid = int(child_pid.read_text())
+                    assert_transport_stopped(transport_pid)
+                    # Scanner Nix startup may outlast the transport cleanup bound.
+                    remaining = 60 - (time.monotonic() - communicate_started)
+                    self.assertGreater(remaining, 0)
+                    stdout, stderr = process.communicate(timeout=remaining)
                 self.assertEqual(process.returncode, 143 if cancel else 0, stderr)
                 if cancel:
                     self.assertNotIn(b"distinct source blobs", stdout)
                 else:
                     self.assertIn(b"conservatively", stderr)
-                pid = int(child_pid.read_text())
-                # A reaped or zombie child cannot retain a running transport.
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    pass
-                else:
-                    stat = Path(f"/proc/{pid}/stat")
-                    self.assertTrue(
-                        stat.exists()
-                        and stat.read_text().split(") ", 1)[1].startswith("Z ")
-                    )
+                if transport_pid is None:
+                    transport_pid = int(child_pid.read_text())
+                assert_transport_stopped(transport_pid)
             finally:
                 if process.poll() is None:
                     process.terminate()
