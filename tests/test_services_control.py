@@ -1618,7 +1618,7 @@ Path('sequence-finished').write_text(str(signals))
                     Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1].split()[0]
                     != "Z"
                 )
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return False
         result = subprocess.run(
             ["/bin/ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
@@ -3073,6 +3073,61 @@ raise SystemExit(7)
         (self.state / "invalid.lease").write_text("incomplete JSON")
         self.run_control("stop", check=0)
         self.assertFalse(self.alive(pid))
+
+
+class ServiceProcessObservationTests(unittest.TestCase):
+    def test_process_disappearing_during_stat_read_is_absent(self):
+        import errno
+        import io
+
+        pid = 2147483000
+        target = Path(f"/proc/{pid}/stat")
+        original_exists = Path.exists
+        original_open = Path.open
+        calls = []
+
+        class DisappearingStat(io.StringIO):
+            def read(self, *args, **kwargs):
+                calls.append("read")
+                raise ProcessLookupError(errno.ESRCH, "process disappeared")
+
+        def exists(path):
+            return True if path == Path("/proc") else original_exists(path)
+
+        def opened_stat(path, *args, **kwargs):
+            if path == target:
+                calls.append("opened")
+                return DisappearingStat()
+            return original_open(path, *args, **kwargs)
+
+        with (
+            patch.object(Path, "exists", exists),
+            patch.object(Path, "open", opened_stat),
+        ):
+            self.assertFalse(ServiceControlTests.alive(self, pid))
+        self.assertEqual(calls, ["opened", "read"])
+
+        # Retain the helper's live/stopped/zombie distinction and fail closed on
+        # unrelated observation errors rather than accepting every OSError.
+        for state in ("R", "S", "T", "Z"):
+            with self.subTest(state=state):
+
+                def present_stat(path, *args, **kwargs):
+                    if path == target:
+                        return io.StringIO(f"{pid} (fixture) {state} 1 1 1")
+                    return original_open(path, *args, **kwargs)
+
+                with (
+                    patch.object(Path, "exists", exists),
+                    patch.object(Path, "open", present_stat),
+                ):
+                    self.assertEqual(ServiceControlTests.alive(self, pid), state != "Z")
+        with (
+            patch.object(Path, "exists", exists),
+            patch.object(Path, "open", side_effect=PermissionError("denied")),
+            self.assertRaises(PermissionError),
+        ):
+            ServiceControlTests.alive(self, pid)
 
 
 @unittest.skipUnless(CONTROL and BACKEND, "run just control-test for native ownership")
