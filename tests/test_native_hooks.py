@@ -373,11 +373,12 @@ check=["true"]
         self.hook("trojan-source", input=b"")
 
     def test_explicit_scan_preserves_inherited_update_lease(self):
+        # Include cold Nix hooks-profile startup in these finite caller bounds.
         with (self.base / "update-lifetime.lease").open("w+b") as lease:
             fcntl.flock(lease, fcntl.LOCK_SH)
             self.env["CHAINMAN_UPDATE_LEASE_FD"] = str(lease.fileno())
             revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
-            self.hook("trojan-source", revision, pass_fds=(lease.fileno(),), timeout=20)
+            self.hook("trojan-source", revision, pass_fds=(lease.fileno(),), timeout=60)
             (self.root / "source.ts").write_text("// harmless canary \u202e\n")
             self.git("add", "source.ts")
             self.git("commit", "-qm", "Scanner canary")
@@ -386,7 +387,7 @@ check=["true"]
                 "trojan-source",
                 revision,
                 pass_fds=(lease.fileno(),),
-                timeout=20,
+                timeout=60,
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0)
@@ -407,6 +408,7 @@ check=["true"]
         self.assertFalse(marker.exists())
 
     def test_update_runner_preserves_prepared_leases_through_explicit_scan(self):
+        # The lease regression also includes cold Nix hooks-profile startup.
         revision = self.git("rev-parse", "HEAD").stdout.decode().strip()
         pool = self.base / "updates"
         result = subprocess.run(
@@ -425,7 +427,7 @@ check=["true"]
             ],
             env=self.env,
             capture_output=True,
-            timeout=20,
+            timeout=60,
         )
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr).decode())
         self.assertEqual(list((pool / "v1").glob("candidate.*")), [])
