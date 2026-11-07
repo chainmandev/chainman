@@ -61,11 +61,14 @@ case "${CHAINMAN_ACTIVE_MODE:-}" in
                 ;;
         esac
         nix=${CHAINMAN_RUNTIME_NIX_BIN:?Chainman reentry requires its selected Nix}/nix
-        expected=$("$nix" --extra-experimental-features nix-command hash path "$runtime")
-        actual=$("$nix" --extra-experimental-features nix-command hash path "$active")
-        if [ "$actual" != "$expected" ]; then
-            echo 'Chainman reentry runtime differs from the verified Git source; leave this shell and enter the project again.' >&2
-            exit 2
+        # Identical validated store paths already name the same immutable tree.
+        if [ "$runtime" != "$active" ]; then
+            expected=$("$nix" --extra-experimental-features nix-command hash path "$runtime")
+            actual=$("$nix" --extra-experimental-features nix-command hash path "$active")
+            if [ "$actual" != "$expected" ]; then
+                echo 'Chainman reentry runtime differs from the verified Git source; leave this shell and enter the project again.' >&2
+                exit 2
+            fi
         fi
         runtime=$active
         ;;
