@@ -115,6 +115,31 @@ def runtime_nix_environment(env: dict[str, str]) -> None:
         )
 
 
+def bootstrap_interpreter(profile: Path) -> Path:
+    """Select Python from existing immutable Nix environment data, never a hook."""
+    selected = profile.resolve(strict=True)
+    if selected.parent != Path("/nix/store") or not selected.name.endswith(
+        "-nix-shell-env"
+    ):
+        raise ValueError("Internal entry requires its held bootstrap environment")
+    data = ad.table(json.loads(selected.read_text()), "Bootstrap environment")
+    variables = ad.table(data.get("variables", {}), "Bootstrap variables")
+    path = ad.table(variables.get("PATH", {}), "Bootstrap PATH")
+    if path.get("type") != "exported":
+        raise ValueError("Internal entry requires an exported bootstrap PATH")
+    for component in ad.text(path.get("value"), "Bootstrap PATH value").split(":"):
+        directory = Path(component)
+        if not component.startswith("/nix/store/") or directory.name != "bin":
+            raise ValueError("Internal bootstrap PATH must contain Nix tools")
+        executable = directory / "python3"
+        if executable.is_file() and os.access(executable, os.X_OK):
+            resolved = executable.resolve(strict=True)
+            if resolved.parts[:3] != ("/", "nix", "store"):
+                raise ValueError("Internal bootstrap interpreter must be immutable")
+            return resolved
+    raise ValueError("Internal bootstrap environment has no Python interpreter")
+
+
 @contextlib.contextmanager
 def nix_root_gate(pool: Path) -> Iterator[None]:
     """Serialize publication and collection, not the commands using the roots."""

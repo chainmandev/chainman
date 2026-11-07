@@ -118,6 +118,41 @@ class TransportTests(unittest.TestCase):
                 0,
             )
 
+    def test_internal_service_entry_uses_its_own_profile_transport(self):
+        selected = {"ports": ["127.0.0.1:8080:80"]}
+        cfg = {
+            "project": {"default_profile": "host"},
+            "profiles": {
+                "host": {},
+                "private": {"transport": selected},
+            },
+            "services": {"worker": {"profile": "private", "command": ["true"]}},
+        }
+        with (
+            patch.object(reentry, "validate"),
+            patch.object(reentry.workflows, "configuration", return_value=cfg),
+            patch.object(reentry.services, "execute_internal", return_value=0) as run,
+            patch.dict(
+                os.environ,
+                CHAINMAN_ACTIVE_MODE="container-nix",
+                CHAINMAN_ACTIVE_TRANSPORT=json.dumps(selected),
+            ),
+        ):
+            for action in ("_workflow-service", "_workflow-probe"):
+                with self.subTest(action=action):
+                    self.assertEqual(
+                        reentry.main(["/fixture", "--entry", action, "worker", "fp"]),
+                        0,
+                    )
+                    run.assert_called_with(Path("/fixture"), action, ["worker", "fp"])
+            with patch.dict(os.environ, CHAINMAN_ACTIVE_TRANSPORT='{"ports": []}'):
+                with self.assertRaisesRegex(
+                    ValueError, "different container transport"
+                ):
+                    reentry.main(
+                        ["/fixture", "--entry", "_workflow-service", "worker", "fp"]
+                    )
+
     def test_profile_entry_and_task_projection_exclude_installers(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

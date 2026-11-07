@@ -48,7 +48,7 @@ def service_context(
         yield selected, (lease.fileno(),)
 
 
-def validate(root: Path) -> None:
+def validate(root: Path, *, internal: bool = False) -> None:
     mode = os.environ.get("CHAINMAN_ACTIVE_MODE")
     if mode and os.environ.get("CHAINMAN_MODE", mode) != mode:
         raise ValueError("Start a different mode outside the active development shell")
@@ -56,7 +56,7 @@ def validate(root: Path) -> None:
     if (
         not active
         or Path(active).resolve() != root
-        or not os.environ.get("CHAINMAN_ACTIVE_PROFILE")
+        or (not internal and not os.environ.get("CHAINMAN_ACTIVE_PROFILE"))
     ):
         raise ValueError(
             "Nested entry belongs to a different project; leave the active shell first"
@@ -68,6 +68,41 @@ def validate(root: Path) -> None:
         raise ValueError(
             "Chainman pin changed; leave this shell and enter the project again"
         )
+    if internal:
+        validate_internal_runtime(pin)
+
+
+def validate_internal_runtime(pin: str) -> None:
+    """Retain the admitted interpreter/source closure without inventing a profile."""
+    import storage
+
+    if (
+        os.environ.get("CHAINMAN_INTERNAL_ENTRY") != "1"
+        or os.environ.get("CHAINMAN_ACTIVE_MODE") not in {"host-nix", "container-nix"}
+        or (os.environ.get("CHAINMAN_ACTIVE_MODE") == "container-nix")
+        != (os.environ.get("TOOLCHAIN_CONTAINER") == "1")
+        or os.environ.get("CHAINMAN_RUNTIME_STORAGE_ACTIVE") != pin
+        or os.environ.get("CHAINMAN_RUNTIME") != str(chainman.RUNTIME)
+        or not str(chainman.RUNTIME).startswith("/nix/store/")
+        or chainman.RUNTIME.is_symlink()
+    ):
+        raise ValueError("Internal entry requires its verified runtime handoff")
+    base = (
+        Path("/nix/var/nix/chainman-runtime-roots")
+        if os.environ.get("TOOLCHAIN_CONTAINER") == "1"
+        else Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+        / "chainman/runtime-roots"
+    )
+    if storage.runtime_check([str(base), pin, str(chainman.RUNTIME)]) != 0:
+        raise ValueError("Internal entry requires its inherited runtime lease")
+    bootstrap = base / storage.POOL / pin / "bootstrap"
+    interpreter = Path(sys.executable).resolve(strict=True)
+    if (
+        Path(os.environ.get("CHAINMAN_RUNTIME_PYTHON", "")).resolve(strict=True)
+        != interpreter
+        or tc.bootstrap_interpreter(bootstrap) != interpreter
+    ):
+        raise ValueError("Internal entry requires its held bootstrap interpreter")
 
 
 def borrow(root: Path, task: str) -> bool:
@@ -122,12 +157,18 @@ def borrow(root: Path, task: str) -> bool:
 
 def main(arguments: list[str]) -> int:
     root = Path(arguments[0]).resolve()
-    validate(root)
     args = arguments[1:]
     if args[:1] == ["--entry"]:
         args = args[1:]
     else:
         args = ["run", *args]
+    internal = args[:1] in (["_workflow-service"], ["_workflow-probe"])
+    if internal:
+        if len(args) != 3:
+            raise ValueError("Internal service entry requires its name and fingerprint")
+        validate(root, internal=True)
+    else:
+        validate(root)
     if args == ["hooks", "config"]:
         # This reads declarations only; it needs neither profile transport nor
         # setup admission, and cannot install or execute repository hooks.
@@ -161,7 +202,14 @@ def main(arguments: list[str]) -> int:
         import execution_transport
 
         cfg = workflows.configuration(root)
-        if args[:1] == ["run"] and len(args) >= 2:
+        if internal:
+            declarations = services.declarations(root, cfg)
+            if args[1] not in declarations:
+                raise ValueError("Internal entry requires a declared service")
+            selected_transport = execution_transport.effective(
+                cfg, declarations[args[1]]
+            )
+        elif args[:1] == ["run"] and len(args) >= 2:
             selected_transport = execution_transport.effective(
                 cfg, workflows.declarations(cfg, "tasks")[args[1]]
             )
@@ -186,6 +234,12 @@ def main(arguments: list[str]) -> int:
             raise ValueError(
                 "Nested entry requires different container transport; start it from the host"
             )
+    if internal:
+        # The handoff retains bootstrap tools, not the service's environment.
+        # Its actual declared profile still enters through execute_internal.
+        os.environ.pop("CHAINMAN_ACTIVE_PROFILE", None)
+        os.environ.pop("CHAINMAN_ACTIVE_FINGERPRINT", None)
+        return services.execute_internal(root, args[0], args[1:])
     if args[:1] == ["run"] and len(args) >= 2:
         borrowed = borrow(root, args[1])
         tail = args[2:]

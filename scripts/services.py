@@ -784,6 +784,36 @@ def export(root: Path, arguments: list[str]) -> int:
         ):
             if name in os.environ:
                 forwarded[name] = os.environ[name]
+    internal_forwarded: dict[str, str] = {}
+    if mode == "host-nix" and str(chainman.RUNTIME).startswith("/nix/store/"):
+        import git_runtime
+        import storage
+
+        # The native owner forwards the live runtime lease separately. These
+        # explicit inputs are revalidated, and confer no active service profile.
+        pin = git_runtime.pin(
+            tc.regular_input(tc.configuration_root(root), "chainman.lock")
+        )
+        entry = (
+            Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+            / "chainman/runtime-roots"
+            / storage.POOL
+            / pin
+        )
+        paths, _ = storage.inherited()
+        if entry in paths and storage.receipt(entry)["kind"] == "runtime":
+            if (entry / "source").readlink() != chainman.RUNTIME:
+                raise ValueError("Internal runtime lease changed its source")
+            internal_forwarded.update(
+                CHAINMAN_INTERNAL_ENTRY="1",
+                CHAINMAN_ROOT=str(root),
+                CHAINMAN_RUNTIME=str(chainman.RUNTIME),
+                CHAINMAN_RUNTIME_PYTHON=str(
+                    tc.bootstrap_interpreter(entry / "bootstrap")
+                ),
+                CHAINMAN_ACTIVE_PIN=pin,
+                CHAINMAN_ACTIVE_MODE=mode,
+            )
     declared = declarations(root, cfg)
     fingerprint = config_fingerprint(root, cfg, env=dict(os.environ, **planning_env))
     lifecycle_fingerprint = config_fingerprint(
@@ -934,7 +964,9 @@ def export(root: Path, arguments: list[str]) -> int:
             }
         else:
             launch = command(
-                [launcher, "_workflow-service", name, fingerprint], root, env
+                [launcher, "_workflow-service", name, fingerprint],
+                root,
+                dict(env, **internal_forwarded) if mode == "host-nix" else env,
             )
             ownership = None
             if mode == "container-nix":
@@ -1047,7 +1079,13 @@ def export(root: Path, arguments: list[str]) -> int:
                     lifecycle_fingerprint,
                 ]
             if "http_get" not in probe:
-                prepared_probe["command"] = command(probe_command, service_root, env)
+                prepared_probe["command"] = command(
+                    probe_command,
+                    service_root,
+                    dict(env, **internal_forwarded)
+                    if mode == "host-nix" and "container" not in spec
+                    else env,
+                )
             value["readiness"] = prepared_probe
         if "shutdown_command" in spec:
             shutdown_argv = [
