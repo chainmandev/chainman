@@ -2184,8 +2184,10 @@ check=["true"]
             arguments.append("--force")
         if no_verify:
             arguments.append("--no-verify")
+        # Like candidate_export_lifecycle, this can prepare distinct pinned
+        # native runtimes and toolchains.
         result = self.run_bootstrap(
-            action, *arguments, check=not reject or force or no_verify
+            action, *arguments, check=not reject or force or no_verify, timeout=600
         )
         if export_candidate:
             self.assertEqual(json.loads(result.stdout)["outcome"], "verified_success")
@@ -2254,7 +2256,7 @@ check=["true"]
                 ],
                 check=True,
             )
-            result = self.run_bootstrap(action, f"resume={candidates[0]}")
+            result = self.run_bootstrap(action, f"resume={candidates[0]}", timeout=600)
             self.assertNotIn("fixture phase: resolve", result.stderr)
         accepted = json.loads(result.stdout)
         self.assertEqual(
