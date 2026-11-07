@@ -44,19 +44,66 @@ func verifyAsset(path, digest string) error {
 		return err
 	}
 	defer f.Close()
+	_, err = verifyAssetFile(f, digest)
+	return err
+}
+
+func verifyAssetFile(f *os.File, digest string) (os.FileInfo, error) {
 	st, err := f.Stat()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err = validateAssetInfo(path, st); err != nil {
-		return err
+	if err = validateAssetInfo(f.Name(), st); err != nil {
+		return nil, err
 	}
 	hash := sha256.New()
 	if _, err = io.Copy(hash, io.LimitReader(f, 100<<20+1)); err != nil {
-		return err
+		return nil, err
 	}
 	if hex.EncodeToString(hash.Sum(nil)) != digest {
-		return fmt.Errorf("cached controller executable failed integrity check: %s", path)
+		return nil, fmt.Errorf("cached controller executable failed integrity check: %s", f.Name())
+	}
+	return st, nil
+}
+
+// Both files were opened without following links. Only an authenticated inode
+// match can reuse the destination's content check while the pool gate is held.
+func verifyAssetPair(destination, shared *os.File, digest string) (os.FileInfo, error) {
+	var verified os.FileInfo
+	var err error
+	if destination != nil {
+		verified, err = verifyAssetFile(destination, digest)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if shared == nil {
+		return nil, nil
+	}
+	info, err := shared.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err = validateAssetInfo(shared.Name(), info); err != nil {
+		return nil, err
+	}
+	if verified != nil && os.SameFile(verified, info) {
+		return verified, nil
+	}
+	_, err = verifyAssetFile(shared, digest)
+	return nil, err
+}
+
+func verifyAssetName(path string, verified os.FileInfo) error {
+	current, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if err = validateAssetInfo(path, current); err != nil {
+		return err
+	}
+	if !os.SameFile(verified, current) {
+		return fmt.Errorf("cached executable changed during verification: %s", path)
 	}
 	return nil
 }
@@ -68,9 +115,12 @@ func installServiceAsset(assets, digest string, data []byte) (string, error) {
 
 func installServiceAssetLink(assets, digest string, data []byte, link func(string, string) error) (string, error) {
 	destination := filepath.Join(assets, digest)
-	destinationErr := verifyAsset(destination, digest)
+	destinationFile, destinationErr := os.OpenFile(destination, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if destinationErr != nil && !os.IsNotExist(destinationErr) {
 		return "", destinationErr
+	}
+	if destinationFile != nil {
+		defer destinationFile.Close()
 	}
 	pool := filepath.Join(filepath.Dir(filepath.Dir(assets)), ".assets-v1")
 	if err := existingPrivate(filepath.Dir(pool)); err != nil {
@@ -85,15 +135,28 @@ func installServiceAssetLink(assets, digest string, data []byte, link func(strin
 	}
 	defer gate.Close()
 	shared := filepath.Join(pool, digest)
-	if err = verifyAsset(shared, digest); os.IsNotExist(err) {
-		err = hookWrite(shared, data, 0700)
+	sharedFile, err := os.OpenFile(shared, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil && !os.IsNotExist(err) {
+		return "", err
 	}
+	if sharedFile != nil {
+		defer sharedFile.Close()
+	}
+	verified, err := verifyAssetPair(destinationFile, sharedFile, digest)
 	if err != nil {
 		return "", err
 	}
-	if a, err := os.Stat(shared); err == nil {
-		if b, err := os.Stat(destination); err == nil && os.SameFile(a, b) {
-			return destination, nil
+	if verified != nil {
+		for _, path := range []string{destination, shared} {
+			if err = verifyAssetName(path, verified); err != nil {
+				return "", err
+			}
+		}
+		return destination, nil
+	}
+	if sharedFile == nil {
+		if err = hookWrite(shared, data, 0700); err != nil {
+			return "", err
 		}
 	}
 	temporary, err := os.CreateTemp(assets, ".asset-link-")

@@ -1259,9 +1259,14 @@ func persistTools(p *Plan) (string, error) {
 		}
 	}
 	installed := []string{}
-	sources := []string{self, p.Backend}
-	if p.Watcher != "" {
-		sources = append(sources, p.Watcher)
+	// Empty local scopes retain the native recovery tool, but only their
+	// service-bearing resource scopes need a controller or watcher executable.
+	sources := []string{self}
+	if len(p.Services) > 0 {
+		sources = append(sources, p.Backend)
+		if p.Watcher != "" {
+			sources = append(sources, p.Watcher)
+		}
 	}
 	for _, source := range sources {
 		f, e := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
@@ -1289,9 +1294,11 @@ func persistTools(p *Plan) (string, error) {
 		}
 		installed = append(installed, destination)
 	}
-	p.Backend = installed[1]
-	if p.Watcher != "" {
-		p.Watcher = installed[2]
+	if len(p.Services) > 0 {
+		p.Backend = installed[1]
+		if p.Watcher != "" {
+			p.Watcher = installed[2]
+		}
 	}
 	return installed[0], nil
 }
