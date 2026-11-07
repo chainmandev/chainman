@@ -136,6 +136,114 @@ Path(sys.argv[1]+'.json').write_text(json.dumps({'profile':os.environ['CHAINMAN_
                     {"profile": "tools", "runtime": str(self.runtime), "leased": True},
                 )
 
+    def recording_nix(self, *, reject_hashes=False):
+        selected = self.root / "selected-nix"
+        selected.mkdir()
+        hashes = self.root / "runtime-hashes"
+        queries = self.root / "bootstrap-queries"
+        real_nix = Path(NIX).resolve()
+        for name, body in (
+            (
+                "nix",
+                'if [ "${3:-}" = hash ] && [ "${4:-}" = path ]; then\n'
+                + '    printf "%s\\n" "$5" >> '
+                + shlex.quote(str(hashes))
+                + "\n"
+                + ("    exit 91\n" if reject_hashes else "")
+                + "fi\nexec "
+                + shlex.quote(str(real_nix))
+                + ' "$@"\n',
+            ),
+            (
+                "nix-store",
+                'if [ "${1:-}" = --query ] && [ "${2:-}" = --requisites ]; then\n'
+                + '    printf "%s\\n" "$3" >> '
+                + shlex.quote(str(queries))
+                + "\nfi\nexec "
+                + shlex.quote(str(real_nix.with_name("nix-store")))
+                + ' "$@"\n',
+            ),
+        ):
+            executable = selected / name
+            executable.write_text("#!/bin/sh\nset -eu\n" + body)
+            executable.chmod(0o700)
+        return dict(self.env, CHAINMAN_RUNTIME_NIX_BIN=str(selected)), hashes, queries
+
+    def test_identical_immutable_runtime_skips_only_redundant_hashes(self):
+        env, hashes, queries = self.recording_nix(reject_hashes=True)
+        for action, record in (
+            ("_workflow-service", "service"),
+            ("_workflow-probe", "probe"),
+        ):
+            with self.subTest(action=action):
+                result = self.child(action, env=env)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads((self.root / (record + ".json")).read_text()),
+                    {"profile": "tools", "runtime": str(self.runtime), "leased": True},
+                )
+        self.assertFalse(hashes.exists(), "An immutable tree was hashed against itself")
+        self.assertEqual(
+            queries.read_text().splitlines(),
+            [str((self.base / "bootstrap").resolve())] * 2,
+        )
+
+    def test_fresh_export_keeps_real_runtime_hash_comparison(self):
+        env, hashes, queries = self.recording_nix()
+        exported = self.base / "source"
+        entry = exported / "bootstrap/reenter.sh"
+        argv = [
+            str(entry),
+            str(self.root),
+            "--entry",
+            "_workflow-service",
+            "worker",
+            self.fingerprint,
+        ]
+        result = tc.managed_run(
+            argv,
+            env=env,
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "service.json").is_file())
+        self.assertEqual(
+            hashes.read_text().splitlines(), [str(exported), str(self.runtime)]
+        )
+        self.assertEqual(
+            queries.read_text().splitlines(), [str((self.base / "bootstrap").resolve())]
+        )
+        (self.root / "service.json").unlink()
+        version = exported / "VERSION"
+        original = version.read_bytes()
+        try:
+            version.write_bytes(original + b"\ndisposable mismatched source\n")
+            rejected = tc.managed_run(
+                argv,
+                env=env,
+                cwd=self.root,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+            self.assertNotEqual(rejected.returncode, 0, rejected.stderr)
+            self.assertIn(
+                "runtime differs from the verified Git source", rejected.stderr
+            )
+            self.assertFalse((self.root / "service.json").exists())
+            self.assertEqual(
+                hashes.read_text().splitlines(),
+                [str(exported), str(self.runtime)] * 2,
+            )
+            self.assertEqual(len(queries.read_text().splitlines()), 1)
+        finally:
+            version.write_bytes(original)
+
     def test_tampered_or_unleased_handoff_never_runs_payload(self):
         cases = {
             "other-root": {"CHAINMAN_ROOT": str(self.root / "other")},
