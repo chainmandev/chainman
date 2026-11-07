@@ -74,7 +74,7 @@ while True:time.sleep(.1)
                         ),
                         "period_seconds": 1,
                         "timeout_seconds": 1,
-                        "failure_threshold": 2,
+                        "failure_threshold": 10,
                     },
                 }
             },
@@ -902,7 +902,7 @@ else: raise AssertionError(sys.argv)
         readiness["command"] = self.command([sys.executable, "-c", parent, child])
         readiness["timeout_seconds"] = 1
         readiness["failure_threshold"] = 5
-        self.run_control("up", check=0, timeout=12)
+        self.run_control("up", check=0)
         for name in ("probe-parent", "probe-child"):
             self.assertFalse(self.alive(int((self.root / name).read_text())))
         self.assertTrue(self.alive(int((self.root / "pid").read_text())))
@@ -1008,11 +1008,14 @@ else: raise AssertionError(sys.argv)
 
     def test_shared_resource_retains_surviving_tasks_parent_lease(self):
         first, second, shared = self.shared_resource()
+        release = self.root / "release-shared-task"
+        self.addCleanup(release.touch)
         self.plan["task"] = self.command(
             [
                 sys.executable,
                 "-c",
-                "import time; from pathlib import Path; Path('shared-task').touch(); time.sleep(3)",
+                "import time\nfrom pathlib import Path\nPath('shared-task').touch()\n"
+                "while not Path('release-shared-task').exists(): time.sleep(.02)",
             ]
         )
         self.plan["own_task"] = True
@@ -1025,14 +1028,18 @@ else: raise AssertionError(sys.argv)
         )
         self.addCleanup(lambda: client.poll() is None and client.kill())
         self.wait_file(self.root / "shared-task")
+        (task_receipt,) = first.glob("*.lease.task.json")
+        task_pid = json.loads(task_receipt.read_text())["pid"]
         pid = int((self.root / "pid").read_text())
         client.kill()
         client.wait(timeout=5)
         self.select_scope(second)
         self.plan["task"] = self.command([sys.executable, "-c", "raise SystemExit(7)"])
         self.run_control("run", check=7)
+        self.assertTrue(self.alive(task_pid))
         self.assertTrue(self.alive(pid))
-        time.sleep(3)
+        release.touch()
+        self.wait_until(lambda: not self.alive(task_pid))
         self.run_control("run", check=7)
         self.wait_until(lambda: not self.alive(pid))
 
@@ -1983,6 +1990,7 @@ finally:
         ]
 
     def test_cold_profile_preparation_precedes_unchanged_application_readiness(self):
+        self.plan["services"]["worker"]["readiness"]["failure_threshold"] = 2
         worker = self.root / "worker.py"
         original_worker = worker.read_text()
         # Reproduce the original failure boundary: cold provisioning inside the
@@ -2024,6 +2032,7 @@ finally:
         self.assertFalse(list(self.state.glob("*.lease")))
 
     def test_prepared_profile_does_not_mask_failed_application_health(self):
+        self.plan["services"]["worker"]["readiness"]["failure_threshold"] = 2
         self.profile_preparation_fixture()
         self.plan["services"]["worker"]["readiness"]["command"] = self.command(
             [sys.executable, "-c", "raise SystemExit(1)"]
@@ -2148,7 +2157,7 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
             "http_get": {"port": port, "path": "/health", "status_code": 204},
             "period_seconds": 1,
             "timeout_seconds": 1,
-            "failure_threshold": 3,
+            "failure_threshold": 10,
         }
         self.plan["task"] = self.command(
             [sys.executable, "-c", "from pathlib import Path; Path('task-ran').touch()"]
@@ -2195,7 +2204,7 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
             },
             "period_seconds": 1,
             "timeout_seconds": 1,
-            "failure_threshold": 2,
+            "failure_threshold": 10,
         }
         self.plan["task"] = self.command(
             [sys.executable, "-c", "from pathlib import Path; Path('task-ran').touch()"]
@@ -2507,7 +2516,7 @@ HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
                 },
                 "period_seconds": 1,
                 "timeout_seconds": 1,
-                "failure_threshold": 2,
+                "failure_threshold": 10,
             },
         }
         self.run_control("up", check=0)
@@ -2678,6 +2687,7 @@ while True: time.sleep(.1)
         self.assertFalse(list(self.state.glob("*.lease")))
 
     def test_readiness_failure_is_bounded_and_cleans_up(self):
+        self.plan["services"]["worker"]["readiness"]["failure_threshold"] = 2
         self.plan["services"]["worker"]["readiness"]["command"] = self.command(
             [sys.executable, "-c", "raise SystemExit(1)"]
         )

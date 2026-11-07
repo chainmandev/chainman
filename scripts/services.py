@@ -1395,7 +1395,15 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
     if name not in entries or "command" not in entries[name] or arguments:
         raise ValueError("Invalid internal service execution")
     spec = entries[name]
-    with tc.operation(root, exclusive=False, new_execution=True, automatic_prune=False):
+    # Global cache maintenance belongs to ordinary operations, outside bounded
+    # service startup and readiness.
+    with tc.operation(
+        root,
+        exclusive=False,
+        new_execution=True,
+        automatic_prune=False,
+        maintain_downloads=False,
+    ):
         env = tc.environment(root)
         if context_task:
             env = workflows.context_environment(root, cfg, context_task, env)
