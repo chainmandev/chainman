@@ -2181,12 +2181,20 @@ class JavaScriptTests(unittest.TestCase):
             result = execute(*args, **kwargs)
             if "--no-frozen-lockfile" in args[2]:
                 return subprocess.CompletedProcess(
-                    args[2], 41, "", "neutral normalization failure"
+                    args[2],
+                    41,
+                    "ERR_PNPM_EXOTIC_SUBDEP https://example.invalid/fixture-native-secret",
+                    "fixture-native-secret ERR_PNPM_EXOTIC_SUBDEP",
                 )
             return result
 
-        with self.assertRaisesRegex(ValueError, "normalization"):
+        with self.assertRaises(ValueError) as failure:
             self.resolve(fail)
+        self.assertEqual(
+            str(failure.exception),
+            "pnpm lock normalization rejected restored declarations "
+            "(exit 41; ERR_PNPM_EXOTIC_SUBDEP)",
+        )
         self.assertEqual(calls, ["resolve", "normalize"])
         self.assertEqual(
             {path: (path.read_bytes(), path.stat().st_mode) for path in original},
@@ -3015,7 +3023,9 @@ class JavaScriptTests(unittest.TestCase):
                 ):
                     js.audit(self.root, self.spec, before, self.policy, self.now)
 
-    def test_transitive_source_resolution_option_is_scoped_to_fresh_resolution(self):
+    def test_transitive_source_resolution_option_covers_disposable_resolution_phases(
+        self,
+    ):
         item, body, lock, data = self.transitive_source_fixture()
         calls = []
 
@@ -3031,9 +3041,11 @@ class JavaScriptTests(unittest.TestCase):
             result = self.resolve(execute)
         self.assertEqual(result["resolution_attempts"], 1)
         self.assertEqual(len(calls), 3)
-        self.assertIn("--config.block-exotic-subdeps=false", calls[0])
-        for command in calls[1:]:
-            self.assertNotIn("--config.block-exotic-subdeps=false", command)
+        self.assertIn("--no-frozen-lockfile", calls[1])
+        self.assertIn("--frozen-lockfile", calls[2])
+        for command in calls[:2]:
+            self.assertIn("--config.block-exotic-subdeps=false", command)
+        self.assertNotIn("--config.block-exotic-subdeps=false", calls[2])
         settings = js.Workspace(self.root, self.spec).settings
         self.assertNotIn("blockExoticSubdeps", settings)
 
