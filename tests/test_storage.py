@@ -20,6 +20,7 @@ from unittest.mock import patch
 from terminal_fixture import (
     terminal_outer_stack,
     terminal_process_snapshot,
+    stopped_terminal_input,
     wait_terminal,
     write_terminal,
 )
@@ -40,6 +41,7 @@ while True:
         # Darwin returns EINTR after SIGTTOU stops a background ioctl.
         if error.args[0] != errno.EINTR:
             raise
+print('CHILD-PID:' + str(os.getpid()), flush=True)
 while True:
     assert not termios.tcgetattr(0)[3] & termios.ECHO
     print('CHILD-READY', flush=True)
@@ -109,6 +111,7 @@ def exercise_job_control(
     pid = process.pid
     output = b""
     transcript = bytearray()
+    reader = None
 
     def receive(data):
         nonlocal output
@@ -130,9 +133,10 @@ def exercise_job_control(
                 + diagnostics()
             )
 
-    def expect(marker):
+    def expect(marker, deadline=None):
         nonlocal output
-        deadline = time.monotonic() + timeout
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         while marker not in output:
             if marker == b"CHILD-READY\r\n":
                 reject_early_exit()
@@ -145,11 +149,18 @@ def exercise_job_control(
     def send(value):
         receive(write_terminal(master, value, 5))
 
-    def wait_stopped_job():
-        deadline = time.monotonic() + timeout
+    def send_stopped(value, deadline):
+        if reader is None:
+            send(value)  # Initial background startup has not identified a reader yet.
+        else:
+            stopped_terminal_input(master, reader, deadline, receive, send, value)
+
+    def wait_stopped_job(deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + timeout
         while True:
-            send(b"jobs\n")
-            snapshot = expect(b"PROMPT> ")
+            send_stopped(b"jobs\n", deadline)
+            snapshot = expect(b"PROMPT> ", deadline)
             if b"Stopped" in snapshot:
                 return
             reject_early_exit()
@@ -170,20 +181,36 @@ def exercise_job_control(
             test.assertEqual(os.tcgetpgrp(master), pid)
             stopped()
             send(b"fg\n")
-        expect(b"CHILD-READY\r\n")
+        ready_output = expect(b"CHILD-READY\r\n")
+        # Keep the original startup/early-exit check and derive identity from its output.
+        reported = re.findall(rb"(?:^|\r\n)CHILD-PID:([1-9][0-9]*)\r\n", ready_output)
+        test.assertEqual(len(reported), 1, "Missing or ambiguous terminal reader PID")
+        reader_pid = int(reported[0])
+        test.assertEqual(os.getsid(reader_pid), pid)
+        reader = (reader_pid, pid, os.getpgid(reader_pid))
         timeout = min(timeout, 10)
-        for _ in range(2):
+        for cycle in range(1, 3):
             send(b"\x1a")
-            expect(b"PROMPT> ")
+            stopped_deadline = time.monotonic() + timeout
+            expect(b"PROMPT> ", stopped_deadline)
             test.assertEqual(os.tcgetpgrp(master), pid)
             stopped()
-            send(b"bg\n")
-            expect(b"PROMPT> ")
-            wait_stopped_job()
+            # Bash can report its direct child stopped before this reader stops.
+            # This is the known single-threaded Python payload, not a Go thread fence.
+            send_stopped(
+                f"bg; printf '\\nBG-ACK:{cycle}:%s\\n' \"$?\"\n".encode(),
+                stopped_deadline,
+            )
+            background_deadline = time.monotonic() + timeout
+            # The echoed command contains %s; only executed printf emits the 0.
+            expect(f"\r\nBG-ACK:{cycle}:0\r\n".encode(), background_deadline)
+            expect(b"PROMPT> ", background_deadline)
+            wait_stopped_job(background_deadline)
             test.assertEqual(os.tcgetpgrp(master), pid)
             stopped()
-            send(b"fg\ncontinue\n")
-            expect(b"CHILD-READY\r\n")
+            foreground_deadline = time.monotonic() + timeout
+            send_stopped(b"fg\ncontinue\n", foreground_deadline)
+            expect(b"CHILD-READY\r\n", foreground_deadline)
         send(b"\x03" if cancel else b"finish\n")
         expect(b"RESULT:130\r\n" if cancel else b"RESULT:7\r\n")
         expect(b"PROMPT> ")
@@ -247,6 +274,129 @@ class StorageTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.pool = self.root / "nix-just-downloads" / storage.POOL
+
+    def test_terminal_input_waits_for_reader_not_stopped_wrapper(self):
+        events = [("wrapper", "T")]
+        states = iter(("R", "S", "T"))
+        current = None
+
+        def snapshot(argv, **_options):
+            nonlocal current
+            self.assertEqual(argv, ["/bin/ps", "-p", "42", "-o", "pid=,pgid=,stat="])
+            current = next(states)
+            events.append(("reader", current))
+            return subprocess.CompletedProcess(argv, 0, stdout=f"42 41 {current}\n")
+
+        def send(value):
+            self.assertEqual(current, "T", "Shell input reached a still-running reader")
+            events.append(("input", value))
+
+        with (
+            patch("terminal_fixture.subprocess.run", side_effect=snapshot),
+            patch("terminal_fixture.os.getsid", return_value=41),
+            patch("terminal_fixture.os.getpgid", return_value=41),
+            patch("terminal_fixture.os.tcgetpgrp", return_value=41),
+            patch("terminal_fixture.select.select", return_value=([7], [], [])),
+            patch("terminal_fixture.os.read", return_value=b"pending output"),
+        ):
+            stopped_terminal_input(
+                7,
+                (42, 41, 41),
+                time.monotonic() + 10,
+                lambda data: events.append(("drain", data)),
+                send,
+                b"bg\n",
+            )
+        self.assertEqual(
+            [event for event in events if event[0] == "reader"],
+            [("reader", "R"), ("reader", "S"), ("reader", "T")],
+        )
+        self.assertEqual(events[-1], ("input", b"bg\n"))
+        self.assertEqual(sum(event[0] == "drain" for event in events), 2)
+
+    def test_terminal_input_rejects_changed_reader_without_sending(self):
+        sent = []
+        with patch("terminal_fixture.os.getsid", return_value=99):
+            with self.assertRaisesRegex(AssertionError, "ownership changed"):
+                stopped_terminal_input(
+                    7,
+                    (42, 41, 41),
+                    time.monotonic() + 10,
+                    lambda _data: None,
+                    sent.append,
+                    b"bg\n",
+                )
+        self.assertEqual(sent, [])
+
+    def test_terminal_input_expired_deadline_never_queries_or_sends(self):
+        sent = []
+        with (
+            patch("terminal_fixture.subprocess.run") as query,
+            patch("terminal_fixture.os.getsid") as session,
+        ):
+            with self.assertRaisesRegex(AssertionError, "Timed out"):
+                stopped_terminal_input(
+                    7,
+                    (42, 41, 41),
+                    time.monotonic() - 1,
+                    lambda _data: None,
+                    sent.append,
+                    b"bg\n",
+                )
+        query.assert_not_called()
+        session.assert_not_called()
+        self.assertEqual(sent, [])
+
+    def test_terminal_input_unavailable_or_malformed_state_never_sends(self):
+        for result in (OSError("unavailable"), "", "42 wrong T\n", "42 41\n"):
+            with self.subTest(result=result):
+                sent = []
+                query = (
+                    result
+                    if isinstance(result, OSError)
+                    else subprocess.CompletedProcess([], 0, stdout=result)
+                )
+                with (
+                    patch("terminal_fixture.os.getsid", return_value=41),
+                    patch("terminal_fixture.os.getpgid", return_value=41),
+                    patch(
+                        "terminal_fixture.subprocess.run",
+                        side_effect=query if isinstance(query, OSError) else None,
+                        return_value=query,
+                    ),
+                ):
+                    with self.assertRaises(AssertionError):
+                        stopped_terminal_input(
+                            7,
+                            (42, 41, 41),
+                            time.monotonic() + 10,
+                            lambda _data: None,
+                            sent.append,
+                            b"bg\n",
+                        )
+                self.assertEqual(sent, [])
+
+    def test_terminal_input_foreground_handoff_never_sends(self):
+        sent = []
+        with (
+            patch("terminal_fixture.os.getsid", return_value=41),
+            patch("terminal_fixture.os.getpgid", return_value=41),
+            patch("terminal_fixture.os.tcgetpgrp", return_value=99),
+            patch(
+                "terminal_fixture.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout="42 41 T\n"),
+            ),
+        ):
+            with self.assertRaisesRegex(AssertionError, "no longer owns"):
+                stopped_terminal_input(
+                    7,
+                    (42, 41, 41),
+                    time.monotonic() + 10,
+                    lambda _data: None,
+                    sent.append,
+                    b"bg\n",
+                )
+        self.assertEqual(sent, [])
 
     def test_terminal_result_is_recognized_after_background_prompt(self):
         for transcript in (

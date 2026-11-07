@@ -136,6 +136,58 @@ def terminal_modes(fd):
     return settings
 
 
+def stopped_terminal_input(master, reader, deadline, receive, send, value):
+    """Do not queue shell input while this fixture's Python reader can consume it."""
+    pid, session, group = reader
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                "Timed out waiting for the owned terminal reader to stop"
+            )
+        try:
+            if os.getsid(pid) != session or os.getpgid(pid) != group:
+                raise AssertionError("Terminal reader ownership changed")
+            result = subprocess.run(
+                ["/bin/ps", "-p", str(pid), "-o", "pid=,pgid=,stat="],
+                capture_output=True,
+                text=True,
+                timeout=min(2, remaining),
+                check=True,
+            )
+            fields = result.stdout.split()
+            if len(fields) != 3 or list(map(int, fields[:2])) != [pid, group]:
+                raise AssertionError("Owned terminal reader is absent or changed")
+            if os.getsid(pid) != session or os.getpgid(pid) != group:
+                raise AssertionError("Terminal reader ownership changed")
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            raise AssertionError(
+                "Could not inspect the owned terminal reader"
+            ) from error
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                "Timed out waiting for the owned terminal reader to stop"
+            )
+        if fields[2].startswith("T"):
+            try:
+                foreground = os.tcgetpgrp(master)
+            except OSError as error:
+                raise AssertionError(
+                    "Could not inspect the fixture terminal owner"
+                ) from error
+            if foreground != session:
+                raise AssertionError(
+                    "Interactive shell no longer owns the fixture terminal"
+                )
+            send(value)
+            return
+        # Reuse the caller's phase budget and keep its PTY output draining.
+        if select.select(
+            [master], [], [], max(0, min(0.1, deadline - time.monotonic()))
+        )[0]:
+            receive(os.read(master, 65536))
+
+
 def write_terminal(master, data, timeout):
     """Send input while draining echo/output, with a deadline on both directions."""
     deadline = time.monotonic() + timeout
