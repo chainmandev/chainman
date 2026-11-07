@@ -188,7 +188,7 @@ func TestCachedExecutableTamperingIsRejected(t *testing.T) {
 	if err := private(state); err != nil {
 		t.Fatal(err)
 	}
-	p := Plan{State: state, Backend: backend}
+	p := Plan{State: state, Backend: backend, Services: map[string]Service{"worker": {}}}
 	if _, err := persistTools(&p); err != nil {
 		t.Fatal(err)
 	}
