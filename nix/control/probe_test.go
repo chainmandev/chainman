@@ -9,6 +9,44 @@ import (
 	"testing"
 )
 
+func TestInternalProbeEntryAllowanceRejectsOtherCommands(t *testing.T) {
+	root := physicalTempDir(t)
+	command := Command{Argv: []string{"/fixture/launch", "_workflow-service", "web", "fixture"}, Directory: root}
+	p := Plan{Schema: 1, Root: root, State: physicalTempDir(t), Backend: "/bin/true", Fingerprint: "fixture-engine-identity", Services: map[string]Service{}, Requested: []string{"web"}, Task: command}
+	probe := Command{Argv: []string{"/fixture/launch", "_workflow-probe", "web", "fixture"}, Directory: root}
+	for _, tc := range []struct {
+		name  string
+		entry int
+		argv  []string
+		http  *HTTPProbe
+		valid bool
+	}{
+		{"host", 10, probe.Argv, nil, true},
+		{"container-nix", 10, []string{"/engine", "exec", "container", "/fixture/launch", "_workflow-probe", "web", "fixture"}, nil, true},
+		{"raw", 0, []string{"/bin/true"}, nil, true},
+		{"direct-container", 0, []string{"/engine", "exec", "container", "/bin/true"}, nil, true},
+		{"http", 0, nil, &HTTPProbe{Port: 8080, Path: "/", StatusCode: 200}, true},
+		{"negative", -1, probe.Argv, nil, false},
+		{"oversized", 11, probe.Argv, nil, false},
+		{"raw-marked", 10, []string{"/bin/true"}, nil, false},
+		{"direct-container-marked", 10, []string{"/engine", "exec", "container", "/bin/true"}, nil, false},
+		{"wrong-service", 10, []string{"/fixture/launch", "_workflow-probe", "other", "fixture"}, nil, false},
+		{"wrong-fingerprint", 10, []string{"/fixture/launch", "_workflow-probe", "web", "changed"}, nil, false},
+		{"http-marked", 10, nil, &HTTPProbe{Port: 8080, Path: "/", StatusCode: 200}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probeCommand := Command{Argv: tc.argv, Directory: root}
+			if tc.http != nil {
+				probeCommand = Command{}
+			}
+			p.Services["web"] = Service{Command: command, Restart: "no", Shutdown: 1, Readiness: &Probe{Command: probeCommand, HTTPGet: tc.http, Period: 1, Timeout: 2, Failures: 10, Entry: tc.entry}}
+			if err := validate(p); (err == nil) != tc.valid {
+				t.Fatalf("entry allowance validity: %v", err)
+			}
+		})
+	}
+}
+
 func TestWatchMarkerProbeDoesNotEnterTransientBuildContainer(t *testing.T) {
 	owner := &Container{Engine: "/missing/docker", Name: "transient-build", Token: strings.Repeat("a", 32)}
 	p := Plan{Root: "/fixture", State: "/fixture/state", Watcher: "/fixture/watcher", Services: map[string]Service{

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import sys
 import fcntl
 import stat
 import time
@@ -61,6 +62,7 @@ class Probe(TypedDict):
     period_seconds: int
     timeout_seconds: int
     failure_threshold: int
+    entry_seconds: NotRequired[int]
 
 
 class Watch(TypedDict):
@@ -1035,6 +1037,10 @@ def export(root: Path, arguments: list[str]) -> int:
                     if mode == "host-nix" and "container" not in spec
                     else env,
                 )
+                if "container" not in spec:
+                    # Bound runtime/config entry and remaining profile activation;
+                    # the internal worker starts the app deadline afterward.
+                    prepared_probe["entry_seconds"] = 10
             value["readiness"] = prepared_probe
         prepared[name] = value
         if "watch" in spec:
@@ -1394,10 +1400,25 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                     raise ValueError("Service has no readiness command")
                 # The application owns compiler lifetime. A readiness command
                 # uses its declared profile without starting another compiler.
+                # Start the app deadline inside the activated profile, after
+                # runtime/config entry and any Nix develop activation.
                 return chainman.execute(
                     root,
                     profile,
-                    strings(readiness["command"], "Readiness command"),
+                    [
+                        sys.executable,
+                        "-E",
+                        "-s",
+                        "-S",
+                        "-B",
+                        str(chainman.RUNTIME / "scripts/service_probe.py"),
+                        str(
+                            integer(
+                                readiness.get("timeout_seconds", 2), "Probe timeout"
+                            )
+                        ),
+                        *strings(readiness["command"], "Readiness command"),
+                    ],
                     env=env,
                     overrides=spec.get("environment", {}),
                     cwd=tc.contained(root, directory),

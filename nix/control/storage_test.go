@@ -166,6 +166,192 @@ func TestServiceStorageRetiresOrphanWithoutReplacingGate(t *testing.T) {
 	}
 }
 
+func TestAutomaticServiceStorageDoesNotRewriteRetainedCopies(t *testing.T) {
+	base := physicalTempDir(t)
+	p := storageFixture(t, base, "a")
+	p.Backend = storageAsset(t, p, "retained binary")
+	if err := atomic(filepath.Join(p.State, "plan.json"), p); err != nil {
+		t.Fatal(err)
+	}
+	// A valid independent copy can remain after a filesystem without hardlinks.
+	copy := p.Backend + ".copy"
+	if err := os.WriteFile(copy, []byte("retained binary"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(copy, p.Backend); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Stat(p.Backend)
+	serviceStorageMaintenance(base)
+	after, err := os.Stat(p.Backend)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("automatic collection rewrote a retained executable", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, ".assets-v1", ".maintenance.json")); err != nil {
+		t.Fatal("automatic collection did not finish", err)
+	}
+	// Explicit prune retains its thorough verification and deduplication behavior.
+	if _, _, err := serviceStorage(base, true, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	shared, _ := os.Stat(filepath.Join(base, ".assets-v1", filepath.Base(p.Backend)))
+	after, _ = os.Stat(p.Backend)
+	if !os.SameFile(shared, after) {
+		t.Fatal("explicit prune did not deduplicate the retained copy")
+	}
+}
+
+func TestAutomaticServiceStorageLeavesContentChecksAtLaunchAndAudit(t *testing.T) {
+	base := physicalTempDir(t)
+	p := storageFixture(t, base, "a")
+	p.Backend = storageAsset(t, p, "binary")
+	if err := atomic(filepath.Join(p.State, "plan.json"), p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Backend, []byte("changed"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	serviceStorageMaintenance(base)
+	if _, err := os.Stat(p.Backend); err != nil {
+		t.Fatal("automatic collection removed a retained asset", err)
+	}
+	if _, err := installServiceAsset(filepath.Join(p.State, "assets"), filepath.Base(p.Backend), []byte("binary")); err == nil {
+		t.Fatal("launch installation accepted changed executable content")
+	}
+	for _, apply := range []bool{false, true} {
+		if _, removed, err := serviceStorage(base, apply, false, time.Now()); err == nil || len(removed) != 0 {
+			t.Fatalf("explicit inspection accepted corruption: apply=%v removed=%v err=%v", apply, removed, err)
+		}
+	}
+}
+
+func TestAutomaticServiceStorageRetainsMetadataChecks(t *testing.T) {
+	for _, kind := range []string{"permissions", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			base := physicalTempDir(t)
+			p := storageFixture(t, base, "a")
+			p.Backend = storageAsset(t, p, "binary")
+			if err := atomic(filepath.Join(p.State, "plan.json"), p); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "permissions" {
+				if err := os.Chmod(p.Backend, 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				outside := filepath.Join(base, "outside")
+				if err := os.Rename(p.Backend, outside); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, p.Backend); err != nil {
+					t.Fatal(err)
+				}
+			}
+			serviceStorageMaintenance(base)
+			if _, err := os.Lstat(p.Backend); err != nil {
+				t.Fatal("invalid retained asset was removed", err)
+			}
+			if _, err := os.Stat(filepath.Join(base, ".assets-v1", ".maintenance.json")); !os.IsNotExist(err) {
+				t.Fatal("invalid retained metadata was stamped as complete", err)
+			}
+		})
+	}
+}
+
+func TestAutomaticServiceStorageDoesNotRemoveCorruptEligibleAssets(t *testing.T) {
+	base := physicalTempDir(t)
+	p := storageFixture(t, base, "a")
+	path := storageAsset(t, p, "old binary")
+	if err := os.WriteFile(path, []byte("changed"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-storageAge - time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	serviceStorageMaintenance(base)
+	for _, retained := range []string{path, filepath.Join(base, ".assets-v1", filepath.Base(path))} {
+		if _, err := os.Stat(retained); err != nil {
+			t.Fatal("eligible content failed verification but was removed", err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(base, ".assets-v1", ".maintenance.json")); !os.IsNotExist(err) {
+		t.Fatal("failed eligible integrity check was stamped complete", err)
+	}
+}
+
+func TestAutomaticServiceStorageCollectsOldAssetsAndPreservesRecovery(t *testing.T) {
+	base := physicalTempDir(t)
+	p := storageFixture(t, base, "a")
+	p.Backend = storageAsset(t, p, "current")
+	if err := atomic(filepath.Join(p.State, "plan.json"), p); err != nil {
+		t.Fatal(err)
+	}
+	oldAsset := storageAsset(t, p, "old")
+	fresh := storageAsset(t, p, "fresh")
+	recovery := storageFixture(t, base, "b")
+	recoverable := storageAsset(t, recovery, "recovery")
+	if err := atomic(filepath.Join(recovery.State, "task.owner.json"), Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-storageAge - time.Hour)
+	for _, path := range []string{p.Backend, oldAsset, recoverable} {
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gate, _ := os.Stat(filepath.Join(p.State, "gate"))
+	serviceStorageMaintenance(base)
+	for _, path := range []string{oldAsset, filepath.Join(base, ".assets-v1", filepath.Base(oldAsset))} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("old unreferenced asset survived automatic collection", path, err)
+		}
+	}
+	for _, path := range []string{p.Backend, fresh, recoverable, filepath.Join(recovery.State, "task.owner.json")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("current, fresh or recovery state was removed", path, err)
+		}
+	}
+	after, _ := os.Stat(filepath.Join(p.State, "gate"))
+	if !os.SameFile(gate, after) {
+		t.Fatal("automatic collection replaced admission inode")
+	}
+}
+
+func TestAutomaticServiceStorageRetriesAfterPoolContention(t *testing.T) {
+	base := physicalTempDir(t)
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
+	pool := filepath.Join(base, ".assets-v1")
+	if err := private(pool); err != nil {
+		t.Fatal(err)
+	}
+	gate, err := locked(filepath.Join(pool, ".gate"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Close()
+	finished := make(chan struct{})
+	go func() { serviceStorageMaintenance(base); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		gate.Close()
+		<-finished
+		t.Fatal("automatic collection waited for an occupied asset pool")
+	}
+	stamp := filepath.Join(pool, ".maintenance.json")
+	if _, err := os.Stat(stamp); !os.IsNotExist(err) {
+		t.Fatal("contended collection was stamped as complete", err)
+	}
+	gate.Close()
+	serviceStorageMaintenance(base)
+	if _, err := os.Stat(stamp); err != nil {
+		t.Fatal("automatic collection did not retry after contention", err)
+	}
+}
+
 func TestStorageLeaseForwardingUsesIndependentDescription(t *testing.T) {
 	pool := filepath.Join(physicalTempDir(t), storagePool)
 	entry := filepath.Join(pool, "downloads")

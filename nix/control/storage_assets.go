@@ -31,6 +31,13 @@ type storageEntry struct {
 	Error    string `json:"error,omitempty"`
 }
 
+func validateAssetInfo(path string, st os.FileInfo) error {
+	if !st.Mode().IsRegular() || st.Size() > 100<<20 || st.Mode().Perm() != 0700 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
+		return fmt.Errorf("invalid executable asset: %s", path)
+	}
+	return nil
+}
+
 func verifyAsset(path, digest string) error {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -41,8 +48,8 @@ func verifyAsset(path, digest string) error {
 	if err != nil {
 		return err
 	}
-	if !st.Mode().IsRegular() || st.Size() > 100<<20 || st.Mode().Perm() != 0700 || int(st.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
-		return fmt.Errorf("invalid executable asset: %s", path)
+	if err = validateAssetInfo(path, st); err != nil {
+		return err
 	}
 	hash := sha256.New()
 	if _, err = io.Copy(hash, io.LimitReader(f, 100<<20+1)); err != nil {
@@ -199,7 +206,7 @@ func storageAssetReferences(state string) (map[string]bool, error) {
 	return refs, nil
 }
 
-func storageScope(p Plan, apply, all bool, now time.Time) (row storageEntry, removed []string) {
+func storageScope(p Plan, apply, all, automatic bool, now time.Time) (row storageEntry, removed []string) {
 	row.Path = p.State
 	row.Reason = "current service references"
 	fail := func(err error) { row.Error = err.Error(); row.Eligible = false; row.Reason = "inspection failed" }
@@ -288,11 +295,19 @@ func storageScope(p Plan, apply, all bool, now time.Time) (row storageEntry, rem
 			continue
 		}
 		row.Bytes += info.Size()
+		eligible := !refs[entry.Name()] && (all || abandoned || now.Sub(info.ModTime()) >= storageAge)
+		if automatic && !eligible {
+			// Automatic collection does not audit or relink retained executables.
+			// Launch and explicit storage inspection still verify their contents.
+			if err = validateAssetInfo(path, info); err != nil {
+				fail(err)
+			}
+			continue
+		}
 		if err = verifyAsset(path, entry.Name()); err != nil {
 			fail(err)
 			continue
 		}
-		eligible := !refs[entry.Name()] && (all || abandoned || now.Sub(info.ModTime()) >= storageAge)
 		if eligible {
 			row.Eligible = true
 			row.Reason = "unreferenced executable generations"
@@ -327,6 +342,10 @@ func storageScope(p Plan, apply, all bool, now time.Time) (row storageEntry, rem
 }
 
 func serviceStorage(base string, apply, all bool, now time.Time) ([]storageEntry, []string, error) {
+	return serviceStorageMode(base, apply, all, false, now)
+}
+
+func serviceStorageMode(base string, apply, all, automatic bool, now time.Time) ([]storageEntry, []string, error) {
 	rows := []storageEntry{}
 	removed := []string{}
 	if err := existingPrivate(base); os.IsNotExist(err) {
@@ -347,7 +366,7 @@ func serviceStorage(base string, apply, all bool, now time.Time) ([]storageEntry
 		if _, err := os.Lstat(filepath.Join(state, "plan.json")); os.IsNotExist(err) {
 			continue
 		}
-		row, paths := storageScope(Plan{State: state}, apply, all, now)
+		row, paths := storageScope(Plan{State: state}, apply, all, automatic, now)
 		rows = append(rows, row)
 		removed = append(removed, paths...)
 		if row.Error != "" {
@@ -362,7 +381,7 @@ func serviceStorage(base string, apply, all bool, now time.Time) ([]storageEntry
 	}
 	var gate *os.File
 	if apply {
-		gate, err = locked(filepath.Join(pool, ".gate"), false)
+		gate, err = locked(filepath.Join(pool, ".gate"), automatic)
 	} else {
 		gate, err = observeLock(filepath.Join(pool, ".gate"))
 	}
@@ -381,12 +400,17 @@ func serviceStorage(base string, apply, all bool, now time.Time) ([]storageEntry
 		path := filepath.Join(pool, file.Name())
 		row := storageEntry{Path: path, Reason: "referenced scope asset"}
 		info, err := file.Info()
+		eligible := err == nil && info.Sys().(*syscall.Stat_t).Nlink == 1 && (all || now.Sub(info.ModTime()) >= storageAge)
 		if err == nil {
-			err = verifyAsset(path, file.Name())
+			if automatic && !eligible {
+				err = validateAssetInfo(path, info)
+			} else {
+				err = verifyAsset(path, file.Name())
+			}
 		}
 		if err == nil {
 			row.Bytes = info.Size()
-			row.Eligible = info.Sys().(*syscall.Stat_t).Nlink == 1 && (all || now.Sub(info.ModTime()) >= storageAge)
+			row.Eligible = eligible
 			if row.Eligible {
 				row.Reason = "unreferenced shared executable"
 			}
@@ -437,9 +461,13 @@ func serviceStorageMaintenance(base string) {
 	if readJSON(stamp, &previous) == nil && time.Since(previous) < 24*time.Hour {
 		return
 	}
-	_, _, err = serviceStorage(base, true, false, time.Now())
+	_, _, err = serviceStorageMode(base, true, false, true, time.Now())
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "Chainman: service storage maintenance:", err)
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			fmt.Fprintln(os.Stderr, "Chainman: service storage maintenance:", err)
+		}
+		// Contention or failed collection must not postpone retry for a day.
+		return
 	}
 	if err = atomic(stamp, time.Now()); err != nil {
 		fmt.Fprintln(os.Stderr, "Chainman: service storage receipt:", err)

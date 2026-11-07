@@ -177,13 +177,15 @@ with tc.operation(root,exclusive=False,new_execution=True):
         import storage
 
         self.managed_service_preparation()
+        # This proof imports the lease/storage machinery and runs collection;
+        # its positive validation work needs more than the default app deadline.
         self.body = self.body.replace(
             'command=["python3","task.py"]\nreadiness={command=["python3","task.py"]}',
             "command="
             + json.dumps([sys.executable, "lifetime.py", "service"])
             + "\nreadiness={command="
             + json.dumps([sys.executable, "lifetime.py", "probe"])
-            + "}",
+            + ",timeout_seconds=10}",
         )
         self.write_config()
         (self.root / "lifetime.py").write_text(

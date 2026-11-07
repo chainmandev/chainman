@@ -14,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import storage
 import toolchain as tc
+from internal_service_fixture import immutable_runtime
 
 SOURCE = Path(__file__).resolve().parents[1]
 NIX = shutil.which("nix")
@@ -23,72 +24,9 @@ NIX = shutil.which("nix")
 class InternalServiceEntryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory(prefix="chainman internal runtime ")
-        cls.addClassCleanup(cls.temporary.cleanup)
-        cls.base = Path(cls.temporary.name).resolve()
-        exported = cls.base / "source"
-        inventory = subprocess.check_output(
-            [
-                "git",
-                "-C",
-                str(SOURCE),
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-            text=True,
-        ).splitlines()
-        for name in inventory:
-            if (SOURCE / name).is_file():
-                target = exported / name
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(SOURCE / name, target)
-        cls.runtime = Path(
-            subprocess.check_output(
-                [
-                    NIX,
-                    "--extra-experimental-features",
-                    "nix-command",
-                    "store",
-                    "add-path",
-                    "--name",
-                    "chainman-source",
-                    str(exported),
-                ],
-                text=True,
-                timeout=60,
-            ).strip()
+        cls.base, cls.runtime, cls.bootstrap_python = immutable_runtime(
+            cls.addClassCleanup
         )
-        subprocess.run(
-            [
-                str(Path(NIX).with_name("nix-store")),
-                "--realise",
-                str(cls.runtime),
-                "--add-root",
-                str(cls.base / "runtime-root"),
-                "--indirect",
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            timeout=30,
-        )
-        subprocess.run(
-            [
-                NIX,
-                "--extra-experimental-features",
-                "nix-command flakes",
-                "print-dev-env",
-                f"path:{cls.runtime}/nix#bootstrap",
-                "--no-write-lock-file",
-                "--profile",
-                str(cls.base / "bootstrap"),
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            timeout=120,
-        )
-        cls.bootstrap_python = str(tc.bootstrap_interpreter(cls.base / "bootstrap"))
 
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="case-", dir=self.base)
@@ -96,6 +34,8 @@ class InternalServiceEntryTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.pin = "a" * 40
         (self.root / "chainman.lock").write_text(self.pin + "\n")
+        # This probe validates activation and real lease imports, rather than
+        # measuring the application deadline covered by the timeout fixtures.
         (self.root / "chainman.toml").write_text("""schema=3
 [project]
 default_profile="host"
@@ -104,7 +44,7 @@ runtime_profile="bootstrap"
 [services.worker]
 profile="tools"
 command=["python3","payload.py","service"]
-readiness={command=["python3","payload.py","probe"]}
+readiness={command=["python3","payload.py","probe"],timeout_seconds=10}
 """)
         (self.root / "payload.py").write_text("""import json,os,sys
 from pathlib import Path
