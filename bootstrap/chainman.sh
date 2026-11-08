@@ -278,7 +278,8 @@ verification_dispatch() {
     printf '%s\n%s\n' --mount "type=bind,src=$verification_helper,dst=$verification_helper" > "$verification_helper/mounts"
     CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$verification_helper/mounts \
         lifetime_helper "$self" _consent-export "$verification_helper" "$verification_target" >&2
-    "$self" _verification-plan verify "$self" "$self" > "$verification_output/plan.json"
+    "$self" _verification-plan verify "$self" "$self" "$verification_helper/chainman-control" \
+        "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" > "$verification_output/plan.json"
     lifetime_supervise "$verification_helper/chainman-control" verification "$verification_output/plan.json" "$verification_output"
     exit $?
 }
@@ -519,7 +520,8 @@ update_worker() {
         if [ "$update_keep_going" = 1 ]; then
             CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$update_output/control/mounts \
                 "$self" _verification-update-plan "$update_output/control/verify" \
-                "$update_output/candidate-bootstrap/chainman.sh" "$self" > "$update_output/control/verification-plan.json"
+                "$update_output/candidate-bootstrap/chainman.sh" "$self" "$CHAINMAN_UPDATE_HELPER" \
+                "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" > "$update_output/control/verification-plan.json"
             update_verification_cache=${XDG_CACHE_HOME:-$HOME/.cache}/chainman/verification
             mkdir -p "$update_verification_cache"
             update_verification_cache=$(CDPATH='' cd -P -- "$update_verification_cache" && pwd)

@@ -21,10 +21,12 @@ func verificationFixture(t *testing.T, names ...string) (VerificationPlan, strin
 	entry := filepath.Join(root, "entry")
 	identity := VerificationIdentity{"fixture", strings.Repeat("a", 64), strings.Repeat("b", 40)}
 	body, _ := json.Marshal(identity)
-	health := `{"state":"fixture","complete":true,"busy":false,"recovery_required":false,"running":false,"leases":{},"inspection_errors":[],"resources":[]}`
+	state := filepath.Join(root, "service-state")
+	scope, _ := json.Marshal(state)
+	health := `{"state":` + string(scope) + `,"complete":true,"busy":false,"recovery_required":false,"running":false,"leases":{},"inspection_errors":[],"resources":[]}`
 	script := "#!/bin/sh\nset -eu\ncase \"$1\" in\n" +
 		"_verification-identity) if [ -e changed ]; then printf '{}'; else printf '%s' " + quote(string(body)) + "; fi ;;\n" +
-		"services-status) if [ -e unsafe ]; then printf '{}'; else printf '%s' " + quote(health) + "; fi ;;\n" +
+		"status) if [ -e unsafe ]; then printf '{}'; else printf '%s' " + quote(health) + "; fi ;;\n" +
 		"run) printf '%s\\n' \"$2\" >> events; printf 'output %s\\n' \"$2\"; case \"$2\" in\n" +
 		"fail) exit 7 ;; killed) exit 137 ;; unsafe) touch unsafe; exit 8 ;; mutate) touch changed ;;\n" +
 		"slow) trap 'exit 0' TERM INT HUP; touch ready; while :; do sleep 1; done ;;\n" +
@@ -33,7 +35,7 @@ func verificationFixture(t *testing.T, names ...string) (VerificationPlan, strin
 		t.Fatal(err)
 	}
 	plan := VerificationPlan{Schema: 1, Root: root, Identity: identity,
-		IdentityCommand: []string{entry, "_verification-identity"}, HealthCommand: []string{entry, "services-status"}}
+		IdentityCommand: []string{entry, "_verification-identity"}, HealthCommand: []string{entry, "status", state}}
 	for _, name := range names {
 		plan.Gates = append(plan.Gates, VerificationGate{Name: name, Argv: []string{entry, "run", name}})
 	}
@@ -181,5 +183,131 @@ func TestVerificationCancellationReportsAndDoesNotStartNextGate(t *testing.T) {
 	report := verificationReadReport(t, paths[0])
 	if report.Code != 143 || report.Gates[0].Status != "interrupted" || report.Gates[1].Status != "unrun" {
 		t.Fatalf("report %+v", report)
+	}
+}
+
+func TestVerificationHealthUsesPreparedNativeStatusWithoutColdLauncher(t *testing.T) {
+	plan, output := verificationFixture(t, "first", "last")
+	entry := plan.IdentityCommand[0]
+	marker := filepath.Join(plan.Root, "cold-launcher-entered")
+	cold := filepath.Join(plan.Root, "cold-entry")
+	body := "#!/bin/sh\ncase \"$1\" in status|services-status) touch " + quote(marker) + "; exit 91 ;; esac\nexec " + quote(entry) + " \"$@\"\n"
+	if err := os.WriteFile(cold, []byte(body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	plan.IdentityCommand[0] = cold
+	for index := range plan.Gates {
+		plan.Gates[index].Argv[0] = cold
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.HealthCommand[0] = self
+	if err := verificationValidate(plan); err != nil {
+		t.Fatal(err)
+	}
+	if code := verificationRun(plan, output); code != 0 {
+		t.Fatalf("prepared native status code %d", code)
+	}
+	for _, path := range []string{marker, plan.HealthCommand[2]} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("inspection entered cold launcher or created state: %s, %v", path, err)
+		}
+	}
+	// Fail control: routing health through the cold launcher still fails closed.
+	plan.HealthCommand[0] = cold
+	failed := physicalTempDir(t)
+	if code := verificationRun(plan, failed); code != 2 {
+		t.Fatalf("cold launcher control code %d", code)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatal("cold launcher control was not exercised", err)
+	}
+	report := verificationReadReport(t, failed)
+	if report.Reason != "unsafe_initial_service_state" || report.Gates[0].Status != "unrun" {
+		t.Fatalf("report %+v", report)
+	}
+}
+
+func TestVerificationPreparedStatusRejectsBusyScopeWithoutReaping(t *testing.T) {
+	plan, _ := verificationFixture(t, "first")
+	state := plan.HealthCommand[2]
+	if err := private(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomic(filepath.Join(state, "plan.json"), Plan{State: state, Services: map[string]Service{}}); err != nil {
+		t.Fatal(err)
+	}
+	lease := filepath.Join(state, "abandoned.lease")
+	if err := atomic(lease, Lease{Services: []string{"abandoned"}}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(lease)
+	gate, err := locked(filepath.Join(state, "gate"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Close()
+	plan.HealthCommand[0], err = os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verificationCheckHealth(plan, nil); err == nil {
+		t.Fatal("busy incomplete scope accepted")
+	}
+	after, err := os.ReadFile(lease)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("inspection changed a lease", err)
+	}
+}
+
+func TestVerificationRejectsHealthFromDifferentScope(t *testing.T) {
+	plan, _ := verificationFixture(t, "first")
+	plan.HealthCommand[2] = filepath.Join(plan.Root, "other-scope")
+	if _, err := verificationCheckHealth(plan, nil); err == nil {
+		t.Fatal("different healthy scope accepted")
+	}
+}
+
+func TestVerificationPreparedStatusPreservesSharedRecoveryAndLeases(t *testing.T) {
+	plan, _ := verificationFixture(t, "first")
+	state := plan.HealthCommand[2]
+	resource := filepath.Join(plan.Root, "shared-resource")
+	for _, path := range []string{state, resource} {
+		if err := private(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := Plan{State: resource, Services: map[string]Service{}}
+	if err := atomic(filepath.Join(resource, "plan.json"), shared); err != nil {
+		t.Fatal(err)
+	}
+	root := Plan{State: state, Services: map[string]Service{}, Resources: []Plan{shared}}
+	if err := atomic(filepath.Join(state, "plan.json"), root); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.HealthCommand[0] = self
+	baseline, err := verificationCheckHealth(plan, nil)
+	if err != nil || len(baseline) != 2 {
+		t.Fatal("shared native baseline unavailable", baseline, err)
+	}
+	lease := filepath.Join(resource, "existing.lease")
+	if err := atomic(lease, Lease{Persistent: true, Services: []string{"worker"}}); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(lease)
+	// A persistent client whose controller is absent requires recovery. Health
+	// must inspect the saved shared scope, fail closed and preserve its lease.
+	if _, err := verificationCheckHealth(plan, baseline); err == nil {
+		t.Fatal("changed shared ownership/recovery accepted")
+	}
+	after, err := os.ReadFile(lease)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("shared inspection changed existing lease", err)
 	}
 }

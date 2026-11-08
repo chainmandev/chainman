@@ -2,6 +2,7 @@
 
 import sys
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -218,6 +219,8 @@ class RecipeTests(unittest.TestCase):
                 [["run", "build"], ["run", "test"]],
                 "/gate-entry",
                 "/identity-entry",
+                "/prepared/chainman-control",
+                "/host cache/chainman/services",
             )
         gates = plan["gates"]
         self.assertIsInstance(gates, list)
@@ -250,11 +253,19 @@ class RecipeTests(unittest.TestCase):
                     [["run", "test"], ["run", "build"]],
                     "/entry",
                     "/entry",
+                    "/prepared/chainman-control",
+                    "/host cache/chainman/services",
                 )
             cfg["tasks"]["test"]["wait_for_services"] = True
             with self.assertRaises(ValueError):
                 recipes.verification_plan(
-                    Path("/fixture"), cfg, [["run", "test"]], "/entry", "/entry"
+                    Path("/fixture"),
+                    cfg,
+                    [["run", "test"]],
+                    "/entry",
+                    "/entry",
+                    "/prepared/chainman-control",
+                    "/host cache/chainman/services",
                 )
 
     def test_keep_going_plan_rejects_waiting_prerequisites_before_identity(self):
@@ -285,6 +296,131 @@ class RecipeTests(unittest.TestCase):
                         [["run", "test"], ["run", "last"]],
                         "/entry",
                         "/entry",
+                        "/prepared/chainman-control",
+                        "/host cache/chainman/services",
+                    )
+                identity.assert_not_called()
+
+    def test_verification_health_uses_prepared_native_status_for_consumer_scope(self):
+        import services
+
+        cfg = {"schema": 3, "tasks": {"check": {"commands": [["true"]]}}}
+        cache = "/host cache/chainman/services"
+        for mode in ("host-nix", "container-nix"):
+            for root in (Path("/consumer root"), Path("/update/candidate")):
+                with (
+                    self.subTest(mode=mode, root=root),
+                    patch.dict(os.environ, CHAINMAN_MODE=mode),
+                    patch("recipes.verification_identity", return_value={}),
+                    patch("admission.graph"),
+                    patch(
+                        "services.subprocess.run",
+                        side_effect=AssertionError("cold export entered"),
+                    ),
+                ):
+                    plan = recipes.verification_plan(
+                        root,
+                        cfg,
+                        [["run", "check"]],
+                        "/gate-entry",
+                        "/identity-entry",
+                        "/prepared/chainman-control",
+                        cache,
+                    )
+                self.assertEqual(
+                    plan["health_command"],
+                    [
+                        "/prepared/chainman-control",
+                        "status",
+                        str(Path(cache) / services.scope_key(cache, root, mode)),
+                    ],
+                )
+                self.assertEqual(
+                    plan["identity_command"],
+                    ["/identity-entry", "_verification-identity"],
+                )
+                self.assertEqual(
+                    plan["gates"][0]["argv"], ["/gate-entry", "run", "check"]
+                )
+
+    def test_verification_health_normalizes_separators_without_changing_scope_key(self):
+        import services
+
+        cfg = {"schema": 3, "tasks": {"check": {"commands": [["true"]]}}}
+        paths = (
+            ("/prepared//chainman-control", "/host cache//chainman/services"),
+            ("/prepared/chainman-control/", "/host cache/chainman/services/"),
+            (
+                "/var/folders/session/T//chainman-helper/chainman-control",
+                "/host cache///chainman/services//",
+            ),
+        )
+        for mode in ("host-nix", "container-nix"):
+            for root in (Path("/consumer root"), Path("/update/candidate")):
+                for controller, cache in paths:
+                    with (
+                        self.subTest(
+                            mode=mode, root=root, controller=controller, cache=cache
+                        ),
+                        patch.dict(os.environ, CHAINMAN_MODE=mode),
+                        patch("recipes.verification_identity", return_value={}),
+                        patch("admission.graph"),
+                        patch(
+                            "services.scope_key", wraps=services.scope_key
+                        ) as scope_key,
+                        patch(
+                            "services.subprocess.run",
+                            side_effect=AssertionError("cold export entered"),
+                        ),
+                    ):
+                        plan = recipes.verification_plan(
+                            root,
+                            cfg,
+                            [["run", "check"]],
+                            "/gate-entry",
+                            "/identity-entry",
+                            controller,
+                            cache,
+                        )
+                        scope_key.assert_called_once_with(cache, root, mode)
+                    self.assertEqual(
+                        plan["health_command"],
+                        [
+                            str(Path(controller)),
+                            "status",
+                            str(Path(cache) / services.scope_key(cache, root, mode)),
+                        ],
+                    )
+                    self.assertEqual(
+                        plan["identity_command"],
+                        ["/identity-entry", "_verification-identity"],
+                    )
+                    self.assertEqual(
+                        plan["gates"][0]["argv"], ["/gate-entry", "run", "check"]
+                    )
+
+    def test_verification_health_rejects_relative_or_noncanonical_authority(self):
+        cfg = {"schema": 3, "tasks": {"check": {"commands": [["true"]]}}}
+        for controller, cache in (
+            ("controller", "/cache"),
+            ("/prepared/controller", "cache"),
+            ("/prepared/../controller", "/cache"),
+            ("/prepared/controller", "/cache\nother"),
+        ):
+            with (
+                self.subTest(controller=controller, cache=cache),
+                patch("admission.graph"),
+                patch("recipes.verification_identity") as identity,
+            ):
+                with self.assertRaisesRegex(ValueError, "absolute canonical paths"):
+                    recipes.verification_plan(
+                        Path("/consumer"),
+                        cfg,
+                        [["run", "check"]],
+                        "/gate",
+                        "/identity",
+                        controller,
+                        cache,
                     )
                 identity.assert_not_called()
 

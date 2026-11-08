@@ -223,9 +223,12 @@ def verification_plan(
     commands: list[list[str]],
     launcher: str,
     identity_launcher: str,
+    health_controller: str,
+    host_state: str,
 ) -> Table:
     """Describe existing finite task entries, without changing their execution."""
     import admission
+    import services
     import workflows
 
     tasks = workflows.declarations(cfg, "tasks")
@@ -251,11 +254,29 @@ def verification_plan(
         for name in workflows.order(tasks, selected)
     ):
         raise ValueError("Keep-going requires finite verification tasks")
+    # Inspect with the already exported native helper, never a cold bootstrap.
+    # Keep the same host cache domain and mode used by services.export; updates
+    # inspect their candidate scope while their identity entry remains separate.
+    for value in (health_controller, host_state):
+        path = Path(value)
+        if (
+            not path.is_absolute()
+            or ".." in path.parts
+            or any(char in value for char in "\r\n\0")
+        ):
+            raise ValueError("Verification health requires absolute canonical paths")
+    mode = os.environ.get("CHAINMAN_MODE", "host-nix")
+    if mode not in {"host-nix", "container-nix"}:
+        raise ValueError("Verification health requires a managed execution mode")
+    # Normalize executable spelling, but preserve the cache-domain spelling
+    # in scope_key exactly as services.export does for existing service scopes.
+    health_controller = str(Path(health_controller))
+    state = str(Path(host_state) / services.scope_key(host_state, root, mode))
     return {
         "schema": 1,
         "root": str(root),
         "identity_command": [identity_launcher, "_verification-identity"],
-        "health_command": [launcher, "services-status"],
+        "health_command": [health_controller, "status", state],
         "identity": verification_identity(root),
         "gates": [
             {
