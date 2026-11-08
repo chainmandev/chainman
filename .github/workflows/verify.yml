@@ -83,7 +83,9 @@ jobs:
           - {runner: macos-15-intel, mode: host-nix, module: core, engine: docker, timeout_minutes: 360}
           - {runner: ubuntu-24.04, mode: host-nix, module: core, engine: docker}
           - {runner: ubuntu-24.04-arm, mode: host-nix, module: core, engine: docker}
-          - {runner: macos-15, mode: host-nix, module: core, engine: docker}
+          # Budget for macOS source verification, initialization, and native
+          # service qualification together; individual test deadlines still apply.
+          - {runner: macos-15, mode: host-nix, module: core, engine: docker, timeout_minutes: 90}
           - {runner: ubuntu-24.04, mode: host-nix, module: javascript, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: rust, engine: docker}
           - {runner: ubuntu-24.04, mode: host-nix, module: python, engine: docker}

@@ -42,12 +42,14 @@ fall back to a cold build or skip qualification. Artifacts are not shared betwee
 workflow runs. Failed-job retries can reuse the successful preparation job's
 immutable artifact and outputs while that artifact is retained.
 
-Preparation and Intel verification each have a 360-minute job limit. Docker and
-Podman core lanes have 90 minutes for the complete bootstrap suite and starter
-qualification, including real update and resume transactions. Repeated Podman
-runs exceeded the previous one-hour job limit while their tests were still
-passing. The remaining eleven lanes retain their 60-minute limits. Intel runs
-first in the serial matrix; all fourteen lanes and preparation must succeed.
+Preparation and Intel verification each have a 360-minute job limit. The macOS
+ARM64 host core lane has 90 minutes for source verification, initialization, and
+native service qualification. Docker and Podman core lanes have 90 minutes for
+the complete bootstrap suite and starter qualification, including real update and
+resume transactions. Repeated Podman runs exceeded the previous one-hour job
+limit while their tests were still passing. The remaining ten lanes retain their
+60-minute limits. Intel runs first in the serial matrix; all fourteen lanes and
+preparation must succeed.
 Bootstrap command deadlines and scanner assertions are unchanged.
 `just ci-runtime-test` verifies the transfer in isolated local Nix stores,
 including refusal of changed content before import.

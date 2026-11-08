@@ -22,12 +22,30 @@ from git_fixtures import pin_tree
 
 class NixReferenceTests(unittest.TestCase):
     def test_source_entry_uses_pinned_bash_when_primary_input_cannot_supply_it(self):
-        self.pinned_bash_entry_case(bootstrap=False)
+        for architecture in ("x86_64", "arm64"):
+            with self.subTest(architecture=architecture):
+                self.pinned_bash_entry_case(
+                    bootstrap=False, platform="Darwin", architecture=architecture
+                )
 
     def test_bootstrap_uses_pinned_bash_when_primary_input_cannot_supply_it(self):
-        self.pinned_bash_entry_case(bootstrap=True)
+        for architecture in ("x86_64", "arm64"):
+            with self.subTest(architecture=architecture):
+                self.pinned_bash_entry_case(
+                    bootstrap=True, platform="Darwin", architecture=architecture
+                )
 
-    def pinned_bash_entry_case(self, *, bootstrap):
+    def test_linux_does_not_use_the_darwin_bash_wrapper(self):
+        for bootstrap in (False, True):
+            for architecture in ("x86_64", "aarch64"):
+                with self.subTest(bootstrap=bootstrap, architecture=architecture):
+                    self.pinned_bash_entry_case(
+                        bootstrap=bootstrap,
+                        platform="Linux",
+                        architecture=architecture,
+                    )
+
+    def pinned_bash_entry_case(self, *, bootstrap, platform, architecture):
         with tempfile.TemporaryDirectory(prefix="chainman shell entry ") as temporary:
             root = Path(temporary).resolve()
             (root / "scripts").mkdir()
@@ -78,18 +96,29 @@ class NixReferenceTests(unittest.TestCase):
             (binaries / "nix").symlink_to(toolchain.nix_command())
             for prerequisite in ("git", "just"):
                 (binaries / prerequisite).symlink_to(shutil.which(prerequisite))
-            (binaries / "bash").write_text("#!/bin/sh\nexit 77\n")
+            host_bash_marker = root / "host-bash-called"
+            (binaries / "bash").write_text(
+                '#!/bin/sh\nprintf called > "$FIXTURE_HOST_BASH_MARKER"\nexit 77\n'
+            )
             (binaries / "bash").chmod(0o755)
             (binaries / "uname").write_text(
-                '#!/bin/sh\ncase "$1" in -s) echo Darwin;; -m) echo x86_64;; *) exit 2;; esac\n'
+                '#!/bin/sh\ncase "$1" in -s) echo '
+                + platform
+                + ";; -m) echo "
+                + architecture
+                + ";; *) exit 2;; esac\n"
             )
             (binaries / "uname").chmod(0o755)
+            probe = (
+                "import sys; print(sys.argv[-1]); print(sys.stdin.read(), end=''); "
+                "raise SystemExit(7)\n"
+            )
             command = [
                 str(root / "scripts/enter.sh"),
                 "core",
                 "python3",
                 "-c",
-                "import sys; print(sys.argv[1]); raise SystemExit(7)",
+                probe,
                 "literal ' $ value",
             ]
             env = dict(
@@ -97,6 +126,7 @@ class NixReferenceTests(unittest.TestCase):
                 PATH=str(binaries) + os.pathsep + os.defpath,
                 CHAINMAN_NIX_BIN=toolchain.nix_command(),
                 TOOLCHAIN_FRESH="1",
+                FIXTURE_HOST_BASH_MARKER=str(host_bash_marker),
             )
             if bootstrap:
                 runtime = root / "runtime"
@@ -111,9 +141,7 @@ class NixReferenceTests(unittest.TestCase):
                     shutil.copy2(
                         toolchain.RUNTIME / "scripts" / name, runtime / "scripts" / name
                     )
-                (runtime / "scripts/chainman.py").write_text(
-                    "import sys; print(sys.argv[-1]); raise SystemExit(7)\n"
-                )
+                (runtime / "scripts/chainman.py").write_text(probe)
                 shutil.copytree(toolchain.RUNTIME / "bootstrap", runtime / "bootstrap")
                 (runtime / "VERSION").write_text("0.1.0\n")
                 consumer = root / "consumer"
@@ -145,11 +173,22 @@ class NixReferenceTests(unittest.TestCase):
                 command,
                 env=env,
                 text=True,
+                input="literal stdin ' $ value\n",
                 capture_output=True,
                 timeout=120,
             )
-            self.assertEqual(result.returncode, 7, result.stderr)
-            self.assertEqual(result.stdout, "literal ' $ value\n")
+            if platform == "Darwin":
+                self.assertEqual(result.returncode, 7, result.stderr)
+                self.assertEqual(
+                    result.stdout, "literal ' $ value\nliteral stdin ' $ value\n"
+                )
+                self.assertFalse(host_bash_marker.exists(), result.stderr)
+            else:
+                # The deliberately broken primary input and unusable host Bash
+                # fail on Linux; a broader wrapper would incorrectly rescue it.
+                self.assertEqual(result.returncode, 77, result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(host_bash_marker.read_text(), "called")
 
     def test_native_task_from_copied_runtime_keeps_output_and_exit_status(self):
         with tempfile.TemporaryDirectory(

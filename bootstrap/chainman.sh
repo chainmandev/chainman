@@ -73,9 +73,9 @@ develop_runtime() {
         set -- --profile "$bootstrap_profile" --command "$@"
     fi
     set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' develop "path:$store/nix#bootstrap" --no-write-lock-file "$@"
-    # The primary nixpkgs input no longer supplies Intel macOS Bash. Make the
-    # compatibility input's Bash available before Nix executes its shell script.
-    if [ "$(uname -s)-$(uname -m)" = Darwin-x86_64 ]; then
+    # Nix may fall back to macOS's old host Bash before entering the pinned
+    # environment. Supply this platform's pinned Bash for Nix's shell script too.
+    if [ "$(uname -s)" = Darwin ]; then
         set -- "$nix_bin" --extra-experimental-features 'nix-command flakes' shell "path:$store/nix#bash" --no-write-lock-file --command "$@"
     fi
     if [ "$develop_action" = exec ]; then exec "$@"; else lifetime_run "$@"; fi
