@@ -55,6 +55,8 @@ type Service struct {
 	FailurePolicy   string   `json:"failure_policy,omitempty"`
 	Shutdown        int      `json:"shutdown_seconds"`
 	ShutdownCommand *Command `json:"shutdown_command,omitempty"`
+	// Launch retains setup content identity; lifecycle commands retain its scope.
+	LifecycleFingerprint string `json:"lifecycle_fingerprint,omitempty"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
 	Container      *Container `json:"container,omitempty"`
 	Watch          *Watch     `json:"watch,omitempty"`
@@ -420,9 +422,27 @@ func validate(p Plan) error {
 		if s.Shutdown < 1 || s.Shutdown > 300 {
 			return fmt.Errorf("invalid shutdown timeout")
 		}
+		service := s.Command.Argv
+		lifecycleFingerprint := ""
+		if len(service) >= 4 && service[len(service)-3] == "_workflow-service" && service[len(service)-2] == name {
+			lifecycleFingerprint = service[len(service)-1]
+		}
+		if s.LifecycleFingerprint != "" {
+			if lifecycleFingerprint == "" {
+				return fmt.Errorf("invalid internal service lifecycle fingerprint")
+			}
+			lifecycleFingerprint = s.LifecycleFingerprint
+		}
 		if s.ShutdownCommand != nil {
 			if _, e := child(*s.ShutdownCommand); e != nil {
 				return e
+			}
+			if s.LifecycleFingerprint != "" {
+				shutdown := s.ShutdownCommand.Argv
+				if len(shutdown) < 4 || shutdown[len(shutdown)-3] != "_workflow-shutdown" ||
+					shutdown[len(shutdown)-2] != name || shutdown[len(shutdown)-1] != lifecycleFingerprint {
+					return fmt.Errorf("invalid internal service shutdown scope")
+				}
 			}
 		}
 		if s.Restart != "no" && s.Restart != "always" && s.Restart != "on_failure" {
@@ -434,11 +454,10 @@ func validate(p Plan) error {
 		if s.Readiness != nil {
 			r := s.Readiness
 			if r.Entry != 0 {
-				probe, service := r.Command.Argv, s.Command.Argv
-				if r.Entry != 10 || r.HTTPGet != nil || len(probe) < 4 || len(service) < 4 ||
+				probe := r.Command.Argv
+				if r.Entry != 10 || r.HTTPGet != nil || len(probe) < 4 ||
 					probe[len(probe)-3] != "_workflow-probe" || probe[len(probe)-2] != name ||
-					service[len(service)-3] != "_workflow-service" || service[len(service)-2] != name ||
-					probe[len(probe)-1] == "" || probe[len(probe)-1] != service[len(service)-1] {
+					lifecycleFingerprint == "" || probe[len(probe)-1] != lifecycleFingerprint {
 					return fmt.Errorf("invalid internal probe entry allowance")
 				}
 			}

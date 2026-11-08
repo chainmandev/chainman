@@ -325,9 +325,15 @@ class ExternalSourceTests(unittest.TestCase):
                     ),
                     0,
                 )
-                self.assertEqual(
-                    execute.call_args.args[:3], (self.consumer, "host", argv)
-                )
+                self.assertEqual(execute.call_args.args[:2], (self.consumer, "host"))
+                executed = execute.call_args.args[2]
+                if action == "_workflow-probe":
+                    self.assertEqual(executed[-len(argv) :], argv)
+                    self.assertIn(
+                        str(chainman.RUNTIME / "scripts/service_probe.py"), executed
+                    )
+                else:
+                    self.assertEqual(executed, argv)
                 self.assertEqual(execute.call_args.kwargs["cwd"], self.source)
                 self.assertEqual(execute.call_args.kwargs["pass_fds"], ())
             with self.assertRaisesRegex(ValueError, "inputs changed"):

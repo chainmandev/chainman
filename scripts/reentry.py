@@ -162,7 +162,11 @@ def main(arguments: list[str]) -> int:
         args = args[1:]
     else:
         args = ["run", *args]
-    internal = args[:1] in (["_workflow-service"], ["_workflow-probe"])
+    internal = args[:1] in (
+        ["_workflow-service"],
+        ["_workflow-probe"],
+        ["_workflow-shutdown"],
+    )
     if internal:
         if len(args) != 3:
             raise ValueError("Internal service entry requires its name and fingerprint")

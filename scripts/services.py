@@ -87,6 +87,7 @@ class Service(TypedDict):
     readiness: NotRequired[Probe]
     watch: NotRequired[Watch]
     shutdown_command: NotRequired[Command]
+    lifecycle_fingerprint: NotRequired[str]
 
 
 class Bridge(TypedDict):
@@ -994,6 +995,8 @@ def export(root: Path, arguments: list[str]) -> int:
             ),
             "shutdown_seconds": workflows.task_seconds(spec, "shutdown_seconds"),
         }
+        if "container" not in spec:
+            value["lifecycle_fingerprint"] = lifecycle_fingerprint
         if spec.get("network_service") and ownership:
             peer = declared[workflows.name(spec["network_service"])]
             if mode != "container-nix" and "container" not in peer:
@@ -1102,7 +1105,11 @@ def export(root: Path, arguments: list[str]) -> int:
             ]
             if mode == "container-nix":
                 shutdown_argv = [engine, "exec", container_name, *shutdown_argv]
-            value["shutdown_command"] = command(shutdown_argv, service_root, env)
+            value["shutdown_command"] = command(
+                shutdown_argv,
+                service_root,
+                dict(env, **internal_forwarded) if mode == "host-nix" else env,
+            )
         prepared[name] = value
         if "watch" in spec:
             watch = table(spec["watch"], "Service watch")

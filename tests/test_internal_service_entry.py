@@ -45,6 +45,7 @@ runtime_profile="bootstrap"
 profile="tools"
 command=["python3","payload.py","service"]
 readiness={command=["python3","payload.py","probe"],timeout_seconds=10}
+shutdown_command=["python3","payload.py","shutdown"]
 """)
         (self.root / "payload.py").write_text("""import json,os,sys
 from pathlib import Path
@@ -87,20 +88,27 @@ Path(sys.argv[1]+'.json').write_text(json.dumps({'profile':os.environ['CHAINMAN_
         (entry / "source").symlink_to(self.runtime)
         (entry / "bootstrap").symlink_to((self.base / "bootstrap").resolve())
         self.env = dict(os.environ)
+        self.fingerprint = self.fingerprints()["launch"]
+
+    def fingerprints(self):
         code = (
             f"import sys;sys.path.insert(0,{str(self.runtime / 'scripts')!r});"
-            "import services,toolchain as tc,workflows;from pathlib import Path;"
+            "import json,services,toolchain as tc,workflows;from pathlib import Path;"
             f"root=Path({str(self.root)!r});"
-            "print(services.config_fingerprint(root,workflows.configuration(root),env=tc.environment(root,create=False)))"
+            "cfg=workflows.configuration(root);env=tc.environment(root,create=False);"
+            "print(json.dumps({'launch':services.config_fingerprint(root,cfg,env=env),"
+            "'lifecycle':services.config_fingerprint(root,cfg,env=env,include_setup_inputs=False)}))"
         )
-        self.fingerprint = tc.managed_run(
-            [sys.executable, "-I", "-B", "-c", code],
-            env=self.env,
-            text=True,
-            stdout=subprocess.PIPE,
-            check=True,
-            timeout=15,
-        ).stdout.strip()
+        return json.loads(
+            tc.managed_run(
+                [sys.executable, "-I", "-B", "-c", code],
+                env=self.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                check=True,
+                timeout=15,
+            ).stdout
+        )
 
     def child(
         self, action="_workflow-service", *, env=None, name="worker", fingerprint=None
@@ -121,11 +129,14 @@ Path(sys.argv[1]+'.json').write_text(json.dumps({'profile':os.environ['CHAINMAN_
             timeout=60,
         )
 
-    def test_service_and_probe_activate_declared_profile_with_real_leases(self):
+    def test_service_probe_and_shutdown_activate_declared_profile_with_real_leases(
+        self,
+    ):
         self.assertNotIn("CHAINMAN_ACTIVE_PROFILE", self.env)
         for action, record in (
             ("_workflow-service", "service"),
             ("_workflow-probe", "probe"),
+            ("_workflow-shutdown", "shutdown"),
         ):
             with self.subTest(action=action):
                 result = self.child(action)
@@ -174,6 +185,7 @@ Path(sys.argv[1]+'.json').write_text(json.dumps({'profile':os.environ['CHAINMAN_
         for action, record in (
             ("_workflow-service", "service"),
             ("_workflow-probe", "probe"),
+            ("_workflow-shutdown", "shutdown"),
         ):
             with self.subTest(action=action):
                 result = self.child(action, env=env)
@@ -185,8 +197,63 @@ Path(sys.argv[1]+'.json').write_text(json.dumps({'profile':os.environ['CHAINMAN_
         self.assertFalse(hashes.exists(), "An immutable tree was hashed against itself")
         self.assertEqual(
             queries.read_text().splitlines(),
-            [str((self.base / "bootstrap").resolve())] * 2,
+            [str((self.base / "bootstrap").resolve())] * 3,
         )
+
+    def test_shutdown_rejects_unleased_handoff_and_changed_scope(self):
+        for label, changes in (
+            ("changed-pin", {"CHAINMAN_ACTIVE_PIN": "b" * 40}),
+            ("unleased", {storage.FDS: "[]", storage.PATHS: "[]"}),
+        ):
+            with self.subTest(handoff=label):
+                result = subprocess.run(
+                    [
+                        str(self.runtime / "bootstrap/chainman.sh"),
+                        "_workflow-shutdown",
+                        "worker",
+                        self.fingerprint,
+                    ],
+                    cwd=self.root,
+                    env=dict(self.env, **changes),
+                    pass_fds=storage.inherited()[1],
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertFalse((self.root / "shutdown.json").exists())
+        result = self.child("_workflow-shutdown", fingerprint="0" * 64)
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.root / "shutdown.json").exists())
+
+    def test_real_lifecycle_keeps_admitted_setup_scope_and_rejects_stale_launch(self):
+        configuration = self.root / "chainman.toml"
+        configuration.write_text(
+            configuration.read_text().replace(
+                "[services.worker]\n", '[services.worker]\nsetup=["dependencies"]\n'
+            )
+            + '\n[setup.dependencies]\nprofile="tools"\ninputs=["setup.lock"]\nartifacts=["installed"]\ncommands=[["true"]]\n'
+        )
+        inputs = self.root / "setup.lock"
+        inputs.write_text("admitted setup inputs")
+        admitted = self.fingerprints()
+        self.assertNotEqual(admitted["launch"], admitted["lifecycle"])
+        inputs.write_text("HMR changed setup inputs")
+        updated = self.fingerprints()
+        self.assertNotEqual(updated["launch"], admitted["launch"])
+        self.assertEqual(updated["lifecycle"], admitted["lifecycle"])
+        for action, record in (
+            ("_workflow-probe", "probe"),
+            ("_workflow-shutdown", "shutdown"),
+        ):
+            with self.subTest(action=action):
+                result = self.child(action, fingerprint=admitted["lifecycle"])
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue((self.root / (record + ".json")).is_file())
+        result = self.child(fingerprint=admitted["launch"])
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn("inputs changed", result.stderr)
+        self.assertFalse((self.root / "service.json").exists())
 
     def test_fresh_export_keeps_real_runtime_hash_comparison(self):
         env, hashes, queries = self.recording_nix()

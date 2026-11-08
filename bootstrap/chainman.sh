@@ -121,7 +121,7 @@ fi
 # Native service owners retain a verified runtime lease, not an active project
 # profile. Revalidate that handoff without provisioning bootstrap during health.
 case "${1:-}" in
-    _workflow-service | _workflow-probe)
+    _workflow-service | _workflow-probe | _workflow-shutdown)
         if [ -n "${CHAINMAN_INTERNAL_ENTRY:-}" ]; then
             exec "$script_dir/reenter.sh" "$root" --entry "$@"
         fi

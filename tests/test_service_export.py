@@ -167,6 +167,83 @@ command=["false"]
                 ["/fixture/launcher", "_workflow-profile", "worker"],
             )
 
+    def test_export_preserves_launch_inputs_and_binds_lifecycle_commands_separately(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(
+            prefix="chainman lifecycle plan "
+        ) as temporary:
+            base = Path(temporary).resolve()
+            root, output = base / "project", base / "output"
+            root.mkdir()
+            output.mkdir()
+            (output / "host-environment").write_bytes(b"")
+            (root / "flake.nix").write_text(
+                'throw "consumer flake must not execute in export"'
+            )
+            (root / "flake.lock").write_text("{}")
+            (root / "input.lock").write_text("admitted dependency inputs")
+            (root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="private"
+[profiles.private]
+flake="flake.nix#private"
+[setup.dependencies]
+inputs=["input.lock"]
+artifacts=["installed"]
+commands=[["true"]]
+[tasks.main]
+services=["worker"]
+commands=[["true"]]
+[services.worker]
+setup=["dependencies"]
+command=["serve"]
+readiness={command=["ready"]}
+shutdown_command=["checkpoint"]
+""")
+            real_run = subprocess.run
+
+            def run(argv, **kwargs):
+                if "--out-link" in argv:
+                    return subprocess.CompletedProcess(argv, 0, self.package + "\n")
+                self.assertNotIn("print-dev-env", argv)
+                self.assertNotIn("develop", argv)
+                return real_run(argv, **kwargs)
+
+            with (
+                patch.dict(os.environ, CHAINMAN_MODE="host-nix"),
+                patch.object(services.subprocess, "run", side_effect=run),
+            ):
+                services.export(
+                    root,
+                    [
+                        str(output),
+                        "linux-arm64",
+                        str(base / "state"),
+                        "",
+                        "/fixture/launcher",
+                        "run",
+                        "main",
+                    ],
+                )
+            plan = json.loads((output / "plan.json").read_text())
+            service = plan["services"]["worker"]
+            launch = service["command"]["argv"]
+            lifecycle = service["lifecycle_fingerprint"]
+            self.assertEqual(
+                launch[:-1], ["/fixture/launcher", "_workflow-service", "worker"]
+            )
+            self.assertNotEqual(launch[-1], lifecycle)
+            self.assertEqual(
+                service["readiness"]["command"]["argv"],
+                ["/fixture/launcher", "_workflow-probe", "worker", lifecycle],
+            )
+            self.assertEqual(service["readiness"]["entry_seconds"], 10)
+            self.assertEqual(
+                service["shutdown_command"]["argv"],
+                ["/fixture/launcher", "_workflow-shutdown", "worker", lifecycle],
+            )
+
     def test_service_image_is_separated_from_engine_options(self):
         digest = "@sha256:" + "a" * 64
         image = "registry.example.invalid:5000/team/database:1.0" + digest

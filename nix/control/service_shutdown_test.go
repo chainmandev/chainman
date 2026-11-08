@@ -45,6 +45,10 @@ func shutdownFixtureOwner(t *testing.T, p Plan, name string) Identity {
 
 func shutdownFixturePlan(t *testing.T) Plan {
 	t.Helper()
+	// exec/sequence reexec this race-instrumented test binary. Its default
+	// one-second successful-exit sleep is sanitizer teardown, not hook work.
+	// Keep race checks and caller options while excluding that fixture delay.
+	t.Setenv("GORACE", strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 	root := physicalTempDir(t)
 	p := Plan{Schema: 1, Root: root, State: filepath.Join(root, "state"), Backend: "/bin/false", Fingerprint: "shutdown-fixture", Services: map[string]Service{}}
 	if err := private(p.State); err != nil {
