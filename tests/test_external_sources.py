@@ -172,6 +172,51 @@ class ExternalSourceTests(unittest.TestCase):
         self.assertNotIn(str(self.base), [row["source"] for row in result])
         self.assertNotIn(str(self.consumer), [row["source"] for row in result])
 
+    def test_home_symlink_and_its_ancestors_are_not_source_roots(self):
+        home = self.source / "host-home"
+        home.mkdir()
+        alias = self.base / "home-alias"
+        alias.symlink_to(home, target_is_directory=True)
+        consumer = self.consumer
+        spec = {"source_root_env": "FIXTURE_SOURCE"}
+        helper = Path(__file__).resolve().parents[1] / "bootstrap/source-roots.sh"
+        script = 'fail() { exit 2; }; single_line() { :; }; . "$1"; canonical_source_inventory'
+        with patch.dict(os.environ, HOME=str(alias)):
+            for value in (home, alias, self.source):
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ValueError, "narrow source directory"):
+                        source_roots.root(
+                            consumer, spec, {"FIXTURE_SOURCE": str(value)}
+                        )
+                    result = subprocess.run(
+                        ["sh", "-eu", "-c", script, "fixture", str(helper)],
+                        input=f"FIXTURE_SOURCE\n{value}\n",
+                        text=True,
+                        capture_output=True,
+                        env={
+                            "PATH": os.environ.get("PATH", ""),
+                            "HOME": str(alias),
+                            "root": str(consumer),
+                        },
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                source_roots.root(consumer, spec, {"FIXTURE_SOURCE": str(self.other)}),
+                self.other,
+            )
+            result = subprocess.run(
+                ["sh", "-eu", "-c", script, "fixture", str(helper)],
+                input=f"FIXTURE_SOURCE\n{self.other}\n",
+                text=True,
+                capture_output=True,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(alias),
+                    "root": str(consumer),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_setup_inputs_artifacts_and_identity_use_passed_environment(self):
         spec = workflows.group_spec(self.cfg, "website")
         with patch.dict(os.environ, FIXTURE_SOURCE=str(self.other)):

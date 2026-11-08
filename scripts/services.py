@@ -1411,7 +1411,6 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                 spec.get("profile", workflows.default_profile(cfg)),
                 "Service profile",
             )
-            directory = text(spec.get("directory", "."), "Service directory")
             if action == "_workflow-shutdown":
                 if "shutdown_command" not in spec:
                     raise ValueError("Service has no shutdown command")

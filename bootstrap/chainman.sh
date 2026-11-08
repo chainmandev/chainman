@@ -1122,6 +1122,7 @@ auto-optimise-store = true' --env NIX_REMOTE=daemon \
 # Discovery reads only the verified declarations and raw host input snapshot.
 # Resolve on the host, then replay the verified planner with narrow canonical
 # mounts. Every lifecycle container receives this same global inventory.
+# shellcheck source=bootstrap/source-roots.sh
 . "$script_dir/source-roots.sh"
 plan_options sources > "$temporary/source-declarations"
 canonical_source_inventory < "$temporary/source-declarations" > "$temporary/sources"

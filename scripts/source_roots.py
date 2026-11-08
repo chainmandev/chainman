@@ -41,10 +41,11 @@ def root(
     if not value or not selected.is_absolute() or any(c in value for c in "\0\n\r,"):
         raise ValueError(f"External source root {key} requires an absolute directory")
     selected = selected.resolve(strict=True)
+    home = Path.home().resolve()
     if (
         not selected.is_dir()
         or selected == Path("/")
-        or selected == Path.home()
+        or home.is_relative_to(selected)
         or consumer.is_relative_to(selected)
     ):
         raise ValueError(
