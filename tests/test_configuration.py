@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -223,6 +224,174 @@ extends="base"
             )
             with self.assertRaises(ValueError):
                 bootstrap_plan.plan(root, "run", "test")
+
+    def test_recovery_projections_do_not_load_declarations_or_external_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "chainman.toml"
+            removed_source = root / "removed-source"
+            removed_source.mkdir()
+            removed_source.rmdir()
+            for state, body in (
+                (
+                    "broken-template",
+                    'schema=3\n[templates.tasks.broken]\nextends="missing"\n',
+                ),
+                ("malformed-toml", "schema=3\n[tasks.broken\n"),
+                ("deleted-declarations", None),
+                (
+                    "deleted-source",
+                    'schema=3\n[project]\ndefault_profile="host"\n'
+                    '[tasks.test]\ncommands=[["true"]]\n'
+                    'source_root_env="FIXTURE_SOURCE"\n',
+                ),
+            ):
+                if body is None:
+                    path.unlink()
+                else:
+                    path.write_text(body)
+                for recovery in (None, "1"):
+                    environment = {"FIXTURE_SOURCE": str(removed_source)}
+                    if recovery is not None:
+                        environment["CHAINMAN_CONTROL_RECOVERY"] = recovery
+                    with (
+                        patch.dict(os.environ, environment, clear=True),
+                        patch.object(
+                            config_inspection,
+                            "validated",
+                            side_effect=AssertionError("recovery loaded declarations"),
+                        ) as validated,
+                        patch.object(
+                            bootstrap_plan.source_roots,
+                            "raw_inventory",
+                            side_effect=AssertionError("recovery discovered sources"),
+                        ) as raw_inventory,
+                        patch.object(
+                            bootstrap_plan.source_roots,
+                            "inventory",
+                            side_effect=AssertionError("recovery resolved sources"),
+                        ) as inventory,
+                    ):
+                        for action in (
+                            "services-status",
+                            "services-stop",
+                            "services-logs",
+                            "_control-export",
+                            "_hook-export",
+                            "_hook-worker",
+                        ):
+                            with self.subTest(
+                                state=state, recovery=recovery, action=action
+                            ):
+                                self.assertEqual(
+                                    bootstrap_plan.discover(root, action), {}
+                                )
+                                self.assertEqual(
+                                    bootstrap_plan.plan(root, action, ""),
+                                    (True, ["--controller", "1"])
+                                    if action.startswith("services-")
+                                    else (False, []),
+                                )
+                        validated.assert_not_called()
+                        raw_inventory.assert_not_called()
+                        inventory.assert_not_called()
+
+    def test_normal_projections_still_reject_broken_or_deleted_declarations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "chainman.toml"
+            for state, body, error in (
+                (
+                    "broken-template",
+                    'schema=3\n[templates.tasks.broken]\nextends="missing"\n',
+                    ValueError,
+                ),
+                ("malformed-toml", "schema=3\n[tasks.broken\n", ValueError),
+                ("deleted-declarations", None, FileNotFoundError),
+            ):
+                if body is None:
+                    path.unlink()
+                else:
+                    path.write_text(body)
+                for action, recovery in (
+                    ("run", None),
+                    ("run", "0"),
+                    ("_control-export", "0"),
+                ):
+                    environment = {}
+                    if recovery is not None:
+                        environment["CHAINMAN_CONTROL_RECOVERY"] = recovery
+                    for projection in ("discover", "plan"):
+                        with (
+                            self.subTest(
+                                state=state,
+                                action=action,
+                                recovery=recovery,
+                                projection=projection,
+                            ),
+                            patch.dict(os.environ, environment, clear=True),
+                            patch.object(
+                                config_inspection,
+                                "validated",
+                                wraps=config_inspection.validated,
+                            ) as validated,
+                        ):
+                            with self.assertRaises(error):
+                                if projection == "discover":
+                                    bootstrap_plan.discover(root, action)
+                                else:
+                                    bootstrap_plan.plan(root, action, "test")
+                            validated.assert_called_once_with(root)
+
+    def test_normal_export_still_validates_and_mounts_external_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root, source = base / "consumer", base / "source"
+            root.mkdir()
+            source.mkdir()
+            (root / "chainman.toml").write_text(
+                'schema=3\n[project]\ndefault_profile="host"\n'
+                '[tasks.test]\ncommands=[["true"]]\n'
+                'source_root_env="FIXTURE_SOURCE"\n'
+            )
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CHAINMAN_CONTROL_RECOVERY": "0",
+                        "CHAINMAN_MODE": "container-nix",
+                        "FIXTURE_SOURCE": str(source),
+                    },
+                    clear=True,
+                ),
+                patch.object(
+                    config_inspection, "validated", wraps=config_inspection.validated
+                ) as validated,
+                patch.object(
+                    bootstrap_plan.source_roots,
+                    "raw_inventory",
+                    wraps=bootstrap_plan.source_roots.raw_inventory,
+                ) as raw_inventory,
+            ):
+                self.assertEqual(
+                    bootstrap_plan.discover(root, "_control-export"),
+                    {"FIXTURE_SOURCE": str(source)},
+                )
+                validated.assert_called_once_with(root)
+                raw_inventory.assert_called_once()
+                validated.reset_mock()
+                controller, options = bootstrap_plan.plan(root, "_control-export", "")
+                validated.assert_called_once_with(root)
+            self.assertFalse(controller)
+            self.assertIn("--env-pattern", options)
+            self.assertEqual(
+                options[options.index("--env-pattern") + 1], "FIXTURE_SOURCE"
+            )
+            self.assertIn("--mount", options)
+            self.assertEqual(
+                options[options.index("--mount") + 1],
+                f"type=bind,src={source},dst={source}",
+            )
 
     def test_schema_three_keeps_full_validation(self):
         with tempfile.TemporaryDirectory() as directory:

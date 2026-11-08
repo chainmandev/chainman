@@ -446,7 +446,9 @@ class ExternalSourceTests(unittest.TestCase):
             "FIXTURE_SETUP_ONLY": "/host/setup only",
         }
         with (
-            patch.dict(os.environ, env, clear=True),
+            patch.dict(
+                os.environ, dict(env, CHAINMAN_CONTROL_RECOVERY="0"), clear=True
+            ),
             patch.object(
                 bootstrap_plan.config_inspection, "validated", return_value=cfg
             ),
@@ -516,6 +518,7 @@ class ExternalSourceTests(unittest.TestCase):
             **self.env,
             "FIXTURE_SETUP_ONLY": str(self.other),
             "CHAINMAN_MODE": "container-nix",
+            "CHAINMAN_CONTROL_RECOVERY": "0",
         }
         with (
             patch.dict(os.environ, env, clear=True),

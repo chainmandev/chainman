@@ -127,6 +127,8 @@ def inherited_environment(cfg: dict[str, object]) -> dict[str, str]:
 
 def discover(root: Path, request: str) -> dict[str, str]:
     # Recovery must still work after declarations or source trees are removed.
+    # Ordinary controller exports opt into declarations with an explicit "0";
+    # direct/nested exports need only the verified native tooling transport.
     if (
         request
         in {
@@ -136,6 +138,10 @@ def discover(root: Path, request: str) -> dict[str, str]:
             "_hook-export",
             "_hook-worker",
         }
+        or (
+            request == "_control-export"
+            and os.environ.get("CHAINMAN_CONTROL_RECOVERY") != "0"
+        )
         or os.environ.get("CHAINMAN_CONTROL_RECOVERY") == "1"
     ):
         return {}
@@ -150,6 +156,10 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         return True, ["--controller", "1"]
     if (
         request in {"_hook-export", "_hook-worker"}
+        or (
+            request == "_control-export"
+            and os.environ.get("CHAINMAN_CONTROL_RECOVERY") != "0"
+        )
         or os.environ.get("CHAINMAN_CONTROL_RECOVERY") == "1"
     ):
         return False, []
