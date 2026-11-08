@@ -625,30 +625,61 @@ readiness={command=["python3","probe.py"]}
         )
         expected = services.config_fingerprint(self.root, cfg, env=selected)
         endpoints = []
+        probe_endpoints = []
         real_setup_use = workflows.setup_use
+        real_execute = services.chainman.execute
 
-        def setup_use(root, cfg, requested, env, **kwargs):
+        def observe_environment(env):
             self.assertTrue(tc._operation_id)
             self.assertTrue(env["SCCACHE_SERVER_UDS"].endswith(tc._operation_id))
             self.assertNotIn("CHAINMAN_COMPILER_OWNER", env)
+            self.assertEqual(env["AUTH_MODE"], "local")
             self.assertEqual(env["FIXTURE_SEED"], "from file")
             endpoints.append(env["SCCACHE_SERVER_UDS"])
+
+        def setup_use(root, cfg, requested, env, **kwargs):
+            observe_environment(env)
             return real_setup_use(root, cfg, requested, env, **kwargs)
 
-        with patch.object(workflows, "setup_use", side_effect=setup_use):
-            for _ in range(2):
+        def execute(root, profile, argv, **kwargs):
+            if lane == "_workflow-probe":
+                # Readiness skips setup; inspect its real target environment here.
+                env = kwargs["env"]
+                observe_environment(env)
+                self.assertEqual(env["FIXTURE_SERVICE"], "from file")
+                probe_endpoints.append(env["SCCACHE_SERVER_UDS"])
+            return real_execute(root, profile, argv, **kwargs)
+
+        with (
+            patch.object(workflows, "setup_use", side_effect=setup_use) as setup,
+            patch.object(services.chainman, "execute", side_effect=execute),
+        ):
+            for iteration in range(2):
+                lane = "prepare_requested"
+                before = setup.call_count
                 self.assertEqual(services.prepare_requested(self.root, ["main"]), 0)
-                for action, name in (
-                    ("_workflow-prepare", "main"),
-                    ("_workflow-task", "build"),
-                    ("_workflow-service", "demo"),
-                    ("_workflow-probe", "demo"),
+                self.assertEqual(setup.call_count - before, 1)
+                for action, name, setup_calls in (
+                    ("_workflow-prepare", "main", 1),
+                    ("_workflow-task", "build", 1),
+                    ("_workflow-service", "demo", 1),
+                    ("_workflow-probe", "demo", 0),
                 ):
-                    self.assertEqual(
-                        services.execute_internal(self.root, action, [name, expected]),
-                        0,
-                    )
-        self.assertEqual(len(endpoints), 10)
+                    with self.subTest(iteration=iteration, action=action):
+                        lane = action
+                        before = setup.call_count
+                        probes_before = len(probe_endpoints)
+                        self.assertEqual(
+                            services.execute_internal(
+                                self.root, action, [name, expected]
+                            ),
+                            0,
+                        )
+                        self.assertEqual(setup.call_count - before, setup_calls)
+                        self.assertEqual(
+                            len(probe_endpoints) - probes_before,
+                            int(action == "_workflow-probe"),
+                        )
         self.assertEqual(len(set(endpoints)), len(endpoints))
         self.assertEqual((self.root / "effective").read_text(), "from file")
         self.assertEqual((self.root / "probed").read_text(), "from file")
