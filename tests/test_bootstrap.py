@@ -2363,7 +2363,26 @@ check=["true"]
             (tree / "artifact").write_text("fixture installed")
         alias = base / "selected web alias"
         alias.symlink_to(web, target_is_directory=True)
-        service = "import json,os,time; from pathlib import Path; Path('selection.json').write_text(json.dumps(dict(cwd=os.getcwd(),web=os.environ['FIXTURE_WEB'],common=os.environ['FIXTURE_COMMON'],unused=os.environ['FIXTURE_UNUSED']))); Path('ready').touch(); time.sleep(600)"
+        nested_exec = (
+            "import os; from pathlib import Path; "
+            "Path(os.environ['FIXTURE_WEB'], 'nested-exec').write_text(os.getcwd())"
+        )
+        nested_task = (
+            "import os; from pathlib import Path; "
+            "Path('nested-task').write_text(os.getcwd())"
+        )
+        service = (
+            "import json,os,subprocess,time; from pathlib import Path; "
+            "Path('selection.json').write_text(json.dumps(dict(cwd=os.getcwd(),"
+            "web=os.environ['FIXTURE_WEB'],common=os.environ['FIXTURE_COMMON'],"
+            "unused=os.environ['FIXTURE_UNUSED']))); "
+            "root=Path(os.environ['CHAINMAN_ROOT']); "
+            "nested_env=dict(os.environ,XDG_CACHE_HOME=str(root/'.cache/nested Git cache')); "
+            "launcher=str(root/'scripts/chainman.sh'); "
+            f"subprocess.run([launcher,'exec','--','python3','-c',{nested_exec!r}],env=nested_env,check=True,close_fds=False); "
+            "subprocess.run([launcher,'run','nested'],env=nested_env,check=True,close_fds=False); "
+            "Path('ready').touch(); time.sleep(600)"
+        )
         install = [
             "python3",
             "-c",
@@ -2402,6 +2421,9 @@ check=["true"]
                 ]
             )
             + ',period_seconds=1,timeout_seconds=2,failure_threshold=10}\n[tasks.dev]\nservices=["web"]\nwait_for_services=true\n'
+            + '\n[tasks.nested]\nsource_root_env="FIXTURE_WEB"\ncommands='
+            + json.dumps([["python3", "-c", nested_task]])
+            + "\n"
         )
         (self.root / "chainman.toml").write_text(config)
         environment = dict(
@@ -2413,6 +2435,11 @@ check=["true"]
             FIXTURE_COMMON=str(common),
             FIXTURE_UNUSED=str(unused),
             XDG_CACHE_HOME=str(base / "host cache"),
+        )
+        # The unpublished fixture pin must also be available to the checked-in
+        # public launcher inside the service's consumer mount.
+        self.prepare_cache(
+            dict(environment, XDG_CACHE_HOME=str(self.root / ".cache/nested Git cache"))
         )
         try:
             for expected in (web, replacement):
@@ -2426,6 +2453,8 @@ check=["true"]
                         "unused": str(unused),
                     },
                 )
+                self.assertEqual((expected / "nested-exec").read_text(), str(self.root))
+                self.assertEqual((expected / "nested-task").read_text(), str(expected))
                 self.assertEqual(
                     (common / "artifact").read_text(), "installed by managed setup"
                 )

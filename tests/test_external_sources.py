@@ -15,6 +15,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import bootstrap_plan
 import chainman
+import reentry
 import services
 import source_roots
 import storage
@@ -539,6 +540,171 @@ class ExternalSourceTests(unittest.TestCase):
             source_roots.preserve(
                 self.consumer, self.cfg, {}, {"FIXTURE_SOURCE": str(self.source)}
             )
+
+    def active_transport(self, cfg, env):
+        with (
+            patch.dict(
+                os.environ, dict(env, CHAINMAN_MODE="container-nix"), clear=True
+            ),
+            patch.object(
+                bootstrap_plan.config_inspection, "validated", return_value=cfg
+            ),
+        ):
+            _, options = bootstrap_plan.plan(self.consumer, "exec", "")
+        declarations = [
+            json.loads(options[index + 1])
+            for index, value in enumerate(options)
+            if value == "--transport-declaration"
+        ]
+        self.assertLessEqual(len(declarations), 1)
+        return declarations[0] if declarations else {"mounts": [], "ports": []}
+
+    def nested_entry(self, cfg, env, active, arguments):
+        with (
+            patch.dict(
+                os.environ,
+                dict(
+                    env,
+                    CHAINMAN_ACTIVE_MODE="container-nix",
+                    CHAINMAN_ACTIVE_TRANSPORT=json.dumps(active),
+                ),
+                clear=True,
+            ),
+            patch.object(reentry, "validate"),
+            patch.object(workflows, "configuration", return_value=cfg),
+            patch.object(reentry, "borrow", return_value=False),
+            patch.object(chainman, "main", return_value=0) as execute,
+            patch.object(workflows, "run", return_value=0) as run,
+        ):
+            self.assertEqual(
+                reentry.main([str(self.consumer), "--entry", *arguments]), 0
+            )
+            if arguments[0] == "run":
+                run.assert_called_once()
+                execute.assert_not_called()
+            else:
+                execute.assert_called_once()
+                run.assert_not_called()
+
+    def test_nested_commands_reuse_canonical_sources_with_aliases_spaces_and_deduplication(
+        self,
+    ):
+        cfg = deepcopy(self.cfg)
+        cfg["tasks"]["nested"] = {
+            "commands": [["true"]],
+            "source_root_env": "FIXTURE_SOURCE",
+        }
+        cfg["setup"]["alias"] = {
+            **cfg["setup"]["website"],
+            "source_root_env": "FIXTURE_ALIAS",
+        }
+        alias = self.base / "source alias with spaces"
+        alias.symlink_to(self.source, target_is_directory=True)
+        env = {
+            **self.env,
+            "FIXTURE_SOURCE": str(alias),
+            "FIXTURE_ALIAS": str(self.source),
+        }
+        active = self.active_transport(cfg, env)
+        self.assertEqual(len(active["mounts"]), 1)
+        self.assertEqual(active["mounts"][0]["source"], str(self.source))
+        for selected in (env, {**env, "FIXTURE_SOURCE": str(self.source)}):
+            for arguments in (["exec", "true"], ["run", "nested"]):
+                with self.subTest(env=selected, arguments=arguments):
+                    self.nested_entry(cfg, selected, active, arguments)
+
+    def test_nested_commands_allow_unset_optional_sources(self):
+        cfg = deepcopy(self.cfg)
+        cfg["tasks"]["nested"] = {"commands": [["true"]]}
+        active = self.active_transport(cfg, {})
+        self.assertEqual(active, {"mounts": [], "ports": []})
+        for arguments in (["exec", "true"], ["run", "nested"]):
+            with self.subTest(arguments=arguments):
+                self.nested_entry(cfg, {}, active, arguments)
+
+    def test_nested_commands_reject_changed_removed_added_and_retargeted_sources(self):
+        cfg = deepcopy(self.cfg)
+        cfg["tasks"]["nested"] = {"commands": [["true"]]}
+        cfg["setup"]["optional"] = {
+            **cfg["setup"]["website"],
+            "source_root_env": "FIXTURE_OPTIONAL",
+        }
+        alias = self.base / "selected source alias"
+        alias.symlink_to(self.source, target_is_directory=True)
+        env = {**self.env, "FIXTURE_SOURCE": str(alias)}
+        active = self.active_transport(cfg, env)
+        changed = [
+            {**env, "FIXTURE_SOURCE": str(self.other)},
+            {},
+            {**env, "FIXTURE_OPTIONAL": str(self.other)},
+        ]
+        alias.unlink()
+        alias.symlink_to(self.other, target_is_directory=True)
+        changed.append(env)
+        for selected in changed:
+            for arguments in (["exec", "true"], ["run", "nested"]):
+                with (
+                    self.subTest(env=selected, arguments=arguments),
+                    self.assertRaisesRegex(ValueError, "different container transport"),
+                ):
+                    self.nested_entry(cfg, selected, active, arguments)
+
+    def test_nested_source_mounts_preserve_declared_scope_and_overlapping_order(self):
+        cfg = deepcopy(self.cfg)
+        cfg["tasks"]["nested"] = {"commands": [["true"]]}
+        cfg["profiles"] = {
+            "host": {
+                "transport": {
+                    "mounts": [
+                        {
+                            "source": str(self.other),
+                            "target": str(self.source / "child"),
+                        }
+                    ],
+                    "ports": ["127.0.0.1:8080:80"],
+                }
+            }
+        }
+        active = self.active_transport(cfg, self.env)
+        for field, value in (
+            ("source", "/different-source"),
+            ("target", "/different-target"),
+            ("read_only", False),
+            ("optional", True),
+        ):
+            changed = deepcopy(cfg)
+            changed["profiles"]["host"]["transport"]["mounts"][0][field] = value
+            for arguments in (["exec", "true"], ["run", "nested"]):
+                with (
+                    self.subTest(field=field, arguments=arguments),
+                    self.assertRaisesRegex(ValueError, "different container transport"),
+                ):
+                    self.nested_entry(changed, self.env, active, arguments)
+        for field, value in (
+            ("ports", ["127.0.0.1:8080:81"]),
+            ("ports", ["127.0.0.1:8080:80/udp"]),
+            ("host_access", True),
+            ("display", "x11"),
+        ):
+            changed = deepcopy(cfg)
+            changed["profiles"]["host"]["transport"][field] = value
+            with (
+                self.subTest(field=field, value=value),
+                self.assertRaisesRegex(ValueError, "different container transport"),
+            ):
+                self.nested_entry(changed, self.env, active, ["exec", "true"])
+        readonly = deepcopy(active)
+        readonly["mounts"][-1]["read_only"] = True
+        reversed_mounts = {**active, "mounts": list(reversed(active["mounts"]))}
+        for changed in (readonly, reversed_mounts):
+            with self.assertRaisesRegex(ValueError, "different container transport"):
+                self.nested_entry(cfg, self.env, changed, ["exec", "true"])
+        conflicting = deepcopy(cfg)
+        conflicting["profiles"]["host"]["transport"]["mounts"][0]["target"] = str(
+            self.source
+        )
+        with self.assertRaisesRegex(ValueError, "Conflicting transport mount target"):
+            self.nested_entry(conflicting, self.env, active, ["exec", "true"])
 
     def test_external_payload_enters_consumer_profile_before_changing_directory(self):
         with (

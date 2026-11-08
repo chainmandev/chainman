@@ -13,6 +13,7 @@ import admission
 import chainman
 import git_runtime
 import services
+import source_roots
 import toolchain as tc
 import workflows
 from adapter_data import Table
@@ -175,6 +176,9 @@ def main(arguments: list[str]) -> int:
             selected_transport = execution_transport.effective(
                 cfg, {}, profile=selected_profile
             )
+        selected_transport = source_roots.compose_transport(
+            selected_transport, source_roots.inventory(root, cfg, os.environ)
+        )
         active_transport = json.loads(
             os.environ.get("CHAINMAN_ACTIVE_TRANSPORT", '{"mounts": [], "ports": []}')
         )

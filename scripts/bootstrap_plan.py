@@ -330,14 +330,8 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
             root, profile, env, selected.get("environment", {}), cfg=cfg
         )
     if has_sources:
-        mounts = [
-            {"source": value, "target": value, "read_only": False}
-            for value in dict.fromkeys(configured_sources.values())
-        ]
         transports = [
-            execution_transport.compose(
-                [("execution", value), ("sources", {"mounts": mounts})]
-            )
+            source_roots.compose_transport(value, configured_sources)
             for value in (transports or [{}])
         ]
     for value in transports:

@@ -154,6 +154,9 @@ requires its selector. Declare selectors in the caller environment, since
 project files, defaults and task/profile policy cannot replace or synthesize them.
 The same canonical values and narrow mounts reach planning, profile preparation,
 setup, application processes, probes and shutdown. Fingerprints remain global.
+Nested managed commands compose this same inventory before comparing transport,
+so the same source selection can reuse its container. Changed sources, declared
+mount access, overlapping mount order or port bindings still require host entry.
 Selecting another checkout invalidates setup and service identity.
 An unset optional selector needs no directory. Ordinary source edits can
 hot reload without making the running service's probes or shutdown re-run setup;

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import project_environment
 import toolchain as tc
-from adapter_data import strings, table, text
+from adapter_data import Table, strings, table, text
 
 
 def declaration(spec: Mapping[str, object]) -> None:
@@ -133,6 +133,26 @@ def inventory(
         key: str(root(consumer, {"source_root_env": key}, env))
         for key in raw_inventory(cfg, env)
     }
+
+
+def compose_transport(value: Mapping[str, object], sources: Mapping[str, str]) -> Table:
+    """Append one writable mount per canonical source, preserving declared scope."""
+    import execution_transport
+
+    return execution_transport.compose(
+        [
+            ("execution", dict(value)),
+            (
+                "sources",
+                {
+                    "mounts": [
+                        {"source": path, "target": path, "read_only": False}
+                        for path in dict.fromkeys(sources.values())
+                    ]
+                },
+            ),
+        ]
+    )
 
 
 def preserve(
