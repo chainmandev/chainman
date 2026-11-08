@@ -266,7 +266,10 @@ class ExecutionTests(ConsumerFixture):
             "#!"
             + sys.executable
             + "\nimport os, time\nfrom pathlib import Path\n"
-            + f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+            + f"marker=Path({str(pid_file)!r})\n"
+            + "pending=marker.with_name(marker.name+'.pending-'+str(os.getpid()))\n"
+            + "pending.write_text(str(os.getpid()))\n"
+            + "pending.replace(marker)\n"
             + "while True: time.sleep(0.05)\n",
         )
         fake_nix.chmod(0o755)
