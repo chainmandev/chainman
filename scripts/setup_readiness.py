@@ -10,6 +10,7 @@ import sys
 
 import chainman
 import toolchain as tc
+import source_roots
 from adapter_data import Table, strings, table, text
 
 
@@ -50,7 +51,7 @@ def check(
             ],
             env=dict(env, CHAINMAN_SETUP="error"),
             resolved_defaults=resolved_defaults,
-            cwd=root / text(spec["directory"], "Setup directory"),
+            cwd=source_roots.directory(root, spec, env),
             stdin=subprocess.DEVNULL,
             pass_fds=pass_fds,
             capture_output=True,

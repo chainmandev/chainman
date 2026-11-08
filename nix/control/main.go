@@ -48,11 +48,15 @@ type HTTPProbe struct {
 	PendingEnvironment bool              `json:"pending_environment,omitempty"`
 }
 type Service struct {
-	Command      Command  `json:"command"`
-	Dependencies []string `json:"depends_on"`
-	Readiness    *Probe   `json:"readiness,omitempty"`
-	Restart      string   `json:"restart"`
-	Shutdown     int      `json:"shutdown_seconds"`
+	Command         Command  `json:"command"`
+	Dependencies    []string `json:"depends_on"`
+	Readiness       *Probe   `json:"readiness,omitempty"`
+	Restart         string   `json:"restart"`
+	FailurePolicy   string   `json:"failure_policy,omitempty"`
+	Shutdown        int      `json:"shutdown_seconds"`
+	ShutdownCommand *Command `json:"shutdown_command,omitempty"`
+	// Launch retains setup content identity; lifecycle commands retain its scope.
+	LifecycleFingerprint string `json:"lifecycle_fingerprint,omitempty"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
 	Container      *Container `json:"container,omitempty"`
 	Watch          *Watch     `json:"watch,omitempty"`
@@ -418,17 +422,42 @@ func validate(p Plan) error {
 		if s.Shutdown < 1 || s.Shutdown > 300 {
 			return fmt.Errorf("invalid shutdown timeout")
 		}
+		service := s.Command.Argv
+		lifecycleFingerprint := ""
+		if len(service) >= 4 && service[len(service)-3] == "_workflow-service" && service[len(service)-2] == name {
+			lifecycleFingerprint = service[len(service)-1]
+		}
+		if s.LifecycleFingerprint != "" {
+			if lifecycleFingerprint == "" {
+				return fmt.Errorf("invalid internal service lifecycle fingerprint")
+			}
+			lifecycleFingerprint = s.LifecycleFingerprint
+		}
+		if s.ShutdownCommand != nil {
+			if _, e := child(*s.ShutdownCommand); e != nil {
+				return e
+			}
+			if s.LifecycleFingerprint != "" {
+				shutdown := s.ShutdownCommand.Argv
+				if len(shutdown) < 4 || shutdown[len(shutdown)-3] != "_workflow-shutdown" ||
+					shutdown[len(shutdown)-2] != name || shutdown[len(shutdown)-1] != lifecycleFingerprint {
+					return fmt.Errorf("invalid internal service shutdown scope")
+				}
+			}
+		}
 		if s.Restart != "no" && s.Restart != "always" && s.Restart != "on_failure" {
 			return fmt.Errorf("invalid restart policy")
+		}
+		if s.FailurePolicy != "" && s.FailurePolicy != "stop" && s.FailurePolicy != "continue" {
+			return fmt.Errorf("invalid service failure policy")
 		}
 		if s.Readiness != nil {
 			r := s.Readiness
 			if r.Entry != 0 {
-				probe, service := r.Command.Argv, s.Command.Argv
-				if r.Entry != 10 || r.HTTPGet != nil || len(probe) < 4 || len(service) < 4 ||
+				probe := r.Command.Argv
+				if r.Entry != 10 || r.HTTPGet != nil || len(probe) < 4 ||
 					probe[len(probe)-3] != "_workflow-probe" || probe[len(probe)-2] != name ||
-					service[len(service)-3] != "_workflow-service" || service[len(service)-2] != name ||
-					probe[len(probe)-1] == "" || probe[len(probe)-1] != service[len(service)-1] {
+					lifecycleFingerprint == "" || probe[len(probe)-1] != lifecycleFingerprint {
 					return fmt.Errorf("invalid internal probe entry allowance")
 				}
 			}
@@ -610,7 +639,8 @@ func ready(p Plan, names []string, startup *startupGuard) error {
 			seconds += (r.Period + r.Timeout + 15) * r.Failures
 		}
 	}
-	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	started := time.Now()
+	deadline := started.Add(time.Duration(seconds) * time.Second)
 	for time.Now().Before(deadline) {
 		if e := startup.check(); e != nil {
 			return e
@@ -624,28 +654,14 @@ func ready(p Plan, names []string, startup *startupGuard) error {
 		if e != nil {
 			return fmt.Errorf("service controller lost: %w", e)
 		}
-		found := map[string]Process{}
-		for _, s := range ps {
-			found[s.Name] = s
+		pending, degraded, err := startupServiceSample(p, names, ps, time.Since(started))
+		if err != nil {
+			return err
 		}
-		all := true
-		for _, n := range names {
-			s, ok := found[n]
-			if !ok {
-				return fmt.Errorf("backend omitted service %s", n)
+		if !pending {
+			for _, name := range degraded {
+				fmt.Fprintf(os.Stderr, "chainman: service %s unavailable; continuing degraded (failure_policy=continue); log: %s\n", name, filepath.Join(p.State, "services.log"))
 			}
-			if s.Status == "Completed" || s.Status == "Error" || s.Status == "Skipped" {
-				detail := s.Status
-				if s.ExitCode != nil {
-					detail += fmt.Sprintf(", exit code %d", *s.ExitCode)
-				}
-				return fmt.Errorf("service %s exited before readiness (%s); log: %s", n, detail, filepath.Join(p.State, "services.log"))
-			}
-			if !s.Running || (p.Services[n].Readiness != nil && s.Ready != "Ready") {
-				all = false
-			}
-		}
-		if all {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -1035,10 +1051,15 @@ func releaseUnused(p Plan, force bool) error {
 			}
 		}
 	}
+	var shutdownFailure error
 	for i := len(ordered) - 1; i >= 0; i-- {
 		n := ordered[i]
 		if used[n] {
 			continue
+		}
+		if err := shutdownService(p, n); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			shutdownFailure = errors.Join(shutdownFailure, err)
 		}
 		if live {
 			_, _ = backend(p, "process", "stop", n)
@@ -1067,12 +1088,12 @@ func releaseUnused(p Plan, force bool) error {
 		}
 	}
 	if e = pruneResources(p); e != nil {
-		return e
+		shutdownFailure = errors.Join(shutdownFailure, e)
 	}
 	if p.Bridge != nil && !hasLeases(p) {
-		return removeBridge(p.Bridge)
+		shutdownFailure = errors.Join(shutdownFailure, removeBridge(p.Bridge))
 	}
-	return nil
+	return shutdownFailure
 }
 func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (*os.File, string, error) {
 	if e := bindEngines(&p); e != nil {

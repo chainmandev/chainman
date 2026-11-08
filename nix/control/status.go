@@ -186,6 +186,7 @@ func scopeStatus(ctx context.Context, state string, resource bool) (map[string]a
 			}
 		} else {
 			value["services"] = ps
+			value["degraded_services"] = degradedServices(p, ps, used)
 		}
 		if leaseError == nil && value["busy"] != true {
 			value["recovery_required"] = err != nil && clients > 0

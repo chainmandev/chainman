@@ -47,6 +47,45 @@ func TestInternalProbeEntryAllowanceRejectsOtherCommands(t *testing.T) {
 	}
 }
 
+func TestInternalLifecycleCommandsRequireTheirDeclaredFingerprintScope(t *testing.T) {
+	root := physicalTempDir(t)
+	launch := []string{"/fixture/launch", "_workflow-service", "web", "launch-inputs"}
+	probe := []string{"/fixture/launch", "_workflow-probe", "web", "lifecycle-inputs"}
+	shutdown := []string{"/fixture/launch", "_workflow-shutdown", "web", "lifecycle-inputs"}
+	for _, tc := range []struct {
+		name     string
+		launch   []string
+		probe    []string
+		shutdown []string
+		valid    bool
+	}{
+		{"host", launch, probe, shutdown, true},
+		{"container-nix", launch, append([]string{"/engine", "exec", "container"}, probe...), append([]string{"/engine", "exec", "container"}, shutdown...), true},
+		{"probe-uses-launch-scope", launch, []string{"/fixture/launch", "_workflow-probe", "web", "launch-inputs"}, shutdown, false},
+		{"probe-uses-other-scope", launch, []string{"/fixture/launch", "_workflow-probe", "web", "changed"}, shutdown, false},
+		{"probe-uses-other-service", launch, []string{"/fixture/launch", "_workflow-probe", "other", "lifecycle-inputs"}, shutdown, false},
+		{"empty-launch-scope", []string{"/fixture/launch", "_workflow-service", "web", ""}, probe, shutdown, false},
+		{"raw-launch", []string{"/bin/true"}, probe, shutdown, false},
+		{"shutdown-uses-launch-scope", launch, probe, []string{"/fixture/launch", "_workflow-shutdown", "web", "launch-inputs"}, false},
+		{"shutdown-uses-other-service", launch, probe, []string{"/fixture/launch", "_workflow-shutdown", "other", "lifecycle-inputs"}, false},
+		{"shutdown-uses-other-action", launch, probe, []string{"/fixture/launch", "_workflow-probe", "web", "lifecycle-inputs"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := Command{Argv: tc.launch, Directory: root}
+			stop := Command{Argv: tc.shutdown, Directory: root}
+			p := Plan{Schema: 1, Root: root, State: physicalTempDir(t), Backend: "/bin/true", Fingerprint: "fixture-engine-identity", Requested: []string{"web"}, Task: command,
+				Services: map[string]Service{"web": {Command: command, Restart: "no", Shutdown: 1, LifecycleFingerprint: "lifecycle-inputs", ShutdownCommand: &stop,
+					Readiness: &Probe{Command: Command{Argv: tc.probe, Directory: root}, Period: 1, Timeout: 2, Failures: 10, Entry: 10}}}}
+			if err := validate(p); (err == nil) != tc.valid {
+				t.Fatalf("lifecycle scope validity: %v", err)
+			}
+			if !reflect.DeepEqual(p.Services["web"].Command.Argv, tc.launch) {
+				t.Fatal("validation changed the immutable launch scope")
+			}
+		})
+	}
+}
+
 func TestWatchMarkerProbeDoesNotEnterTransientBuildContainer(t *testing.T) {
 	owner := &Container{Engine: "/missing/docker", Name: "transient-build", Token: strings.Repeat("a", 32)}
 	p := Plan{Root: "/fixture", State: "/fixture/state", Watcher: "/fixture/watcher", Services: map[string]Service{

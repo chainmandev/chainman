@@ -9,7 +9,7 @@ import subprocess
 
 import chainman
 import toolchain as tc
-from adapter_data import text
+import source_roots
 
 
 @contextmanager
@@ -25,7 +25,11 @@ def caller_lifetime() -> Iterator[int]:
 
 @contextmanager
 def command(
-    root: Path, commands: Sequence[Sequence[str]], spec: Mapping[str, object]
+    root: Path,
+    commands: Sequence[Sequence[str]],
+    spec: Mapping[str, object],
+    *,
+    env: Mapping[str, str] | None = None,
 ) -> Iterator[list[str]]:
     target = (
         platform.system().lower()
@@ -59,11 +63,7 @@ def command(
                 "commands": [
                     {
                         "argv": argv,
-                        "directory": str(
-                            tc.contained(
-                                root, text(spec.get("directory", "."), "Task directory")
-                            )
-                        ),
+                        "directory": str(source_roots.directory(root, spec, env)),
                     }
                     for argv in commands
                 ],

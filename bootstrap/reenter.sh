@@ -6,7 +6,7 @@ shift
 internal_entry=0
 if [ "${1:-}" = --entry ]; then
     case "${2:-}" in
-        _workflow-service | _workflow-probe)
+        _workflow-service | _workflow-probe | _workflow-shutdown)
             if [ "${CHAINMAN_INTERNAL_ENTRY:-}" = 1 ]; then internal_entry=1; fi
             ;;
     esac

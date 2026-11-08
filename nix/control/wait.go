@@ -102,11 +102,21 @@ func serviceOutcome(p Plan, development *developmentSession) error {
 		wanted[name] = true
 	}
 	development.services(p, ps, wanted)
+	observed := map[string]bool{}
 	for _, process := range ps {
-		if wanted[process.Name] && (process.Status == "Error" || process.Status == "Completed" || process.Status == "Skipped") {
+		observed[process.Name] = true
+	}
+	for _, name := range selected {
+		if !observed[name] {
+			return fmt.Errorf("backend omitted service %s", name)
+		}
+	}
+	for _, process := range ps {
+		if wanted[process.Name] && serviceEnded(process) && p.Services[process.Name].FailurePolicy != "continue" {
 			return fmt.Errorf("service %s ended: %s", process.Name, process.Status)
 		}
 	}
+
 	return nil
 }
 

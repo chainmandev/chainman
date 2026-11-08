@@ -249,7 +249,9 @@ def profile_environment(
                 "Cannot unset managed runtime and cache lifecycle variables"
             )
         selected.pop(key, None)
-    return selected
+    import source_roots
+
+    return source_roots.preserve(root, cfg, inherited, selected)
 
 
 class ExecuteOptions(tc.ProcessIOOptions, total=False):
@@ -404,9 +406,14 @@ def execute(
         ]
     with ExitStack() as lifetime:
         command = argv
+        launch_cwd = target
         if ref and (
             gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
         ):
+            # Consumer flakes own their shell hooks and caches. Enter them
+            # from the consumer before moving the payload into an explicit
+            # external source root or a declared working directory.
+            launch_cwd = root
             if gc_root is None:
                 # nix develop execs the payload: its process-local roots do not
                 # retain the shell tools across an isolated daemon's GC. Keep a
@@ -462,7 +469,7 @@ def execute(
         try:
             return tc.managed_run(
                 command,
-                cwd=target,
+                cwd=launch_cwd,
                 env=selected,
                 check=check,
                 text=text,
@@ -652,13 +659,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.environ.get("CHAINMAN_X11_HOSTNAME", ""),
             )
             return 0
-        if args.action == "_bootstrap-options":
+        if args.action in {"_bootstrap-options", "_bootstrap-sources"}:
             import bootstrap_plan
 
             if len(args.arguments) != 2:
                 raise ValueError(
                     "Bootstrap options require the original action and task"
                 )
+            if args.action == "_bootstrap-sources":
+                for key, value in bootstrap_plan.discover(
+                    root, args.arguments[0]
+                ).items():
+                    print(bootstrap_plan.line(key))
+                    print(bootstrap_plan.line(value))
+                return 0
             _, options = bootstrap_plan.plan(root, args.arguments[0], args.arguments[1])
             if options:
                 print("\n".join(map(bootstrap_plan.line, options)))
@@ -767,6 +781,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "_workflow-task",
             "_workflow-service",
             "_workflow-probe",
+            "_workflow-shutdown",
             "_workflow-prepare",
             "_workflow-profile",
         }:

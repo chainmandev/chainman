@@ -81,6 +81,25 @@ avoids a shell/Nix entry per probe. It supports bounded body checks and headers
 from declared environment variables, including Basic authentication. See the
 [configuration reference](configuration.md#services) for port and credential rules.
 
+## Optional service failures
+
+Services default to `failure_policy = "stop"`: terminal startup or runtime failure
+ends their clients. A reporting or preview service may explicitly set
+`failure_policy = "continue"`. A terminal startup failure then admits the client
+in a degraded state. A process that stays unavailable receives a bounded initial
+readiness window based on its declared probe settings before admission degrades.
+Runtime process death or lost readiness stays visible without canceling core
+services or the task. `services-status` includes `degraded_services`; application
+summaries show degraded health and recover when the existing probes succeed.
+A lost controller, invalid ownership or omitted service row remains an error.
+
+Failure policy does not change dependency conditions or Process Compose restart
+policy. Mark every optional member of a dependency group explicitly, and keep
+core services independent of that group's health. `restart = "always"` recreates
+an exited managed service even after a clean exit; `restart = "on_failure"` only
+restarts failed exits. The native owner still checks container identity and
+performs cleanup before Process Compose starts the frozen command again.
+
 ## Application ownership
 
 Keep commands in the foreground. Declare service `depends_on` and `setup` groups
@@ -92,6 +111,70 @@ the commands succeed and required services remain available. A development task
 uses `wait_for_services = true` to retain ownership until stop or interruption.
 Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
+
+### External source checkouts
+
+A command service, task, or setup group may declare `source_root_env`, naming an
+explicit environment variable with an absolute source directory. Profiles,
+ownership state, and setup leases still belong to the consumer. `directory`,
+setup inputs, and artifacts are relative to the selected checkout. For example:
+
+```toml
+[environment]
+pass = ["PREVIEW_SOURCE"]
+
+[setup.preview]
+profile = "core"
+source_root_env = "PREVIEW_SOURCE"
+commands = [["pnpm", "install", "--frozen-lockfile"]]
+inputs = ["package.json", "pnpm-lock.yaml"]
+artifacts = ["node_modules"]
+
+[services.preview]
+profile = "core"
+source_root_env = "PREVIEW_SOURCE"
+setup = ["preview"]
+command = ["pnpm", "dev", "--host", "0.0.0.0"]
+```
+
+Container entry discovers external source names and raw paths in a verified
+inspection planner that has no external mounts. The POSIX host bootstrap checks
+and canonicalizes those paths, then reruns the verified planner with narrow
+read-only source mounts. Execution mounts those canonical checkouts writable.
+No host Python or Node is needed to discover or resolve sources. Spaces and
+symlink selections are supported; paths containing newlines or commas are refused.
+The filesystem root, home directory, and directories containing the consumer
+are refused.
+
+Every explicitly set source variable declared by any task, service or setup group
+belongs to one global inventory, including unselected and setup-only groups.
+Those names are automatically forwarded, independently of `environment.pass`.
+Unset optional selectors stay absent; a selected external task/service/setup
+requires its selector. Declare selectors in the caller environment, since
+project files, defaults and task/profile policy cannot replace or synthesize them.
+The same canonical values and narrow mounts reach planning, profile preparation,
+setup, application processes, probes and shutdown. Fingerprints remain global.
+Nested managed commands compose this same inventory before comparing transport,
+so the same source selection can reuse its container. Changed sources, declared
+mount access, overlapping mount order or port bindings still require host entry.
+Selecting another checkout invalidates setup and service identity.
+An unset optional selector needs no directory. Ordinary source edits can
+hot reload without making the running service's probes or shutdown re-run setup;
+declaration, profile, and source identity changes still require a restart.
+
+### Graceful persistence
+
+A managed command service may declare `shutdown_command = ["node", "save.mjs"]`.
+It runs before that service stops, after its dependents have drained, bounded by
+`shutdown_seconds`. Container hooks execute in the checked immutable container
+identity. Plain image-container services cannot declare hooks; use a managed
+command service when application persistence needs an explicit lifecycle step.
+
+Hooks should publish a complete snapshot atomically and preserve the previous
+successful snapshot on failure. Chainman reports a failed or timed-out hook and
+continues cleanup of owned services. It cannot guarantee a snapshot after a
+process crash or a forced host shutdown. The application must detect that case
+and require explicit recovery rather than silently starting empty.
 
 ### Development display and readiness
 

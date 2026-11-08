@@ -14,6 +14,7 @@ import chainman
 import project_environment
 import execution_transport
 import workflows
+import source_roots
 from adapter_data import array, strings, table, text
 
 
@@ -25,6 +26,7 @@ INTERNAL = {
     "_workflow-task",
     "_workflow-service",
     "_workflow-probe",
+    "_workflow-shutdown",
     "_workflow-prepare",
     "_workflow-profile",
     "_service-prepare",
@@ -107,12 +109,49 @@ def transport(
     return result
 
 
+def inherited_environment(cfg: dict[str, object]) -> dict[str, str]:
+    inherited = dict(os.environ)
+    if os.environ.get("CHAINMAN_BOOTSTRAP_INPUTS"):
+        forwarded = source_roots.host_inputs(
+            Path(os.environ["CHAINMAN_BOOTSTRAP_INPUTS"]), cfg
+        )
+        inherited.update(
+            {
+                key: value
+                for key, value in forwarded.items()
+                if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+            }
+        )
+    return inherited
+
+
+def discover(root: Path, request: str) -> dict[str, str]:
+    # Recovery must still work after declarations or source trees are removed.
+    if (
+        request
+        in {
+            "services-status",
+            "services-stop",
+            "services-logs",
+            "_hook-export",
+            "_hook-worker",
+        }
+        or os.environ.get("CHAINMAN_CONTROL_RECOVERY") == "1"
+    ):
+        return {}
+    cfg = config_inspection.validated(root)
+    return source_roots.raw_inventory(cfg, inherited_environment(cfg))
+
+
 def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     # Recovery consumes saved ownership state, never current declarations. Keep
     # nested native-tool export available through the same read-only transport.
     if request in {"services-status", "services-stop", "services-logs"}:
         return True, ["--controller", "1"]
-    if request in {"_control-export", "_hook-export", "_hook-worker"}:
+    if (
+        request in {"_hook-export", "_hook-worker"}
+        or os.environ.get("CHAINMAN_CONTROL_RECOVERY") == "1"
+    ):
         return False, []
     cfg = config_inspection.validated(root)
     tasks = table(cfg.get("tasks", {}), "Tasks")
@@ -143,7 +182,12 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_*?]*", line(pattern)):
             raise ValueError("Invalid environment forwarding pattern")
         options += ["--env-pattern", pattern]
-    if request in {"_workflow-service", "_workflow-probe", "_workflow-profile"}:
+    if request in {
+        "_workflow-service",
+        "_workflow-probe",
+        "_workflow-shutdown",
+        "_workflow-profile",
+    }:
         selected = table(services.get(name, {}), "Service")
     elif request in {"_workflow-task", "run"}:
         selected = table(tasks.get(name, {}), "Task")
@@ -157,6 +201,7 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
             "_workflow-task",
             "_workflow-service",
             "_workflow-probe",
+            "_workflow-shutdown",
             "_workflow-profile",
             "run",
         }
@@ -225,24 +270,51 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
                     "Tasks in one container execution require identical transport; start differently scoped tasks separately from the host"
                 )
     env = None
-    if any(
+    source_specs = [selected]
+    setup_entries = workflows.declarations(cfg, "setup")
+    if (
+        request in {"_workflow-prepare", "_service-prepare", "_workflow-task", "run"}
+        or request in tasks
+    ):
+        task_name = name if name in tasks else task
+        if task_name in tasks:
+            graph_tasks = workflows.order(tasks, [task_name])
+            source_specs = [table(tasks[key], "Task") for key in graph_tasks]
+            requested_services = [
+                service
+                for spec in source_specs
+                for service in workflows.names(spec.get("services", []))
+            ]
+            source_specs += [
+                table(services[key], "Service")
+                for key in workflows.order(services, requested_services)
+            ]
+    groups = [
+        group
+        for spec in source_specs
+        for group in workflows.names(spec.get("setup", []))
+    ]
+    source_specs += [
+        setup_entries[key] for key in workflows.order(setup_entries, groups)
+    ]
+    inherited = inherited_environment(cfg)
+    configured_sources = source_roots.inventory(root, cfg, inherited)
+    for spec in source_specs:
+        if (
+            spec.get("source_root_env")
+            and str(spec["source_root_env"]) not in inherited
+        ):
+            raise ValueError(
+                f"External source root {spec['source_root_env']} requires an absolute directory"
+            )
+    has_sources = bool(configured_sources)
+    for key in configured_sources:
+        options += ["--env-pattern", key]
+    if has_sources or any(
         "{" in port
         for value in transports
         for port in strings(table(value, "Transport").get("ports", []), "Ports")
     ):
-        inherited = dict(os.environ)
-        if os.environ.get("CHAINMAN_BOOTSTRAP_INPUTS"):
-            forwarded = project_environment.host_inputs(
-                Path(os.environ["CHAINMAN_BOOTSTRAP_INPUTS"]),
-                table(cfg.get("environment", {}), "Environment"),
-            )
-            inherited.update(
-                {
-                    key: value
-                    for key, value in forwarded.items()
-                    if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
-                }
-            )
         env = (
             workflows.context_environment(root, cfg, task, inherited)
             if task in tasks
@@ -257,6 +329,11 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         env = chainman.profile_environment(
             root, profile, env, selected.get("environment", {}), cfg=cfg
         )
+    if has_sources:
+        transports = [
+            source_roots.compose_transport(value, configured_sources)
+            for value in (transports or [{}])
+        ]
     for value in transports:
         if any(value.get(key) for key in ("mounts", "ports", "host_access", "display")):
             import json
