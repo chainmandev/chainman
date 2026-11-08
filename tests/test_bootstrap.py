@@ -261,6 +261,14 @@ class BootstrapTests(unittest.TestCase):
             self.fail(result.stdout + result.stderr)
         return result
 
+    def verification_separator_environment(self):
+        # Exercise raw bootstrap path spellings without changing their location.
+        return dict(
+            self.env,
+            TMPDIR=str(Path(self.shared.name).resolve()) + "/",
+            XDG_CACHE_HOME=self.env["XDG_CACHE_HOME"] + "/",
+        )
+
     def records(self):
         return [
             json.loads(path.read_text()) for path in self.root.glob("record-*.json")
@@ -713,7 +721,12 @@ commands=[["python3", "-c", "print('last verification gate executed')"]]
         self.lifecycle_git("commit", "-m", "Verification fixture")
         before = self.lifecycle_git("rev-parse", "HEAD")
         result = self.run_bootstrap(
-            "deps-update", "--skip-chainman", "--keep-going", check=False, timeout=600
+            "deps-update",
+            "--skip-chainman",
+            "--keep-going",
+            check=False,
+            env=self.verification_separator_environment(),
+            timeout=600,
         )
         self.assertNotEqual(result.returncode, 0, result.stderr)
         self.assertIn("last verification gate executed", result.stdout + result.stderr)
@@ -736,7 +749,12 @@ commands=[["python3", "-c", "print('last verification gate executed')"]]
     def test_public_keep_going_success_retains_report_after_candidate_collection(self):
         before = self.update_lifecycle()
         result = self.run_bootstrap(
-            "deps-update", "--skip-chainman", "--keep-going", "--json", timeout=600
+            "deps-update",
+            "--skip-chainman",
+            "--keep-going",
+            "--json",
+            env=self.verification_separator_environment(),
+            timeout=600,
         )
         accepted = json.loads(result.stdout)
         self.assertEqual(accepted["verification"], "passed")
@@ -796,7 +814,12 @@ verify=["reject", "last"]
             "Verification fixture",
         )
         result = self.run_bootstrap(
-            "recipe", "verify", "--keep-going", check=False, timeout=600
+            "recipe",
+            "verify",
+            "--keep-going",
+            check=False,
+            env=self.verification_separator_environment(),
+            timeout=600,
         )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("last verification gate executed", result.stdout)

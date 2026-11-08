@@ -694,12 +694,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.action == "_verification-plan":
             import recipes
 
-            if len(rest) != 3 or rest[0] != "verify":
-                raise ValueError("Verification plan requires verify and two launchers")
+            if len(rest) != 5 or rest[0] != "verify":
+                raise ValueError(
+                    "Verification plan requires verify, launchers and health scope"
+                )
             print(
                 json.dumps(
                     recipes.verification_plan(
-                        root, cfg, recipes.actions(cfg)["verify"], rest[1], rest[2]
+                        root,
+                        cfg,
+                        recipes.actions(cfg)["verify"],
+                        rest[1],
+                        rest[2],
+                        rest[3],
+                        rest[4],
                     )
                 )
             )
@@ -707,9 +715,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             import recipes
             import workflows
 
-            if len(rest) != 3:
+            if len(rest) != 5:
                 raise ValueError(
-                    "Update verification plan requires task file and launchers"
+                    "Update verification plan requires task file, launchers and health scope"
                 )
             arguments = Path(rest[0]).read_text().splitlines()
             if len(arguments) % 2:
@@ -725,6 +733,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 commands,
                 rest[1],
                 rest[2],
+                rest[3],
+                rest[4],
             )
             plan["identity_command"] = [
                 rest[2],

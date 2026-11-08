@@ -57,8 +57,10 @@ type VerificationReport struct {
 
 func verificationValidate(p VerificationPlan) error {
 	if p.Schema != 1 || !filepath.IsAbs(p.Root) || filepath.Clean(p.Root) != p.Root || len(p.Gates) == 0 ||
-		(len(p.IdentityCommand) != 2 && len(p.IdentityCommand) != 3) || len(p.HealthCommand) != 2 ||
-		p.IdentityCommand[1] != "_verification-identity" || p.HealthCommand[1] != "services-status" ||
+		(len(p.IdentityCommand) != 2 && len(p.IdentityCommand) != 3) || len(p.HealthCommand) != 3 ||
+		p.IdentityCommand[1] != "_verification-identity" || p.HealthCommand[1] != "status" ||
+		!filepath.IsAbs(p.HealthCommand[0]) || filepath.Clean(p.HealthCommand[0]) != p.HealthCommand[0] ||
+		!filepath.IsAbs(p.HealthCommand[2]) || filepath.Clean(p.HealthCommand[2]) != p.HealthCommand[2] ||
 		p.Identity.Commit == "" || len(p.Identity.Fingerprint) != 64 || len(p.Identity.Pin) != 40 {
 		return fmt.Errorf("invalid verification plan")
 	}
@@ -144,6 +146,9 @@ func verificationCheckHealth(p VerificationPlan, baseline map[string]verificatio
 	var health verificationHealth
 	if err := verificationQuery(p, p.HealthCommand, &health); err != nil {
 		return nil, err
+	}
+	if health.State != p.HealthCommand[2] {
+		return nil, fmt.Errorf("verification observed a different service scope")
 	}
 	scopes := map[string]verificationHealth{}
 	if err := verificationScopes(health, scopes); err != nil {
