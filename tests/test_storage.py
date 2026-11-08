@@ -666,8 +666,10 @@ def interrupted(signum, frame):
     sys.stderr.flush()
     raise KeyboardInterrupt
 signal.signal(signal.SIGINT, interrupted)
+# Block before readiness so an early terminal interrupt remains available.
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
 print('ready', flush=True)
-input()
+interrupted(signal.sigwait({signal.SIGINT}), None)
 """
         wrapper = (
             "import os,sys,termios; from pathlib import Path; "
