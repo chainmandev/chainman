@@ -13,6 +13,7 @@ import subprocess
 import fcntl
 import stat
 import time
+from contextlib import nullcontext
 from urllib.parse import urlsplit
 from collections.abc import Mapping
 from typing import Literal, NotRequired, TypedDict
@@ -22,6 +23,7 @@ import chainman
 import toolchain as tc
 import workflows
 import project_environment
+import source_roots
 
 
 class Command(TypedDict):
@@ -81,6 +83,7 @@ class Service(TypedDict):
     container: NotRequired[Container]
     readiness: NotRequired[Probe]
     watch: NotRequired[Watch]
+    shutdown_command: NotRequired[Command]
 
 
 class Bridge(TypedDict):
@@ -351,6 +354,10 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
             if profile not in checked_profiles:
                 chainman.profile(root, profile, cfg=cfg)
                 checked_profiles.add(profile)
+        if "shutdown_command" in spec:
+            workflows.commands([spec["shutdown_command"]])
+            if "container" in spec:
+                raise ValueError("Shutdown commands require a managed command service")
         if "container" in spec:
             item = spec["container"]
             if not isinstance(item, dict) or set(item) - {
@@ -374,7 +381,15 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
                 raise ValueError("Service container images cannot start with '-'")
             if item.get("command"):
                 workflows.commands([item["command"]])
-        tc.contained(root, text(spec.get("directory", "."), "Service directory"))
+        source_roots.declaration(spec)
+        for key in strings(
+            spec.get("environment_inputs", []), "Service environment inputs"
+        ):
+            project_environment.variable(key)
+        if "source_root_env" not in spec:
+            tc.contained(root, text(spec.get("directory", "."), "Service directory"))
+        if "source_root_env" in spec and ("container" in spec or scope == "repository"):
+            raise ValueError("External source roots require a worktree command service")
         workflows.names(spec.get("depends_on", []))
         workflows.order(setup_entries, workflows.names(spec.get("setup", [])))
         if spec.get("restart", "no") not in {"no", "always", "on_failure"}:
@@ -504,6 +519,7 @@ def config_fingerprint(
     *,
     include_volume_inputs: bool = True,
     env: Mapping[str, str] | None = None,
+    include_setup_inputs: bool = True,
 ) -> str:
     env = os.environ if env is None else env
     declared = workflows.declarations(cfg, "services")
@@ -527,6 +543,20 @@ def config_fingerprint(
         cfg.get("environment", {}),
         cfg.get("container", {}),
         cfg.get("tasks", {}),
+        {
+            name: {
+                key: env.get(key)
+                for key in strings(
+                    spec.get("environment_inputs", []), "Service environment inputs"
+                )
+            }
+            for name, spec in declared.items()
+        },
+        {
+            str(spec["source_root_env"]): source_roots.identity(root, spec, env)
+            for spec in workflow_specs
+            if spec.get("source_root_env")
+        },
         project_environment.file_fingerprint(
             root, table(cfg.get("environment", {}), "Project environment"), env
         ),
@@ -543,10 +573,27 @@ def config_fingerprint(
             for group in workflows.names(spec.get("setup", []))
         ],
     )
-    material += [
-        workflows.fingerprint(root, workflows.group_spec(cfg, name), env)
-        for name in groups
-    ]
+    if include_setup_inputs:
+        material += [
+            workflows.fingerprint(root, workflows.group_spec(cfg, name), env)
+            for name in groups
+        ]
+    else:
+        # Running services already retain setup leases. HMR changes source
+        # content while probes and stop continue using the admitted tools.
+        material += [
+            [
+                workflows.group_spec(cfg, name),
+                source_roots.identity(root, workflows.group_spec(cfg, name), env),
+                {
+                    key: env.get(key)
+                    for key in workflows.names(
+                        workflows.group_spec(cfg, name).get("environment_inputs", [])
+                    )
+                },
+            ]
+            for name in groups
+        ]
     if include_volume_inputs:
         material += [
             volume_compatibility(root, volume)
@@ -741,6 +788,9 @@ def export(root: Path, arguments: list[str]) -> int:
                 forwarded[name] = os.environ[name]
     declared = declarations(root, cfg)
     fingerprint = config_fingerprint(root, cfg, env=dict(os.environ, **planning_env))
+    lifecycle_fingerprint = config_fingerprint(
+        root, cfg, env=dict(os.environ, **planning_env), include_setup_inputs=False
+    )
     task_args = (
         extra[1:]
         if action in {"run", "services-run", "services-up", "services-reset"}
@@ -986,18 +1036,28 @@ def export(root: Path, arguments: list[str]) -> int:
                     launcher,
                     "_workflow-probe",
                     name,
-                    fingerprint,
+                    lifecycle_fingerprint,
                 ]
             else:
                 probe_command = [
                     launcher,
                     "_workflow-probe",
                     name,
-                    fingerprint,
+                    lifecycle_fingerprint,
                 ]
             if "http_get" not in probe:
                 prepared_probe["command"] = command(probe_command, service_root, env)
             value["readiness"] = prepared_probe
+        if "shutdown_command" in spec:
+            shutdown_argv = [
+                launcher,
+                "_workflow-shutdown",
+                name,
+                lifecycle_fingerprint,
+            ]
+            if mode == "container-nix":
+                shutdown_argv = [engine, "exec", container_name, *shutdown_argv]
+            value["shutdown_command"] = command(shutdown_argv, service_root, env)
         prepared[name] = value
         if "watch" in spec:
             watch = table(spec["watch"], "Service watch")
@@ -1307,7 +1367,12 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
     context_task = os.environ.get("CHAINMAN_CONTEXT_TASK")
     if context_task:
         env = workflows.context_environment(root, cfg, context_task, env)
-    if config_fingerprint(root, cfg, env=env) != expected:
+    lifecycle = action in {"_workflow-probe", "_workflow-shutdown"}
+    if config_fingerprint(
+        root, cfg, env=env, include_setup_inputs=not lifecycle
+    ) != expected and (
+        not lifecycle or config_fingerprint(root, cfg, env=env) != expected
+    ):
         raise ValueError(
             "Service inputs changed after planning; stop existing services before starting the updated workflow"
         )
@@ -1334,14 +1399,31 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
         if context_task:
             env = workflows.context_environment(root, cfg, context_task, env)
         env.update(literal_environment(spec.get("environment", {}), root, env))
-        with workflows.setup_use(
-            root, cfg, workflows.names(spec.get("setup", [])), env
+        with (
+            nullcontext(())
+            if lifecycle
+            else workflows.setup_use(
+                root, cfg, workflows.names(spec.get("setup", [])), env
+            )
         ) as descriptors:
             profile = text(
                 spec.get("profile", workflows.default_profile(cfg)),
                 "Service profile",
             )
             directory = text(spec.get("directory", "."), "Service directory")
+            if action == "_workflow-shutdown":
+                if "shutdown_command" not in spec:
+                    raise ValueError("Service has no shutdown command")
+                return chainman.execute(
+                    root,
+                    profile,
+                    strings(spec["shutdown_command"], "Shutdown command"),
+                    env=env,
+                    overrides=spec.get("environment", {}),
+                    cwd=source_roots.directory(root, spec, env),
+                    pass_fds=descriptors,
+                    check=False,
+                ).returncode
             if action == "_workflow-probe":
                 readiness = table(spec.get("readiness", {}), "Service readiness")
                 if "command" not in readiness:
@@ -1354,7 +1436,7 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                     strings(readiness["command"], "Readiness command"),
                     env=env,
                     overrides=spec.get("environment", {}),
-                    cwd=tc.contained(root, directory),
+                    cwd=source_roots.directory(root, spec, env),
                     pass_fds=descriptors,
                     check=False,
                 ).returncode
@@ -1367,7 +1449,7 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                     strings(spec["command"], "Service command"),
                     env=selected,
                     overrides=spec.get("environment", {}),
-                    cwd=tc.contained(root, directory),
+                    cwd=source_roots.directory(root, spec, selected),
                     pass_fds=descriptors,
                     check=False,
                 ).returncode

@@ -46,11 +46,12 @@ type HTTPProbe struct {
 	PendingEnvironment bool              `json:"pending_environment,omitempty"`
 }
 type Service struct {
-	Command      Command  `json:"command"`
-	Dependencies []string `json:"depends_on"`
-	Readiness    *Probe   `json:"readiness,omitempty"`
-	Restart      string   `json:"restart"`
-	Shutdown     int      `json:"shutdown_seconds"`
+	Command         Command  `json:"command"`
+	Dependencies    []string `json:"depends_on"`
+	Readiness       *Probe   `json:"readiness,omitempty"`
+	Restart         string   `json:"restart"`
+	Shutdown        int      `json:"shutdown_seconds"`
+	ShutdownCommand *Command `json:"shutdown_command,omitempty"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
 	Container      *Container `json:"container,omitempty"`
 	Watch          *Watch     `json:"watch,omitempty"`
@@ -415,6 +416,11 @@ func validate(p Plan) error {
 		}
 		if s.Shutdown < 1 || s.Shutdown > 300 {
 			return fmt.Errorf("invalid shutdown timeout")
+		}
+		if s.ShutdownCommand != nil {
+			if _, e := child(*s.ShutdownCommand); e != nil {
+				return e
+			}
 		}
 		if s.Restart != "no" && s.Restart != "always" && s.Restart != "on_failure" {
 			return fmt.Errorf("invalid restart policy")
@@ -1024,10 +1030,15 @@ func releaseUnused(p Plan, force bool) error {
 			}
 		}
 	}
+	var shutdownFailure error
 	for i := len(ordered) - 1; i >= 0; i-- {
 		n := ordered[i]
 		if used[n] {
 			continue
+		}
+		if err := shutdownService(p, n); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			shutdownFailure = errors.Join(shutdownFailure, err)
 		}
 		if live {
 			_, _ = backend(p, "process", "stop", n)
@@ -1056,12 +1067,12 @@ func releaseUnused(p Plan, force bool) error {
 		}
 	}
 	if e = pruneResources(p); e != nil {
-		return e
+		shutdownFailure = errors.Join(shutdownFailure, e)
 	}
 	if p.Bridge != nil && !hasLeases(p) {
-		return removeBridge(p.Bridge)
+		shutdownFailure = errors.Join(shutdownFailure, removeBridge(p.Bridge))
 	}
-	return nil
+	return shutdownFailure
 }
 func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (*os.File, string, error) {
 	if e := bindEngines(&p); e != nil {

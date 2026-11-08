@@ -22,13 +22,13 @@ def table(value: object, location: str) -> Table:
 
 FIELDS = {
     "tasks": set(
-        "commands profile directory presentation depends_on setup services cleanup_children timeout_seconds timeout_env shutdown_seconds wait_for_services environment context_environment transport exclusive exclusive_services serial_group network_service allowed_modes allowed_platforms".split()
+        "commands profile directory source_root_env presentation depends_on setup services cleanup_children timeout_seconds timeout_env shutdown_seconds wait_for_services environment context_environment transport exclusive exclusive_services serial_group network_service allowed_modes allowed_platforms".split()
     ),
     "setup": set(
-        "commands profile directory depends_on inputs exclude_inputs environment_inputs artifacts readiness pnpm".split()
+        "commands profile directory source_root_env depends_on inputs exclude_inputs environment_inputs artifacts readiness pnpm".split()
     ),
     "services": set(
-        "command profile directory environment depends_on readiness restart shutdown_seconds container setup watch scope transport network_service".split()
+        "command profile directory source_root_env environment environment_inputs depends_on readiness shutdown_command restart shutdown_seconds container setup watch scope transport network_service".split()
     ),
     "profiles": set(
         "flake runtime_profile compiler_cache environment resources inputs entry_setup allowed_modes allowed_platforms transport".split()
@@ -52,7 +52,7 @@ BOOLEANS = set(
     "trim_body optional trim pnpm compiler_cache cleanup_children wait_for_services exclusive exclusive_services read_only host_access".split()
 )
 ARRAYS = set(
-    "commands command depends_on setup services inputs exclude_inputs environment_inputs artifacts paths ignore ports mounts volumes job_variables entry_setup allowed_modes allowed_platforms".split()
+    "commands command shutdown_command depends_on setup services inputs exclude_inputs environment_inputs artifacts paths ignore ports mounts volumes job_variables entry_setup allowed_modes allowed_platforms".split()
 )
 NUMBERS = set(
     "timeout_seconds shutdown_seconds period_seconds failure_threshold port status_code debounce_ms startup_seconds max_jobs memory_per_job_gib".split()

@@ -486,6 +486,20 @@ probe ownership, deadlines and cancellation apply to native HTTP probes too.
 
 `restart` is `no`, `always`, or `on_failure`; `shutdown_seconds` bounds cleanup.
 Commands must stay in the foreground so the backend can own their lifetime.
+Command services may set `shutdown_command` to one argument array. The hook
+runs after dependent services stop and before its owner stops; its deadline is
+`shutdown_seconds`. Hook failure is reported while owned cleanup continues.
+Image-container and repository-scoped external-source services are not supported
+for these extensions.
+
+Tasks, setup groups and worktree command services accept `source_root_env`, an
+explicit environment variable selecting an absolute, narrow external checkout.
+Working directories, setup input globs and artifacts use that source root;
+profiles and ownership stay in the consumer. Container mode mounts that checkout
+only. Source identity and setup inputs participate in startup reuse decisions;
+running probes and shutdown retain their admitted setup while hot reload edits
+source files. Services may additionally declare `environment_inputs` for values
+that must change their reuse identity. See [external checkouts and persistence](services.md#external-source-checkouts).
 
 The launcher routes service-bearing tasks through an upstream Process Compose
 binary and a native chainman ownership adapter. Both are built/materialized from

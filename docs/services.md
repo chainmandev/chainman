@@ -93,6 +93,52 @@ uses `wait_for_services = true` to retain ownership until stop or interruption.
 Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
 
+### External source checkouts
+
+A command service, task, or setup group may declare `source_root_env`, naming an
+explicit environment variable with an absolute source directory. Profiles,
+ownership state, and setup leases still belong to the consumer. `directory`,
+setup inputs, and artifacts are relative to the selected checkout. For example:
+
+```toml
+[environment]
+pass = ["PREVIEW_SOURCE"]
+
+[setup.preview]
+profile = "core"
+source_root_env = "PREVIEW_SOURCE"
+commands = [["pnpm", "install", "--frozen-lockfile"]]
+inputs = ["package.json", "pnpm-lock.yaml"]
+artifacts = ["node_modules"]
+
+[services.preview]
+profile = "core"
+source_root_env = "PREVIEW_SOURCE"
+setup = ["preview"]
+command = ["pnpm", "dev", "--host", "0.0.0.0"]
+```
+
+Container execution mounts only the selected checkout, at its canonical path.
+The filesystem root, home directory, and directories containing the consumer
+are refused. Selecting another checkout invalidates setup and service identity.
+An unselected optional checkout needs no directory. Ordinary source edits can
+hot reload without making the running service's probes or shutdown re-run setup;
+declaration, profile, and source identity changes still require a restart.
+
+### Graceful persistence
+
+A managed command service may declare `shutdown_command = ["node", "save.mjs"]`.
+It runs before that service stops, after its dependents have drained, bounded by
+`shutdown_seconds`. Container hooks execute in the checked immutable container
+identity. Plain image-container services cannot declare hooks; use a managed
+command service when application persistence needs an explicit lifecycle step.
+
+Hooks should publish a complete snapshot atomically and preserve the previous
+successful snapshot on failure. Chainman reports a failed or timed-out hook and
+continues cleanup of owned services. It cannot guarantee a snapshot after a
+process crash or a forced host shutdown. The application must detect that case
+and require explicit recovery rather than silently starting empty.
+
 ### Development display and readiness
 
 Tasks with `wait_for_services = true` show their declared URLs when service startup

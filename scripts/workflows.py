@@ -19,6 +19,7 @@ import toolchain as tc
 import project_environment
 import timing
 import setup_readiness
+import source_roots
 from adapter_data import Table, array, string_map, strings, table, text
 
 
@@ -142,7 +143,9 @@ def configuration(root: Path) -> Table:
             else:
                 commands(spec.get("commands"))
             names(spec.get("depends_on", []))
-            tc.contained(root, spec.get("directory", "."))
+            source_roots.declaration(spec)
+            if "source_root_env" not in spec:
+                tc.contained(root, spec.get("directory", "."))
             check_profile(
                 text(spec.get("profile", default_profile(cfg)), "Workflow profile")
             )
@@ -302,6 +305,9 @@ def fingerprint(
         json.dumps([1, tc.context_id(), spec], sort_keys=True).encode()
     )
     digest.update(storage.download_epoch(env).encode())
+    source_key = spec.get("source_root_env")
+    source_value = source_roots.identity(root, spec, os.environ if env is None else env)
+    digest.update((source_value or "").encode() if source_key else str(root).encode())
     profile_name = text(spec["profile"], "Setup profile")
     ref, profile = chainman.profile(root, profile_name)
     if spec.get("environment_inputs"):
@@ -322,15 +328,23 @@ def fingerprint(
     digest.update(chainman.profile_fingerprint(root, profile_name, ref).encode())
     digest.update(
         json.dumps(
-            setup_inputs(root, spec) if inputs is None else inputs, sort_keys=True
+            setup_inputs(root, spec, env) if inputs is None else inputs, sort_keys=True
         ).encode()
     )
     return digest.hexdigest()
 
 
-def setup_inputs(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
+def setup_inputs(
+    root: Path, spec: Mapping[str, object], env: Mapping[str, str] | None = None
+) -> dict[str, str]:
     selected = text(spec["profile"], "Setup profile")
     ref, _ = chainman.profile(root, selected)
+    # The complete service fingerprint includes unused declarations too. An
+    # absent optional source is not provisioned; selecting it later changes the
+    # fingerprint and its execution fails closed unless the directory exists.
+    external_missing = spec.get("source_root_env") and not (
+        os.environ if env is None else env
+    ).get(str(spec["source_root_env"]))
     return {
         **{
             "profile:" + path: digest
@@ -338,10 +352,14 @@ def setup_inputs(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
         },
         **{
             "setup:" + path: digest
-            for path, digest in chainman.input_digests(
-                root,
-                strings(spec["inputs"], "Setup inputs"),
-                strings(spec.get("exclude_inputs", []), "Setup exclusions"),
+            for path, digest in (
+                {}
+                if external_missing
+                else chainman.input_digests(
+                    source_roots.root(root, spec, env),
+                    strings(spec["inputs"], "Setup inputs"),
+                    strings(spec.get("exclude_inputs", []), "Setup exclusions"),
+                )
             ).items()
         },
     }
@@ -386,7 +404,10 @@ def artifact_environment(
     return selected
 
 
-def artifact_digests(root: Path, spec: Mapping[str, object]) -> dict[str, str]:
+def artifact_digests(
+    root: Path, spec: Mapping[str, object], env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    root = source_roots.root(root, spec, env)
     result: dict[str, str] = {}
     for item in array(spec["artifacts"], "Setup artifacts"):
         if isinstance(item, dict) and item.get("digest") is True:
@@ -462,7 +483,7 @@ def setup_use(
                 group_env = environments[key]
                 if current(root, key, spec, env, pass_fds=(lease.fileno(),)):
                     continue
-                inputs = setup_inputs(root, spec)
+                inputs = setup_inputs(root, spec, env)
                 expected = fingerprint(root, spec, env, inputs=inputs)
                 # An interrupted repair must not leave an earlier success stamp.
                 stamp_path(root, key).unlink(missing_ok=True)
@@ -473,13 +494,11 @@ def setup_use(
                         argv,
                         env=env,
                         resolved_defaults=interpreter_defaults(spec, group_env),
-                        cwd=tc.contained(
-                            root, text(spec["directory"], "Setup directory")
-                        ),
+                        cwd=source_roots.directory(root, spec, env),
                         pass_fds=(lease.fileno(),),
                     )
                 if not all(
-                    artifact_ready(root, item, group_env)
+                    artifact_ready(source_roots.root(root, spec, env), item, group_env)
                     for item in array(spec["artifacts"], "Setup artifacts")
                 ):
                     raise ValueError(
@@ -497,7 +516,7 @@ def setup_use(
                         f"Setup group {key} failed validation after installation: {diagnostic}"
                     )
                 if not all(
-                    artifact_ready(root, item, group_env)
+                    artifact_ready(source_roots.root(root, spec, env), item, group_env)
                     for item in array(spec["artifacts"], "Setup artifacts")
                 ):
                     raise ValueError(
@@ -512,7 +531,7 @@ def setup_use(
                     {
                         "fingerprint": expected,
                         "input_digests": inputs,
-                        "artifact_digests": artifact_digests(root, spec),
+                        "artifact_digests": artifact_digests(root, spec, env),
                     },
                 )
             fcntl.flock(lease, fcntl.LOCK_SH)
@@ -564,7 +583,7 @@ def setup_detail(
             if isinstance(previous, dict) and all(
                 isinstance(k, str) and isinstance(v, str) for k, v in previous.items()
             ):
-                inputs = setup_inputs(root, spec)
+                inputs = setup_inputs(root, spec, env)
                 changed = {
                     "added": sorted(set(inputs) - set(previous)),
                     "missing": sorted(set(previous) - set(inputs)),
@@ -589,11 +608,11 @@ def setup_detail(
                     "recovery": ["setup", key],
                 }
         elif not all(
-            artifact_ready(root, item, artifact_env)
+            artifact_ready(source_roots.root(root, spec, env), item, artifact_env)
             for item in array(spec["artifacts"], "Setup artifacts")
         ):
             reason = "artifact-missing-or-incompatible"
-        elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
+        elif recorded.get("artifact_digests", {}) != artifact_digests(root, spec, env):
             reason = "artifact-content-changed"
         else:
             diagnostic = setup_readiness.check(
@@ -613,9 +632,11 @@ def setup_detail(
             if recorded.get("fingerprint") != fingerprint(root, spec, env):
                 reason = "inputs-changed-during-readiness"
             elif not all(
-                artifact_ready(root, item, artifact_env)
+                artifact_ready(source_roots.root(root, spec, env), item, artifact_env)
                 for item in array(spec["artifacts"], "Setup artifacts")
-            ) or recorded.get("artifact_digests", {}) != artifact_digests(root, spec):
+            ) or recorded.get("artifact_digests", {}) != artifact_digests(
+                root, spec, env
+            ):
                 reason = "artifacts-changed-during-readiness"
             else:
                 return {"current": True, "reason": "current"}
@@ -831,19 +852,16 @@ def run(
                         ):
                             import native_tasks
 
-                            with native_tasks.command(root, arguments, spec) as argv:
+                            with native_tasks.command(
+                                root, arguments, spec, env=selected
+                            ) as argv:
                                 chainman.execute(
                                     root,
                                     profile,
                                     argv,
                                     env=selected,
                                     overrides=spec.get("environment", {}),
-                                    cwd=tc.contained(
-                                        root,
-                                        text(
-                                            spec.get("directory", "."), "Task directory"
-                                        ),
-                                    ),
+                                    cwd=source_roots.directory(root, spec, selected),
                                     pass_fds=(*descriptors, *serial_descriptors),
                                 )
                         else:
@@ -854,12 +872,7 @@ def run(
                                     argv,
                                     env=selected,
                                     overrides=spec.get("environment", {}),
-                                    cwd=tc.contained(
-                                        root,
-                                        text(
-                                            spec.get("directory", "."), "Task directory"
-                                        ),
-                                    ),
+                                    cwd=source_roots.directory(root, spec, selected),
                                     pass_fds=(*descriptors, *serial_descriptors),
                                 )
                     if spec.get("wait_for_services", False):

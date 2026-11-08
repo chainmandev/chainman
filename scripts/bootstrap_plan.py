@@ -14,6 +14,7 @@ import chainman
 import project_environment
 import execution_transport
 import workflows
+import source_roots
 from adapter_data import array, strings, table, text
 
 
@@ -25,6 +26,7 @@ INTERNAL = {
     "_workflow-task",
     "_workflow-service",
     "_workflow-probe",
+    "_workflow-shutdown",
     "_workflow-prepare",
     "_workflow-profile",
     "_service-prepare",
@@ -143,7 +145,12 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_*?]*", line(pattern)):
             raise ValueError("Invalid environment forwarding pattern")
         options += ["--env-pattern", pattern]
-    if request in {"_workflow-service", "_workflow-probe", "_workflow-profile"}:
+    if request in {
+        "_workflow-service",
+        "_workflow-probe",
+        "_workflow-shutdown",
+        "_workflow-profile",
+    }:
         selected = table(services.get(name, {}), "Service")
     elif request in {"_workflow-task", "run"}:
         selected = table(tasks.get(name, {}), "Task")
@@ -157,6 +164,7 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
             "_workflow-task",
             "_workflow-service",
             "_workflow-probe",
+            "_workflow-shutdown",
             "_workflow-profile",
             "run",
         }
@@ -225,7 +233,35 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
                     "Tasks in one container execution require identical transport; start differently scoped tasks separately from the host"
                 )
     env = None
-    if any(
+    source_specs = [selected]
+    setup_entries = workflows.declarations(cfg, "setup")
+    if (
+        request in {"_workflow-prepare", "_service-prepare", "_workflow-task", "run"}
+        or request in tasks
+    ):
+        task_name = name if name in tasks else task
+        if task_name in tasks:
+            graph_tasks = workflows.order(tasks, [task_name])
+            source_specs = [table(tasks[key], "Task") for key in graph_tasks]
+            requested_services = [
+                service
+                for spec in source_specs
+                for service in workflows.names(spec.get("services", []))
+            ]
+            source_specs += [
+                table(services[key], "Service")
+                for key in workflows.order(services, requested_services)
+            ]
+    groups = [
+        group
+        for spec in source_specs
+        for group in workflows.names(spec.get("setup", []))
+    ]
+    source_specs += [
+        setup_entries[key] for key in workflows.order(setup_entries, groups)
+    ]
+    has_sources = any(spec.get("source_root_env") for spec in source_specs)
+    if has_sources or any(
         "{" in port
         for value in transports
         for port in strings(table(value, "Transport").get("ports", []), "Ports")
@@ -257,6 +293,14 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         env = chainman.profile_environment(
             root, profile, env, selected.get("environment", {}), cfg=cfg
         )
+    if has_sources and not controller:
+        mounts = source_roots.mounts(root, source_specs, env or dict(os.environ))
+        transports = [
+            execution_transport.compose(
+                [("execution", value), ("sources", {"mounts": mounts})]
+            )
+            for value in (transports or [{}])
+        ]
     for value in transports:
         if any(value.get(key) for key in ("mounts", "ports", "host_access", "display")):
             import json

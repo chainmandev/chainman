@@ -404,9 +404,14 @@ def execute(
         ]
     with ExitStack() as lifetime:
         command = argv
+        launch_cwd = target
         if ref and (
             gc_root is not None or not active or selected.get("TOOLCHAIN_FRESH") == "1"
         ):
+            # Consumer flakes own their shell hooks and caches. Enter them
+            # from the consumer before moving the payload into an explicit
+            # external source root or a declared working directory.
+            launch_cwd = root
             if gc_root is None:
                 # nix develop execs the payload: its process-local roots do not
                 # retain the shell tools across an isolated daemon's GC. Keep a
@@ -462,7 +467,7 @@ def execute(
         try:
             return tc.managed_run(
                 command,
-                cwd=target,
+                cwd=launch_cwd,
                 env=selected,
                 check=check,
                 text=text,
@@ -757,6 +762,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "_workflow-task",
             "_workflow-service",
             "_workflow-probe",
+            "_workflow-shutdown",
             "_workflow-prepare",
             "_workflow-profile",
         }:
