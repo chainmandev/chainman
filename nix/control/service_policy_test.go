@@ -51,6 +51,9 @@ func TestServiceStartupPolicyKeepsDefaultFatalAndBoundsOptionalReadiness(t *test
 }
 
 func TestOptionalServiceDoesNotMaskFatalDependencyOrLostBackendRow(t *testing.T) {
+	if got := serviceStartupBound(Service{Readiness: &Probe{Period: 2, Timeout: 5, Failures: 180}}); got != 365*time.Second {
+		t.Fatalf("optional reporting startup ignored its declared readiness window: %v", got)
+	}
 	p := Plan{State: t.TempDir(), Services: map[string]Service{"core": {}, "reporting": {FailurePolicy: "continue"}}}
 	for _, ps := range [][]Process{
 		{{Name: "reporting", Status: "Error"}},

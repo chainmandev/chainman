@@ -18,9 +18,10 @@ func serviceAvailable(service Service, process Process) bool {
 func serviceStartupBound(service Service) time.Duration {
 	seconds := 1
 	if r := service.Readiness; r != nil {
-		// Match the controller's existing probe/cleanup allowance. This bounds
-		// waiting, without running a second readiness probe or restart loop.
-		seconds = (r.Period + r.Timeout + 15) * r.Failures
+		// Optional startup uses the declared readiness window (at most ten
+		// minutes), not a cleanup allowance multiplied by every probe. Probes
+		// continue under Process Compose after this client starts degraded.
+		seconds = r.Period*r.Failures + r.Timeout
 	}
 	return time.Duration(seconds) * time.Second
 }
