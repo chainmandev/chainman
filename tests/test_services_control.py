@@ -2251,6 +2251,55 @@ HTTPServer(('127.0.0.1', int(__import__('sys').argv[1])), Handler).serve_forever
                 parent.kill()
                 parent.wait()
 
+    def test_continued_reporting_initial_failure_and_runtime_death_keep_core_and_task_alive(
+        self,
+    ):
+        reporting = {
+            "command": self.command([sys.executable, "-c", "raise SystemExit(42)"]),
+            "depends_on": [],
+            "restart": "no",
+            "failure_policy": "continue",
+            "shutdown_seconds": 1,
+        }
+        self.plan["services"]["reporting"] = reporting
+        self.plan["requested"].append("reporting")
+        parent = self.waiting_task(wait=True)
+        try:
+            self.assertIsNone(parent.poll())
+            self.assertTrue(self.alive(self.pid()))
+            status = json.loads(self.run_control("status", check=0).stdout)
+            self.assertEqual(status["degraded_services"], ["reporting"])
+        finally:
+            self.run_control("stop", check=0)
+            parent.wait(timeout=15)
+        for file in ("waiting", "pid", "ready"):
+            (self.root / file).unlink(missing_ok=True)
+        reporting["command"] = self.command(
+            [
+                sys.executable,
+                "-c",
+                "import os,time; from pathlib import Path; Path('reporting-pid').write_text(str(os.getpid())); time.sleep(120)",
+            ]
+        )
+        parent = self.waiting_task(wait=True)
+        try:
+            self.wait_file(self.root / "reporting-pid")
+            os.kill(int((self.root / "reporting-pid").read_text()), signal.SIGKILL)
+            self.wait_until(
+                lambda: (
+                    "reporting"
+                    in json.loads(self.run_control("status", check=0).stdout).get(
+                        "degraded_services", []
+                    )
+                )
+            )
+            self.assertIsNone(parent.poll())
+            self.assertTrue(self.alive(self.pid()))
+            self.assertTrue(self.alive(int((self.root / "waiting").read_text())))
+        finally:
+            self.run_control("stop", check=0)
+            parent.wait(timeout=15)
+
     def test_stop_recovers_finite_task_after_client_death_and_receipt_corruption(self):
         parent = self.waiting_task(wait=False)
         task = int((self.root / "waiting").read_text())

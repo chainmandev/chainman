@@ -2337,6 +2337,119 @@ check=["true"]
     def test_schema_three_container_recovery_ignores_broken_templates(self):
         self.schema_three_recovery("container-nix")
 
+    @unittest.skipUnless(
+        os.environ.get("CHAINMAN_TEST_CONTAINER") in ("docker", "podman"),
+        "requires real container engine",
+    )
+    def test_external_sources_full_container_lifecycle_uses_one_canonical_inventory(
+        self,
+    ):
+        self.use_real_runtime()
+        temporary = tempfile.TemporaryDirectory(prefix="chainman external lifecycle ")
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name).resolve()
+        web, common, unused, replacement = [
+            base / name
+            for name in (
+                "web source",
+                "common source",
+                "unused setup source",
+                "replacement source",
+            )
+        ]
+        for tree in (web, common, unused, replacement):
+            tree.mkdir()
+            (tree / "input.lock").write_text(tree.name)
+            (tree / "artifact").write_text("fixture installed")
+        alias = base / "selected web alias"
+        alias.symlink_to(web, target_is_directory=True)
+        service = "import json,os,time; from pathlib import Path; Path('selection.json').write_text(json.dumps(dict(cwd=os.getcwd(),web=os.environ['FIXTURE_WEB'],common=os.environ['FIXTURE_COMMON'],unused=os.environ['FIXTURE_UNUSED']))); Path('ready').touch(); time.sleep(600)"
+        install = [
+            "python3",
+            "-c",
+            "from pathlib import Path; Path('artifact').write_text('installed by managed setup')",
+        ]
+        config = 'schema=3\n[project]\ndefault_profile="host"\n[profiles.host]\nruntime_profile="bootstrap"\n'
+        for name, variable in (
+            ("web", "FIXTURE_WEB"),
+            ("common", "FIXTURE_COMMON"),
+            ("unused", "FIXTURE_UNUSED"),
+        ):
+            config += (
+                f'\n[setup.{name}]\nsource_root_env="{variable}"\ninputs=["input.lock"]\nartifacts=["artifact"]\ncommands='
+                + json.dumps([install])
+                + "\n"
+            )
+            if name == "web":
+                config += 'depends_on=["common"]\n'
+        config += (
+            '\n[services.web]\nsource_root_env="FIXTURE_WEB"\nsetup=["web"]\ncommand='
+            + json.dumps(["python3", "-c", service])
+            + "\nshutdown_seconds=2\nshutdown_command="
+            + json.dumps(
+                [
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; Path('checkpoint').write_text('drained')",
+                ]
+            )
+            + "\nreadiness={command="
+            + json.dumps(
+                [
+                    "python3",
+                    "-c",
+                    "from pathlib import Path; assert Path('ready').exists()",
+                ]
+            )
+            + ',period_seconds=1,timeout_seconds=2,failure_threshold=10}\n[tasks.dev]\nservices=["web"]\nwait_for_services=true\n'
+        )
+        (self.root / "chainman.toml").write_text(config)
+        environment = dict(
+            self.env,
+            CHAINMAN_MODE="container-nix",
+            CHAINMAN_SETUP="auto",
+            CHAINMAN_CONTAINER_ENGINE=os.environ["CHAINMAN_TEST_CONTAINER"],
+            FIXTURE_WEB=str(alias),
+            FIXTURE_COMMON=str(common),
+            FIXTURE_UNUSED=str(unused),
+            XDG_CACHE_HOME=str(base / "host cache"),
+        )
+        try:
+            for expected in (web, replacement):
+                self.run_bootstrap("services-up", "dev", env=environment, timeout=300)
+                self.assertEqual(
+                    json.loads((expected / "selection.json").read_text()),
+                    {
+                        "cwd": str(expected),
+                        "web": str(expected),
+                        "common": str(common),
+                        "unused": str(unused),
+                    },
+                )
+                self.assertEqual(
+                    (common / "artifact").read_text(), "installed by managed setup"
+                )
+                (expected / "hot-source-edit").write_text(
+                    "keep probes and shutdown admitted"
+                )
+                status = json.loads(
+                    self.run_bootstrap("services-status", env=environment).stdout
+                )
+                self.assertTrue(status["running"])
+                self.assertTrue(
+                    any(
+                        p["name"] == "web" and p["is_running"]
+                        for p in status["services"]
+                    )
+                )
+                self.run_bootstrap("services-stop", env=environment)
+                self.assertEqual((expected / "checkpoint").read_text(), "drained")
+                if expected == web:
+                    alias.unlink()
+                    alias.symlink_to(replacement, target_is_directory=True)
+        finally:
+            self.run_bootstrap("services-stop", env=environment)
+
     def test_schema_three_actual_host_compilation_and_command(self):
         self.use_real_runtime()
         (self.root / "chainman.toml").write_text(

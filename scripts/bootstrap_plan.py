@@ -109,12 +109,49 @@ def transport(
     return result
 
 
+def inherited_environment(cfg: dict[str, object]) -> dict[str, str]:
+    inherited = dict(os.environ)
+    if os.environ.get("CHAINMAN_BOOTSTRAP_INPUTS"):
+        forwarded = source_roots.host_inputs(
+            Path(os.environ["CHAINMAN_BOOTSTRAP_INPUTS"]), cfg
+        )
+        inherited.update(
+            {
+                key: value
+                for key, value in forwarded.items()
+                if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
+            }
+        )
+    return inherited
+
+
+def discover(root: Path, request: str) -> dict[str, str]:
+    # Recovery must still work after declarations or source trees are removed.
+    if (
+        request
+        in {
+            "services-status",
+            "services-stop",
+            "services-logs",
+            "_hook-export",
+            "_hook-worker",
+        }
+        or os.environ.get("CHAINMAN_CONTROL_RECOVERY") == "1"
+    ):
+        return {}
+    cfg = config_inspection.validated(root)
+    return source_roots.raw_inventory(cfg, inherited_environment(cfg))
+
+
 def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     # Recovery consumes saved ownership state, never current declarations. Keep
     # nested native-tool export available through the same read-only transport.
     if request in {"services-status", "services-stop", "services-logs"}:
         return True, ["--controller", "1"]
-    if request in {"_control-export", "_hook-export", "_hook-worker"}:
+    if (
+        request in {"_hook-export", "_hook-worker"}
+        or os.environ.get("CHAINMAN_CONTROL_RECOVERY") == "1"
+    ):
         return False, []
     cfg = config_inspection.validated(root)
     tasks = table(cfg.get("tasks", {}), "Tasks")
@@ -260,25 +297,24 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
     source_specs += [
         setup_entries[key] for key in workflows.order(setup_entries, groups)
     ]
-    has_sources = any(spec.get("source_root_env") for spec in source_specs)
+    inherited = inherited_environment(cfg)
+    configured_sources = source_roots.inventory(root, cfg, inherited)
+    for spec in source_specs:
+        if (
+            spec.get("source_root_env")
+            and str(spec["source_root_env"]) not in inherited
+        ):
+            raise ValueError(
+                f"External source root {spec['source_root_env']} requires an absolute directory"
+            )
+    has_sources = bool(configured_sources)
+    for key in configured_sources:
+        options += ["--env-pattern", key]
     if has_sources or any(
         "{" in port
         for value in transports
         for port in strings(table(value, "Transport").get("ports", []), "Ports")
     ):
-        inherited = dict(os.environ)
-        if os.environ.get("CHAINMAN_BOOTSTRAP_INPUTS"):
-            forwarded = project_environment.host_inputs(
-                Path(os.environ["CHAINMAN_BOOTSTRAP_INPUTS"]),
-                table(cfg.get("environment", {}), "Environment"),
-            )
-            inherited.update(
-                {
-                    key: value
-                    for key, value in forwarded.items()
-                    if not key.startswith(("CHAINMAN_", "TOOLCHAIN_"))
-                }
-            )
         env = (
             workflows.context_environment(root, cfg, task, inherited)
             if task in tasks
@@ -293,8 +329,11 @@ def plan(root: Path, request: str, name: str) -> tuple[bool, list[str]]:
         env = chainman.profile_environment(
             root, profile, env, selected.get("environment", {}), cfg=cfg
         )
-    if has_sources and not controller:
-        mounts = source_roots.mounts(root, source_specs, env or dict(os.environ))
+    if has_sources:
+        mounts = [
+            {"source": value, "target": value, "read_only": False}
+            for value in dict.fromkeys(configured_sources.values())
+        ]
         transports = [
             execution_transport.compose(
                 [("execution", value), ("sources", {"mounts": mounts})]

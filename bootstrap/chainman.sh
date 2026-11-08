@@ -166,7 +166,7 @@ case "$CHAINMAN_REQUEST_ACTION" in
         if [ "${2:-}" = --reuse-operation ]; then CHAINMAN_REQUEST_PROFILE=; fi
         export CHAINMAN_REQUEST_PROFILE
         ;;
-    _bootstrap-options | _display-prepare) ;;
+    _bootstrap-options | _bootstrap-sources | _display-prepare) ;;
     *) unset CHAINMAN_REQUEST_PROFILE ;;
 esac
 # Planning and setup admission must not let an interactive engine client drain
@@ -231,7 +231,9 @@ control_dispatch() {
     control_engine=
     if select_container_engine; then control_engine=$container_program; fi
     printf '%s\n%s\n' --mount "type=bind,src=$control_output,dst=$control_output" > "$control_output/mounts"
-    CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts lifetime_helper "$self" _control-export "$control_output" "$control_target" \
+    control_recovery=0
+    case "$1" in services-status | services-stop | services-logs) control_recovery=1 ;; esac
+    CHAINMAN_CONTROL_RECOVERY=$control_recovery CHAINMAN_FORWARD_ENV='' CHAINMAN_CONTAINER_OPTIONS_FILE=$control_output/mounts lifetime_helper "$self" _control-export "$control_output" "$control_target" \
         "${XDG_CACHE_HOME:-$HOME/.cache}/chainman/services" "$control_engine" "$self" "$@"
     case "$1" in
         services-status | services-stop | services-logs)
@@ -1059,6 +1061,7 @@ fi
 validate_daemon
 lifetime_run "$engine_executable" container start "$daemon_name" > /dev/null
 plan_options() {
+    projection=${1:-options}
     # The verified planner reads declared host inputs as data, never as its own
     # execution environment. Do not expose this snapshot to project commands.
     (
@@ -1074,6 +1077,16 @@ plan_options() {
             --mount "type=bind,src=$temporary/x11,dst=/chainman-x11-output" \
             --env DISPLAY --env "CHAINMAN_X11_HOSTNAME=$(uname -n)" --env CHAINMAN_DISPLAY_PREPARE=1 "$@"
     fi
+    if [ "$projection" != sources ] && [ -f "$temporary/sources" ]; then
+        : > "$temporary/planner-source-paths"
+        while IFS= read -r source_key && IFS= read -r source_value; do
+            set -- --env "$source_key=$source_value" "$@"
+            if ! grep -F -x -q -- "$source_value" "$temporary/planner-source-paths"; then
+                printf '%s\n' "$source_value" >> "$temporary/planner-source-paths"
+                set -- --mount "type=bind,src=$source_value,dst=$source_value,readonly" "$@"
+            fi
+        done < "$temporary/sources"
+    fi
     run --rm --user "$container_uid:$container_gid" --label dev.chainman.store.schema=1 --security-opt no-new-privileges --cap-drop ALL \
         --mount "type=volume,src=$volume,dst=/nix" --mount "type=bind,src=$root,dst=$root,readonly" \
         --mount "type=bind,src=$source_root,dst=$source_root,readonly" --env HOME=/tmp/chainman-home \
@@ -1082,7 +1095,7 @@ plan_options() {
 store = daemon
 auto-optimise-store = true' --env NIX_REMOTE=daemon \
         --env "CHAINMAN_BOOTSTRAP_HELPER=$helper" --env "CHAINMAN_SOURCE_ROOT=$source_root" --env CHAINMAN_SOURCE_REVISION \
-        --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options \
+        --env "CHAINMAN_PROJECT_ROOT=$root" --env CHAINMAN_BOOTSTRAP_ACTION=options --env "CHAINMAN_BOOTSTRAP_PROJECTION=$projection" --env CHAINMAN_CONTROL_RECOVERY \
         --env CHAINMAN_REQUEST_ACTION --env CHAINMAN_REQUEST_TASK --env CHAINMAN_REQUEST_PROFILE --env CHAINMAN_HOST_PLATFORM --env CHAINMAN_PREFLIGHT_TASKS \
         "$@" "$image" sh -eu -c "$container_init" \
         sh sh -eu -c '
@@ -1100,11 +1113,21 @@ auto-optimise-store = true' --env NIX_REMOTE=daemon \
             # Reuse the normal verified runtime/GC-root path in this read-only
             # planning container. No consumer code or declared mounts run here.
             exec env CHAINMAN_BOOTSTRAP_CONTAINER=1 CHAINMAN_MODE=container-nix \
-                "$2" _bootstrap-options "$CHAINMAN_REQUEST_ACTION" "$CHAINMAN_REQUEST_TASK"
+                "$2" "_bootstrap-${CHAINMAN_BOOTSTRAP_PROJECTION:-options}" "$CHAINMAN_REQUEST_ACTION" "$CHAINMAN_REQUEST_TASK"
         fi
+        [ "${CHAINMAN_BOOTSTRAP_PROJECTION:-options}" != sources ] || exit 0
         exec nix --extra-experimental-features "nix-command flakes" eval --impure --raw --expr "$1"
     ' sh "$expression" "$self"
 }
+# Discovery reads only the verified declarations and raw host input snapshot.
+# Resolve on the host, then replay the verified planner with narrow canonical
+# mounts. Every lifecycle container receives this same global inventory.
+. "$script_dir/source-roots.sh"
+plan_options sources > "$temporary/source-declarations"
+canonical_source_inventory < "$temporary/source-declarations" > "$temporary/sources"
+while IFS= read -r source_key && IFS= read -r source_value; do
+    export "$source_key=$source_value"
+done < "$temporary/sources"
 plan_options > "$temporary/options"
 if grep -q -e '^--display$' -e '^--display-check$' "$temporary/options"; then
     [ "$CHAINMAN_HOST_PLATFORM" = Linux ] || fail 'X11 container transport requires a Linux host; select host-nix for a native display.'
@@ -1430,7 +1453,7 @@ set -- --rm --init --interactive --user "$container_uid:$container_gid" --label 
     --env "CHAINMAN_TIMING=${CHAINMAN_TIMING:-0}" \
     --env HOME=/tmp/chainman-home --env CHAINMAN_MODE=container-nix --env CHAINMAN_BOOTSTRAP_CONTAINER=1 \
     --env CHAINMAN_HOOK_REMOTE_NAME --env CHAINMAN_HOOK_REMOTE_URL \
-    --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
+    --env CHAINMAN_CONTROL_RECOVERY --env CHAINMAN_SETUP --env CHAINMAN_CONTAINER_PLATFORM --env CHAINMAN_CONTAINER_NETWORK_MODE --env CHAINMAN_NIX_VOLUME --env CHAINMAN_UPDATE_ACTIVE --env CHAINMAN_CONTEXT_TASK \
     --env CHAINMAN_WORKSPACE_TRANSACTION_ROOT --env CHAINMAN_SOURCE_REVISION --env CHAINMAN_HOST_PLATFORM \
     --env 'NIX_CONFIG=build-users-group =
 store = daemon

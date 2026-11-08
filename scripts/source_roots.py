@@ -11,7 +11,7 @@ from pathlib import Path
 
 import project_environment
 import toolchain as tc
-from adapter_data import text
+from adapter_data import strings, table, text
 
 
 def declaration(spec: Mapping[str, object]) -> None:
@@ -81,3 +81,72 @@ def mounts(
         path = str(root(consumer, spec, env))
         selected[path] = {"source": path, "target": path, "read_only": False}
     return list(selected.values())
+
+
+def declarations(cfg: Mapping[str, object]) -> list[Mapping[str, object]]:
+    """One inventory covers every fingerprint participant, including setup-only roots."""
+    return [
+        table(spec, "Source declaration")
+        for section in ("tasks", "services", "setup")
+        for spec in table(cfg.get(section, {}), section).values()
+    ]
+
+
+def variables(cfg: Mapping[str, object]) -> list[str]:
+    result = set()
+    for spec in declarations(cfg):
+        declaration(spec)
+        if "source_root_env" in spec:
+            result.add(str(spec["source_root_env"]))
+    return sorted(result)
+
+
+def host_inputs(destination: Path, cfg: Mapping[str, object]) -> dict[str, str]:
+    spec = dict(table(cfg.get("environment", {}), "Project environment"))
+    spec["pass"] = [*strings(spec.get("pass", []), "Environment pass"), *variables(cfg)]
+    return project_environment.host_inputs(destination, spec)
+
+
+def raw_inventory(cfg: Mapping[str, object], env: Mapping[str, str]) -> dict[str, str]:
+    """Read declarations and caller data only; never stat/resolve host paths here."""
+    selected = {}
+    for key in variables(cfg):
+        if key not in env:
+            continue
+        value = env[key]
+        if (
+            not value
+            or not Path(value).is_absolute()
+            or any(c in value for c in "\0\n\r,")
+        ):
+            raise ValueError(
+                f"External source root {key} requires an absolute directory"
+            )
+        selected[key] = value
+    return selected
+
+
+def inventory(
+    consumer: Path, cfg: Mapping[str, object], env: Mapping[str, str]
+) -> dict[str, str]:
+    return {
+        key: str(root(consumer, {"source_root_env": key}, env))
+        for key in raw_inventory(cfg, env)
+    }
+
+
+def preserve(
+    consumer: Path,
+    cfg: Mapping[str, object],
+    inherited: Mapping[str, str],
+    selected: dict[str, str],
+) -> dict[str, str]:
+    """Selectors are explicit caller inputs, never synthesized or replaced by project policy."""
+    canonical = inventory(consumer, cfg, inherited)
+    for key in variables(cfg):
+        if key in selected and selected[key] != inherited.get(key):
+            raise ValueError(
+                f"External source selector {key} cannot be overridden by project environment"
+            )
+    selected.update(canonical)
+    return selected

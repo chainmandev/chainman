@@ -78,6 +78,7 @@ class Service(TypedDict):
     command: Command
     depends_on: list[str]
     restart: str
+    failure_policy: str
     shutdown_seconds: int
     network_service: NotRequired[str]
     container: NotRequired[Container]
@@ -394,6 +395,8 @@ def declarations(root: Path, cfg: Mapping[str, object]) -> dict[str, Table]:
         workflows.order(setup_entries, workflows.names(spec.get("setup", [])))
         if spec.get("restart", "no") not in {"no", "always", "on_failure"}:
             raise ValueError("Invalid service restart policy")
+        if spec.get("failure_policy", "stop") not in {"stop", "continue"}:
+            raise ValueError("Service failure_policy must be stop or continue")
         timeout = spec.get("shutdown_seconds", 10)
         if type(timeout) is not int or not 1 <= timeout <= 300:
             raise ValueError("Service shutdown_seconds must be between 1 and 300")
@@ -552,11 +555,7 @@ def config_fingerprint(
             }
             for name, spec in declared.items()
         },
-        {
-            str(spec["source_root_env"]): source_roots.identity(root, spec, env)
-            for spec in workflow_specs
-            if spec.get("source_root_env")
-        },
+        source_roots.inventory(root, cfg, env),
         project_environment.file_fingerprint(
             root, table(cfg.get("environment", {}), "Project environment"), env
         ),
@@ -744,9 +743,8 @@ def export(root: Path, arguments: list[str]) -> int:
         if action in {"run", "services-run", "services-up", "services-reset"} and extra
         else action
     )
-    input_env = project_environment.host_inputs(
-        destination, table(cfg.get("environment", {}), "Project environment")
-    )
+    input_env = source_roots.host_inputs(destination, cfg)
+    input_env.update(source_roots.inventory(root, cfg, input_env))
     planning_env = dict(input_env, CHAINMAN_MODE=mode)
     for name in (
         "TOOLCHAIN_DOWNLOAD_CACHE",
@@ -957,6 +955,9 @@ def export(root: Path, arguments: list[str]) -> int:
                 if (dependency in shared_names) == (name in shared_names)
             ],
             "restart": text(spec.get("restart", "no"), "Service restart"),
+            "failure_policy": text(
+                spec.get("failure_policy", "stop"), "Service failure policy"
+            ),
             "shutdown_seconds": workflows.task_seconds(spec, "shutdown_seconds"),
         }
         if spec.get("network_service") and ownership:

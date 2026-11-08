@@ -341,3 +341,24 @@ process even when a later stop discards the pending `SIGCONT` notification;
 requiring that notification can strand a running anchor with a stopped child.
 The anchor does not resume the sequence itself. Actual child stops and exits
 remain the authority. See [POSIX signal generation](https://pubs.opengroup.org/onlinepubs/9699919799/functions/V2_chap02.html).
+
+
+External-source regression sources cover raw inspection without filesystem
+resolution, POSIX canonicalization of spaces and symlinks, global setup-only roots
+across planner/profile/service/probe/shutdown entry, and a real container lifecycle
+with setup artifacts, hot source edits, shutdown checkpoints and symlink reselection.
+Service-policy regression sources cover default fatal behavior, continued initial
+readiness failure, continued runtime death, health recovery and unchanged controller
+failure handling. These are exercised by the ordinary Python/native control suites.
+
+A consumer's isolated acceptance harness can hold a service outage through the
+saved controller backend's `process stop NAME` / `process start NAME` operations.
+Use the private saved plan's frozen `backend`, with `--use-uds --unix-socket SOCKET
+--log-file /dev/null`; the socket is under `/tmp/chainman-control-UID/` and is the
+first 24 hexadecimal SHA-256 characters of the saved state path plus `.sock`.
+This keeps stop/start under Process Compose and Chainman's owned service anchor.
+For an abrupt container crash test, inspect only the saved container's engine,
+verify `engine_identity` and `Config.Labels["dev.chainman.owner"] == token`, then
+address the returned immutable container ID. Never kill by a mutable name after
+validation. These operations belong in disposable acceptance state; ordinary
+operator cleanup remains `services-stop`.

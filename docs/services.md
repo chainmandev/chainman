@@ -81,6 +81,25 @@ avoids a shell/Nix entry per probe. It supports bounded body checks and headers
 from declared environment variables, including Basic authentication. See the
 [configuration reference](configuration.md#services) for port and credential rules.
 
+## Optional service failures
+
+Services default to `failure_policy = "stop"`: terminal startup or runtime failure
+ends their clients. A reporting or preview service may explicitly set
+`failure_policy = "continue"`. A terminal startup failure then admits the client
+in a degraded state. A process that stays unavailable receives a bounded initial
+readiness window based on its declared probe settings before admission degrades.
+Runtime process death or lost readiness stays visible without canceling core
+services or the task. `services-status` includes `degraded_services`; application
+summaries show degraded health and recover when the existing probes succeed.
+A lost controller, invalid ownership or omitted service row remains an error.
+
+Failure policy does not change dependency conditions or Process Compose restart
+policy. Mark every optional member of a dependency group explicitly, and keep
+core services independent of that group's health. `restart = "always"` recreates
+an exited managed service even after a clean exit; `restart = "on_failure"` only
+restarts failed exits. The native owner still checks container identity and
+performs cleanup before Process Compose starts the frozen command again.
+
 ## Application ownership
 
 Keep commands in the foreground. Declare service `depends_on` and `setup` groups
@@ -118,10 +137,25 @@ setup = ["preview"]
 command = ["pnpm", "dev", "--host", "0.0.0.0"]
 ```
 
-Container execution mounts only the selected checkout, at its canonical path.
+Container entry discovers external source names and raw paths in a verified
+inspection planner that has no external mounts. The POSIX host bootstrap checks
+and canonicalizes those paths, then reruns the verified planner with narrow
+read-only source mounts. Execution mounts those canonical checkouts writable.
+No host Python or Node is needed to discover or resolve sources. Spaces and
+symlink selections are supported; paths containing newlines or commas are refused.
 The filesystem root, home directory, and directories containing the consumer
-are refused. Selecting another checkout invalidates setup and service identity.
-An unselected optional checkout needs no directory. Ordinary source edits can
+are refused.
+
+Every explicitly set source variable declared by any task, service or setup group
+belongs to one global inventory, including unselected and setup-only groups.
+Those names are automatically forwarded, independently of `environment.pass`.
+Unset optional selectors stay absent; a selected external task/service/setup
+requires its selector. Declare selectors in the caller environment, since
+project files, defaults and task/profile policy cannot replace or synthesize them.
+The same canonical values and narrow mounts reach planning, profile preparation,
+setup, application processes, probes and shutdown. Fingerprints remain global.
+Selecting another checkout invalidates setup and service identity.
+An unset optional selector needs no directory. Ordinary source edits can
 hot reload without making the running service's probes or shutdown re-run setup;
 declaration, profile, and source identity changes still require a restart.
 

@@ -492,11 +492,24 @@ runs after dependent services stop and before its owner stops; its deadline is
 Image-container and repository-scoped external-source services are not supported
 for these extensions.
 
+Services accept `failure_policy = "stop" | "continue"`, defaulting to `stop`.
+An explicit `continue` permits a bounded initial unavailable service and later
+process failure to degrade health without ending its clients. Dependency gates
+and `restart = "no" | "always" | "on_failure"` remain unchanged. Mark optional
+dependents explicitly and keep fatal core services independent of their health.
+Controller/ownership failures remain fatal. Status exposes `degraded_services`.
+
 Tasks, setup groups and worktree command services accept `source_root_env`, an
 explicit environment variable selecting an absolute, narrow external checkout.
 Working directories, setup input globs and artifacts use that source root;
-profiles and ownership stay in the consumer. Container mode mounts that checkout
-only. Source identity and setup inputs participate in startup reuse decisions;
+profiles and ownership stay in the consumer. Container mode first discovers raw
+declarations without resolving host paths,
+then validates and canonicalizes them on the POSIX host before rerunning its
+verified planner with narrow mounts. One inventory covers all explicitly set
+selectors across tasks, services and setup groups, including setup-only groups;
+it is mounted and forwarded consistently for every global fingerprint participant.
+Selectors are explicit caller inputs and cannot be replaced by project policy.
+Source identity and setup inputs participate in startup reuse decisions;
 running probes and shutdown retain their admitted setup while hot reload edits
 source files. Services may additionally declare `environment_inputs` for values
 that must change their reuse identity. See [external checkouts and persistence](services.md#external-source-checkouts).

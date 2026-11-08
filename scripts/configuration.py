@@ -28,7 +28,7 @@ FIELDS = {
         "commands profile directory source_root_env depends_on inputs exclude_inputs environment_inputs artifacts readiness pnpm".split()
     ),
     "services": set(
-        "command profile directory source_root_env environment environment_inputs depends_on readiness shutdown_command restart shutdown_seconds container setup watch scope transport network_service".split()
+        "command profile directory source_root_env environment environment_inputs depends_on readiness shutdown_command restart failure_policy shutdown_seconds container setup watch scope transport network_service".split()
     ),
     "profiles": set(
         "flake runtime_profile compiler_cache environment resources inputs entry_setup allowed_modes allowed_platforms transport".split()

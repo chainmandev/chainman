@@ -385,6 +385,161 @@ class ExternalSourceTests(unittest.TestCase):
             {str(self.source), str(common), str(preparation)},
         )
 
+    def test_discovery_emits_raw_explicit_roots_without_host_filesystem_access(self):
+        cfg = deepcopy(self.cfg)
+        cfg["setup"]["unused"] = {"source_root_env": "FIXTURE_SETUP_ONLY"}
+        cfg["tasks"]["unused"] = {"source_root_env": "FIXTURE_ABSENT"}
+        env = {
+            "FIXTURE_SOURCE": "/host/source link with spaces",
+            "FIXTURE_SETUP_ONLY": "/host/setup only",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                bootstrap_plan.config_inspection, "validated", return_value=cfg
+            ),
+            patch.object(
+                Path,
+                "resolve",
+                side_effect=AssertionError("inspection resolved a host path"),
+            ),
+        ):
+            self.assertEqual(
+                bootstrap_plan.discover(self.consumer, "_control-export"), env
+            )
+        with patch.dict(os.environ, CHAINMAN_CONTROL_RECOVERY="1"):
+            with patch.object(
+                bootstrap_plan.config_inspection,
+                "validated",
+                side_effect=AssertionError("recovery loaded config"),
+            ):
+                self.assertEqual(
+                    bootstrap_plan.discover(self.consumer, "_control-export"), {}
+                )
+
+    def test_posix_host_validation_canonicalizes_spaces_and_symlinks_without_language_runtime(
+        self,
+    ):
+        link = self.base / "source alias with spaces"
+        link.symlink_to(self.source, target_is_directory=True)
+        helper = Path(__file__).resolve().parents[1] / "bootstrap/source-roots.sh"
+        script = 'fail() { printf "%s\\n" "$*" >&2; exit 2; }; single_line() { case "$1" in *"$(printf "\\r")"*|*"\n"*) fail multiline ;; esac; }; . "$1"; canonical_source_inventory'
+
+        def project(value):
+            return subprocess.run(
+                ["sh", "-eu", "-c", script, "fixture", str(helper)],
+                input=f"FIXTURE_SOURCE\n{value}\n",
+                text=True,
+                capture_output=True,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(self.base / "home"),
+                    "root": str(self.consumer),
+                },
+            )
+
+        result = project(link)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"FIXTURE_SOURCE\n{self.source}\n")
+        for value in (
+            self.base,
+            self.consumer,
+            "/",
+            self.source / "missing",
+            str(link) + ",bad",
+            "relative",
+        ):
+            with self.subTest(value=value):
+                self.assertNotEqual(project(value).returncode, 0)
+        link.unlink()
+        link.symlink_to(self.other, target_is_directory=True)
+        self.assertEqual(project(link).stdout, f"FIXTURE_SOURCE\n{self.other}\n")
+
+    def test_global_source_inventory_crosses_every_fingerprint_lifecycle_container(
+        self,
+    ):
+        cfg = deepcopy(self.cfg)
+        cfg["setup"]["unselected"] = {"source_root_env": "FIXTURE_SETUP_ONLY"}
+        env = {
+            **self.env,
+            "FIXTURE_SETUP_ONLY": str(self.other),
+            "CHAINMAN_MODE": "container-nix",
+        }
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch.object(
+                bootstrap_plan.config_inspection, "validated", return_value=cfg
+            ),
+            patch.object(
+                chainman,
+                "profile_environment",
+                side_effect=lambda root, profile, selected, *args, **kwargs: dict(
+                    selected
+                ),
+            ),
+        ):
+            for request, name in (
+                ("_control-export", ""),
+                ("_service-prepare", "work"),
+                ("_workflow-prepare", "work"),
+                ("_workflow-task", "work"),
+                ("_workflow-profile", "web"),
+                ("_workflow-service", "web"),
+                ("_workflow-probe", "web"),
+                ("_workflow-shutdown", "web"),
+            ):
+                with self.subTest(request=request):
+                    _, options = bootstrap_plan.plan(self.consumer, request, name)
+                    mounted = {
+                        options[i + 1]
+                        for i, value in enumerate(options)
+                        if value == "--mount"
+                    }
+                    self.assertEqual(
+                        mounted,
+                        {
+                            f"type=bind,src={p},dst={p}"
+                            for p in (self.source, self.other)
+                        },
+                    )
+                    forwarded = {
+                        options[i + 1]
+                        for i, value in enumerate(options)
+                        if value == "--env-pattern"
+                    }
+                    self.assertTrue(
+                        {"FIXTURE_SOURCE", "FIXTURE_SETUP_ONLY"} <= forwarded
+                    )
+        original = services.config_fingerprint(self.consumer, cfg, env=env)
+        changed = services.config_fingerprint(
+            self.consumer, cfg, env={**env, "FIXTURE_SETUP_ONLY": str(self.source)}
+        )
+        self.assertNotEqual(original, changed)
+
+    def test_source_selectors_are_forwarded_even_without_a_wildcard_and_cannot_be_replaced(
+        self,
+    ):
+        destination = self.base / "controller"
+        destination.mkdir()
+        (destination / "host-environment").write_bytes(
+            f"FIXTURE_SOURCE={self.source}\0UNDECLARED=secret\0".encode()
+        )
+        self.assertEqual(
+            source_roots.host_inputs(destination, self.cfg),
+            {"FIXTURE_SOURCE": str(self.source)},
+        )
+        with self.assertRaisesRegex(ValueError, "cannot be overridden"):
+            source_roots.preserve(
+                self.consumer,
+                self.cfg,
+                self.env,
+                {**self.env, "FIXTURE_SOURCE": str(self.other)},
+            )
+        with self.assertRaisesRegex(ValueError, "cannot be overridden"):
+            source_roots.preserve(
+                self.consumer, self.cfg, {}, {"FIXTURE_SOURCE": str(self.source)}
+            )
+
     def test_external_payload_enters_consumer_profile_before_changing_directory(self):
         with (
             patch.object(chainman, "configuration", return_value=self.cfg),

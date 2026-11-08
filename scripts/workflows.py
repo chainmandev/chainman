@@ -723,7 +723,12 @@ def context_environment(
     expanded = project_environment.expand(values, root, configured)
     # The context replaces caller inputs; explicit project and profile policy
     # still has the same precedence as it does for a normal caller environment.
-    return project_environment.apply(root, spec, dict(inherited, **expanded))
+    return source_roots.preserve(
+        root,
+        cfg,
+        inherited,
+        project_environment.apply(root, spec, dict(inherited, **expanded)),
+    )
 
 
 def run(

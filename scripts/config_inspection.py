@@ -168,6 +168,7 @@ def document(root: Path, action: str, arguments: list[str]) -> Table:
     for service in declarations["services"].values():
         service.setdefault("scope", "worktree")
         service.setdefault("restart", "no")
+        service.setdefault("failure_policy", "stop")
         service.setdefault("shutdown_seconds", 10)
         if "container" in service:
             container = table(service["container"], "Service container")

@@ -50,6 +50,7 @@ type Service struct {
 	Dependencies    []string `json:"depends_on"`
 	Readiness       *Probe   `json:"readiness,omitempty"`
 	Restart         string   `json:"restart"`
+	FailurePolicy   string   `json:"failure_policy,omitempty"`
 	Shutdown        int      `json:"shutdown_seconds"`
 	ShutdownCommand *Command `json:"shutdown_command,omitempty"`
 	// Container cleanup addresses an immutable engine ID after checking its label.
@@ -425,6 +426,9 @@ func validate(p Plan) error {
 		if s.Restart != "no" && s.Restart != "always" && s.Restart != "on_failure" {
 			return fmt.Errorf("invalid restart policy")
 		}
+		if s.FailurePolicy != "" && s.FailurePolicy != "stop" && s.FailurePolicy != "continue" {
+			return fmt.Errorf("invalid service failure policy")
+		}
 		if s.Readiness != nil {
 			r := s.Readiness
 			if r.HTTPGet != nil {
@@ -605,7 +609,8 @@ func ready(p Plan, names []string, startup *startupGuard) error {
 			seconds += (r.Period + r.Timeout + 15) * r.Failures
 		}
 	}
-	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	started := time.Now()
+	deadline := started.Add(time.Duration(seconds) * time.Second)
 	for time.Now().Before(deadline) {
 		if e := startup.check(); e != nil {
 			return e
@@ -619,28 +624,14 @@ func ready(p Plan, names []string, startup *startupGuard) error {
 		if e != nil {
 			return fmt.Errorf("service controller lost: %w", e)
 		}
-		found := map[string]Process{}
-		for _, s := range ps {
-			found[s.Name] = s
+		pending, degraded, err := startupServiceSample(p, names, ps, time.Since(started))
+		if err != nil {
+			return err
 		}
-		all := true
-		for _, n := range names {
-			s, ok := found[n]
-			if !ok {
-				return fmt.Errorf("backend omitted service %s", n)
+		if !pending {
+			for _, name := range degraded {
+				fmt.Fprintf(os.Stderr, "chainman: service %s unavailable; continuing degraded (failure_policy=continue); log: %s\n", name, filepath.Join(p.State, "services.log"))
 			}
-			if s.Status == "Completed" || s.Status == "Error" || s.Status == "Skipped" {
-				detail := s.Status
-				if s.ExitCode != nil {
-					detail += fmt.Sprintf(", exit code %d", *s.ExitCode)
-				}
-				return fmt.Errorf("service %s exited before readiness (%s); log: %s", n, detail, filepath.Join(p.State, "services.log"))
-			}
-			if !s.Running || (p.Services[n].Readiness != nil && s.Ready != "Ready") {
-				all = false
-			}
-		}
-		if all {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)

@@ -249,7 +249,9 @@ def profile_environment(
                 "Cannot unset managed runtime and cache lifecycle variables"
             )
         selected.pop(key, None)
-    return selected
+    import source_roots
+
+    return source_roots.preserve(root, cfg, inherited, selected)
 
 
 class ExecuteOptions(tc.ProcessIOOptions, total=False):
@@ -657,13 +659,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.environ.get("CHAINMAN_X11_HOSTNAME", ""),
             )
             return 0
-        if args.action == "_bootstrap-options":
+        if args.action in {"_bootstrap-options", "_bootstrap-sources"}:
             import bootstrap_plan
 
             if len(args.arguments) != 2:
                 raise ValueError(
                     "Bootstrap options require the original action and task"
                 )
+            if args.action == "_bootstrap-sources":
+                for key, value in bootstrap_plan.discover(
+                    root, args.arguments[0]
+                ).items():
+                    print(bootstrap_plan.line(key))
+                    print(bootstrap_plan.line(value))
+                return 0
             _, options = bootstrap_plan.plan(root, args.arguments[0], args.arguments[1])
             if options:
                 print("\n".join(map(bootstrap_plan.line, options)))
