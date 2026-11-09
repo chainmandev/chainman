@@ -1,6 +1,7 @@
 """Release qualification keeps its complete matrix and scoped time allowance."""
 
 from pathlib import Path
+import tomllib
 import unittest
 
 import yaml
@@ -120,6 +121,58 @@ class ReleaseWorkflowTests(unittest.TestCase):
         for name in ("publish", "readback"):
             self.assertNotIn("if", jobs[name])
             self.assertNotIn("continue-on-error", jobs[name])
+
+    def test_optional_attestation_helper_is_required_in_the_javascript_lane(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
+        job = workflow["jobs"]["verify"]
+        steps = [
+            step
+            for step in job["steps"]
+            if step.get("name") == "Qualify optional attestation helper"
+        ]
+        self.assertEqual(len(steps), 1)
+        step = steps[0]
+        self.assertEqual(set(step), {"name", "if", "run"})
+        self.assertEqual(
+            step["if"],
+            "matrix.mode == 'host-nix' && matrix.module == 'javascript' && matrix.runner == 'ubuntu-24.04'",
+        )
+        self.assertEqual(
+            step["run"],
+            "nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module attest verify",
+        )
+        self.assertEqual(job["strategy"]["max-parallel"], 1)
+        module = tomllib.loads((ROOT / "modules/attest.toml").read_text())
+        self.assertEqual(
+            module["commands"]["verify"],
+            [
+                ["pnpm", "run", "check"],
+                ["pnpm", "run", "build"],
+                ["pnpm", "run", "test"],
+                ["nix", "build", "path:..#attest", "--no-link"],
+            ],
+        )
+
+    def test_javascript_lane_runs_native_pnpm_setup_regressions(self):
+        workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
+        step = next(
+            step
+            for step in workflow["jobs"]["verify"]["steps"]
+            if step.get("name") == "Qualify native JavaScript update validation"
+        )
+        self.assertEqual(
+            step["if"], "matrix.mode == 'host-nix' && matrix.module == 'javascript'"
+        )
+        self.assertEqual(
+            step["run"],
+            "nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test",
+        )
+        recipe = (ROOT / "justfile").read_text().split("javascript-test:\n", 1)[1]
+        recipe = recipe.split("\n\n", 1)[0]
+        self.assertIn(
+            "    @./scripts/enter.sh javascript python3 -B -m unittest discover -s tests -p test_pnpm_setup.py -v\n",
+            recipe + "\n",
+        )
 
     def test_native_runtime_transfer_is_required_in_linux_host_core_lane(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/verify.yml").read_text())
