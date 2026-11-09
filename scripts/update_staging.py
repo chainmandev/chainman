@@ -327,9 +327,18 @@ def prepare_runtime(root: Path, destination: Path) -> None:
             raise ValueError("Candidate runtime has already been prepared")
         if updates.snapshot(candidate) != state.candidate_before:
             raise ValueError("Candidate changed before runtime preparation")
-        if state.runtime_revision is None:
-            state = replace(state, runtime_revision=git_runtime.default_revision())
+        proposed = state.runtime_revision
+        if proposed is None:
+            proposed = git_runtime.default_revision()
+            state = replace(state, runtime_revision=proposed)
             # Save selection before fetching: failed downloads resume this SHA.
+            tc.atomic_json(destination / "control/state.json", state.encode())
+        selected = git_runtime.update_revision(
+            git_runtime.pin(tc.regular_input(candidate, "chainman.lock")),
+            proposed,
+        )
+        if selected != state.runtime_revision:
+            state = replace(state, runtime_revision=selected)
             tc.atomic_json(destination / "control/state.json", state.encode())
         with tc.nix_temporary_directory("chainman-runtime-stage-") as directory:
             try:

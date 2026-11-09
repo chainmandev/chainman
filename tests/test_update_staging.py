@@ -77,6 +77,13 @@ commands=[["true"]]
         )
         self.discovery = discovery.start()
         self.addCleanup(discovery.stop)
+        ancestry = patch.object(
+            subject.git_runtime,
+            "update_revision",
+            side_effect=lambda current, candidate: candidate,
+        )
+        self.ancestry = ancestry.start()
+        self.addCleanup(ancestry.stop)
 
     def prepare(self, *args):
         # Most fixtures exercise project-only transaction behavior without a
@@ -369,6 +376,38 @@ commands=[["true"]]
         with self.assertRaisesRegex(ValueError, "runtime has not been prepared"):
             subject.inspect(self.root, self.stage)
         self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_full_update_saves_retained_newer_pin_before_runtime_materialization(self):
+        subject.prepare(self.root, self.stage, [])
+        current = "a" * 40
+        self.ancestry.side_effect = None
+        self.ancestry.return_value = current
+        with patch.object(
+            subject.runtime_updates, "runtime_candidate", return_value=chainman.RUNTIME
+        ) as selected:
+            subject.prepare_runtime(self.root, self.stage)
+        self.ancestry.assert_called_once_with(current, "b" * 40)
+        self.assertEqual(selected.call_args.kwargs["revision"], current)
+        state, _ = subject.read_state(self.root, self.stage)
+        self.assertEqual(state.runtime_revision, current)
+        self.assertEqual(updates.snapshot(self.root), self.before)
+
+    def test_ancestry_fetch_failure_retains_exact_discovered_default_on_retry(self):
+        subject.prepare(self.root, self.stage, [])
+        self.ancestry.side_effect = ValueError("Cannot verify complete Git ancestry")
+        with self.assertRaisesRegex(ValueError, "complete Git ancestry"):
+            subject.prepare_runtime(self.root, self.stage)
+        state, _ = subject.read_state(self.root, self.stage)
+        self.assertEqual(state.runtime_revision, "b" * 40)
+        self.discovery.side_effect = AssertionError("Default branch must stay frozen")
+        self.ancestry.side_effect = None
+        self.ancestry.return_value = "b" * 40
+        subject.resume(self.root, self.stage)
+        with patch.object(
+            subject.runtime_updates, "runtime_candidate", return_value=chainman.RUNTIME
+        ) as selected:
+            subject.prepare_runtime(self.root, self.stage)
+        self.assertEqual(selected.call_args.kwargs["revision"], "b" * 40)
 
     def test_failed_runtime_preparation_resumes_before_project_resolution(self):
         subject.prepare(self.root, self.stage, [])
