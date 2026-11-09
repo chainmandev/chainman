@@ -72,10 +72,14 @@
           nodejs =
             if pkgs.stdenv.hostPlatform.system == "x86_64-darwin" then
               pkgs.nodejs_latest.override {
-                # Node's test runner ignores Nix's serial make-check setting.
-                # Keep every upstream check and its deadline while giving its
-                # large SQLite string tests the Intel runner's memory alone.
+                # Keep every upstream check. Its reviewed SQLite test fix moves
+                # the large-string cases to pummel, which test-ci-js already runs
+                # with the normal intensive-suite deadline. Keep one test worker
+                # to avoid competing allocations on Intel macOS.
                 nodejs-slim = pkgs.nodejs-slim_latest.overrideAttrs (old: {
+                  patches = (old.patches or [ ]) ++ [
+                    ./patches/nodejs-sqlite-heavy-tests.patch
+                  ];
                   checkFlags = (old.checkFlags or [ ]) ++ [ "JOBS=1" ];
                 });
               }

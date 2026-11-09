@@ -1,0 +1,169 @@
+From 0c2949dd9d484adf3942a59d1aa23bed5ba4b882 Mon Sep 17 00:00:00 2001
+From: Filip Skokan <panva.ip@gmail.com>
+Date: Wed, 14 Oct 2026 11:37:37 +0200
+Subject: [PATCH] test: move large SQLite string cases to pummel
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The oversized-string cases allocate hundreds of megabytes and can make
+the ordinary statement test time out under parallel suite load. Move
+all five cases unchanged to the sequential pummel suite, which also
+allows more time for intensive tests.
+
+Refs: https://github.com/nodejs/reliability/issues/1690
+Signed-off-by: Filip Skokan <panva.ip@gmail.com>
+Assisted-by: Codex
+PR-URL: https://github.com/nodejs/node/pull/66722
+Refs: https://github.com/nodejs/reliability/issues/1686
+Refs: https://github.com/nodejs/reliability/issues/1687
+Reviewed-By: Antoine du Hamel <duhamelantoine1995@gmail.com>
+Reviewed-By: James M Snell <jasnell@gmail.com>
+Reviewed-By: Matteo Collina <matteo.collina@gmail.com>
+Reviewed-By: Guilherme Araújo <arauujogui@gmail.com>
+---
+ test/parallel/test-sqlite-statement.js        | 55 +----------------
+ test/pummel/test-sqlite-statement-too-long.js | 60 +++++++++++++++++++
+ 2 files changed, 61 insertions(+), 54 deletions(-)
+ create mode 100644 test/pummel/test-sqlite-statement-too-long.js
+
+diff --git a/test/parallel/test-sqlite-statement.js b/test/parallel/test-sqlite-statement.js
+index 79e72a89d18a..a66ef9585be8 100644
+--- a/test/parallel/test-sqlite-statement.js
++++ b/test/parallel/test-sqlite-statement.js
+@@ -1,13 +1,11 @@
+ // Flags: --expose-gc
+ 'use strict';
+-const { enoughTestMem, skipIfSQLiteMissing } = require('../common');
++const { skipIfSQLiteMissing } = require('../common');
+ skipIfSQLiteMissing();
+ const {
+   Database,
+   Statement,
+-  constants: { SQLITE_OK },
+ } = require('node:sqlite');
+-const { constants } = require('node:buffer');
+ const { suite, test } = require('node:test');
+ 
+ suite('Statement() constructor', () => {
+@@ -1447,54 +1445,3 @@ suite('options.persistent', () => {
+     t.assert.deepStrictEqual(stmt.get(), { __proto__: null, val: 42n });
+   });
+ });
+-
+-suite('values larger than the maximum string length', { skip: !enoughTestMem }, () => {
+-  // hex() doubles its input, so this is the smallest blob whose text form
+-  // exceeds what V8 can hold in a string.
+-  const blobSize = (constants.MAX_STRING_LENGTH >>> 1) + 1;
+-  // '\u20ac' is 1 UTF-16 code unit but 3 UTF-8 bytes, so this identifier is a
+-  // valid JS string whose UTF-8 form exceeds the limit.
+-  const longIdentifier = '\u20ac'.repeat(Math.ceil(constants.MAX_STRING_LENGTH / 3) + 10);
+-  const tooLong = { code: 'ERR_STRING_TOO_LONG', name: 'Error' };
+-
+-  test('get() throws instead of returning undefined', (t) => {
+-    using db = new Database(':memory:');
+-    using stmt = db.prepare('SELECT hex(zeroblob(?))');
+-    t.assert.throws(() => {
+-      stmt.get(blobSize);
+-    }, tooLong);
+-  });
+-
+-  test('prepare() throws when the SQLite error message is too long', (t) => {
+-    using db = new Database(':memory:');
+-    // SQLite repeats the identifier in the error.
+-    t.assert.throws(() => {
+-      db.prepare(`SELECT 1 FROM "${longIdentifier}"`);
+-    }, tooLong);
+-  });
+-
+-  test('prepare() throws for an oversized authorizer argument', (t) => {
+-    using db = new Database(':memory:');
+-    db.setAuthorizer(() => SQLITE_OK);
+-    t.assert.throws(() => db.prepare(`CREATE TABLE "${longIdentifier}" (x)`), tooLong);
+-  });
+-
+-  test('columns() throws for an oversized declared type', (t) => {
+-    using db = new Database(':memory:');
+-    db.exec(`CREATE TABLE t (x "${longIdentifier}")`);
+-    using stmt = db.prepare('SELECT x FROM t');
+-    t.assert.throws(() => stmt.columns(), tooLong);
+-  });
+-
+-  test('exec() surfaces the error from a user-defined function', (t) => {
+-    using db = new Database(':memory:');
+-    db.exec('CREATE TABLE data(val TEXT)');
+-    db.function('identity', (val) => val);
+-
+-    t.assert.throws(() => {
+-      db.exec(`INSERT INTO data (val) VALUES (identity(hex(zeroblob(${blobSize}))))`);
+-    }, tooLong);
+-    using stmt = db.prepare('SELECT count(*) AS count FROM data');
+-    t.assert.deepStrictEqual(stmt.get(), { __proto__: null, count: 0 });
+-  });
+-});
+diff --git a/test/pummel/test-sqlite-statement-too-long.js b/test/pummel/test-sqlite-statement-too-long.js
+new file mode 100644
+index 000000000000..02c3faf0ac38
+--- /dev/null
++++ b/test/pummel/test-sqlite-statement-too-long.js
+@@ -0,0 +1,60 @@
++'use strict';
++
++const { enoughTestMem, skipIfSQLiteMissing } = require('../common');
++skipIfSQLiteMissing();
++const { Database, constants: { SQLITE_OK } } = require('node:sqlite');
++const { constants } = require('node:buffer');
++const { suite, test } = require('node:test');
++
++// These queries allocate strings and blobs of several hundred megabytes.
++// Run them separately from the ordinary statement tests.
++suite('values larger than the maximum string length', { skip: !enoughTestMem }, () => {
++  // hex() doubles its input, so this is the smallest blob whose text form
++  // exceeds what V8 can hold in a string.
++  const blobSize = (constants.MAX_STRING_LENGTH >>> 1) + 1;
++  // '\u20ac' is 1 UTF-16 code unit but 3 UTF-8 bytes, so this identifier is a
++  // valid JS string whose UTF-8 form exceeds the limit.
++  const longIdentifier = '\u20ac'.repeat(Math.ceil(constants.MAX_STRING_LENGTH / 3) + 10);
++  const tooLong = { code: 'ERR_STRING_TOO_LONG', name: 'Error' };
++
++  test('get() throws instead of returning undefined', (t) => {
++    using db = new Database(':memory:');
++    using stmt = db.prepare('SELECT hex(zeroblob(?))');
++    t.assert.throws(() => {
++      stmt.get(blobSize);
++    }, tooLong);
++  });
++
++  test('prepare() throws when the SQLite error message is too long', (t) => {
++    using db = new Database(':memory:');
++    // SQLite repeats the identifier in the error.
++    t.assert.throws(() => {
++      db.prepare(`SELECT 1 FROM "${longIdentifier}"`);
++    }, tooLong);
++  });
++
++  test('prepare() throws for an oversized authorizer argument', (t) => {
++    using db = new Database(':memory:');
++    db.setAuthorizer(() => SQLITE_OK);
++    t.assert.throws(() => db.prepare(`CREATE TABLE "${longIdentifier}" (x)`), tooLong);
++  });
++
++  test('columns() throws for an oversized declared type', (t) => {
++    using db = new Database(':memory:');
++    db.exec(`CREATE TABLE t (x "${longIdentifier}")`);
++    using stmt = db.prepare('SELECT x FROM t');
++    t.assert.throws(() => stmt.columns(), tooLong);
++  });
++
++  test('exec() surfaces the error from a user-defined function', (t) => {
++    using db = new Database(':memory:');
++    db.exec('CREATE TABLE data(val TEXT)');
++    db.function('identity', (val) => val);
++
++    t.assert.throws(() => {
++      db.exec(`INSERT INTO data (val) VALUES (identity(hex(zeroblob(${blobSize}))))`);
++    }, tooLong);
++    using stmt = db.prepare('SELECT count(*) AS count FROM data');
++    t.assert.deepStrictEqual(stmt.get(), { __proto__: null, count: 0 });
++  });
++});
