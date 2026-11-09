@@ -7,19 +7,20 @@
     "node": ">=26 <27"
   },
   "type": "module",
+  "bin": {
+    "chainman-attest-adapter": "dist/src/adapter.js"
+  },
   "scripts": {
     "check": "tsc --noEmit",
-    "build": "tsc",
-    "test": "tsc && node --test dist/test/*.test.js"
+    "build": "rm -rf dist && tsc",
+    "test": "node --run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
     "@actions/attest": "3.2.0",
-    "npm": "12.2.0",
-    "yauzl": "3.4.0"
+    "npm": "12.2.0"
   },
   "devDependencies": {
     "@types/node": "26.6.5",
-    "@types/yauzl": "3.4.0",
     "typescript": "7.0.2"
   }
 }

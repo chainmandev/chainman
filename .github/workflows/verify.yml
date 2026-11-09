@@ -176,7 +176,9 @@ jobs:
           nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- init-test "$engine"
       - name: Qualify native JavaScript update validation
         if: matrix.mode == 'host-nix' && matrix.module == 'javascript'
-        run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
+        run: |
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- javascript-test
+          nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module attest verify
       - name: Qualify native service ownership and backend
         if: matrix.mode == 'host-nix' && (matrix.module == 'core' || runner.os == 'macOS')
         run: nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- control-test

@@ -7,7 +7,8 @@ import re
 import sys
 import tempfile
 
-from adapter_data import Table, strings, table, text
+from adapter_data import Table, table
+from attestation_model import policy as decode_policy
 import chainman
 import toolchain as tc
 
@@ -30,34 +31,16 @@ def policy(cfg: Mapping[str, object]) -> Table:
         raise ValueError(
             "Unknown attestation policy fields: " + ", ".join(sorted(unknown))
         )
-    if declared.get("provider") != "github-actions":
-        raise ValueError(
-            "Unsupported attestation provider; initially only github-actions is supported"
-        )
     required = fields - {"tag"}
     if required - declared.keys():
         raise ValueError(
             "Attestation policy requires: "
             + ", ".join(sorted(required - declared.keys()))
         )
-    result: Table = {}
-    for name in required - {"required_jobs"}:
-        value = text(declared[name], "Attestation " + name)
-        if not value.strip() or any(c in value for c in "\0\r\n"):
-            raise ValueError("Attestation policy strings must be nonempty single lines")
-        result[name] = value
-    jobs = strings(declared["required_jobs"], "Attestation required_jobs")
-    if not jobs or len(jobs) != len(set(jobs)) or any(not job.strip() for job in jobs):
-        raise ValueError(
-            "Attestation required_jobs must contain distinct nonempty job names"
-        )
-    result["requiredJobs"] = jobs
+    result = dict(declared)
+    result["requiredJobs"] = result.pop("required_jobs")
     result["artifactName"] = result.pop("artifact_name")
-    if "tag" in declared and declared["tag"] != "next":
-        raise ValueError("Initially npm publication supports only the next tag")
-    if "tag" in declared:
-        result["tag"] = "next"
-    return result
+    return decode_policy(result).encode()
 
 
 def arguments(action: str, rest: Sequence[str]) -> list[str]:
@@ -97,7 +80,7 @@ def run(root: Path, action: str, rest: Sequence[str]) -> int:
     relative = argv[manifest_index]
     tc.regular_input(root, relative)
     argv[manifest_index] = str(tc.contained(root, relative))
-    # This private file only transports already validated configuration to Node.
+    # This private file transports validated configuration to the isolated entry.
     # It is created inside the current execution mode, including container mode.
     with tempfile.TemporaryDirectory(prefix="chainman-attest-policy-") as temporary:
         path = Path(temporary) / "policy.json"
@@ -112,8 +95,10 @@ def run(root: Path, action: str, rest: Sequence[str]) -> int:
             "attest",
             [
                 sys.executable,
-                "-c",
-                'import os,sys; executable=os.environ["CHAINMAN_ATTEST_BIN"]; os.execv(executable,[executable,*sys.argv[1:]])',
+                "-I",
+                "-B",
+                str(tc.RUNTIME / "scripts/isolated.py"),
+                "attestation_entry.py",
                 *argv,
                 "--policy",
                 str(path),
