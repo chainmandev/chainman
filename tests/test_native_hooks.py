@@ -254,6 +254,58 @@ check=["true"]
         self.assertEqual((self.root / ".git/index").read_bytes(), before)
         self.assertEqual((self.root / "a.txt").read_bytes(), b"GOOD\nunstaged\n")
 
+    def test_restrictive_umask_formats_index_modes_without_losing_unstaged_edits(self):
+        modes = {
+            "regular.txt": (0o644, b"100644"),
+            "private.txt": (0o600, b"100644"),
+            "executable.txt": (0o755, b"100755"),
+        }
+        for name, (mode, indexed_mode) in modes.items():
+            self.stage(name)
+            (self.root / name).chmod(mode)
+            self.git("add", "--", name)
+            self.assertEqual(self.git("show", ":" + name).stdout, b"BAD\n")
+            self.assertEqual(
+                self.git("ls-files", "--stage", "--", name).stdout.split()[0],
+                indexed_mode,
+            )
+        (self.root / "a.txt").write_bytes(b"unrelated unstaged bytes\n")
+        (self.root / "untracked.txt").write_bytes(b"untracked user bytes\n")
+        before_head = self.git("rev-parse", "HEAD").stdout
+        before_index_mode = (self.root / ".git/index").stat().st_mode & 0o777
+        self.hook("format-staged", umask=0o077)
+        for name, (mode, indexed_mode) in modes.items():
+            self.assertEqual(self.git("show", ":" + name).stdout, b"GOOD\n")
+            self.assertEqual((self.root / name).read_bytes(), b"GOOD\n")
+            self.assertEqual((self.root / name).stat().st_mode & 0o777, mode)
+            self.assertEqual(
+                self.git("ls-files", "--stage", "--", name).stdout.split()[0],
+                indexed_mode,
+            )
+        self.assertEqual(
+            (self.root / ".git/index").stat().st_mode & 0o777, before_index_mode
+        )
+        self.assertEqual(self.git("rev-parse", "HEAD").stdout, before_head)
+        self.assertEqual(self.git("show", ":a.txt").stdout, b"initial\n")
+        self.assertEqual(
+            (self.root / "a.txt").read_bytes(), b"unrelated unstaged bytes\n"
+        )
+        self.assertEqual(
+            (self.root / "untracked.txt").read_bytes(), b"untracked user bytes\n"
+        )
+
+    def test_restrictive_umask_still_rejects_formatter_mode_changes(self):
+        self.stage()
+        (self.root / "a.txt").chmod(0o644)
+        self.change_formatter("pathlib.Path('a.txt').chmod(0o755)\n")
+        before_index = (self.root / ".git/index").read_bytes()
+        result = self.hook("format-staged", check=False, umask=0o077)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"outside selected content", result.stderr)
+        self.assertEqual((self.root / ".git/index").read_bytes(), before_index)
+        self.assertEqual((self.root / "a.txt").read_bytes(), b"BAD\n")
+        self.assertEqual((self.root / "a.txt").stat().st_mode & 0o777, 0o644)
+
     def test_literal_names_and_modes(self):
         name = "-space 'quote\nλ.txt"
         self.stage(name)

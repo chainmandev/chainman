@@ -275,6 +275,10 @@ func (p HookPlan) hookFormat() error {
 			if e = os.WriteFile(path, body, mode); e != nil {
 				return e
 			}
+			// Snapshot permissions must match the index independently of umask.
+			if e = os.Chmod(path, mode); e != nil {
+				return e
+			}
 			files = append(files, "./"+entry.Path)
 			fmt.Fprintf(&indexInfo, "%s %s\t%s\x00", entry.Mode, entry.OID, entry.Path)
 		}
