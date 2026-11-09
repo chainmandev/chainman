@@ -227,6 +227,7 @@ Start with the [documentation index](docs/README.md):
 - [Split configuration into modules and reuse templates](docs/composition.md)
 - [Setup and services](docs/services.md)
 - [Dependency updates and recovery](docs/updates.md)
+- [Artifact attestation and manual npm publication](docs/attestation.md)
 - [Execution modes, caches, and native tools](docs/runtime.md)
 - [Troubleshooting](docs/troubleshooting.md) and [release trust](docs/release-trust.md)
 - [Contributing and qualification](docs/contributing.md)

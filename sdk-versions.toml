@@ -8,6 +8,16 @@
 schema = 1
 
 [[targets]]
+module = "attest"
+kind = "pnpm"
+files = ["nix/attest/package.json"]
+
+[[targets]]
+module = "attest"
+kind = "node"
+files = ["nix/attest/package.json"]
+
+[[targets]]
 module = "javascript"
 kind = "pnpm"
 files = ["examples/javascript/package.json"]

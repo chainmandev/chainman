@@ -1300,7 +1300,14 @@ def fingerprint(spec: Mapping[str, object], root: Path = ROOT) -> str:
         paths.update(
             p
             for p in (root / directory).rglob("*")
-            if p.is_file() and "__pycache__" not in p.parts
+            if p.is_file()
+            and "__pycache__" not in p.parts
+            and not (
+                p.relative_to(root).parts[:2] == ("nix", "attest")
+                and {"node_modules", "dist", ".pnpm-store"}.intersection(
+                    p.relative_to(root).parts[2:]
+                )
+            )
         )
     for pattern in ad.strings(spec.get("inputs", []), "Module inputs"):
         paths.update(root.glob(pattern))

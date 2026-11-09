@@ -49,6 +49,8 @@ INTERNAL = {
     "deps-resolve",
     "deps-update",
     "chainman-update",
+    "attest",
+    "npm-publish",
     "deps-check",
     "clean",
     "cache-prune",

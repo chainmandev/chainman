@@ -1096,6 +1096,9 @@ def perform(root: Path, now: datetime, selected: list[str]) -> None:
 
 
 def verify(root: Path, selected: list[str]) -> None:
+    import module_updates
+
+    selected = module_updates.selected_modules(selected, settings(root))
     env = environment(root)
     env["TOOLCHAIN_FRESH"] = "1"
     env["CHAINMAN_UPDATE_ACTIVE"] = "1"
@@ -1109,8 +1112,11 @@ def verify(root: Path, selected: list[str]) -> None:
 
 
 def preview(root: Path, now: datetime, selected: list[str]) -> PreviewResult:
+    import module_updates
+
     repository(root, clean=False)
     before = snapshot(root)
+    selected = module_updates.selected_modules(selected, settings(root))
     patterns = strings(settings(root)["outputs"], "Update outputs") + [
         p
         for n in selected

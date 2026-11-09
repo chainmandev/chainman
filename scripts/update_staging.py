@@ -113,9 +113,13 @@ def patterns(root: Path, policy: Mapping[str, object]) -> list[str]:
         *exception_retirement.output_paths(root),
     ]
     if not policy.get("resolver") and not policy.get("steps"):
+        import module_updates
+
         result += [
             p
-            for name in strings(tc.config(root)["modules"], "Modules")
+            for name in module_updates.selected_modules(
+                strings(tc.config(root)["modules"], "Modules"), policy
+            )
             for p in strings(
                 tc.module(name, root).get("update_outputs", []), "Module update outputs"
             )

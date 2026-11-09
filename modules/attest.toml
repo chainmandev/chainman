@@ -1,0 +1,16 @@
+name = "attest"
+# Dependency repair must enter JavaScript without building the pinned helper.
+profile = "javascript"
+directory = "nix/attest"
+ecosystem = "npm"
+inputs = ["sdk-versions.toml", "nix/attest/package.json", "nix/attest/pnpm-lock.yaml", "nix/attest/tsconfig.json", "nix/attest/src/*.ts", "nix/attest/test/*.ts"]
+artifacts = ["nix/attest/node_modules/.pnpm/lock.yaml"]
+update_outputs = ["nix/attest/package.json", "nix/attest/pnpm-lock.yaml", "nix/attest.nix"]
+
+[commands]
+setup = [["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--config.confirmModulesPurge=false"]]
+resolve = [["pnpm", "install", "--lockfile-only", "--ignore-scripts"]]
+build = [["pnpm", "run", "build"]]
+test = [["pnpm", "run", "test"]]
+verify = [["pnpm", "run", "check"], ["pnpm", "run", "build"], ["pnpm", "run", "test"], ["nix", "build", "path:..#attest", "--no-link"]]
+format = [["prettier", "--write", "package.json", "tsconfig.json", "src/*.ts", "test/*.ts"]]
