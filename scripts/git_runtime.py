@@ -10,6 +10,8 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 import toolchain as tc
 
@@ -90,12 +92,30 @@ def git(*args: str, input: bytes | None = None) -> bytes:
     ).stdout
 
 
+@contextmanager
+def isolated_repository() -> Iterator[str]:
+    """Use Git objects without adopting a caller's or persistent cache's config."""
+    with tempfile.TemporaryDirectory(prefix="chainman-git-ancestry-") as directory:
+        selected = "--git-dir=" + str(Path(directory) / "objects.git")
+        git(
+            selected, "init", "--bare", "--quiet", "--template=", "--object-format=sha1"
+        )
+        yield selected
+
+
 def default_revision() -> str:
     """Resolve one advertised default-branch snapshot, without naming the branch."""
     try:
-        advertised = git(
-            "ls-remote", "--symref", "--exit-code", REPOSITORY, "HEAD", "refs/heads/*"
-        ).decode("utf-8")
+        with isolated_repository() as selected:
+            advertised = git(
+                selected,
+                "ls-remote",
+                "--symref",
+                "--exit-code",
+                REPOSITORY,
+                "HEAD",
+                "refs/heads/*",
+            ).decode("utf-8")
         entries = [line.split("\t") for line in advertised.splitlines()]
         if any(len(entry) != 2 for entry in entries):
             raise ValueError("malformed advertisement")
@@ -119,6 +139,70 @@ def default_revision() -> str:
         raise ValueError(
             f"Cannot resolve Chainman's public default branch: {error}"
         ) from error
+
+
+def update_revision(current: str, candidate: str) -> str:
+    """Default updates may advance or retain a pin, but never roll it back."""
+    pin((current + "\n").encode())
+    pin((candidate + "\n").encode())
+    if current == candidate:
+        return current
+    try:
+        with isolated_repository() as selected:
+            # A new object database has no shallow boundary, alternates, grafts,
+            # replace refs or cache configuration that could change ancestry.
+            git(
+                selected,
+                "-c",
+                "gc.auto=0",
+                "fetch",
+                "--no-auto-maintenance",
+                "--no-write-fetch-head",
+                "--no-tags",
+                REPOSITORY,
+                current,
+                candidate,
+            )
+            if (
+                git(selected, "rev-parse", "--is-shallow-repository").strip()
+                != b"false"
+            ):
+                raise ValueError("Runtime ancestry requires complete Git history")
+            git(
+                selected,
+                "fsck",
+                "--full",
+                "--strict",
+                "--no-reflogs",
+                "--no-dangling",
+                current,
+                candidate,
+            )
+            for revision in (current, candidate):
+                if git(selected, "cat-file", "-t", revision).strip() != b"commit":
+                    raise ValueError("Runtime ancestry requires commit identities")
+
+            def ancestor(base: str, tip: str) -> bool:
+                try:
+                    git(selected, "merge-base", "--is-ancestor", base, tip)
+                except subprocess.CalledProcessError as error:
+                    if error.returncode == 1:
+                        return False
+                    raise
+                return True
+
+            if ancestor(current, candidate):
+                return candidate
+            if ancestor(candidate, current):
+                return current
+    except subprocess.CalledProcessError as error:
+        raise ValueError(
+            "Cannot verify complete Git ancestry for the runtime update"
+        ) from error
+    raise ValueError(
+        "Chainman's current pin and public default branch have diverged; "
+        "select an explicit runtime revision or reconcile their histories"
+    )
 
 
 def objects(revision: str) -> Path:
