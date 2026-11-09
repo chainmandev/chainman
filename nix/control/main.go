@@ -1466,19 +1466,23 @@ func owned(state, name string, probe bool, generation string) int {
 	}
 	timedOut := false
 	var interrupted syscall.Signal
+	var cleanupDeadline time.Time
 	select {
 	case e = <-done:
+		cleanupDeadline = time.Now().Add(time.Duration(s.Shutdown) * time.Second)
 	case <-timeout:
+		cleanupDeadline = time.Now().Add(time.Duration(s.Shutdown) * time.Second)
 		timedOut = true
 		_ = syscall.Kill(-id.PID, syscall.SIGTERM)
 		_ = syscall.Kill(-id.PID, syscall.SIGCONT)
 		select {
 		case e = <-done:
-		case <-time.After(time.Duration(s.Shutdown) * time.Second):
+		case <-time.After(time.Until(cleanupDeadline)):
 			killMembers(id.PID, syscall.SIGKILL)
 			e = <-done
 		}
 	case sig := <-signals:
+		cleanupDeadline = time.Now().Add(time.Duration(s.Shutdown) * time.Second)
 		interrupted = sig.(syscall.Signal)
 		if s.ForwardLeases {
 			fmt.Fprintln(os.Stderr, "chainman: stopping task…")
@@ -1492,12 +1496,14 @@ func owned(state, name string, probe bool, generation string) int {
 		_ = syscall.Kill(-id.PID, syscall.SIGCONT)
 		select {
 		case e = <-done:
-		case <-time.After(time.Duration(s.Shutdown) * time.Second):
+		case <-time.After(time.Until(cleanupDeadline)):
 			killMembers(id.PID, syscall.SIGKILL)
 			e = <-done
 		}
 	}
-	if e := finishGroup(id.PID, time.Now().Add(time.Duration(s.Shutdown)*time.Second)); e != nil {
+	// Reuse the graceful deadline so waiting for the direct child cannot spend
+	// the forced-cleanup allowance reserved by the enclosing owner.
+	if e := finishGroup(id.PID, cleanupDeadline); e != nil {
 		fmt.Fprintln(os.Stderr, e)
 		return 1
 	}
@@ -1530,9 +1536,12 @@ func owned(state, name string, probe bool, generation string) int {
 }
 
 // The calling process remains alive as the group's identity anchor throughout.
+// Callers reserve one second after the graceful deadline for observing SIGKILL.
 func finishGroup(group int, deadline time.Time) error {
+	forcedDeadline := deadline.Add(time.Second)
+	forced := false
 	killMembers(group, syscall.SIGTERM)
-	for time.Now().Before(deadline) {
+	for {
 		members, err := groupMembers(group)
 		if err != nil {
 			return err
@@ -1546,12 +1555,18 @@ func finishGroup(group int, deadline time.Time) error {
 			}
 		}
 		if !live {
-			break
+			return nil
+		}
+		if !forced && !time.Now().Before(deadline) {
+			killMembers(group, syscall.SIGKILL)
+			forced = true
+			continue
+		}
+		if forced && !time.Now().Before(forcedDeadline) {
+			return fmt.Errorf("owned process group %d did not stop after SIGKILL", group)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	killMembers(group, syscall.SIGKILL)
-	return nil
 }
 func killMembers(group int, sig syscall.Signal) {
 	members, e := groupMembers(group)
