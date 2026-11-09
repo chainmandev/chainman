@@ -103,22 +103,39 @@ await test("public adapter refuses other registries; manual publication refuses 
     npmRegistry({ registry: new URL("https://registry.example/") }),
     /public npm/,
   );
-  const previous = process.env["CI"];
-  process.env["CI"] = "true";
+  const flags = ["CI", "GITHUB_ACTIONS"] as const;
+  const previous = Object.fromEntries(
+    flags.map((flag) => [flag, process.env[flag]]),
+  );
   try {
+    for (const active of [
+      ["CI"],
+      ["GITHUB_ACTIONS"],
+      ["CI", "GITHUB_ACTIONS"],
+    ]) {
+      for (const flag of flags) {
+        if (active.includes(flag)) process.env[flag] = "true";
+        else delete process.env[flag];
+      }
+      await assert.rejects(
+        npmPublish("unused", identity.runId, configured),
+        /manual only/,
+      );
+    }
+    // Isolate the missing-tag case from the real inherited CI environment.
+    for (const flag of flags) delete process.env[flag];
+    const { tag: _tag, ...genericPolicy } = configured;
     await assert.rejects(
-      npmPublish("unused", identity.runId, configured),
-      /manual only/,
+      npmPublish("unused", identity.runId, genericPolicy),
+      /explicit next/,
     );
   } finally {
-    if (previous === undefined) delete process.env["CI"];
-    else process.env["CI"] = previous;
+    for (const flag of flags) {
+      const value = previous[flag];
+      if (value === undefined) delete process.env[flag];
+      else process.env[flag] = value;
+    }
   }
-  const { tag: _tag, ...genericPolicy } = configured;
-  await assert.rejects(
-    npmPublish("unused", identity.runId, genericPolicy),
-    /explicit next/,
-  );
 });
 await test("registry errors never mistake authentication/transport failures for absence or leak diagnostics", async () => {
   for (const output of [

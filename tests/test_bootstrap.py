@@ -419,10 +419,29 @@ print('entry and Git authority are read-only')
         self.pin_runtime(runtime)
         return runtime
 
-    def pin_runtime(self, runtime):
+    def pin_runtime(self, runtime, *, parent=None):
         repository = Path(tempfile.mkdtemp(prefix="fixture-git-", dir=self.shared.name))
         subprocess.run(["git", "init", "--bare", "-q", str(repository)], check=True)
         command = ["git", "--git-dir=" + str(repository), "--work-tree=" + str(runtime)]
+        if parent is not None:
+            # Transfer a real complete parent before committing this fixture's
+            # tree; default update checks must not trust prepopulated caches.
+            subprocess.run(
+                [
+                    *command,
+                    "-c",
+                    "gc.auto=0",
+                    "fetch",
+                    "--no-auto-maintenance",
+                    "--no-write-fetch-head",
+                    "--no-tags",
+                    str(self.repositories[parent]),
+                    parent,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run([*command, "update-ref", "HEAD", parent], check=True)
         subprocess.run([*command, "add", "-A"], check=True)
         subprocess.run(
             [
@@ -447,6 +466,25 @@ print('entry and Git authority are read-only')
         self.repositories[self.lock] = repository
         self.write_lock()
         self.prepare_cache(self.env)
+
+    def test_runtime_fixture_parent_is_available_to_fresh_ancestry_checks(self):
+        from unittest.mock import patch
+
+        import git_runtime
+
+        parent = self.lock
+        runtime = self.root / "descendant runtime"
+        shutil.copytree(self.tree, runtime)
+        (runtime / "rolling-marker").write_text("candidate runtime\n")
+        self.pin_runtime(runtime, parent=parent)
+        revision = self.lock
+        # Only transport changes: both directions use the real isolated Git
+        # fetch/fsck/merge-base path, independent of the fixture's warm cache.
+        with patch.object(
+            git_runtime, "REPOSITORY", self.repositories[revision].as_uri()
+        ):
+            self.assertEqual(git_runtime.update_revision(parent, revision), revision)
+            self.assertEqual(git_runtime.update_revision(revision, parent), revision)
 
     def prepare_cache(self, env):
         if self.lock not in self.repositories:
@@ -2135,9 +2173,11 @@ check=["true"]
                     "REPOSITORY = " + json.dumps(remote.as_uri()),
                 )
             )
+        self.pin_runtime(previous)
+        old_revision = self.lock
         # VERSION deliberately stays unchanged: the Git SHA identifies this update.
         (next_runtime / "rolling-marker").write_text("candidate runtime\n")
-        self.pin_runtime(next_runtime)
+        self.pin_runtime(next_runtime, parent=old_revision)
         revision = self.lock
         subprocess.run(
             [
@@ -2170,8 +2210,10 @@ check=["true"]
             ],
             check=True,
         )
-        self.pin_runtime(previous)
-        old_revision = self.lock
+        # The remote now has the candidate and its actual previous parent.
+        # Restore the consumer pin without creating an unrelated fixture commit.
+        self.lock = old_revision
+        self.write_lock()
         bootstrap_before = (self.root / "justfile").read_bytes()
         workflow = self.root / "workflow.py"
         workflow.write_text(
