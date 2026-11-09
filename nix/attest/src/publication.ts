@@ -289,6 +289,7 @@ export async function npmRegistry(
 export async function snapshotPackages(
   verified: VerifiedManifest,
   directory: string,
+  policy: Policy,
 ): Promise<Package[]> {
   const npm = await npmAdapter(),
     packages: Package[] = [];
@@ -303,6 +304,12 @@ export async function snapshotPackages(
     const data = await npm.package(path),
       name = string(data["name"]),
       version = string(data["version"]);
+    if (
+      npm.repository(data["repository"]) !== `github.com/${policy.repository}`
+    )
+      throw new Error(
+        `Local npm package ${name}@${version} repository must match signing repository https://github.com/${policy.repository}`,
+      );
     if (
       Boolean(data["private"]) ||
       data["packageExtensions"] !== undefined ||
@@ -341,7 +348,7 @@ export async function npmPublish(
   await chmod(directory, 0o700);
   try {
     await publish(
-      await snapshotPackages(verified, directory),
+      await snapshotPackages(verified, directory, policy),
       await npmRegistry(),
     );
   } finally {

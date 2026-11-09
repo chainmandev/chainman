@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { command, object, sha512, string } from "../src/common.js";
 import { npmAdapter } from "../src/npm.js";
+import { policy } from "../src/model.js";
 import {
   dependencyOrder,
   npmPublish,
@@ -20,7 +21,8 @@ import type { VerifiedManifest } from "../src/provenance.js";
 import { configured, identity, statement } from "./fixtures.js";
 import { predicateType } from "../src/provenance.js";
 const actualTarball = process.env["CHAINMAN_ATTEST_SMOKE_TARBALL"],
-  actualBundle = process.env["CHAINMAN_ATTEST_SMOKE_BUNDLE"];
+  actualBundle = process.env["CHAINMAN_ATTEST_SMOKE_BUNDLE"],
+  actualRepository = process.env["CHAINMAN_ATTEST_SMOKE_REPOSITORY"];
 
 const leaf: Package = {
   name: "leaf",
@@ -174,6 +176,7 @@ async function pack(
     JSON.stringify({
       name,
       version: "1.0.0-rc.0",
+      repository: `git+https://github.com/${configured.repository}.git`,
       scripts: {
         prepublishOnly: "exit 91",
         prepare: "exit 92",
@@ -210,10 +213,11 @@ function verified(
 ): VerifiedManifest {
   const subject = `pkg:npm/${name.replace("@", "%40")}@${version}`,
     artifact = {
-      path: "local.tgz",
+      path: `${name.replaceAll(/[^A-Za-z0-9]/g, "-")}.tgz`,
       subject,
       digest: { sha512: sha512(bytes) },
-    };
+    },
+    path = `/local/${artifact.path}`;
   const bundle = {
     mediaType: "application/vnd.dev.sigstore.bundle.v0.3+json",
     dsseEnvelope: {
@@ -234,31 +238,159 @@ function verified(
         sourceCommit: identity.sourceCommit,
         artifacts: [artifact],
       },
-      artifacts: [{ artifact, bytes, path: "/local/local.tgz" }],
+      artifacts: [{ artifact, bytes, path }],
     },
     artifacts: [
       {
         artifact,
         bytes,
-        path: "/local/local.tgz",
+        path,
         bundle,
         bundleBytes,
-        bundlePath: "/local/local.tgz.sigstore.json",
+        bundlePath: `${path}.sigstore.json`,
       },
     ],
     dispose: async () => {},
   };
 }
 await test(
+  "packed repository identities match signing policy across npm URL forms and preserve owner/project case",
+  { timeout: 60000 },
+  async () => {
+    const directory = await mkdtemp(
+        join(tmpdir(), "chainman-npm-repositories-"),
+      ),
+      policy = { ...configured, repository: "Example/Package" };
+    const accepted: unknown[] = [
+      "https://github.com/Example/Package",
+      "https://GITHUB.COM/Example/Package.git",
+      "git+https://github.com/Example/Package.git",
+      "git@github.com:Example/Package.git",
+      "ssh://git@github.com/Example/Package.git",
+      "git+ssh://git@github.com/Example/Package.git",
+      "github:Example/Package",
+      "Example/Package",
+      {
+        type: "git",
+        url: "https://github.com/Example/Package.git",
+        directory: "packages/fixture",
+      },
+      { url: "github:Example/Package", directory: "another/package" },
+    ];
+    const rejected: unknown[] = [
+      undefined,
+      null,
+      "",
+      "not a repository",
+      {},
+      { type: "git" },
+      { url: 42 },
+      [],
+      42,
+      "https://github.com/Example",
+      "https://github.com/Example/Package/extra",
+      "https://github.com/Example/%ZZ",
+      "https://github.com/Other/Package",
+      "https://github.com/Example/Other",
+      "https://gitlab.com/Example/Package",
+      "https://github.example/Example/Package",
+      "https://github.com/example/Package",
+      "https://github.com/Example/package",
+    ];
+    try {
+      for (const [index, repository] of [...accepted, ...rejected].entries()) {
+        const name = `@example/repository-${index}`,
+          packed = await pack(directory, name, { repository }),
+          frozen = join(directory, `frozen-${index}`);
+        await mkdir(frozen);
+        const snapshot = snapshotPackages(
+          verified(packed.bytes, name, packed.version),
+          frozen,
+          policy,
+        );
+        if (index < accepted.length) {
+          assert.equal((await snapshot)[0]?.name, name);
+        } else {
+          await assert.rejects(
+            snapshot,
+            (error) =>
+              error instanceof Error &&
+              error.message.includes(`${name}@${packed.version}`) &&
+              error.message.includes("https://github.com/Example/Package"),
+          );
+        }
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+await test("a later packed repository mismatch prevents every registry lookup and upload", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "chainman-npm-preflight-")),
+    calls: string[] = [];
+  const registry: Registry = {
+    lookup(pkg) {
+      calls.push(`lookup:${pkg.name}`);
+      return Promise.resolve(undefined);
+    },
+    publish(pkg) {
+      calls.push(`upload:${pkg.name}`);
+      return Promise.resolve();
+    },
+    verify(pkg) {
+      calls.push(`verify:${pkg.name}`);
+      return Promise.resolve();
+    },
+  };
+  try {
+    const good = await pack(directory, "@example/good"),
+      bad = await pack(directory, "@example/bad", {
+        repository: "github:example/other",
+      }),
+      first = verified(good.bytes, "@example/good", good.version),
+      second = verified(bad.bytes, "@example/bad", bad.version),
+      fixture: VerifiedManifest = {
+        ...first,
+        loaded: {
+          ...first.loaded,
+          manifest: {
+            ...first.loaded.manifest,
+            artifacts: [
+              ...first.loaded.manifest.artifacts,
+              ...second.loaded.manifest.artifacts,
+            ],
+          },
+          artifacts: [...first.loaded.artifacts, ...second.loaded.artifacts],
+        },
+        artifacts: [...first.artifacts, ...second.artifacts],
+      },
+      frozen = join(directory, "frozen");
+    await mkdir(frozen);
+    await assert.rejects(
+      async () =>
+        publish(await snapshotPackages(fixture, frozen, configured), registry),
+      /@example\/bad@1\.0\.0-rc\.0.*https:\/\/github\.com\/example\/package/,
+    );
+    assert.deepEqual(calls, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+await test(
   `actual pinned npm CLI publishes exact local tarball with saved provenance to loopback and reconciles native view results (${actualTarball ? "real Sigstore bundle" : "offline signature boundary"})`,
   { timeout: 60000 },
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "chainman-npm-cli-"));
     const npm = await npmAdapter();
-    if (Boolean(actualTarball) !== Boolean(actualBundle))
+    const smokeInputs = [actualTarball, actualBundle, actualRepository];
+    if (smokeInputs.some(Boolean) && !smokeInputs.every(Boolean))
       throw new Error(
-        "Both actual smoke tarball and saved bundle are required",
+        "Actual smoke tarball, saved bundle and signing repository are all required",
       );
+    const snapshotPolicy = policy({
+      ...configured,
+      repository: actualRepository ?? configured.repository,
+    });
     const actualMetadata = actualTarball
       ? await npm.package(actualTarball)
       : undefined;
@@ -372,7 +504,7 @@ await test(
       }
       const frozen = join(directory, "frozen");
       await mkdir(frozen);
-      const packages = await snapshotPackages(fixture, frozen),
+      const packages = await snapshotPackages(fixture, frozen, snapshotPolicy),
         pkg = packages[0];
       assert.ok(pkg);
       const require = createRequire(import.meta.url),
@@ -501,6 +633,7 @@ await test(
         snapshotPackages(
           verified(bad.bytes, "@example/bad-tag", bad.version),
           badFrozen,
+          configured,
         ),
         /next publication policy/,
       );

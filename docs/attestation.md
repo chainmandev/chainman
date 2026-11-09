@@ -67,6 +67,9 @@ derive this manifest from those local archives. The manifest's commit must equal
 the successful run's commit, and every local digest must match a signed subject.
 Chainman freezes those local bytes, preflights every package and registry version,
 then uploads exact archives with pinned npm and saved `--provenance-file` bundles.
+Each packed manifest's `repository` must identify the configured signing
+repository, including matching owner and repository case. Monorepo `directory`
+metadata does not change that identity.
 It rejects CI publication, private packages, conflicting tags, and unsupported
 registries. Registry readback checks bytes, provenance, and `next`; a repeated
 command can reconcile a partial upload. npm authentication remains local.
