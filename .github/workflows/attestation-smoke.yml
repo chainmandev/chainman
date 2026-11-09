@@ -1,0 +1,51 @@
+name: Attestation SDK smoke
+"on":
+  push:
+    branches: [codex/attestation-smoke-20261109]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+  attestations: write
+jobs:
+  sdk-smoke:
+    name: SDK smoke
+    if: github.repository == 'chainmandev/chainman' && github.ref == 'refs/heads/codex/attestation-smoke-20261109'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Confirm exact smoke source
+        run: test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31.11.0
+      - name: Install and build only the shared TypeScript helper
+        run: |
+          ./scripts/enter.sh javascript sh -eu -c '
+            cd nix/attest
+            pnpm install --frozen-lockfile --ignore-scripts
+            pnpm run build
+          '
+      - name: Pack fixed bytes and create a real SDK bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CHAINMAN_ATTEST_GH="$(./scripts/enter.sh release sh -c 'command -v gh')"
+          export CHAINMAN_ATTEST_GH
+          ./scripts/enter.sh javascript node scripts/attestation_smoke.mjs create "$RUNNER_TEMP/chainman-smoke"
+      - name: Retain the exact signed bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qualified-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/chainman-smoke/*.sigstore.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Retain bytes for independent local comparison
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: smoke-bytes-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/chainman-smoke/*.tgz
+          if-no-files-found: error
+          retention-days: 3
