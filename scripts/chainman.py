@@ -943,7 +943,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         return execute(
                             root,
                             name,
-                            rest,
+                            workflows.setup_command(root, cfg, groups, owned, rest),
                             env=owned,
                             pass_fds=descriptors,
                             check=False,

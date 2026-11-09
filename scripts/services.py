@@ -1446,6 +1446,7 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
     if name not in entries or "command" not in entries[name] or arguments:
         raise ValueError("Invalid internal service execution")
     spec = entries[name]
+    groups = workflows.names(spec.get("setup", []))
     # Global cache maintenance belongs to ordinary operations, outside bounded
     # service startup and readiness.
     with tc.operation(
@@ -1462,9 +1463,7 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
         with (
             nullcontext(())
             if lifecycle
-            else workflows.setup_use(
-                root, cfg, workflows.names(spec.get("setup", [])), env
-            )
+            else workflows.setup_use(root, cfg, groups, env)
         ) as descriptors:
             profile = text(
                 spec.get("profile", workflows.default_profile(cfg)),
@@ -1476,7 +1475,13 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                 return chainman.execute(
                     root,
                     profile,
-                    strings(spec["shutdown_command"], "Shutdown command"),
+                    workflows.setup_command(
+                        root,
+                        cfg,
+                        groups,
+                        env,
+                        strings(spec["shutdown_command"], "Shutdown command"),
+                    ),
                     env=env,
                     overrides=spec.get("environment", {}),
                     cwd=source_roots.directory(root, spec, env),
@@ -1490,7 +1495,8 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                 # The application owns compiler lifetime. A readiness command
                 # uses its declared profile without starting another compiler.
                 # Start the app deadline inside the activated profile, after
-                # runtime/config entry and any Nix develop activation.
+                # runtime/config entry and any Nix develop activation. Keep the
+                # checked pnpm identity probe inside that same deadline.
                 return chainman.execute(
                     root,
                     profile,
@@ -1506,7 +1512,13 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                                 readiness.get("timeout_seconds", 2), "Probe timeout"
                             )
                         ),
-                        *strings(readiness["command"], "Readiness command"),
+                        *workflows.setup_command(
+                            root,
+                            cfg,
+                            groups,
+                            env,
+                            strings(readiness["command"], "Readiness command"),
+                        ),
                     ],
                     env=env,
                     overrides=spec.get("environment", {}),
@@ -1520,7 +1532,13 @@ def execute_internal(root: Path, action: str, extra: list[str]) -> int:
                 return chainman.execute(
                     root,
                     profile,
-                    strings(spec["command"], "Service command"),
+                    workflows.setup_command(
+                        root,
+                        cfg,
+                        groups,
+                        selected,
+                        strings(spec["command"], "Service command"),
+                    ),
                     env=selected,
                     overrides=spec.get("environment", {}),
                     cwd=source_roots.directory(root, spec, selected),
