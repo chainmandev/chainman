@@ -728,6 +728,64 @@ class AttestationVerificationTests(unittest.TestCase):
             load_manifest(self.path).artifacts[0].artifact.attestation, saved.name
         )
 
+    def test_create_cleans_up_buffered_close_failure_and_can_retry(self):
+        event = self.directory / "event.json"
+        event.write_text(json.dumps({"repository": {"private": False}}))
+        env = {
+            **environment(),
+            "GITHUB_EVENT_PATH": str(event),
+            "GITHUB_TOKEN": "test-token",
+        }
+        original_manifest = self.path.read_bytes()
+        saved = self.directory / f"{ARTIFACT.path}.sigstore.json"
+        expected_bundle = (json.dumps(bundle(), indent=2) + "\n").encode()
+        failure = OSError("buffered close failed")
+        writes = []
+        streams = []
+        fdopen = os.fdopen
+
+        class FailingFile(io.FileIO):
+            def write(self, value):
+                writes.append(bytes(value))
+                raise failure
+
+        def failing_fdopen(descriptor, mode):
+            if mode != "wb":
+                return fdopen(descriptor, mode)
+            stream = io.BufferedWriter(
+                FailingFile(descriptor, mode), buffer_size=len(expected_bundle) + 1
+            )
+            streams.append(stream)
+            return stream
+
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("attestation_provenance.Github"),
+            patch("attestation_provenance.attest_provenance", return_value=bundle()),
+        ):
+            with (
+                patch("attestation_provenance.os.fdopen", side_effect=failing_fdopen),
+                self.assertRaises(OSError) as caught,
+            ):
+                create_attestations(self.path, CONFIGURED)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(writes, [expected_bundle])
+            self.assertEqual(len(streams), 1)
+            self.assertTrue(streams[0].closed)
+            self.assertFalse(saved.exists())
+            self.assertEqual(self.path.read_bytes(), original_manifest)
+
+            create_attestations(self.path, CONFIGURED)
+
+        self.assertEqual(saved.read_bytes(), expected_bundle)
+        self.assertEqual(stat.S_IMODE(saved.stat().st_mode), 0o600)
+        expected_manifest = json.loads(original_manifest)
+        expected_manifest["artifacts"][0]["attestation"] = saved.name
+        self.assertEqual(
+            self.path.read_bytes(),
+            (json.dumps(expected_manifest, indent=2) + "\n").encode(),
+        )
+
     def test_create_rejects_private_event_wrong_run_and_failed_signing_cleans_up(self):
         event = self.directory / "event.json"
         event.write_text(json.dumps({"repository": {"private": True}}))

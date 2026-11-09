@@ -222,6 +222,7 @@
             export CHAINMAN_ATTEST_ADAPTER=${attest}/bin/chainman-attest-adapter
             export CHAINMAN_ATTEST_NPM=${attest}/bin/chainman-attest-npm
             export CHAINMAN_ATTEST_GH=${pkgs.gh}/bin/gh
+            export CHAINMAN_ATTEST_CURL=${pkgs.curl}/bin/curl
           '';
           rust = shell "rust" [
             pkgs.rustc

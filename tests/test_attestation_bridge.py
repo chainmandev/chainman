@@ -144,7 +144,11 @@ class AttestationBridgeTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "{}")
 
     def test_no_path_fallback_for_pinned_tools(self):
-        for variable in ("CHAINMAN_ATTEST_ADAPTER", "CHAINMAN_ATTEST_NPM"):
+        for variable in (
+            "CHAINMAN_ATTEST_ADAPTER",
+            "CHAINMAN_ATTEST_NPM",
+            "CHAINMAN_ATTEST_CURL",
+        ):
             for value in ("", "npm", str(self.root / "missing")):
                 with (
                     self.subTest(variable=variable, value=value),

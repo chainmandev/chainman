@@ -6,9 +6,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 from threading import Thread
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -565,8 +568,16 @@ class RegistryTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    def setUp(self):
+        self.program = shutil.which("curl")
+        self.assertIsNotNone(self.program, "The pinned core shell must supply curl")
+        environment = patch.dict(os.environ, {"CHAINMAN_ATTEST_CURL": self.program})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_native_download_rejects_redirects_and_http_errors(self):
         requests = []
+        content = b"saved exact bytes\x00\xff\xfe200"
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
@@ -582,16 +593,14 @@ class DownloadTests(unittest.TestCase):
                 else:
                     self.send_response(200)
                 self.end_headers()
-                self.wfile.write(b"saved exact bytes")
+                self.wfile.write(content)
 
         with HTTPServer(("127.0.0.1", 0), Handler) as server:
             thread = Thread(target=lambda: server.serve_forever(poll_interval=0.01))
             thread.start()
             try:
                 origin = f"http://127.0.0.1:{server.server_port}"
-                self.assertEqual(
-                    publication._download(origin + "/ok"), b"saved exact bytes"
-                )
+                self.assertEqual(publication._download(origin + "/ok"), content)
                 for path, status in (("/redirect", 302), ("/error", 403)):
                     with (
                         self.subTest(path=path),
@@ -604,6 +613,168 @@ class DownloadTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 thread.join()
+
+    def test_native_total_deadline_covers_trickling_headers_and_body(self):
+        for phase in ("headers", "body"):
+            writes = []
+
+            class Handler(BaseHTTPRequestHandler):
+                def log_message(self, format, *args):
+                    pass
+
+                def do_GET(self):
+                    try:
+                        if phase == "headers":
+                            self.wfile.write(b"HTTP/1.1 200 OK\r\nX-Trickle: ")
+                        else:
+                            self.send_response(200)
+                            self.send_header("Content-Length", "20")
+                            self.end_headers()
+                        for _ in range(20):
+                            self.wfile.write(b"x")
+                            self.wfile.flush()
+                            writes.append(time.monotonic())
+                            time.sleep(0.03)
+                        if phase == "headers":
+                            self.wfile.write(b"\r\nContent-Length: 4\r\n\r\nbody")
+                    except OSError:
+                        pass
+
+            with (
+                self.subTest(phase=phase),
+                HTTPServer(("127.0.0.1", 0), Handler) as server,
+                patch.object(publication, "_DOWNLOAD_TIMEOUT", 0.2),
+            ):
+                thread = Thread(target=lambda: server.serve_forever(poll_interval=0.01))
+                thread.start()
+                try:
+                    started = time.monotonic()
+                    with self.assertRaisesRegex(
+                        TimeoutError, "Registry download timed out"
+                    ):
+                        publication._download(f"http://127.0.0.1:{server.server_port}/")
+                    self.assertLess(time.monotonic() - started, 0.8)
+                    self.assertGreater(len(writes), 1)
+                    self.assertLess(len(writes), 20)
+                finally:
+                    server.shutdown()
+                    thread.join()
+
+    def test_private_body_and_remaining_deadline_are_shared_with_curl(self):
+        paths = []
+        url = "https://registry.npmjs.org/package[1].tgz?value={x}"
+        content = b"binary\x00\xff200"
+
+        def run(argv, **kwargs):
+            body = Path(argv[argv.index("--output") + 1])
+            self.assertEqual(body.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(body.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(argv[:2], [self.program, "--disable"])
+            self.assertIn("--silent", argv)
+            self.assertIn("--globoff", argv)
+            self.assertEqual(argv[argv.index("--proto") + 1], "=http,https")
+            self.assertEqual(argv[argv.index("--write-out") + 1], "%{http_code}")
+            self.assertEqual(argv[argv.index("--url") + 1], url)
+            self.assertFalse(
+                any(
+                    arg.startswith("--retry")
+                    or arg
+                    in {"--location", "--location-trusted", "-L", "--config", "-K"}
+                    for arg in argv[1:]
+                )
+            )
+            self.assertEqual(kwargs["timeout"], 24)
+            self.assertEqual(
+                float(argv[argv.index("--max-time") + 1]), kwargs["timeout"]
+            )
+            self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+            self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+            self.assertFalse(kwargs.get("text", False))
+            body.write_bytes(content)
+            paths.append(body)
+            return subprocess.CompletedProcess(argv, 0, stdout=b"200")
+
+        with (
+            patch.object(
+                publication.time, "monotonic", side_effect=[100, 106, 107, 108]
+            ),
+            patch.object(publication.tc, "managed_run", side_effect=run),
+        ):
+            self.assertEqual(publication._download(url), content)
+        self.assertFalse(paths[0].parent.exists())
+
+    def test_setup_cannot_restart_an_expired_deadline(self):
+        paths = []
+        original = publication.tempfile.TemporaryDirectory
+
+        def temporary(**kwargs):
+            directory = original(**kwargs)
+            paths.append(Path(directory.name))
+            return directory
+
+        with (
+            patch.object(
+                publication.tempfile, "TemporaryDirectory", side_effect=temporary
+            ),
+            patch.object(publication.time, "monotonic", side_effect=[100, 131]),
+            patch.object(publication.tc, "managed_run") as run,
+            self.assertRaisesRegex(TimeoutError, "Registry download timed out"),
+        ):
+            publication._download("https://registry.npmjs.org/package.tgz")
+        run.assert_not_called()
+        self.assertFalse(paths[0].exists())
+
+    def test_timeout_or_failed_process_cannot_supply_http_success(self):
+        for failure in ("subprocess", 28, 7):
+            paths = []
+
+            def run(argv, **kwargs):
+                body = Path(argv[argv.index("--output") + 1])
+                body.write_bytes(b"untrusted partial body")
+                paths.append(body)
+                if failure == "subprocess":
+                    raise subprocess.TimeoutExpired(
+                        argv, kwargs["timeout"], output=b"200"
+                    )
+                return subprocess.CompletedProcess(argv, failure, stdout=b"200")
+
+            exception = ValueError if failure == 7 else TimeoutError
+            message = "curl exit 7" if failure == 7 else "Registry download timed out"
+            with (
+                self.subTest(failure=failure),
+                patch.object(publication.tc, "managed_run", side_effect=run),
+                self.assertRaisesRegex(exception, message),
+            ):
+                publication._download("https://registry.npmjs.org/package.tgz")
+            self.assertFalse(paths[0].parent.exists())
+
+    def test_only_exact_ascii_success_status_is_accepted(self):
+        for status in (b"20", b"200\n", b" 200", b"200200", b"\xff00", b"000", b"403"):
+            with (
+                self.subTest(status=status),
+                patch.object(
+                    publication.tc,
+                    "managed_run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout=status),
+                ),
+                self.assertRaisesRegex(ValueError, "Registry download failed"),
+            ):
+                publication._download("https://registry.npmjs.org/package.tgz")
+
+    def test_success_returned_after_deadline_is_rejected(self):
+        for instants in ([100, 101, 131], [100, 101, 102, 131]):
+            with (
+                self.subTest(instants=instants),
+                patch.object(publication.time, "monotonic", side_effect=instants),
+                patch.object(
+                    publication.tc,
+                    "managed_run",
+                    return_value=subprocess.CompletedProcess([], 0, stdout=b"200"),
+                ),
+                self.assertRaisesRegex(TimeoutError, "Registry download timed out"),
+            ):
+                publication._download("https://registry.npmjs.org/package.tgz")
 
 
 class SnapshotTests(unittest.TestCase):
