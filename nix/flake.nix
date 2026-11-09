@@ -219,7 +219,9 @@
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";
           attest = shellWith pkgs.mkShellNoCC runtimeBase "attest" [ attest ] ''
-            export CHAINMAN_ATTEST_BIN=${attest}/bin/chainman-attest
+            export CHAINMAN_ATTEST_ADAPTER=${attest}/bin/chainman-attest-adapter
+            export CHAINMAN_ATTEST_NPM=${attest}/bin/chainman-attest-npm
+            export CHAINMAN_ATTEST_GH=${pkgs.gh}/bin/gh
           '';
           rust = shell "rust" [
             pkgs.rustc

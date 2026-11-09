@@ -3,7 +3,7 @@ name = "attest"
 profile = "javascript"
 directory = "nix/attest"
 ecosystem = "npm"
-inputs = ["sdk-versions.toml", "nix/attest/package.json", "nix/attest/pnpm-lock.yaml", "nix/attest/tsconfig.json", "nix/attest/src/*.ts", "nix/attest/test/*.ts"]
+inputs = ["sdk-versions.toml", "nix/attest.nix", "nix/attest/package.json", "nix/attest/pnpm-lock.yaml", "nix/attest/tsconfig.json", "nix/attest/src/*.ts", "nix/attest/test/*.ts", "scripts/attestation*.py", "tests/test_attestation*.py"]
 artifacts = ["nix/attest/node_modules/.pnpm/lock.yaml"]
 update_outputs = ["nix/attest/package.json", "nix/attest/pnpm-lock.yaml", "nix/attest.nix"]
 
@@ -12,5 +12,5 @@ setup = [["pnpm", "install", "--frozen-lockfile", "--ignore-scripts", "--config.
 resolve = [["pnpm", "install", "--lockfile-only", "--ignore-scripts"]]
 build = [["pnpm", "run", "build"]]
 test = [["pnpm", "run", "test"]]
-verify = [["pnpm", "run", "check"], ["pnpm", "run", "build"], ["pnpm", "run", "test"], ["nix", "build", "path:..#attest", "--no-link"]]
+verify = [["pnpm", "run", "check"], ["pnpm", "run", "build"], ["pnpm", "run", "test"], ["nix", "build", "path:..#attest", "--no-link"], ["nix", "develop", "path:..#attest", "--no-write-lock-file", "--command", "env", "CHAINMAN_TEST_ATTEST_RUNTIME=1", "python3", "-B", "-m", "unittest", "discover", "-s", "../../tests", "-p", "test_attestation_runtime.py", "-v"]]
 format = [["prettier", "--write", "package.json", "tsconfig.json", "src/*.ts", "test/*.ts"]]
