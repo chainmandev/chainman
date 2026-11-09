@@ -9,6 +9,7 @@ import subprocess
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from string import Formatter
 from typing import NotRequired, TypedDict
 from urllib.parse import quote, urlencode
 
@@ -37,6 +38,10 @@ class SourceRevision(TypedDict):
     published: str
     channel_publication: NotRequired[str]
     channel_release: NotRequired[str]
+    release_publication: NotRequired[str]
+    release_tag: NotRequired[str]
+    release_version: NotRequired[str]
+    url: NotRequired[str]
 
 
 class ActionRecord(TypedDict):
@@ -254,6 +259,40 @@ def published_nix_revision(
 def selected_nix_candidate(
     item: Mapping[str, object], policy: Mapping[str, object], now: datetime
 ) -> SourceRevision:
+    if "tag_pattern" in item:
+        # Release publication and immutable commit age both govern eligibility.
+        # Nix's GitHub lastModified remains the commit timestamp.
+        import source_github
+
+        repository = ad.text(item["repository"], "Nix repository")
+        values = None
+        if item.get("release_provider") == "botan":
+            pattern = source_github.pattern(
+                ad.text(item["tag_pattern"], "Nix release tag pattern")
+            )
+            values = [
+                release
+                for release in botan_releases()
+                if pattern.fullmatch(release.identity)
+            ]
+        selected = source_github.select(
+            repository,
+            ad.text(item["tag_pattern"], "Nix release tag pattern"),
+            policy,
+            now,
+            values=values,
+        )
+        release = selected["release"]
+        result: SourceRevision = {
+            "revision": release.identity,
+            "published": commit_time(repository, release.identity).isoformat(),
+            "release_publication": selected["publication"].isoformat(),
+            "release_tag": selected["tag"],
+            "release_version": release.version,
+        }
+        if "url_template" in item:
+            result["url"] = nix_release_url(item, selected["tag"], release.version)
+        return result
     channel = nix_channels.channel(item)
     if channel is None:
         return nix_candidate(
@@ -273,6 +312,12 @@ def approved_nix_candidate(
     item: Mapping[str, object], policy: Mapping[str, object], now: datetime
 ) -> SourceRevision:
     repository = ad.text(item["repository"], "Nix repository")
+    if "tag_pattern" in item:
+        if nix_approval(item, policy) is not None:
+            raise ValueError(
+                "Release-tracked Nix inputs require GitHub version exceptions"
+            )
+        return selected_nix_candidate(item, policy, now)
     branch = ad.text(item["branch"], "Nix branch")
     channel = nix_channels.channel(item)
     approval = nix_approval(item, policy)
@@ -991,6 +1036,114 @@ def resolve_oci(
     }
 
 
+def botan_releases() -> list[registry.Release]:
+    """Botan publishes dated official notes rather than GitHub release records."""
+    body, _ = registry.fetch(
+        "https://botan.randombit.net/news.html", "text/html", anonymous=True
+    )
+    if len(body) > 1024 * 1024:
+        raise ValueError("Botan release notes exceed their bounded inventory")
+    headings = re.findall(
+        rb"<h2>Version ([0-9]+\.[0-9]+\.[0-9]+), ([0-9]{4}-[0-9]{2}-[0-9]{2})<a\s",
+        body,
+    )
+    if not headings:
+        raise ValueError("Botan official release publication metadata is missing")
+    result = []
+    seen: set[str] = set()
+    for raw_version, raw_date in headings:
+        version = raw_version.decode("ascii")
+        if version in seen:
+            raise ValueError("Duplicate Botan official release publication")
+        seen.add(version)
+        # The notes give a calendar date, not a clock time. Use the end of that
+        # UTC day so an imprecise publication cannot cross the age gate early.
+        published = registry.timestamp(raw_date.decode("ascii") + "T23:59:59.999999Z")
+        result.append(registry.Release(version, published, version))
+    return result
+
+
+def nix_release_template(item: Mapping[str, object]) -> list[tuple[str, str | None]]:
+    template = ad.text(item["url_template"], "Nix release URL template")
+    parts = []
+    for literal, field, modifier, conversion in Formatter().parse(template):
+        if field is not None and (
+            field not in {"tag", "version"} or modifier or conversion
+        ):
+            raise ValueError("Nix release URLs permit only {tag} and {version}")
+        parts.append((literal, field))
+    if not any(field for _, field in parts):
+        raise ValueError("Nix release URLs require an exact tag or version template")
+    if item.get("release_provider", "github") == "github" and not any(
+        field == "tag" for _, field in parts
+    ):
+        raise ValueError("GitHub release archive URLs require an exact {tag}")
+    return parts
+
+
+def nix_release_url(item: Mapping[str, object], tag: str, version: str) -> str:
+    import source_artifact
+
+    parts = nix_release_template(item)
+    fields = {"tag": tag, "version": version}
+    url = "".join(
+        literal + (fields[field] if field else "") for literal, field in parts
+    )
+    # This alphabet also makes the URL safe as a literal Nix fetchTree argument.
+    if not re.fullmatch(r"[A-Za-z0-9._~:/%+@=-]+", url):
+        raise ValueError("Nix release URL has unsupported characters")
+    source_artifact.artifact_url(url)
+    if item.get("release_provider", "github") == "botan":
+        if url != f"https://botan.randombit.net/releases/Botan-{version}.tar.xz":
+            raise ValueError("Botan releases require the official release archive")
+    elif not url.startswith(
+        f"https://github.com/{item['repository']}/releases/download/{tag}/"
+    ):
+        raise ValueError("GitHub release archives require an official repository asset")
+    return url
+
+
+def nix_tarball_binding(item: Mapping[str, object], value: object) -> str:
+    """Bind a prior lock to its declared release URL without network discovery."""
+    import source_github
+
+    url = ad.text(value, "Nix current release URL")
+    pattern = ""
+    seen = set()
+    for literal, field in nix_release_template(item):
+        pattern += re.escape(literal)
+        if field:
+            pattern += (
+                f"(?P={field})"
+                if field in seen
+                else f"(?P<{field}>"
+                + (r"[A-Za-z0-9._/-]+" if field == "tag" else r"\d+\.\d+\.\d+")
+                + ")"
+            )
+            seen.add(field)
+    match = re.fullmatch(pattern, url)
+    if not match:
+        raise ValueError("Nix tarball differs from its declared release source")
+    fields = match.groupdict()
+    if "tag" in fields:
+        release = source_github.pattern(
+            ad.text(item["tag_pattern"], "Nix release tag pattern")
+        ).fullmatch(fields["tag"])
+        if release is None:
+            raise ValueError("Nix tarball has an undeclared release tag")
+        version = release["version"]
+        if version.count(".") == 1:
+            version += ".0"
+        if "version" in fields and fields["version"] != version:
+            raise ValueError("Nix tarball tag and version disagree")
+    else:
+        version = fields["version"]
+    # Check the origin and URL alphabet using the same validation as a new pin.
+    tag = fields.get("tag", version)
+    nix_release_url(item, tag, version)
+    return url
+
+
 def nix_specs(root: Path, spec: Mapping[str, object]) -> list[ad.Table]:
     entries = spec.get("inputs")
     if not isinstance(entries, list) or not entries:
@@ -1003,7 +1156,36 @@ def nix_specs(root: Path, spec: Mapping[str, object]) -> list[ad.Table]:
         tc.regular_input(root, str(Path(directory) / "flake.nix"))
         repository_name(ad.text(item.get("repository"), "Nix repository"))
         name = item.get("input")
-        nix_channels.channel(item)
+        if "tag_pattern" in item:
+            import source_github
+
+            if "branch" in item or item.get("selection", "git") != "git":
+                raise ValueError(
+                    "Nix release tag patterns cannot also select a branch or channel"
+                )
+            source_github.pattern(
+                ad.text(item["tag_pattern"], "Nix release tag pattern")
+            )
+            provider = item.get("release_provider", "github")
+            if provider not in ("github", "botan"):
+                raise ValueError("Nix release provider must be github or botan")
+            if provider == "botan" and (
+                item["repository"] != "randombit/botan" or "url_template" not in item
+            ):
+                raise ValueError(
+                    "Botan releases require their repository and official archive"
+                )
+            if "url_template" in item:
+                nix_release_template(item)
+        else:
+            if "url_template" in item or "release_provider" in item:
+                raise ValueError(
+                    "Nix release archive declarations require a tag pattern"
+                )
+            branch = ad.text(item.get("branch"), "Nix source branch")
+            if not branch or any(c.isspace() for c in branch):
+                raise ValueError("An explicit Nix source branch is required")
+            nix_channels.channel(item)
         if not isinstance(name, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", name
         ):
@@ -1083,14 +1265,22 @@ def nix_bindings(
         node = nix_node(lock, ad.text(item["input"], "Nix input name"))
         current = ad.table(nix_nodes(lock)[node]["locked"], "Nix locked source")
         repository = ad.text(item["repository"], "Nix repository")
-        if (
-            current.get("type") != "github"
-            or ad.text(current.get("owner", ""), "Nix owner")
-            + "/"
-            + ad.text(current.get("repo", ""), "Nix repository")
-            != repository
-        ):
-            raise ValueError("Nix input differs from its declared source repository")
+        if "url_template" in item:
+            if current.get("type") != "tarball":
+                raise ValueError("Nix release archive requires a tarball lock source")
+            baseline = nix_tarball_binding(item, current.get("url"))
+        else:
+            if (
+                current.get("type") != "github"
+                or ad.text(current.get("owner", ""), "Nix owner")
+                + "/"
+                + ad.text(current.get("repo", ""), "Nix repository")
+                != repository
+            ):
+                raise ValueError(
+                    "Nix input differs from its declared source repository"
+                )
+            baseline = revision(ad.text(current.get("rev"), "Nix current revision"))
         approval = nix_approval(item, policy)
         approved = (
             ad.text(approval["revision"], "Approved revision") if approval else None
@@ -1105,7 +1295,7 @@ def nix_bindings(
                 "file": path,
                 "node": node,
                 "approval": approved,
-                "baseline": ad.text(current.get("rev"), "Nix current revision"),
+                "baseline": baseline,
             }
         )
     return bindings
@@ -1149,20 +1339,23 @@ def nix_plan(
         path, node = binding["file"], binding["node"]
         repository = ad.text(item["repository"], "Nix repository")
         selected = approved_nix_candidate(item, policy, now)
-        current_revision = ad.text(binding["baseline"], "Nix current revision")
-        at = commit_time(repository, current_revision)
-        if at > now:
-            raise ValueError("Nix baseline has a future commit date")
-        if (
-            nix_channels.channel(item) is None
-            and binding["approval"] is None
-            and at >= registry.timestamp(selected["published"])
-        ):
-            selected = {"revision": current_revision, "published": at.isoformat()}
+        if "url_template" not in item:
+            current_revision = ad.text(binding["baseline"], "Nix current revision")
+            at = commit_time(repository, current_revision)
+            if at > now:
+                raise ValueError("Nix baseline has a future commit date")
+            if (
+                "tag_pattern" not in item
+                and nix_channels.channel(item) is None
+                and binding["approval"] is None
+                and at >= registry.timestamp(selected["published"])
+            ):
+                selected = {"revision": current_revision, "published": at.isoformat()}
         if any(
             p["file"] == path
             and p["node"] == node
-            and p["revision"] != selected["revision"]
+            and (p["revision"], p.get("url"))
+            != (selected["revision"], selected.get("url"))
             for p in plans
         ):
             raise ValueError("Nix aliases select conflicting revisions for one source")
@@ -1184,8 +1377,8 @@ def resolve_nix(
             ad.table(
                 nodes[ad.text(p["node"], "Nix planned node")]["locked"],
                 "Nix locked source",
-            )["rev"]
-            == p["revision"]
+            ).get("url" if "url" in p else "rev")
+            == p.get("url", p["revision"])
             for p in selected
         ):
             continue
@@ -1202,7 +1395,9 @@ def resolve_nix(
                 [
                     "--override-input",
                     ad.text(item["input"], "Nix input name"),
-                    f"github:{item['repository']}/{item['revision']}",
+                    ad.text(item["url"], "Nix release URL")
+                    if "url" in item
+                    else f"github:{item['repository']}/{item['revision']}",
                 ]
             )
         chainman.execute(
@@ -1262,6 +1457,44 @@ def nix_tree(
     return {"narHash": evidence["narHash"]}
 
 
+def nix_tarball_tree(root: Path, spec: Mapping[str, object], url: str) -> ad.Table:
+    # URLs reached here have passed nix_release_url's restricted literal alphabet.
+    if not re.fullmatch(r"[A-Za-z0-9._~:/%+@=-]+", url):
+        raise ValueError("Nix release URL has unsupported characters")
+    expression = (
+        'let tree = builtins.fetchTree { type = "tarball"; url = "'
+        + url
+        + '"; }; in { inherit (tree) narHash lastModified; }'
+    )
+    result = chainman.execute(
+        root,
+        ad.text(spec.get("profile", "core"), "Nix profile"),
+        [
+            "nix",
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "eval",
+            "--impure",
+            "--json",
+            "--expr",
+            expression,
+        ],
+        env=tc.environment(root),
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    evidence = ad.table(json.loads(result.stdout), "Nix release archive evidence")
+    if (
+        set(evidence) != {"narHash", "lastModified"}
+        or not isinstance(evidence["narHash"], str)
+        or not re.fullmatch(r"sha256-[A-Za-z0-9+/]{43}=", evidence["narHash"])
+        or type(evidence["lastModified"]) is not int
+        or evidence["lastModified"] < 0
+    ):
+        raise ValueError("Nix release archive lacks timestamp/hash evidence")
+    return evidence
+
+
 def audit_nix(
     root: Path,
     spec: Mapping[str, object],
@@ -1297,6 +1530,8 @@ def audit_nix(
                 "repo": repository,
                 "rev": plan["revision"],
             }
+            if "url" in plan:
+                canonical_original = {"type": "tarball", "url": plan["url"]}
             if selected_node.get("original") not in (
                 node.get("original"),
                 canonical_original,
@@ -1315,20 +1550,27 @@ def audit_nix(
                     "Nix changed the selected input's dependency structure"
                 )
             allowed_locked = {"rev", "lastModified", "narHash"}
+            if "url" in plan:
+                allowed_locked = {"url", "lastModified", "narHash"}
             if {k: v for k, v in selected.items() if k not in allowed_locked} != {
                 k: v
                 for k, v in ad.table(node["locked"], "Nix original source").items()
                 if k not in allowed_locked
             }:
                 raise ValueError("Nix changed undeclared source attributes")
-            if (
-                nix_node(new, ad.text(plan["input"], "Nix input name")) != key
-                or selected.get("rev") != plan["revision"]
-                or selected.get("type") != "github"
-                or ad.text(selected.get("owner", ""), "Nix owner")
+            identity_matches = (
+                selected.get("type") == "tarball" and selected.get("url") == plan["url"]
+                if "url" in plan
+                else selected.get("rev") == plan["revision"]
+                and selected.get("type") == "github"
+                and ad.text(selected.get("owner", ""), "Nix owner")
                 + "/"
                 + ad.text(selected.get("repo", ""), "Nix repository")
-                != plan["repository"]
+                == plan["repository"]
+            )
+            if (
+                nix_node(new, ad.text(plan["input"], "Nix input name")) != key
+                or not identity_matches
             ):
                 raise ValueError(
                     "Nix final input differs from its selected immutable source"
@@ -1337,7 +1579,20 @@ def audit_nix(
                 selected != node["locked"]
                 or nix_approval(plan, policy) is not None
                 or nix_channels.channel(plan) is not None
+                or "tag_pattern" in plan
             ):
+                if "url" in plan:
+                    archive_tree = nix_tarball_tree(
+                        root, spec, ad.text(plan["url"], "Nix release URL")
+                    )
+                    if any(
+                        selected.get(field) != archive_tree[field]
+                        for field in ("narHash", "lastModified")
+                    ):
+                        raise ValueError(
+                            "Nix release archive differs from its immutable timestamp/hash evidence"
+                        )
+                    continue
                 if selected.get("lastModified") != int(
                     registry.timestamp(plan["published"]).timestamp()
                 ) or not re.fullmatch(

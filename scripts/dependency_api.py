@@ -642,6 +642,7 @@ def query(root: Path, request: Table, *, now: datetime | None = None) -> Table:
                 tagged = {
                     "release": source_github.bind(package, chosen),
                     "tag": chosen.identity,
+                    "publication": chosen.published,
                 }
             chosen = tagged["release"]
             extra["tag"] = tagged["tag"]

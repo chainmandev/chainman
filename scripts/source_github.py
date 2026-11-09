@@ -20,6 +20,7 @@ VERSION_FORMS = {
 class Selection(TypedDict):
     release: registry.Release
     tag: str
+    publication: datetime
 
 
 def pattern(value: str) -> re.Pattern[str]:
@@ -96,7 +97,11 @@ def select(
             raise ValueError("GitHub tag points to future-dated contents")
         rebound = [chosen if value is candidate else value for value in values]
         if chosen in registry.eligible("github", rebound, policy, repository, now):
-            return {"release": chosen, "tag": candidate.identity}
+            return {
+                "release": chosen,
+                "tag": candidate.identity,
+                "publication": candidate.published,
+            }
     raise ValueError("No eligible GitHub release with mature immutable contents")
 
 
@@ -106,4 +111,8 @@ def metadata(repository: str, tag_pattern: str, value: str) -> Selection:
     matches = exact or [release for release in values if release.version == value]
     if len(matches) != 1:
         raise ValueError("Exact GitHub tag metadata is missing or ambiguous")
-    return {"release": bind(repository, matches[0]), "tag": matches[0].identity}
+    return {
+        "release": bind(repository, matches[0]),
+        "tag": matches[0].identity,
+        "publication": matches[0].published,
+    }
