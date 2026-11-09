@@ -265,7 +265,7 @@ def create_attestations(
                 ):
                     raise ValueError("Artifact changed during attestation signing")
                 stream.write((json.dumps(bundle, indent=2) + "\n").encode())
-                complete = True
+            complete = True
         finally:
             if not complete:
                 destination.unlink(missing_ok=True)

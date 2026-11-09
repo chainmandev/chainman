@@ -4,17 +4,20 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import base64
 import builtins
-from http.client import HTTPMessage
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import time
 from typing import Protocol, TypeVar
-from urllib.error import HTTPError
 from urllib.parse import SplitResult, urlsplit, urlunsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from attestation_bridge import PackageMetadata, inspect_package, npm_executable
+from attestation_bridge import (
+    PackageMetadata,
+    executable,
+    inspect_package,
+    npm_executable,
+)
 from attestation_common import (
     Command,
     CommandResult,
@@ -26,6 +29,7 @@ from attestation_common import (
 )
 from attestation_model import Policy
 from attestation_provenance import PREDICATE_TYPE, VerifiedManifest, verify_manifest
+import toolchain as tc
 
 
 @dataclass(frozen=True)
@@ -133,31 +137,59 @@ def _origin(url: SplitResult) -> tuple[str, str | None, int | None]:
     )
 
 
-class _NoRedirect(HTTPRedirectHandler):
-    # Returning no replacement request makes urllib reject every redirect.
-    def redirect_request(
-        self,
-        req: Request,
-        fp: object,
-        code: int,
-        msg: str,
-        headers: HTTPMessage,
-        newurl: str,
-    ) -> None:
-        return None
+_DOWNLOAD_TIMEOUT = 30
 
 
 def _download(url: str) -> bytes:
-    try:
-        with build_opener(_NoRedirect()).open(url, timeout=30) as response:
-            status: object = response.status
-            if not isinstance(status, int) or not 200 <= status < 300:
-                raise ValueError(f"Registry download failed ({status})")
-            data: bytes = response.read()
-            return data
-    except HTTPError as error:
-        error.close()
-        raise ValueError(f"Registry download failed ({error.code})") from None
+    deadline = time.monotonic() + _DOWNLOAD_TIMEOUT
+    program = executable("CHAINMAN_ATTEST_CURL")
+    with tempfile.TemporaryDirectory(prefix="chainman-registry-download-") as temporary:
+        body = Path(temporary) / "body"
+        body.touch(mode=0o600, exist_ok=False)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Registry download timed out")
+        try:
+            result = tc.managed_run(
+                [
+                    program,
+                    "--disable",
+                    "--silent",
+                    "--globoff",
+                    "--proto",
+                    "=http,https",
+                    "--output",
+                    str(body),
+                    "--write-out",
+                    "%{http_code}",
+                    "--max-time",
+                    str(remaining),
+                    "--url",
+                    url,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=remaining,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise TimeoutError("Registry download timed out") from None
+        if result.returncode == 28 or time.monotonic() >= deadline:
+            raise TimeoutError("Registry download timed out")
+        status = result.stdout
+        if len(status) != 3 or not status.isdigit():
+            raise ValueError("Registry download failed (invalid HTTP status)")
+        if not 200 <= int(status) < 300:
+            raise ValueError(f"Registry download failed ({status.decode('ascii')})")
+        if result.returncode != 0:
+            raise ValueError(
+                f"Registry download failed (curl exit {result.returncode})"
+            )
+        data = body.read_bytes()
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Registry download timed out")
+        return data
 
 
 def _same_json(left: object, right: object) -> bool:
