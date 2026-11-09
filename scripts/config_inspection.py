@@ -44,6 +44,10 @@ def validated(root: Path) -> dict[str, object]:
 
     formatters.declarations(cfg)
     hooks.declaration(cfg)
+    if "attest" in cfg:
+        import attestation
+
+        attestation.policy(cfg)
     if "recipes" in cfg:
         import recipes
 

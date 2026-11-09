@@ -11,7 +11,7 @@ import registry
 KINDS = ("exceptions", "nix_exceptions", "artifact_exceptions")
 METADATA = {"reason", "advisory", "expires"}
 POLICY_FIELDS = set(
-    "minimum_age_days policy_file constraints exceptions nix_exceptions artifact_exceptions adapters steps targets target_groups profile outputs resolver eligibility verify verify_task verify_tasks reconcile_tasks reconcile_outputs pins nix docker javascript".split()
+    "minimum_age_days policy_file constraints exceptions nix_exceptions artifact_exceptions adapters steps targets target_groups profile outputs resolver eligibility verify verify_task verify_tasks reconcile_tasks reconcile_outputs pins nix docker javascript source_modules".split()
 )
 
 
@@ -69,6 +69,7 @@ def validate(policy: Mapping[str, object]) -> None:
             "Unknown dependency policy fields: " + ", ".join(sorted(unknown))
         )
     registry.minimum_age(policy)
+    ad.strings(policy.get("source_modules", []), "Update source modules")
     seen: set[tuple[str, ...]] = set()
     for entry in entries(policy, "exceptions"):
         metadata(entry, {"package", "version", "minimum_safe", "applies_to"})

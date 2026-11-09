@@ -9,8 +9,10 @@ automatic_prune = true
 
 [updates]
 minimum_age_days = 30
+# Maintain shipped optional helper sources without enabling them for setup/build.
+source_modules = ["attest"]
 # Only these files may change during the update transaction.
-outputs = ["nix/flake.lock", "nix/container-image.txt", "bootstrap/chainman.sh", ".github/workflows/verify.yml", ".github/workflows/release.yml", "template/.github/workflows/verify.yml"]
+outputs = ["nix/flake.lock", "nix/container-image.txt", "bootstrap/chainman.sh", ".github/workflows/verify.yml", ".github/workflows/release.yml", "template/.github/workflows/verify.yml", "nix/attest/package.json", "nix/attest/pnpm-lock.yaml", "nix/attest.nix"]
 # Additional pins and ecosystem lock audits live in dependencies.toml.
 
 [ci]

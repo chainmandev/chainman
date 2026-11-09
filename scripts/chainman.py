@@ -110,6 +110,7 @@ def profile(
             "hooks",
             "format-text",
             "format-rust",
+            "attest",
         }:
             raise ValueError(f"Profile {name!r} is not declared")
         raw = {"runtime_profile": "core" if name == "default" else name}
@@ -549,7 +550,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         epilog=(
             "Commands: exec [--profile NAME] -- COMMAND ..., shell [--profile NAME], "
             "run TASK ..., preflight TASK ..., setup [GROUP ...], setup-status, config validate, explain TASK or --profile NAME, "
-            "config show --json, explain TASK, version, doctor. "
+            "config show --json, explain TASK, version, doctor, "
+            "attest create MANIFEST, attest verify MANIFEST --run ID, npm-publish MANIFEST --run ID. "
             "Use just chainman recipe NAME for project recipe bindings. "
             "Services and verified updates require a Nix execution mode."
         ),
@@ -680,7 +682,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
-        if args.action == "_service-prepare":
+        if args.action in {"attest", "npm-publish"}:
+            import attestation
+
+            return attestation.run(root, args.action, rest)
+        elif args.action == "_service-prepare":
             import services
 
             return services.prepare_requested(root, rest)

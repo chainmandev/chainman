@@ -27,6 +27,29 @@
             );
           }) systems
         );
+      # Packages and shells share one SDK selection, including Intel macOS's
+      # reviewed SQLite test fix. pnpm wrappers must embed that same Node.
+      javascriptTools = pkgs: rec {
+        nodejs =
+          if pkgs.stdenv.hostPlatform.system == "x86_64-darwin" then
+            pkgs.nodejs_latest.override {
+              # Keep every upstream check. Its reviewed SQLite test fix moves
+              # the large-string cases to pummel, which test-ci-js already runs
+              # with the normal intensive-suite deadline. Keep one test worker
+              # to avoid competing allocations on Intel macOS.
+              nodejs-slim = pkgs.nodejs-slim_latest.overrideAttrs (old: {
+                patches = (old.patches or [ ]) ++ [
+                  ./patches/nodejs-sqlite-heavy-tests.patch
+                ];
+                checkFlags = (old.checkFlags or [ ]) ++ [ "JOBS=1" ];
+              });
+            }
+          else
+            pkgs.nodejs_latest;
+        # Retain the supported Node-based line on every platform. pnpm 12
+        # introduces a separate native TLS client with platform trust defaults.
+        pnpm = pkgs.pnpm_11.override { nodejs-slim = nodejs; };
+      };
     in
     {
       devShells = each (
@@ -67,27 +90,8 @@
               p.types-pyyaml
             ]
           );
-          # Package wrappers otherwise embed nixpkgs' default Node even when a
-          # newer node executable leads PATH, splitting engine checks from builds.
-          nodejs =
-            if pkgs.stdenv.hostPlatform.system == "x86_64-darwin" then
-              pkgs.nodejs_latest.override {
-                # Keep every upstream check. Its reviewed SQLite test fix moves
-                # the large-string cases to pummel, which test-ci-js already runs
-                # with the normal intensive-suite deadline. Keep one test worker
-                # to avoid competing allocations on Intel macOS.
-                nodejs-slim = pkgs.nodejs-slim_latest.overrideAttrs (old: {
-                  patches = (old.patches or [ ]) ++ [
-                    ./patches/nodejs-sqlite-heavy-tests.patch
-                  ];
-                  checkFlags = (old.checkFlags or [ ]) ++ [ "JOBS=1" ];
-                });
-              }
-            else
-              pkgs.nodejs_latest;
-          # Retain the supported Node-based line on every platform. pnpm 12
-          # introduces a separate native TLS client with platform trust defaults.
-          pnpm = pkgs.pnpm_11.override { nodejs-slim = nodejs; };
+          inherit (javascriptTools pkgs) nodejs pnpm;
+          attest = import ./attest.nix { inherit pkgs nodejs pnpm; };
           prettier = pkgs.prettier.override { inherit nodejs; };
           # Flutter's Linux wrapper references aapt even for non-Android commands.
           # Its aapt2 binary remains x86_64-only; this only enables those commands on ARM.
@@ -208,12 +212,15 @@
             pkgs.nixfmt
           ] "";
           format-rust = shellWith pkgs.mkShellNoCC runtimeBase "format-rust" [ pkgs.rustfmt ] "";
-          updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ ] "";
+          updates = shellWith pkgs.mkShellNoCC updateBase "updates" [ pkgs.nix-update ] "";
           release = shellWith pkgs.mkShellNoCC (updateBase ++ [ pkgs.gh ]) "release" [ ] "";
           core = shell "core" [ ] "";
           trust = shellWith pkgs.mkShellNoCC updateBase "trust" [ nodejs pnpm uv pkgs.openssl ] "";
           default = shell "core" [ ] "";
           javascript = shell "javascript" [ nodejs pnpm prettier ] "";
+          attest = shellWith pkgs.mkShellNoCC runtimeBase "attest" [ attest ] ''
+            export CHAINMAN_ATTEST_BIN=${attest}/bin/chainman-attest
+          '';
           rust = shell "rust" [
             pkgs.rustc
             pkgs.cargo
@@ -270,6 +277,10 @@
         {
           just = pkgs.just;
           bash = pkgs.bashInteractive;
+          attest = import ./attest.nix {
+            inherit pkgs;
+            inherit (javascriptTools pkgs) nodejs pnpm;
+          };
           audit-rust = pkgs.cargo-deny;
           audit-go = pkgs.govulncheck;
           # pip-api launches Python separately, without inheriting sys.path.

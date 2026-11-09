@@ -8,10 +8,23 @@ import re
 from collections.abc import Mapping
 
 import dependency_api
+import helper_sources
 import sdk_versions
 import source_updates
 import toolchain as tc
 from adapter_data import Table, array, table, text, strings
+
+
+def selected_modules(selected: list[str], policy: Mapping[str, object]) -> list[str]:
+    """Update shipped source modules without enabling their ordinary setup."""
+    return list(
+        dict.fromkeys(
+            [
+                *selected,
+                *strings(policy.get("source_modules", []), "Update source modules"),
+            ]
+        )
+    )
 
 
 def nix_spec(policy: Mapping[str, object]) -> Table | None:
@@ -72,7 +85,7 @@ def adapters(root: Path, selected: list[str], policy: Table) -> dict[str, Table]
         "maven": "gradle",
         "go": "go",
     }
-    for name in selected:
+    for name in selected_modules(selected, policy):
         module = table(tc.module(name, root), "Example module")
         ecosystem = module.get("ecosystem")
         if ecosystem is None:
@@ -142,6 +155,7 @@ def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> No
         if exception_retirement.has_exceptions(policy)
         else []
     )
+    selected = selected_modules(selected, policy)
     configured = adapters(root, selected, policy)
     before = {
         name: table(
@@ -159,6 +173,9 @@ def resolve(root: Path, selected: list[str], policy: Table, now: datetime) -> No
                 root, spec, policy, now
             )
             before[name]["resolution"] = result
+        # Recompute fixed-output hashes only after ordinary registry resolution.
+        # This enters the updater shell, never the stale helper derivation.
+        helper_sources.reconcile(root, selected)
         if image_before is not None:
             chosen = source_updates.select_oci(image_before, {}, policy, now)
             image = (
