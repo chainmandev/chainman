@@ -62,7 +62,7 @@ def options(actual: str, expected: str | None) -> list[str]:
 
 
 def execution_command(roots: Sequence[Path], argv: list[str]) -> list[str]:
-    """Probe inside the task profile, then replace this wrapper with its command."""
+    """Probe inside the selected profile, then replace this wrapper with its command."""
     return [
         sys.executable,
         str(Path(__file__).resolve()),

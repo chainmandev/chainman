@@ -731,18 +731,18 @@ def context_environment(
     )
 
 
-def task_command(
+def setup_command(
     root: Path,
     cfg: Mapping[str, object],
-    spec: Mapping[str, object],
+    groups: Iterable[str],
     env: Mapping[str, str],
     argv: list[str],
 ) -> list[str]:
-    """Only this task's managed pnpm setup closure grants checked execution."""
+    """Only the explicit managed pnpm setup closure grants checked execution."""
     roots = list(
         dict.fromkeys(
             source_roots.directory(root, group, env)
-            for key in order(declarations(cfg, "setup"), names(spec.get("setup", [])))
+            for key in order(declarations(cfg, "setup"), groups)
             if (group := group_spec(cfg, key)).get("pnpm") is True
         )
     )
@@ -751,6 +751,17 @@ def task_command(
     import pnpm_setup
 
     return pnpm_setup.execution_command(roots, argv)
+
+
+def task_command(
+    root: Path,
+    cfg: Mapping[str, object],
+    spec: Mapping[str, object],
+    env: Mapping[str, str],
+    argv: list[str],
+) -> list[str]:
+    """Only this task's managed setup grants checked execution."""
+    return setup_command(root, cfg, names(spec.get("setup", [])), env, argv)
 
 
 def run(

@@ -45,6 +45,36 @@ class DeclarationTests(unittest.TestCase):
                 argv,
             )
 
+    def test_explicit_setup_closure_deduplicates_selected_source_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            root = base / "consumer"
+            source = base / "source"
+            root.mkdir()
+            (source / "nested").mkdir(parents=True)
+            cfg = {
+                "setup": {
+                    "managed": {"pnpm": True, "source_root_env": "SOURCE"},
+                    "alias": {"pnpm": True, "source_root_env": "SOURCE"},
+                    "nested": {
+                        "pnpm": True,
+                        "source_root_env": "SOURCE",
+                        "directory": "nested",
+                    },
+                    "bridge": {"depends_on": ["managed", "alias", "nested"]},
+                    "unrelated": {"pnpm": True},
+                }
+            }
+            argv = ["payload"]
+            wrapped = workflows.setup_command(
+                root, cfg, ["bridge", "managed"], {"SOURCE": str(source)}, argv
+            )
+            self.assertEqual(
+                json.loads(wrapped[3]), [str(source), str(source / "nested")]
+            )
+            self.assertEqual(wrapped[4:], argv)
+            self.assertIs(workflows.setup_command(root, cfg, [], {}, argv), argv)
+
     def test_checked_environment_rejects_a_different_task_profile_version(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
