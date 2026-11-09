@@ -190,7 +190,8 @@ def runtime_candidate(
                 f"Managed runtime copy was locally modified; reconcile it explicitly: {target}"
             )
         copies[target] = before
-    revision = git_runtime.default_revision() if revision is None else revision
+    if revision is None:
+        revision = git_runtime.update_revision(old, git_runtime.default_revision())
     git_runtime.pin((revision + "\n").encode())
     if revision == old:
         return chainman.RUNTIME

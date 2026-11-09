@@ -29,8 +29,12 @@ and verification use the selected candidate runtime; the original checkout keeps
 its previous runtime until the combined candidate has passed verification.
 The chainman source repository has no self-pin and updates only its declared tools.
 Runtime selection resolves the public repository's advertised default branch to one
-exact SHA, without a version or age filter. A different SHA is a candidate even if
-`VERSION` is unchanged; an identical SHA retains normal no-change handling.
+exact SHA, without a version or age filter. It advances when the current pin is an
+ancestor of that snapshot, and retains a newer pin when the public default is its
+ancestor. Divergent histories fail and require an explicit runtime revision or
+history reconciliation. Git ancestry uses complete verified objects, independently
+of persistent cache configuration. An identical SHA retains normal no-change handling;
+`VERSION` does not determine update order.
 Missing or inconsistent Git information fails explicitly. `--skip-chainman` remains
 available for project-only updates. Missing project dependency eligibility evidence
 is still an error, never an implicit exemption.

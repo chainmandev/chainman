@@ -56,6 +56,11 @@ class SelfUpdateTests(unittest.TestCase):
                 "github_releases",
                 side_effect=AssertionError("Runtime selection must not query releases"),
             ),
+            patch.object(
+                subject.git_runtime,
+                "update_revision",
+                side_effect=lambda current, candidate: candidate,
+            ),
         ]
         self.mocks = [item.start() for item in patches]
         for item in patches:
@@ -158,6 +163,38 @@ class SelfUpdateTests(unittest.TestCase):
         self.mocks[2].assert_called_once_with(
             self.new, gc_root=self.base / "runtime-root"
         )
+        self.mocks[4].assert_not_called()
+
+    def test_older_public_default_retains_current_pin_and_runtime(self):
+        self.mocks[4].side_effect = None
+        self.mocks[4].return_value = self.old
+        self.assertEqual(self.select(), self.previous)
+        self.mocks[4].assert_called_once_with(self.old, self.new)
+        self.mocks[2].assert_not_called()
+        self.assertEqual(self.state(), self.before)
+
+    def test_divergent_default_preserves_pin_before_materializing_runtime(self):
+        self.mocks[4].side_effect = ValueError("runtime histories have diverged")
+        with self.assertRaisesRegex(ValueError, "diverged"):
+            self.select()
+        self.mocks[2].assert_not_called()
+        self.assertEqual(self.state(), self.before)
+
+    def test_explicit_revision_can_deliberately_replace_newer_pin(self):
+        (self.root / "chainman.lock").write_text(self.new + "\n")
+        self.assertEqual(
+            subject.runtime_candidate(
+                self.root,
+                {},
+                self.now,
+                gc_root=self.base / "runtime-root",
+                revision=self.old,
+            ),
+            self.candidate,
+        )
+        self.assertEqual((self.root / "chainman.lock").read_text(), self.old + "\n")
+        self.mocks[1].assert_not_called()
+        self.mocks[4].assert_not_called()
 
     def test_invalid_metadata_and_tree_fail_before_publication(self):
         (self.candidate / "VERSION").write_text("\n")

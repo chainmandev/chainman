@@ -60,7 +60,11 @@ class AttestationDeliveryTests(unittest.TestCase):
             self.assertEqual(root, self.root)
             self.assertEqual(profile, "attest")
             self.assertEqual(argv[0], sys.executable)
-            self.assertIn("CHAINMAN_ATTEST_BIN", argv[2])
+            self.assertEqual(argv[1:3], ["-I", "-B"])
+            self.assertEqual(
+                Path(argv[3]), attestation.tc.RUNTIME / "scripts/isolated.py"
+            )
+            self.assertEqual(argv[4], "attestation_entry.py")
             self.assertNotIn("CHAINMAN_ACTIVE_PROFILE", kwargs["env"])
             self.assertIn(str(self.root / "manifest.json"), argv)
             self.assertEqual(argv[-2], "--policy")

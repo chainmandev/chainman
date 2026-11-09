@@ -913,6 +913,10 @@ version, disables pnpm's automatic package-manager download, installs with a fro
 lockfile, and asks pnpm to validate dependencies before a harmless Node command.
 The package manager stays supplied by the profile; setup does not add pnpm 12's
 separate `packageManagerDependencies` lock metadata.
+Tasks, public shell/exec entry, and service command/readiness/shutdown paths with
+managed pnpm setup also check the execution profile's exact manager before their
+payload runs. Each uses only its own setup dependency closure; public entry uses
+the profile's `entry_setup` groups.
 A mismatch names both versions and requires reconciliation of the project flake
 and manifest. Normal dependency age, integrity and build-approval policies still
 apply. No global Corepack shims are created. Custom installers can retain explicit

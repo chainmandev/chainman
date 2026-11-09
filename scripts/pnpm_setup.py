@@ -1,6 +1,6 @@
 """Frozen pnpm installs with the project profile's exact package-manager binary."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import json
 import os
 from pathlib import Path
@@ -61,6 +61,74 @@ def options(actual: str, expected: str | None) -> list[str]:
     )
 
 
+def execution_command(roots: Sequence[Path], argv: list[str]) -> list[str]:
+    """Probe inside the selected profile, then replace this wrapper with its command."""
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "exec",
+        json.dumps([str(root) for root in roots]),
+        *argv,
+    ]
+
+
+def execution_environment(roots: Sequence[Path]) -> dict[str, str]:
+    env = dict(os.environ)
+    expected = [
+        required_version(json.loads((root / "package.json").read_bytes()))
+        for root in roots
+    ]
+    if not expected:
+        raise ValueError("Checked pnpm execution requires a managed setup manifest")
+    actual = subprocess.run(
+        ["pnpm", "--version"],
+        cwd="/",
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    ).stdout.strip()
+    for version in expected:
+        options(actual, version)
+    # pmOnFail=error itself makes pnpm 12 resolve a separate manager lock, even
+    # for `run` with the right binary. Identity was checked in this exact profile;
+    # disable only that duplicate manager handling for this command and children.
+    for name in (
+        "PNPM_CONFIG_PM_ON_FAIL",
+        "pnpm_config_pm_on_fail",
+        "npm_config_pm_on_fail",
+        "NPM_CONFIG_PM_ON_FAIL",
+    ):
+        env[name] = "ignore"
+    for prefix in ("npm_config_", "pnpm_config_", "NPM_CONFIG_", "PNPM_CONFIG_"):
+        env[
+            prefix
+            + (
+                "manage_package_manager_versions"
+                if prefix.islower()
+                else "MANAGE_PACKAGE_MANAGER_VERSIONS"
+            )
+        ] = "false"
+        env[
+            prefix
+            + (
+                "verify_deps_before_run"
+                if prefix.islower()
+                else "VERIFY_DEPS_BEFORE_RUN"
+            )
+        ] = "error"
+        env[
+            prefix
+            + (
+                "package_manager_strict_version"
+                if prefix.islower()
+                else "PACKAGE_MANAGER_STRICT_VERSION"
+            )
+        ] = "true"
+    return env
+
+
 def run(action: str, root: Path) -> int:
     if action not in {"install", "check"}:
         raise ValueError("pnpm setup accepts install or check")
@@ -111,6 +179,19 @@ def run(action: str, root: Path) -> int:
 
 if __name__ == "__main__":
     try:
+        if len(sys.argv) >= 4 and sys.argv[1] == "exec":
+            declared = json.loads(sys.argv[2])
+            if (
+                not isinstance(declared, list)
+                or not declared
+                or any(
+                    not isinstance(path, str) or not Path(path).is_absolute()
+                    for path in declared
+                )
+            ):
+                raise ValueError("Checked pnpm execution requires absolute setup roots")
+            env = execution_environment([Path(path) for path in declared])
+            os.execvpe(sys.argv[3], sys.argv[3:], env)
         if len(sys.argv) != 2:
             raise ValueError("pnpm setup requires one action")
         raise SystemExit(run(sys.argv[1], Path.cwd()))

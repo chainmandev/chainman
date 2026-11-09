@@ -48,7 +48,9 @@ from ruamel.yaml import YAML
 from semantic_version import NpmSpec, Version
 
 SECTIONS = inputs.DEPENDENCY_SECTIONS
-NAME = r"(?:@[a-z0-9_.~-]+/)?[a-z0-9_.~-]+"
+# Older published npm packages can contain uppercase letters (for example JSONStream).
+# Preserve their exact registry/lock identity instead of lowercasing a different package.
+NAME = r"(?:@[A-Za-z0-9_.~-]+/)?[A-Za-z0-9_.~-]+"
 
 
 def package_name(value: object) -> str:

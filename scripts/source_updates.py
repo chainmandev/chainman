@@ -1371,16 +1371,18 @@ def resolve_nix(
     changed = []
     # One invocation per flake keeps coordinated overrides in the same lock operation.
     for file in before["locks"]:
-        selected = [p for p in plans if p["file"] == file]
         nodes = nix_nodes(before["locks"][file])
-        if all(
-            ad.table(
+        selected = [
+            p
+            for p in plans
+            if p["file"] == file
+            and ad.table(
                 nodes[ad.text(p["node"], "Nix planned node")]["locked"],
                 "Nix locked source",
             ).get("url" if "url" in p else "rev")
-            == p.get("url", p["revision"])
-            for p in selected
-        ):
+            != p.get("url", p["revision"])
+        ]
+        if not selected:
             continue
         argv = [
             "nix",

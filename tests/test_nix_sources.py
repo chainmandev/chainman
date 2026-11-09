@@ -197,6 +197,81 @@ class SourceReleaseTests(unittest.TestCase):
             sources.resolve_nix(self.root, self.spec, {}, NOW)
         run.assert_not_called()
 
+    def test_only_changed_inputs_are_overridden_together_and_all_sources_are_audited(
+        self,
+    ):
+        self.tarball()
+        archive_url = TEMPLATE.format(tag="v2.0.0", version="2.0.0")
+        self.lock["nodes"]["library"]["locked"]["url"] = archive_url
+        self.lock["nodes"]["library"]["original"]["url"] = archive_url
+        for name, current in (("pkgs", A), ("overlay", A), ("unchanged", B)):
+            self.spec["inputs"].append(
+                {"input": name, "repository": "sample/" + name, "branch": "main"}
+            )
+            self.lock["nodes"]["root"]["inputs"][name] = name
+            self.lock["nodes"][name] = {
+                "locked": {
+                    "type": "github",
+                    "owner": "sample",
+                    "repo": name,
+                    "rev": current,
+                    "narHash": SRI,
+                    "lastModified": int((OLD if current == A else MATURE).timestamp()),
+                },
+                "original": {
+                    "type": "github",
+                    "owner": "sample",
+                    "repo": name,
+                    "ref": "main",
+                },
+            }
+        self.write_lock(self.lock)
+        before = sources.nix_snapshot(self.root, self.spec)
+
+        def apply(*args, **kwargs):
+            changed = copy.deepcopy(self.lock)
+            for name in ("pkgs", "overlay"):
+                changed["nodes"][name]["locked"].update(
+                    rev=B, lastModified=int(MATURE.timestamp())
+                )
+            self.write_lock(changed)
+
+        with (
+            patch.object(
+                sources,
+                "nix_candidate",
+                return_value={"revision": B, "published": MATURE.isoformat()},
+            ),
+            patch.object(
+                sources,
+                "commit_time",
+                side_effect=lambda repo, rev: OLD if rev == A else MATURE,
+            ),
+            patch.object(
+                sources,
+                "nix_tarball_tree",
+                return_value={"narHash": SRI, "lastModified": int(OLD.timestamp())},
+            ) as archive_audit,
+            patch.object(sources.chainman, "execute", side_effect=apply) as run,
+        ):
+            result = sources.resolve_nix(self.root, self.spec, {}, NOW)
+            self.assertEqual(result["changed"], ["flake.lock"])
+            self.assertEqual(len(result["selected"]), 4)
+            run.assert_called_once()
+            argv = run.call_args.args[2]
+            self.assertEqual(argv.count("--override-input"), 2)
+            self.assertIn("github:sample/pkgs/" + B, argv)
+            self.assertIn("github:sample/overlay/" + B, argv)
+            self.assertNotIn("library", argv)
+            self.assertNotIn(archive_url, argv)
+            self.assertNotIn("unchanged", argv)
+            archive_audit.assert_called_once_with(self.root, self.spec, archive_url)
+            final = json.loads((self.root / "flake.lock").read_text())
+            self.assertEqual(
+                final["nodes"]["library"],
+                before["locks"]["flake.lock"]["nodes"]["library"],
+            )
+
     def test_selection_conflicts_and_unsupported_provider_fail(self):
         for extra in (
             {"branch": "main"},

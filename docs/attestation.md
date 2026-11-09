@@ -15,6 +15,11 @@ commands accept generic subjects; `npm-publish` adds npm-specific checks and
 manual registry upload. Future providers can implement the same boundary without
 changing project command names. GitLab is not implemented yet.
 
+Python owns policy, verification, and publication orchestration. A small strictly
+typed Node adapter uses the pinned Actions signing SDK and npm's native metadata
+normalization. The optional runtime installs only production dependencies; its
+compiler and test fixtures stay in the build environment.
+
 Declare the expected identity in `chainman.toml`:
 
 ```toml
@@ -56,7 +61,7 @@ attempt-specific artifact name. The signing job needs `contents: read`,
 `actions: read`, `id-token: write`, and `attestations: write`, with `GITHUB_TOKEN`
 available to the command. Other jobs need no signing permission.
 
-Verification downloads bundles when they are absent locally. It authenticates the
+Verification downloads bundles from the selected run attempt. It authenticates the
 exact saved bundles with pinned `gh`, including source commit/ref, direct signer,
 public repository, hosted runner, run, and attempt. Downloaded manifests and
 package archives never determine the expected subjects or bytes.
@@ -67,8 +72,13 @@ derive this manifest from those local archives. The manifest's commit must equal
 the successful run's commit, and every local digest must match a signed subject.
 Chainman freezes those local bytes, preflights every package and registry version,
 then uploads exact archives with pinned npm and saved `--provenance-file` bundles.
-It rejects CI publication, private packages, conflicting tags, and unsupported
-registries. Registry readback checks bytes, provenance, and `next`; a repeated
+Each packed manifest's npm-normalized `repository` must identify the configured
+signing repository, including matching owner and repository case. Monorepo `directory`
+metadata does not change that identity.
+It rejects CI publication, private packages, conflicting tags, unsupported
+registries, and `publishConfig.provenance: true`, which conflicts with supplying
+the saved bundle. All packages pass these checks before registry access or uploads.
+Registry readback checks bytes, provenance, and `next`; a repeated
 command can reconcile a partial upload. npm authentication remains local.
 
 Project Actions results, this input manifest, and standard bundles are sufficient;

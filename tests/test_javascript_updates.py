@@ -557,6 +557,48 @@ class JavaScriptTests(unittest.TestCase):
             "npm:@neutral/library@^2.0.0",
         )
 
+    def test_historical_uppercase_registry_identity_survives_transitive_audits(self):
+        self.manifest("package.json", {"legacy-bundler": "1.0.0"})
+        self.release("legacy-bundler", "1.0.0", children={"JSONStream": "1.3.5"})
+        self.release("JSONStream", "1.3.5")
+        self.resolve()
+        before = js.snapshot(self.root, self.spec)
+        self.assertTrue(
+            any(identity[1] == "JSONStream" for identity in before["identities"])
+        )
+        self.assertEqual(
+            js.parse_requirement("stream-alias", "npm:JSONStream@^1.3.0"),
+            ("JSONStream", "npm:JSONStream@", "^1.3.0", "^"),
+        )
+        # The exact same historical lock can need a temporary native-manager age
+        # exclusion; the identity and final artifact/range audits still preserve case.
+        self.release("JSONStream", "1.3.5", days=1)
+        evidence = js.Evidence(self.policy, self.now)
+        self.assertEqual(
+            js.baseline_maturity_exclusions(before, evidence), ["JSONStream@1.3.5"]
+        )
+        self.resolve()
+        self.assertEqual(
+            js.snapshot(self.root, self.spec)["identities"], before["identities"]
+        )
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+
+    def test_registry_identity_case_support_does_not_accept_invalid_names(self):
+        for name in (
+            "",
+            "bad name",
+            "../escape",
+            "name/name",
+            "@scope/",
+            "@/name",
+            "https://registry.example/name",
+        ):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(ValueError, "registry package name"),
+            ):
+                js.package_name(name)
+
     def test_manifest_catalog_prefix_and_compatible_rules_all_apply(self):
         self.manifest("package.json", {"@neutral/library": "catalog:shared"})
         self.write(

@@ -15,6 +15,7 @@ def main() -> None:
         "updates.py",
         "chainman.py",
         "candidate_export.py",
+        "attestation_entry.py",
     }:
         raise ValueError("Unknown isolated runtime entry")
     sys.path.insert(0, str(directory))

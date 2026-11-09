@@ -3,14 +3,23 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import { createServer } from "node:http";
 import { test } from "node:test";
 import { buildSLSAProvenancePredicate } from "@actions/attest";
-import { verifyBundle } from "../src/provenance.js";
-import {
-  artifact,
-  bundle,
-  configured,
-  identity,
-  statement,
-} from "./fixtures.js";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+const configured = {
+  provider: "github-actions",
+  repository: "example/package",
+  workflow: ".github/workflows/qualification.yml",
+  ref: "refs/heads/master",
+  requiredJobs: ["Qualification", "Support (*)", "Sign bundles"],
+  artifactName: "qualified-release-{runId}-{runAttempt}",
+  tag: "next",
+};
+const identity = { sourceCommit: "a".repeat(40), runId: "12345", attempt: "2" };
+const artifact = {
+  path: "package.tgz",
+  subject: "pkg:npm/%40example/package@1.0.0-rc.0",
+  digest: { sha512: "b".repeat(128) },
+};
 
 await test("pinned SDK authenticates OIDC claims and emits the accepted generic workflow predicate", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", {
@@ -74,16 +83,50 @@ await test("pinned SDK authenticates OIDC claims and emits the accepted generic 
   try {
     const predicate = await buildSLSAProvenancePredicate(issuer);
     assert.equal(predicate.type, "https://slsa.dev/provenance/v1");
-    verifyBundle(
-      bundle({
-        ...statement(),
-        predicateType: predicate.type,
-        predicate: predicate.params,
-      }),
-      artifact,
-      identity,
-      configured,
+    const statement = {
+      _type: "https://in-toto.io/Statement/v1",
+      predicateType: predicate.type,
+      subject: [{ name: artifact.subject, digest: artifact.digest }],
+      predicate: predicate.params,
+    };
+    const bundle = {
+      dsseEnvelope: {
+        payloadType: "application/vnd.in-toto+json",
+        payload: Buffer.from(JSON.stringify(statement)).toString("base64"),
+      },
+    };
+    // The native SDK's authenticated claims must satisfy the Python policy validator.
+    const scripts = fileURLToPath(
+      new URL("../../../../scripts/", import.meta.url),
     );
+    const result = spawnSync(
+      process.env["CHAINMAN_ATTEST_PYTHON"] ?? "python3",
+      [
+        "-I",
+        "-B",
+        "-c",
+        `import json,sys
+sys.path.insert(0,sys.argv[1])
+from attestation_model import policy,manifest
+from attestation_github import Identity
+from attestation_provenance import verify_bundle
+value=json.load(sys.stdin)
+artifact=manifest({"version":1,"sourceCommit":value["identity"]["sourceCommit"],"artifacts":[value["artifact"]]}).artifacts[0]
+identity=Identity(value["identity"]["sourceCommit"],value["identity"]["runId"],value["identity"]["attempt"])
+verify_bundle(value["bundle"],artifact,identity,policy(value["policy"]))`,
+        scripts,
+      ],
+      {
+        input: JSON.stringify({
+          bundle,
+          artifact,
+          identity,
+          policy: configured,
+        }),
+        encoding: "utf8",
+      },
+    );
+    assert.equal(result.status, 0, result.stderr || String(result.error));
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];

@@ -1,47 +1,88 @@
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
-import { readFile } from "node:fs/promises";
-import { object, parse, string } from "./common.js";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { absolute, normalizedObject, object, string } from "./protocol.js";
+import type { JsonObject } from "./protocol.js";
 
 const require = createRequire(import.meta.url);
-export const npmVersion = "12.2.0";
-interface NpmAdapter {
-  readonly cliPath: string;
-  subject(name: string, version: string): string;
-  package(path: string): Promise<Record<string, unknown>>;
-}
-export async function npmAdapter(): Promise<NpmAdapter> {
-  const packagePath = require.resolve("npm/package.json"),
-    npmRequire = createRequire(packagePath);
-  if (object(parse(await readFile(packagePath)))["version"] !== npmVersion)
-    throw new Error("Installed npm does not match the exact publisher pin");
-  const npa = npmRequire("npm-package-arg") as unknown,
-    pacote = object(npmRequire("pacote") as unknown);
-  const functions = npa as { resolve?: unknown; toPurl?: unknown };
+const npmVersion = "12.2.0";
+type NativeFunction = (...args: unknown[]) => unknown;
+function nativeFunction(value: unknown, key: string): NativeFunction {
   if (
-    typeof functions.resolve !== "function" ||
-    typeof functions.toPurl !== "function" ||
-    typeof pacote["manifest"] !== "function"
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null
   )
-    throw new Error("Pinned npm metadata/PURL adapter contract changed");
-  const resolve = functions.resolve as (
-    name: string,
-    version: string,
-  ) => unknown;
-  const toPurl = functions.toPurl as (spec: unknown) => unknown;
-  const manifest = pacote["manifest"] as (
-    path: string,
-    options: { ignoreScripts: true; offline: true },
-  ) => Promise<unknown>;
-  return {
-    cliPath: join(dirname(packagePath), "bin/npm-cli.js"),
-    subject(name, version) {
-      return string(toPurl(resolve(name, version)));
-    },
-    async package(path) {
-      return object(
-        await manifest(path, { ignoreScripts: true, offline: true }),
-      );
-    },
-  };
+    throw new Error("Pinned npm adapter contract changed");
+  const member: unknown = Reflect.get(value, key);
+  if (typeof member !== "function")
+    throw new Error("Pinned npm adapter contract changed");
+  return member as NativeFunction;
+}
+function repository(
+  manifest: JsonObject,
+  fromUrl: NativeFunction,
+): string | null {
+  const value = manifest["repository"];
+  const url =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value["url"]
+      : value;
+  if (typeof url !== "string" || !url) return null;
+  const parsed = fromUrl(url);
+  if (!parsed) return null;
+  const info = object(parsed);
+  if (
+    info["domain"] !== "github.com" ||
+    typeof info["user"] !== "string" ||
+    !info["user"] ||
+    typeof info["project"] !== "string" ||
+    !info["project"]
+  )
+    return null;
+  return `github.com/${info["user"]}/${info["project"]}`;
+}
+export async function inspectPackage(tarball: string): Promise<{
+  manifest: JsonObject;
+  subject: string;
+  repository: string | null;
+}> {
+  absolute(tarball);
+  if (!(await lstat(tarball)).isFile())
+    throw new Error("Expected a local npm tarball file");
+  const packagePath = require.resolve("npm/package.json");
+  if (
+    object(JSON.parse(await readFile(packagePath, "utf8")) as unknown)[
+      "version"
+    ] !== npmVersion
+  )
+    throw new Error("Installed npm does not match the exact publisher pin");
+  const npmRequire = createRequire(packagePath);
+  const npa = npmRequire("npm-package-arg") as unknown;
+  const pacote = npmRequire("pacote") as unknown;
+  const hosted = npmRequire("hosted-git-info") as unknown;
+  const resolve = nativeFunction(npa, "resolve");
+  const toPurl = nativeFunction(npa, "toPurl");
+  const fromUrl = nativeFunction(hosted, "fromUrl");
+  const cache = await mkdtemp(join(tmpdir(), "chainman-npm-inspect-"));
+  try {
+    const manifest = normalizedObject(
+      await nativeFunction(pacote, "manifest")(tarball, {
+        fullReadJson: true,
+        fullMetadata: true,
+        ignoreScripts: true,
+        offline: true,
+        cache,
+      }),
+    );
+    return {
+      manifest,
+      subject: string(
+        toPurl(resolve(string(manifest["name"]), string(manifest["version"]))),
+      ),
+      repository: repository(manifest, fromUrl),
+    };
+  } finally {
+    await rm(cache, { recursive: true, force: true });
+  }
 }
