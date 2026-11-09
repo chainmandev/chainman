@@ -288,6 +288,40 @@ exception when either age is below the minimum. Publication is evidence of a
 channel release, not a guarantee that every package is available in a binary cache;
 normal project environment preparation and verification remain required.
 
+Source inputs declared with `flake = false` can use the same Nix adapter. Declare
+`tag_pattern` instead of `branch` to select the newest eligible official stable
+GitHub release, including the normal `github:owner/repository` constraints and
+version exceptions. Both release publication and its immutable commit must meet
+the age policy. A newer branch baseline cannot override explicit release selection.
+Results retain `release_publication`, `release_tag`, and `release_version`; GitHub
+lock entries still use the commit timestamp for `lastModified`.
+
+```toml
+[[updates.adapters.nix.inputs]]
+input = "openssl"
+repository = "openssl/openssl"
+tag_pattern = '^openssl-(?P<version>\d+\.\d+\.\d+)$'
+url_template = "https://github.com/openssl/openssl/releases/download/{tag}/openssl-{version}.tar.gz"
+
+[[updates.adapters.nix.inputs]]
+input = "botan"
+repository = "randombit/botan"
+tag_pattern = '^(?P<version>\d+\.\d+\.\d+)$'
+release_provider = "botan"
+url_template = "https://botan.randombit.net/releases/Botan-{version}.tar.xz"
+```
+
+Omit `url_template` to keep a GitHub source archive. An explicit template selects
+an official release asset and requires a `tarball` lock entry. Templates permit
+only `{tag}` and `{version}`; GitHub assets require `{tag}` and the declared
+repository's release download origin. Botan's narrow provider reads dated official
+release notes because that project does not publish GitHub release records. Its
+date-only publications use the end of the UTC day conservatively, and only its
+official versioned `.tar.xz` archive is accepted. Release archive locks preserve
+the archive's own `lastModified`, independently checked with its Nix content hash;
+that timestamp never substitutes for release publication evidence. All inputs in
+one lock should share one Nix adapter so they resolve in a coordinated invocation.
+
 `just chainman deps-update targets=javascript,assets` selects these
 targets. For JavaScript, `--policy compatible` preserves original caret/tilde and
 complex dependency ranges, including their lower and `0.x` compatibility bounds.

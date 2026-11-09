@@ -460,7 +460,7 @@ def report(root: Path, arguments: list[str], *, check: bool = False) -> ad.Table
         audit_coverage=audit_coverage,
         age_bases={
             name: {
-                "nix": "commit-date",
+                "nix": "release-or-commit-date",
                 "artifact": "origin-artifact-last-modified",
                 "oci": "registry-tag-update-bound-to-digest",
                 "actions": "release-or-commit-date",

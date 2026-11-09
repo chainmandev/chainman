@@ -61,6 +61,11 @@ class GitHubTagTests(unittest.TestCase):
         result = source_github.select("example/language", PATTERN, {}, NOW)
         self.assertEqual(result["release"].version, "6.2.0")
 
+    def test_bound_contents_keep_original_release_publication(self):
+        result = source_github.metadata("example/language", PATTERN, "6.3.1")
+        self.assertEqual(result["publication"], OLD)
+        self.assertEqual(result["release"].published, YOUNG)
+
     def test_malformed_inventory_entry_has_a_registry_diagnostic(self):
         with (
             patch.object(registry, "data", return_value=[None]),
