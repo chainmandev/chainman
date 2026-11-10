@@ -7,6 +7,7 @@ import signal
 import shlex
 import subprocess
 import sys
+import tempfile
 
 import chainman
 import toolchain as tc
@@ -126,33 +127,50 @@ def authorize(
 
 def run_probe(timeout: int, argv: list[str]) -> int:
     """Bound the check and its process group without a native controller."""
-    options: tc.ProcessOptions = {
-        "stdin": subprocess.DEVNULL,
-        "start_new_session": True,
-    }
-    child = subprocess.Popen(argv, **tc.managed_options(options))
+    # A descendant that starts its own session (a dev server or package-manager
+    # helper) escapes the group kill. Give the probe private disk-backed output
+    # so it cannot hold the caller's captured pipes open after this exits.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        options: tc.ProcessOptions = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": stdout,
+            "stderr": stderr,
+            "start_new_session": True,
+        }
+        child = subprocess.Popen(argv, **tc.managed_options(options))
 
-    def interrupted(signum: int, _frame: object) -> None:
-        raise SystemExit(128 + signum)
+        def interrupted(signum: int, _frame: object) -> None:
+            raise SystemExit(128 + signum)
 
-    previous = {
-        sig: signal.signal(sig, interrupted)
-        for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
-    }
-    try:
-        status = child.wait(timeout=timeout)
-        return status if status >= 0 else 128 - status
-    except subprocess.TimeoutExpired:
+        previous = {
+            sig: signal.signal(sig, interrupted)
+            for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM)
+        }
+        timed_out = False
+        try:
+            status = child.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+        finally:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+        # Relay only what exists now: an escaped writer cannot extend the relay.
+        for source, target in ((stdout, sys.stdout), (stderr, sys.stderr)):
+            remaining = os.fstat(source.fileno()).st_size
+            source.seek(0)
+            while remaining > 0 and (chunk := source.read(min(remaining, 65536))):
+                target.buffer.write(chunk)
+                remaining -= len(chunk)
+            target.flush()
+    if timed_out:
         print("readiness check timed out", file=sys.stderr)
         return 124
-    finally:
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait()
-        for sig, handler in previous.items():
-            signal.signal(sig, handler)
+    return status if status >= 0 else 128 - status
 
 
 if __name__ == "__main__":

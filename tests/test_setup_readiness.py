@@ -72,6 +72,39 @@ class SetupReadinessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("timed out", result.stdout)
 
+    def test_probe_descendant_outside_its_group_cannot_hold_output_open(self):
+        self.assertEqual(self.run_cli("setup").returncode, 0)
+        for outcome, expected in (
+            ("sys.exit(0)", 0),
+            ("sys.exit('escaped probe failed')", "escaped probe failed"),
+            ("__import__('time').sleep(5)", "timed out"),
+        ):
+            with self.subTest(outcome=outcome):
+                daemon = self.root / "daemon-pid"
+                daemon.unlink(missing_ok=True)
+                # A dev server or package-manager helper may start its own
+                # session while inheriting the probe's stdout and stderr.
+                (self.root / "check.py").write_text(
+                    "from pathlib import Path; import subprocess,sys\n"
+                    "child = subprocess.Popen([sys.executable, '-c', "
+                    "'import time; time.sleep(600)'], start_new_session=True)\n"
+                    "Path('daemon-pid').write_text(str(child.pid))\n"
+                    f"{outcome}\n"
+                )
+                try:
+                    started = time.monotonic()
+                    result = self.run_cli("setup-status")
+                    self.assertLess(time.monotonic() - started, 15)
+                    self.assertEqual(result.returncode, int(bool(expected)))
+                    if expected:
+                        self.assertIn(expected, result.stdout)
+                finally:
+                    if daemon.exists():
+                        try:
+                            os.kill(int(daemon.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
     def test_invalid_probe_is_rejected_before_installation(self):
         for probe in (
             {},
