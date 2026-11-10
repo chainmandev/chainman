@@ -23,6 +23,7 @@ import subprocess
 import tempfile
 from collections.abc import (
     Callable,
+    Collection,
     Iterable,
     Iterator,
     Mapping,
@@ -1834,8 +1835,20 @@ def audit_artifacts(
     policy: Mapping[str, object],
     now: datetime,
     scopes: Mapping[tuple[str, str], Sequence[str]],
+    *,
+    direct: Collection[tuple[str, str]] | None = None,
 ) -> list[str]:
     identities = locked_identities(workspace)
+    # Without importer evidence every locked identity is treated as declared.
+    transitive = (
+        ()
+        if direct is None
+        else {
+            (name, version)
+            for provider, name, version, *_ in identities
+            if provider == "npm" and (name, version) not in direct
+        }
+    )
     old = identity_inventory(before["identities"])
     exclusions: set[str] = set()
     options = inputs.table(policy.get("javascript", {}), "JavaScript policy")
@@ -1858,7 +1871,9 @@ def audit_artifacts(
         groups.setdefault(key, set()).add(identity)
     for (name, group_bounds), group in groups.items():
         scoped = scoped_policy(policy, name, group_bounds) if group_bounds else policy
-        updates.audit_identities(workspace.root, group, old, scoped, now)
+        updates.audit_identities(
+            workspace.root, group, old, scoped, now, transitive_npm=transitive
+        )
         for identity in group:
             if identity[0] != "npm":
                 continue
@@ -1971,7 +1986,14 @@ def audit_details(
                 scopes.setdefault(target[:2], []).extend(
                     direct_scope(pin, spec, options, target[1], before)
                 )
-    return audit_artifacts(workspace, before, policy, now, scopes)
+    direct = {
+        target[:2]
+        for info in lock["importers"].values()
+        for name in SECTIONS
+        for alias, edge in info.get(name, {}).items()
+        if (target := lock_target(alias, edge["version"], workspace)) is not None
+    }
+    return audit_artifacts(workspace, before, policy, now, scopes, direct=direct)
 
 
 def audit(

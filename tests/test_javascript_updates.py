@@ -1798,6 +1798,62 @@ class JavaScriptTests(unittest.TestCase):
             len(registry.releases("npm", "library", include_prerelease=True)), 1
         )
 
+    def test_transitive_prerelease_pins_are_upstream_choices(self):
+        # chromium-bidi publishes Chrome-style releases such as 157.0.8090-0, and
+        # puppeteer-core pins them exactly; pnpm cannot reach one through a range.
+        self.manifest("package.json", {"browser": "1.0.0"})
+        self.release("browser", "1.0.0", children={"bidi": "17.0.2"})
+        self.release("bidi", "17.0.2")
+        self.resolve()
+        before = js.snapshot(self.root, self.spec)
+        self.release("browser", "2.0.0", children={"bidi": "157.0.8090-0"})
+        self.release("bidi", "157.0.8090-0")
+        self.manifest("package.json", {"browser": "2.0.0"})
+        self.resolve()
+        self.assertTrue(
+            any(
+                identity[1:3] == ["bidi", "157.0.8090-0"]
+                or tuple(identity[1:3]) == ("bidi", "157.0.8090-0")
+                for identity in js.snapshot(self.root, self.spec)["identities"]
+            )
+        )
+        js.audit(self.root, self.spec, before, self.policy, self.now)
+        # A declaration is the project's own choice and still needs a migration.
+        self.manifest("package.json", {"browser": "2.0.0", "bidi": "157.0.8090-0"})
+        self.resolve()
+        with self.assertRaisesRegex(ValueError, "prerelease"):
+            js.audit(self.root, self.spec, before, self.policy, self.now)
+
+    def test_transitive_prereleases_keep_maturity_and_integrity_checks(self):
+        import updates
+
+        self.manifest("package.json", {"browser": "2.0.0"})
+        self.release("browser", "2.0.0", children={"bidi": "157.0.8090-0"})
+        self.release("bidi", "157.0.8090-0")
+        self.resolve()
+        identities = {tuple(i) for i in js.snapshot(self.root, self.spec)["identities"]}
+        pair = {("bidi", "157.0.8090-0")}
+        updates.audit_identities(
+            self.root, identities, set(), self.policy, self.now, transitive_npm=pair
+        )
+        with self.assertRaisesRegex(ValueError, "prerelease"):
+            updates.audit_identities(
+                self.root, identities, set(), self.policy, self.now
+            )
+        tampered = {
+            (*i[:-1], "sha512:" + "0" * 128) if i[1] == "bidi" else i
+            for i in identities
+        }
+        with self.assertRaises(ValueError):
+            updates.audit_identities(
+                self.root, tampered, set(), self.policy, self.now, transitive_npm=pair
+            )
+        self.release("bidi", "157.0.8090-0", days=1)
+        with self.assertRaises(ValueError):
+            updates.audit_identities(
+                self.root, identities, set(), self.policy, self.now, transitive_npm=pair
+            )
+
     def test_deprecated_baseline_evidence_is_retained_without_admitting_new_artifacts(
         self,
     ):

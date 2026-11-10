@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Iterable, Iterator, Mapping, MutableMapping
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    MutableMapping,
+)
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 import fnmatch
@@ -801,8 +808,16 @@ def audit_identities(
     before: object,
     policy: Mapping[str, object],
     now: datetime,
+    *,
+    transitive_npm: Collection[tuple[str, str]] = (),
 ) -> None:
-    """Check actual immutable artifacts; only the observed baseline is age-exempt."""
+    """Check actual immutable artifacts; only the observed baseline is age-exempt.
+
+    `transitive_npm` names locked npm (package, version) pairs that no project
+    manifest declares. A prerelease reaches the graph only when a parent's range
+    explicitly names one, so such pairs are upstream choices: they skip the
+    migration gate but keep every age, integrity and security check.
+    """
     current = identity_inventory(current)
     before = identity_inventory(before)
     maven_baseline = {item[:4]: item[4] for item in before if item[0] == "maven"}
@@ -832,6 +847,7 @@ def audit_identities(
             provider in ("npm", "maven")
             and registry.version(provider, value) is None
             and identity not in before
+            and not (provider == "npm" and (package, value) in transitive_npm)
         ):
             kind = (
                 "prerelease"
