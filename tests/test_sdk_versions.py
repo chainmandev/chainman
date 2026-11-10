@@ -50,6 +50,28 @@ class ManifestPointerTests(unittest.TestCase):
                     else:
                         self.assertRegex(updated, r'"2\.0\.0" +# keep comment')
 
+    def test_json_rewrites_keep_indentation_key_order_and_final_newline(self):
+        import javascript_updates
+
+        source = {"name": "demo", "packageManager": "pnpm@1.0.0", "engines": {}}
+        expected = dict(source, packageManager="pnpm@2.0.0")
+        loaders = {
+            "manifests": lambda body: manifests.document(Path("x.json"), body=body),
+            "javascript": lambda body: javascript_updates.document(
+                Path("x.json"), body
+            ),
+        }
+        for indent, ending in (("\t", "\n"), ("    ", "\n"), ("  ", "")):
+            for loader, load in loaders.items():
+                with self.subTest(indent=indent, ending=ending, loader=loader):
+                    value, render = load(json.dumps(source, indent=indent) + ending)
+                    manifests.assign(value, ["packageManager"], "pnpm@2.0.0")
+                    self.assertEqual(
+                        render(), json.dumps(expected, indent=indent) + ending
+                    )
+        value, render = manifests.document(Path("package.json"), body='{"a":"é"}\n')
+        self.assertEqual(render(), '{\n  "a": "é"\n}\n')
+
 
 class SDKTests(unittest.TestCase):
     def setUp(self):
@@ -115,6 +137,20 @@ class SDKTests(unittest.TestCase):
                 "private": True,
             },
         )
+
+    def test_refresh_keeps_tab_indented_package_manifests(self):
+        manifest = {
+            "name": "demo",
+            "packageManager": "pnpm@11.25.0",
+            "engines": {"node": ">=26 <27"},
+            "private": True,
+        }
+        body = json.dumps(manifest, indent="\t") + "\n"
+        path = self.target("pnpm", "package.json", body, "12.1.0")
+        self.target("node", "package.json", body, "27.0.1")
+        self.synchronize()
+        manifest.update(packageManager="pnpm@12.1.0", engines={"node": ">=27 <28"})
+        self.assertEqual(path.read_text(), json.dumps(manifest, indent="\t") + "\n")
 
     def test_explicit_empty_or_malformed_target_files_fail_before_probes(self):
         self.target("go", "go.mod", "module example.invalid/demo\ngo 1.27\n", "1.27.1")

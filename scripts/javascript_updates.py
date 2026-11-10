@@ -127,12 +127,7 @@ def document(
 ) -> tuple[MutableMapping[str, object], Callable[[], str]]:
     if path.suffix == ".json":
         value = mutable_table(json.loads(body))
-        whitespace = re.search(r"\n([ \t]+)\"", body)
-        indent = whitespace[1] if whitespace else 2
-        return (
-            value,
-            lambda: json.dumps(value, indent=indent, ensure_ascii=False) + "\n",
-        )
+        return value, manifests.json_renderer(value, body)
     yaml = YAML()
     yaml.preserve_quotes = True
     value = mutable_table(yaml.load(body) or {})

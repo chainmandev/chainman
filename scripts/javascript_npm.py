@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import javascript_updates as js
+import manifests
 import chainman
 import registry
 import adapter_data as inputs
@@ -383,9 +384,8 @@ def resolve(
                     workspace.modes.get(relative, 0o644),
                 )
         path = tc.contained(temporary, workspace.lock)
-        lock = inputs.table(
-            json.loads(tc.regular_input(temporary, workspace.lock)), "npm lock"
-        )
+        resolved = tc.regular_input(temporary, workspace.lock).decode()
+        lock = inputs.table(json.loads(resolved), "npm lock")
         inputs.npm_lock(lock)
         packages = inputs.table(lock["packages"], "npm packages")
         for manifest in workspace.manifests:
@@ -402,7 +402,9 @@ def resolve(
                     entry[section] = workspace.documents[manifest][0][section]
             packages[key] = entry
         lock["packages"] = packages
-        tc.atomic_bytes(path, (json.dumps(lock, indent=2) + "\n").encode(), 0o644)
+        # npm follows the project's indentation; keep the lock it wrote that way.
+        render = manifests.json_renderer(lock, resolved)
+        tc.atomic_bytes(path, render().encode(), 0o644)
         checked = chainman.execute(
             root,
             inputs.text(spec.get("profile", "javascript"), "JavaScript profile"),

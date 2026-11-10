@@ -46,6 +46,16 @@ class PubWorkspace(TypedDict):
     pins: list[Pin]
 
 
+def json_renderer(value: object, body: str) -> Callable[[], str]:
+    """Re-serialize in the document's own indentation and final-newline style."""
+    # Raw newlines occur only between JSON tokens, so the first indented line
+    # is one nesting level. Compact and empty documents keep the 2-space default.
+    whitespace = re.search(r"\n([ \t]+)\S", body)
+    indent = whitespace[1] if whitespace else 2
+    ending = "\n" if not body or body.endswith("\n") else ""
+    return lambda: json.dumps(value, indent=indent, ensure_ascii=False) + ending
+
+
 def document(
     path: Path, *, body: str | None = None
 ) -> tuple[object, Callable[[], str]]:
@@ -53,7 +63,7 @@ def document(
     suffix = path.suffix
     if suffix == ".json":
         value = json.loads(body)
-        return value, lambda: json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+        return value, json_renderer(value, body)
     if suffix == ".toml":
         value = tomlkit.parse(body)
         return value, lambda: tomlkit.dumps(value)
