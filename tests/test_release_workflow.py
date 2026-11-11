@@ -93,8 +93,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         allowances = {
             ("macos-15-intel", "host-nix", "core", "docker"): 360,
             ("macos-15", "host-nix", "core", "docker"): 90,
-            ("ubuntu-24.04", "container-nix", "core", "docker"): 90,
-            ("ubuntu-24.04", "container-nix", "core", "podman"): 90,
+            ("ubuntu-24.04", "container-nix", "core", "docker"): 150,
+            ("ubuntu-24.04", "container-nix", "core", "podman"): 150,
         }
         identities = []
         extended = []

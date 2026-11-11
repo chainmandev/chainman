@@ -48,9 +48,10 @@ and closure before running all trust, source, starter, and native suites. This k
 cold compilation outside the verification job's time budget. Preparation failure,
 missing artifacts, or integrity failures prevent qualification. The macOS ARM64
 host core lane has a 90-minute job limit for source verification, initialization,
-and native service qualification. Docker and Podman core lanes have 90-minute job
+and native service qualification. Docker and Podman core lanes have 150-minute job
 limits: the complete real-container bootstrap suite, including update and resume
-transactions, can exceed an hour before starter qualification finishes. The
+transactions and the full external-source service lifecycle, took up to 86 minutes
+before starter qualification began. The
 remaining 10 lanes retain their 60-minute limits.
 Per-command test deadlines and the requirement that every lane succeeds before
 publication remain unchanged.
