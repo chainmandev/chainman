@@ -244,6 +244,92 @@ shutdown_command=["checkpoint"]
                 ["/fixture/launcher", "_workflow-shutdown", "worker", lifecycle],
             )
 
+    def test_container_lifecycle_commands_use_the_retained_runtime_launcher(self):
+        # A verified Git entry removes its private export when the entry exits;
+        # probes and shutdown hooks run later inside the service container.
+        runtime = Path("/nix/store/" + "a" * 32 + "-chainman-source")
+        with tempfile.TemporaryDirectory(
+            prefix="chainman container lifecycle "
+        ) as temporary:
+            base = Path(temporary).resolve()
+            root = base / "project"
+            root.mkdir()
+            (root / "chainman.toml").write_text("""schema=3
+[project]
+default_profile="host"
+[tasks.main]
+services=["worker"]
+commands=[["true"]]
+[services.worker]
+command=["serve"]
+readiness={command=["ready"]}
+shutdown_command=["checkpoint"]
+""")
+            real_run = subprocess.run
+
+            def run(argv, **kwargs):
+                if "--out-link" in argv:
+                    return subprocess.CompletedProcess(argv, 0, self.package + "\n")
+                return real_run(argv, **kwargs)
+
+            for launcher, expected in (
+                (
+                    "/private/entry/source/bootstrap/chainman.sh",
+                    str(runtime / "bootstrap/chainman.sh"),
+                ),
+                (str(root / "scripts/chainman.sh"), str(root / "scripts/chainman.sh")),
+            ):
+                with (
+                    self.subTest(launcher=launcher),
+                    patch.dict(os.environ, CHAINMAN_MODE="container-nix"),
+                    patch.object(services.chainman, "RUNTIME", runtime),
+                    patch.object(services.subprocess, "run", side_effect=run),
+                ):
+                    output = Path(tempfile.mkdtemp(dir=base))
+                    (output / "host-environment").write_bytes(b"")
+                    services.export(
+                        root,
+                        [
+                            str(output),
+                            "linux-arm64",
+                            str(base / "state"),
+                            "/fixture/docker",
+                            launcher,
+                            "run",
+                            "main",
+                        ],
+                    )
+                    service = json.loads((output / "plan.json").read_text())[
+                        "services"
+                    ]["worker"]
+                    lifecycle = service["lifecycle_fingerprint"]
+                    name = service["container"]["name"]
+                    self.assertEqual(service["command"]["argv"][0], launcher)
+                    self.assertEqual(
+                        service["readiness"]["command"]["argv"],
+                        [
+                            "/fixture/docker",
+                            "exec",
+                            name,
+                            expected,
+                            "_workflow-probe",
+                            "worker",
+                            lifecycle,
+                        ],
+                    )
+                    self.assertEqual(
+                        service["shutdown_command"]["argv"],
+                        [
+                            "/fixture/docker",
+                            "exec",
+                            name,
+                            expected,
+                            "_workflow-shutdown",
+                            "worker",
+                            lifecycle,
+                        ],
+                    )
+
     def test_service_image_is_separated_from_engine_options(self):
         digest = "@sha256:" + "a" * 64
         image = "registry.example.invalid:5000/team/database:1.0" + digest

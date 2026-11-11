@@ -863,6 +863,16 @@ def export(root: Path, arguments: list[str]) -> int:
     )
     prepared: dict[str, Service] = {}
     volumes: dict[str, Volume] = {}
+    # Probes and shutdown hooks run inside a service container after this entry
+    # may have exited. A verified Git entry removes its private source export on
+    # exit, so execute the runtime's own launcher from the shared store there.
+    container_launcher = launcher
+    if (
+        mode == "container-nix"
+        and str(chainman.RUNTIME).startswith("/nix/store/")
+        and not Path(launcher).is_relative_to(root)
+    ):
+        container_launcher = str(chainman.RUNTIME / "bootstrap/chainman.sh")
     for name, spec in declared.items():
         if name in shared_names and not shared_requested:
             continue
@@ -1077,7 +1087,7 @@ def export(root: Path, arguments: list[str]) -> int:
                     engine,
                     "exec",
                     container_name,
-                    launcher,
+                    container_launcher,
                     "_workflow-probe",
                     name,
                     lifecycle_fingerprint,
@@ -1110,7 +1120,13 @@ def export(root: Path, arguments: list[str]) -> int:
                 lifecycle_fingerprint,
             ]
             if mode == "container-nix":
-                shutdown_argv = [engine, "exec", container_name, *shutdown_argv]
+                shutdown_argv = [
+                    engine,
+                    "exec",
+                    container_name,
+                    container_launcher,
+                    *shutdown_argv[1:],
+                ]
             value["shutdown_command"] = command(
                 shutdown_argv,
                 service_root,

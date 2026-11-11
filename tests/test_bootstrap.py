@@ -2487,7 +2487,9 @@ check=["true"]
                     "from pathlib import Path; assert Path('ready').exists()",
                 ]
             )
-            + ',period_seconds=1,timeout_seconds=2,failure_threshold=10}\n[tasks.dev]\nservices=["web"]\nwait_for_services=true\n'
+            # The service runs two nested containerized launcher entries before
+            # it is ready; allow their cold startup within the readiness window.
+            + ',period_seconds=1,timeout_seconds=2,failure_threshold=180}\n[tasks.dev]\nservices=["web"]\nwait_for_services=true\n'
             + '\n[tasks.nested]\nsource_root_env="FIXTURE_WEB"\ncommands='
             + json.dumps([["python3", "-c", nested_task]])
             + "\n"
