@@ -421,6 +421,38 @@ affinity and cgroup-v2 ancestor limits, with v1 memory-limit support. macOS uses
 available CPU count and physical memory. These are concurrency hints rather than
 memory isolation. Workflows without a resource declaration perform no resource probe.
 
+### Run-wide parallelism
+
+Each top-level run (a recipe, `run`, `exec`, `shell`, `setup`, a service workflow
+or keep-going verification) exports these variables once. Nested commands,
+recipe tasks and verification gates inherit them and never recompute; a value
+already set by the caller always wins. Projects that do not read them are unaffected.
+
+| Variable | Conservative (default) | Aggressive |
+| --- | --- | --- |
+| `CHAINMAN_PARALLELISM` | `conservative` | `aggressive` (opt in via the environment) |
+| `CHAINMAN_JOBS` | max(1, min(cpus/2, mem/2)) | max(1, min(cpus, mem/1.5)) |
+| `CHAINMAN_LANES` | 1 | max(1, min(cpus/3, mem/`lane_memory_gib`)) |
+| `CHAINMAN_JOBS_PER_LANE` | max(1, jobs/lanes) | max(1, jobs/lanes) |
+| `CHAINMAN_PORT_BASE` | host-nix only: random free loopback block | same |
+
+`cpus` is the logical CPU count and `mem` the total memory in GiB, both bounded
+by affinity and cgroup limits as above; quotients round down. Inside a lane, size
+tools with `CHAINMAN_JOBS_PER_LANE` so lanes × jobs never oversubscribe the host.
+`lane_memory_gib` (default 6) in the project or default-profile `resources` table
+only sizes `CHAINMAN_LANES`; it requires no `job_variables`. For example, 2 CPUs
+and 8 GiB give 1 job conservatively and 2 aggressively; 7 CPUs and 19 GiB give 3,
+or 7 jobs in 2 lanes; 44 CPUs and 256 GiB give 22, or 44 jobs in 14 lanes.
+
+In host-nix mode the run owns `CHAINMAN_PORT_BASE` through `CHAINMAN_PORT_BASE+99`,
+a 100-port block in 20000–59999 whose ports were all bindable on `127.0.0.1` at
+selection. Projects derive host-side ports as base plus a fixed offset. A later
+bind failure is the project's clear error, not a silent retry; a rerun selects a new
+block. Container-nix and bare-host modes leave it unset and keep fixed ports.
+The run prints one line, for example
+`Chainman parallelism: conservative — jobs 3 (per lane 3), lanes 1, ports 41200–41299.`,
+and keep-going verification records the values under `parallelism` in its report.
+
 ## Services
 
 Service workflows in schemas 2 and 3 use host orchestration from the verified Git revision. A task's `services`

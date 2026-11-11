@@ -42,6 +42,11 @@ review candidate changes and preserve each project's acceptance criteria.
 
 ## Development workflow improvements
 
+- Each top-level run exports conservative `CHAINMAN_JOBS`, `CHAINMAN_LANES` and
+  `CHAINMAN_JOBS_PER_LANE` hints (`CHAINMAN_PARALLELISM=aggressive` opts in), plus a
+  free 100-port `CHAINMAN_PORT_BASE` block in host-nix mode. Nested commands inherit
+  them; see [run-wide parallelism](configuration.md#run-wide-parallelism).
+
 - Compatible Cargo updates now preserve valid aliases of different major-version families while retaining selected-pin and exact artifact checks.
 
 - Nested task wrappers can reuse a verified environment through

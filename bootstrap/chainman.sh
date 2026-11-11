@@ -1394,6 +1394,10 @@ while IFS= read -r pattern; do
     done < "$temporary/names"
 done < "$temporary/patterns"
 
+# Nested container entries inherit run-wide parallelism; ports stay fixed there.
+for name in CHAINMAN_PARALLELISM CHAINMAN_JOBS CHAINMAN_LANES CHAINMAN_JOBS_PER_LANE; do
+    if grep -q -x -- "$name" "$temporary/names"; then set -- --env "$name" "$@"; fi
+done
 if grep -q '^--display$' "$temporary/options"; then
     # Override ordinary environment forwarding with the scoped authority.
     set -- --env "DISPLAY=:$display_number" --env XAUTHORITY=/chainman-x11-authority "$@"

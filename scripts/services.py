@@ -772,6 +772,12 @@ def export(root: Path, arguments: list[str]) -> int:
     # the selected project lane. Carry the requesting task, not its environment,
     # so services and watched builds can reconstruct the same context there.
     forwarded["CHAINMAN_CONTEXT_TASK"] = task
+    import parallelism
+
+    # Services and tasks of one controller run share one computation and port
+    # block; values already inherited from an enclosing recipe are kept.
+    parallelism.announce(os.environ, chainman.run_resources(cfg))
+    forwarded.update(parallelism.exported(os.environ))
     if os.environ.get("TOOLCHAIN_CONTAINER") != "1" and os.environ.get(
         "CHAINMAN_STORAGE_PATHS"
     ):

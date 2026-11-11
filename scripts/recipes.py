@@ -113,11 +113,17 @@ def actions(cfg: Mapping[str, object]) -> dict[str, list[list[str]]]:
     return actions
 
 
-def plan(cfg: Mapping[str, object], name: str) -> str:
+def plan(
+    cfg: Mapping[str, object], name: str, exports: Mapping[str, str] | None = None
+) -> str:
     commands = actions(cfg).get(name)
     if commands is None:
         raise ValueError(f"Unknown standard recipe: {name}")
     lines = ["entry=$1", "shift"]
+    lines.extend(
+        f"export {key}={shlex.quote(value)}"
+        for key, value in sorted((exports or {}).items())
+    )
     for index, command in enumerate(commands):
         last = index == len(commands) - 1
         lines.append(

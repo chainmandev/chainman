@@ -544,6 +544,31 @@ def run_project(root: Path, action: str, extra: list[str]) -> int | None:
     return None
 
 
+def run_resources(cfg: Mapping[str, object]) -> dict[str, object]:
+    """Project resources overlaid by the default profile's, as for its tasks."""
+    default = table(cfg.get("project", {}), "Project").get("default_profile", "default")
+    profiles = table(cfg.get("profiles", {}), "Profiles")
+    selected = profiles.get(default, {}) if isinstance(default, str) else {}
+    return {
+        **table(cfg.get("resources", {}), "Project resources"),
+        **table(
+            table(selected, "Default profile").get("resources", {}),
+            "Profile resources",
+        ),
+    }
+
+
+# Top-level entries that start work. Nested entries inherit the exported values.
+PARALLELISM_ACTIONS = {
+    "run",
+    "exec",
+    "shell",
+    "setup",
+    "_verification-plan",
+    "_verification-update-plan",
+}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -682,6 +707,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         cfg = configuration(root)
         os.environ.update(CHAINMAN_ROOT=str(root), CHAINMAN_RUNTIME=str(RUNTIME))
         rest = args.arguments
+        if args.action in PARALLELISM_ACTIONS:
+            import parallelism
+
+            parallelism.announce(os.environ, run_resources(cfg))
         if args.action in {"attest", "npm-publish"}:
             import attestation
 
@@ -767,7 +796,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if tc.host_mode():
                 host_execution.validate_recipe(root, rest[0])
-            print(recipes.plan(cfg, rest[0]))
+            exports = {}
+            if any(action[0] in {"run", "setup"} for action in actions):
+                import parallelism
+
+                # Every task of the recipe inherits one computation and port block.
+                parallelism.announce(os.environ, run_resources(cfg))
+                exports = parallelism.exported(os.environ)
+            print(recipes.plan(cfg, rest[0], exports))
         elif args.action == "_format-plan":
             import recipes
 
