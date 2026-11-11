@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"syscall"
 	"time"
 )
@@ -34,6 +35,7 @@ type VerificationPlan struct {
 	IdentityMounts  string               `json:"identity_mounts,omitempty"`
 	HealthCommand   []string             `json:"health_command"`
 	Identity        VerificationIdentity `json:"identity"`
+	Parallelism     map[string]string    `json:"parallelism,omitempty"`
 	Gates           []VerificationGate   `json:"gates"`
 }
 type VerificationResult struct {
@@ -52,8 +54,13 @@ type VerificationReport struct {
 	Ended    *time.Time           `json:"ended_at"`
 	Code     int                  `json:"exit_code"`
 	Reason   string               `json:"reason,omitempty"`
-	Gates    []VerificationResult `json:"gates"`
+	// Run-wide parallelism values inherited by every gate.
+	Parallelism map[string]string    `json:"parallelism,omitempty"`
+	Gates       []VerificationResult `json:"gates"`
 }
+
+var verificationParallelism = regexp.MustCompile(`^CHAINMAN_(PARALLELISM|JOBS|LANES|JOBS_PER_LANE|PORT_BASE)$`)
+var verificationParallelValue = regexp.MustCompile(`^(conservative|aggressive|[1-9][0-9]{0,5})$`)
 
 func verificationValidate(p VerificationPlan) error {
 	if p.Schema != 1 || !filepath.IsAbs(p.Root) || filepath.Clean(p.Root) != p.Root || len(p.Gates) == 0 ||
@@ -66,6 +73,11 @@ func verificationValidate(p VerificationPlan) error {
 	}
 	if len(p.IdentityCommand) == 3 && (p.IdentityCommand[2] != p.Root || !filepath.IsAbs(p.IdentityRoot) || !filepath.IsAbs(p.IdentityMounts)) {
 		return fmt.Errorf("invalid verification identity boundary")
+	}
+	for name, value := range p.Parallelism {
+		if !verificationParallelism.MatchString(name) || !verificationParallelValue.MatchString(value) {
+			return fmt.Errorf("invalid verification parallelism")
+		}
 	}
 	seen := map[string]bool{}
 	for _, gate := range p.Gates {
@@ -184,7 +196,7 @@ func verificationInterrupted(signals <-chan os.Signal) int {
 
 func verificationRun(p VerificationPlan, directory string) (result int) {
 	completed := false
-	report := VerificationReport{Schema: 1, Root: p.Root, Identity: p.Identity, Started: time.Now().UTC(), Code: 1}
+	report := VerificationReport{Schema: 1, Root: p.Root, Identity: p.Identity, Started: time.Now().UTC(), Code: 1, Parallelism: p.Parallelism}
 	for _, gate := range p.Gates {
 		report.Gates = append(report.Gates, VerificationResult{Name: gate.Name, Status: "unrun"})
 	}
@@ -276,6 +288,9 @@ func verificationRun(p VerificationPlan, directory string) (result int) {
 		fmt.Fprintf(os.Stderr, "\nVerification gate %d/%d: %s\n", index+1, len(p.Gates), gate.Name)
 		started := time.Now()
 		cmd := verificationCommand(p, gate.Argv)
+		for name, value := range p.Parallelism {
+			cmd.Env = append(cmd.Env, name+"="+value)
+		}
 		cmd.Stdout, cmd.Stderr = io.MultiWriter(os.Stdout, log), io.MultiWriter(os.Stderr, log)
 		code := exitCode(hookRunWithShutdown(cmd, 0, 0, 300*time.Second))
 		row.Seconds, row.Code = time.Since(started).Seconds(), &code

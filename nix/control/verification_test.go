@@ -27,7 +27,7 @@ func verificationFixture(t *testing.T, names ...string) (VerificationPlan, strin
 	script := "#!/bin/sh\nset -eu\ncase \"$1\" in\n" +
 		"_verification-identity) if [ -e changed ]; then printf '{}'; else printf '%s' " + quote(string(body)) + "; fi ;;\n" +
 		"status) if [ -e unsafe ]; then printf '{}'; else printf '%s' " + quote(health) + "; fi ;;\n" +
-		"run) printf '%s\\n' \"$2\" >> events; printf 'output %s\\n' \"$2\"; case \"$2\" in\n" +
+		"run) printf '%s\\n' \"$2\" >> events; printf '%s' \"${CHAINMAN_JOBS:-}\" > \"jobs-$2\"; printf 'output %s\\n' \"$2\"; case \"$2\" in\n" +
 		"fail) exit 7 ;; killed) exit 137 ;; unsafe) touch unsafe; exit 8 ;; mutate) touch changed ;;\n" +
 		"slow) trap 'exit 0' TERM INT HUP; touch ready; while :; do sleep 1; done ;;\n" +
 		"esac ;; *) exit 2 ;; esac\n"
@@ -84,6 +84,30 @@ func TestVerificationAllGreen(t *testing.T) {
 	report := verificationReadReport(t, output)
 	if report.Code != 0 || report.Identity != plan.Identity {
 		t.Fatalf("report %+v", report)
+	}
+}
+func TestVerificationGatesInheritAndReportParallelism(t *testing.T) {
+	plan, output := verificationFixture(t, "first", "last")
+	plan.Parallelism = map[string]string{"CHAINMAN_PARALLELISM": "conservative", "CHAINMAN_JOBS": "3", "CHAINMAN_PORT_BASE": "41200"}
+	if err := verificationValidate(plan); err != nil {
+		t.Fatal(err)
+	}
+	if code := verificationRun(plan, output); code != 0 {
+		t.Fatalf("code %d", code)
+	}
+	for _, gate := range []string{"first", "last"} {
+		if body, err := os.ReadFile(filepath.Join(plan.Root, "jobs-"+gate)); err != nil || string(body) != "3" {
+			t.Fatalf("gate %s jobs %q %v", gate, body, err)
+		}
+	}
+	if report := verificationReadReport(t, output); report.Parallelism["CHAINMAN_PORT_BASE"] != "41200" || len(report.Parallelism) != 3 {
+		t.Fatalf("report %+v", report)
+	}
+	for _, invalid := range []map[string]string{{"PATH": "1"}, {"CHAINMAN_JOBS": "0"}, {"CHAINMAN_JOBS": "3\nX=1"}} {
+		plan.Parallelism = invalid
+		if verificationValidate(plan) == nil {
+			t.Fatalf("parallelism %v accepted", invalid)
+		}
 	}
 }
 func TestVerificationStopsOnUnsafeCleanupAndSourceDrift(t *testing.T) {

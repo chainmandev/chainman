@@ -234,6 +234,7 @@ def verification_plan(
 ) -> Table:
     """Describe existing finite task entries, without changing their execution."""
     import admission
+    import parallelism
     import services
     import workflows
 
@@ -284,6 +285,7 @@ def verification_plan(
         "identity_command": [identity_launcher, "_verification-identity"],
         "health_command": [health_controller, "status", state],
         "identity": verification_identity(root),
+        "parallelism": parallelism.exported(os.environ),
         "gates": [
             {
                 "name": argv[1],
