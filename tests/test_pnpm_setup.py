@@ -47,7 +47,7 @@ class DeclarationTests(unittest.TestCase):
 
     def test_explicit_setup_closure_deduplicates_selected_source_directories(self):
         with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             root = base / "consumer"
             source = base / "source"
             root.mkdir()
