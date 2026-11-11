@@ -82,5 +82,53 @@ class ResourceTests(unittest.TestCase):
                 detect.assert_not_called()
 
 
+class TotalResourceTests(unittest.TestCase):
+    def test_total_memory_is_bounded_by_cgroup_limits_not_current_use(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            proc, cg = root / "proc", root / "cg"
+            (proc / "self").mkdir(parents=True)
+            (cg / "user/app").mkdir(parents=True)
+            (proc / "meminfo").write_text(
+                "MemTotal: 40000000 kB\nMemAvailable: 1000 kB\n"
+            )
+            (proc / "self/cgroup").write_text("0::/user/app\n")
+            (cg / "user/memory.max").write_text(str(8 * resources.GIB))
+            (cg / "user/memory.current").write_text(str(7 * resources.GIB))
+            (cg / "user/app/memory.max").write_text("max")
+            (cg / "user/cpu.max").write_text("300000 100000")
+            self.assertEqual(
+                resources.linux_limits(proc, cg, total=True), (8 * resources.GIB, 3)
+            )
+            (cg / "user/memory.max").write_text("max")
+            self.assertEqual(
+                resources.linux_limits(proc, cg, total=True)[0], 40000000 * 1024
+            )
+
+    def test_affinity_and_quota_bound_logical_cpus(self):
+        with (
+            patch.object(resources.sys, "platform", "linux"),
+            patch.object(resources.platform, "system", return_value="Linux"),
+            patch.object(resources.os, "cpu_count", return_value=88),
+            patch.object(
+                resources.os,
+                "sched_getaffinity",
+                return_value=set(range(10)),
+                create=True,
+            ),
+            patch.object(
+                resources, "linux_limits", return_value=(32 * resources.GIB, 6)
+            ) as limits,
+        ):
+            self.assertEqual(resources.detected(total=True), (6, 32 * resources.GIB))
+            limits.assert_called_once_with(total=True)
+
+    def test_lane_memory_is_a_resource_field_without_job_variables(self):
+        resources.validate({"lane_memory_gib": 8})
+        self.assertEqual(resources.lane_memory({}), 6)
+        with self.assertRaisesRegex(ValueError, "job_variables"):
+            resources.validate({"lane_memory_gib": 8, "max_jobs": 2})
+
+
 if __name__ == "__main__":
     unittest.main()

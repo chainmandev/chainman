@@ -31,12 +31,16 @@ def read(path: Path) -> str:
 
 
 def linux_limits(
-    proc: Path = Path("/proc"), cgroups: Path = Path("/sys/fs/cgroup")
+    proc: Path = Path("/proc"),
+    cgroups: Path = Path("/sys/fs/cgroup"),
+    *,
+    total: bool = False,
 ) -> tuple[int | None, int | None]:
+    """Available memory by default; total selects limits without current use."""
     memory: list[int] = []
     cpu: list[int] = []
     for line in read(proc / "meminfo").splitlines():
-        if line.startswith("MemAvailable:"):
+        if line.startswith("MemTotal:" if total else "MemAvailable:"):
             parts = line.split()
             if len(parts) > 1 and parts[1].isdecimal():
                 memory.append(int(parts[1]) * 1024)
@@ -52,8 +56,8 @@ def linux_limits(
     for directory in paths:
         limit = read(directory / "memory.max")
         used = read(directory / "memory.current")
-        if limit.isdecimal() and used.isdecimal():
-            memory.append(max(0, int(limit) - int(used)))
+        if limit.isdecimal() and (total or used.isdecimal()):
+            memory.append(int(limit) if total else max(0, int(limit) - int(used)))
         quota = read(directory / "cpu.max").split()
         if len(quota) == 2:
             amount, period = map(positive_integer, quota)
@@ -62,12 +66,12 @@ def linux_limits(
     # Retain support for the v1 container layout used by older engines.
     v1_limit = positive_integer(read(cgroups / "memory/memory.limit_in_bytes"))
     used = read(cgroups / "memory/memory.usage_in_bytes")
-    if v1_limit and used.isdecimal():
-        memory.append(max(0, v1_limit - int(used)))
+    if v1_limit and (total or used.isdecimal()):
+        memory.append(v1_limit if total else max(0, v1_limit - int(used)))
     return (min(memory) if memory else None, min(cpu) if cpu else None)
 
 
-def detected() -> tuple[int, int | None]:
+def detected(*, total: bool = False) -> tuple[int, int | None]:
     cpus = os.cpu_count() or 1
     if sys.platform == "linux":
         try:
@@ -76,7 +80,7 @@ def detected() -> tuple[int, int | None]:
             pass
     memory = None
     if platform.system() == "Linux":
-        memory, quota = linux_limits()
+        memory, quota = linux_limits(total=total)
         if quota is not None:
             cpus = min(cpus, quota)
     elif platform.system() == "Darwin":
@@ -103,12 +107,15 @@ def policy(settings: object, *, require_variables: bool = True) -> Policy:
     if not isinstance(settings, dict) or set(settings) - {
         "max_jobs",
         "memory_per_job_gib",
+        "lane_memory_gib",
         "job_variables",
     }:
         raise ValueError("Unknown resource policy field")
+    lane_memory(settings)
     variables: object = settings.get("job_variables", [])
+    # lane_memory_gib alone sizes CHAINMAN_LANES and exports no job variable.
     if not isinstance(variables, list) or (
-        settings and require_variables and not variables
+        set(settings) - {"lane_memory_gib"} and require_variables and not variables
     ):
         raise ValueError("Resource policy requires explicit job_variables")
     names: list[str] = []
@@ -135,6 +142,21 @@ def policy(settings: object, *, require_variables: bool = True) -> Policy:
     ):
         raise ValueError("resources.memory_per_job_gib must be positive and finite")
     return Policy(maximum, per_job, tuple(names))
+
+
+def lane_memory(settings: object) -> int | float:
+    """Memory budget for one concurrent lane; 6 GiB unless configured."""
+    value: object = (
+        settings.get("lane_memory_gib", 6) if isinstance(settings, dict) else 6
+    )
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or (isinstance(value, float) and not math.isfinite(value))
+        or value <= 0
+    ):
+        raise ValueError("resources.lane_memory_gib must be positive and finite")
+    return value
 
 
 def _budget(policy: Policy, cpus: int, memory: int | None) -> int:

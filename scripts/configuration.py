@@ -46,7 +46,9 @@ TABLES = {
     "watch": set("task paths ignore debounce_ms startup_seconds".split()),
     "container": set("image command ports environment volumes read_only user".split()),
     "transport": set("ports mounts host_access display".split()),
-    "resources": set("max_jobs memory_per_job_gib job_variables".split()),
+    "resources": set(
+        "max_jobs memory_per_job_gib lane_memory_gib job_variables".split()
+    ),
 }
 BOOLEANS = set(
     "trim_body optional trim pnpm compiler_cache cleanup_children wait_for_services exclusive exclusive_services read_only host_access".split()
@@ -55,7 +57,7 @@ ARRAYS = set(
     "commands command shutdown_command depends_on setup services inputs exclude_inputs environment_inputs artifacts paths ignore ports mounts volumes job_variables entry_setup allowed_modes allowed_platforms".split()
 )
 NUMBERS = set(
-    "timeout_seconds shutdown_seconds period_seconds failure_threshold port status_code debounce_ms startup_seconds max_jobs memory_per_job_gib".split()
+    "timeout_seconds shutdown_seconds period_seconds failure_threshold port status_code debounce_ms startup_seconds max_jobs memory_per_job_gib lane_memory_gib".split()
 )
 
 
