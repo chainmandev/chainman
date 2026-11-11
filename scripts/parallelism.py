@@ -5,13 +5,16 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, MutableMapping
 import random
 import socket
+import subprocess
 import sys
 
 import resources
 
 MODES = ("conservative", "aggressive")
-PORT_FIRST = 20000
-PORT_LIMIT = 60000
+PORT_FIRST = 10000
+PORT_LIMIT = 65536
+# Union of the Linux (32768-60999) and IANA/macOS (49152-65535) defaults.
+EPHEMERAL_FALLBACK = (32768, 65535)
 PORT_BLOCK = 100
 PORT_ATTEMPTS = 32
 RANDOM = random.SystemRandom()
@@ -49,23 +52,66 @@ def bindable(port: int) -> bool:
     return True
 
 
+def _system_ephemeral() -> tuple[int, int]:
+    if sys.platform == "darwin":
+        first, last = (
+            subprocess.run(
+                ["sysctl", "-n", f"net.inet.ip.portrange.{key}"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            ).stdout
+            for key in ("first", "last")
+        )
+    else:
+        with open("/proc/sys/net/ipv4/ip_local_port_range", encoding="ascii") as source:
+            first, last = source.read().split()
+    return int(first), int(last)
+
+
+def ephemeral_range(
+    read: Callable[[], tuple[int, int]] = _system_ephemeral,
+) -> tuple[int, int]:
+    """Return the OS outgoing-connection port range, or a conservative fallback."""
+    try:
+        low, high = read()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return EPHEMERAL_FALLBACK
+    if not 0 < low <= high < PORT_LIMIT:
+        return EPHEMERAL_FALLBACK
+    return low, high
+
+
+def block_bases(ephemeral: tuple[int, int]) -> range:
+    """Aligned block bases in the largest window of 10000-65535 outside ephemeral."""
+    low, high = ephemeral
+    windows = [(PORT_FIRST, low), (max(PORT_FIRST, high + 1), PORT_LIMIT)]
+    first, limit = max(windows, key=lambda window: window[1] - window[0])
+    first = -(-first // PORT_BLOCK) * PORT_BLOCK
+    return range(first, limit - PORT_BLOCK + 1, PORT_BLOCK)
+
+
 def port_block(
     free: Callable[[int], bool] = bindable,
     choose: Callable[[range], int] = RANDOM.choice,
+    ephemeral: Callable[[], tuple[int, int]] = ephemeral_range,
 ) -> int:
-    """Select a random 100-port loopback block whose ports are all bindable now."""
-    bases = range(PORT_FIRST, PORT_LIMIT, PORT_BLOCK)
+    """Select a random free 100-port loopback block outside the ephemeral range."""
+    low, high = ephemeral()
+    bases = block_bases((low, high))
     tried: set[int] = set()
-    for _ in range(PORT_ATTEMPTS):
+    for _ in range(PORT_ATTEMPTS if bases else 0):
         base = choose(bases)
         if base in tried:
             continue
         tried.add(base)
         if all(free(port) for port in range(base, base + PORT_BLOCK)):
             return base
+    window = f"{bases[0]}-{bases[-1] + PORT_BLOCK - 1}" if bases else "no window"
     raise ValueError(
-        f"No free {PORT_BLOCK}-port loopback block found in "
-        f"{PORT_FIRST}-{PORT_LIMIT - 1}; free ports or set CHAINMAN_PORT_BASE"
+        f"No free {PORT_BLOCK}-port loopback block found in {window} "
+        f"(outside ephemeral ports {low}-{high}); free ports or set CHAINMAN_PORT_BASE"
     )
 
 

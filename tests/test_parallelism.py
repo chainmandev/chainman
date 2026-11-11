@@ -150,23 +150,79 @@ class ApplyTests(unittest.TestCase):
         self.assertTrue(lines[3].endswith("run a"))
 
 
+def LINUX() -> tuple[int, int]:
+    return 32768, 60999
+
+
 class PortBlockTests(unittest.TestCase):
     def test_collision_selects_another_block(self):
-        choices = iter([41200, 41200, 25000])
+        choices = iter([21200, 21200, 25000])
         base = parallelism.port_block(
-            free=lambda port: not 41200 <= port < 41300,
+            free=lambda port: not 21200 <= port < 21300,
             choose=lambda _: next(choices),
+            ephemeral=LINUX,
         )
         self.assertEqual(base, 25000)
 
     def test_no_free_block_is_a_clear_error(self):
-        with self.assertRaisesRegex(ValueError, "No free 100-port loopback block"):
-            parallelism.port_block(free=lambda port: port % 100 != 57)
+        with self.assertRaisesRegex(
+            ValueError,
+            "No free 100-port loopback block found in 10000-32699 "
+            r"\(outside ephemeral ports 32768-60999\)",
+        ):
+            parallelism.port_block(free=lambda port: port % 100 != 57, ephemeral=LINUX)
 
-    def test_selected_block_is_aligned_inside_the_range(self):
-        base = parallelism.port_block(free=lambda port: True)
-        self.assertEqual(base % 100, 0)
-        self.assertTrue(20000 <= base <= 59900)
+    def test_selected_block_is_aligned_below_the_ephemeral_range(self):
+        for _ in range(50):
+            base = parallelism.port_block(free=lambda port: True, ephemeral=LINUX)
+            self.assertEqual(base % 100, 0)
+            self.assertTrue(10000 <= base and base + 99 < 32768)
+
+    def test_windows_exclude_ephemeral_ranges(self):
+        for ephemeral, first, last in [
+            ((32768, 60999), 10000, 32600),  # Linux default
+            ((49152, 65535), 10000, 49000),  # macOS / IANA
+            ((40000, 41000), 10000, 39900),  # narrow: larger window below
+            ((10000, 20000), 20100, 65400),  # low range: window above
+            ((1024, 65535), None, None),  # everything ephemeral
+        ]:
+            with self.subTest(ephemeral=ephemeral):
+                bases = parallelism.block_bases(ephemeral)
+                if first is None:
+                    self.assertFalse(bases)
+                    continue
+                self.assertEqual((bases[0], bases[-1]), (first, last))
+                low, high = ephemeral
+                for base in bases:
+                    self.assertTrue(base + 99 < low or base > high)
+
+    def test_no_window_is_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "in no window .*1024-65535"):
+            parallelism.port_block(
+                free=lambda port: True, ephemeral=lambda: (1024, 65535)
+            )
+
+    def test_ephemeral_range_reads_or_falls_back(self):
+        self.assertEqual(parallelism.ephemeral_range(LINUX), (32768, 60999))
+        self.assertEqual(
+            parallelism.ephemeral_range(lambda: (49152, 65535)), (49152, 65535)
+        )
+
+        def unreadable() -> tuple[int, int]:
+            raise FileNotFoundError("/proc/sys/net/ipv4/ip_local_port_range")
+
+        for read in (unreadable, lambda: (61000, 32768), lambda: (0, 70000)):
+            with self.subTest(read=read):
+                self.assertEqual(
+                    parallelism.ephemeral_range(read), parallelism.EPHEMERAL_FALLBACK
+                )
+        self.assertEqual(
+            parallelism.block_bases(parallelism.EPHEMERAL_FALLBACK)[-1], 32600
+        )
+
+    def test_system_ephemeral_range_is_readable_here(self):
+        low, high = parallelism.ephemeral_range()
+        self.assertTrue(0 < low <= high <= 65535)
 
     def test_bound_loopback_port_is_not_free(self):
         import socket

@@ -435,7 +435,7 @@ already set by the caller always wins. Projects that do not read them are unaffe
 | `CHAINMAN_JOBS` | max(1, min(cpus/2, mem/2)) | max(1, min(cpus, mem/1.5)) |
 | `CHAINMAN_LANES` | 1 | max(1, min(cpus/3, mem/`lane_memory_gib`)) |
 | `CHAINMAN_JOBS_PER_LANE` | max(1, jobs/lanes) | max(1, jobs/lanes) |
-| `CHAINMAN_PORT_BASE` | host-nix only: random free loopback block | same |
+| `CHAINMAN_PORT_BASE` | host-nix only: random free loopback block outside ephemeral ports | same |
 
 `cpus` is the logical CPU count and `mem` the total memory in GiB, both bounded
 by affinity and cgroup limits as above; quotients round down. Inside a lane, size
@@ -446,12 +446,16 @@ and 8 GiB give 1 job conservatively and 2 aggressively; 7 CPUs and 19 GiB give 3
 or 7 jobs in 2 lanes; 44 CPUs and 256 GiB give 22, or 44 jobs in 14 lanes.
 
 In host-nix mode the run owns `CHAINMAN_PORT_BASE` through `CHAINMAN_PORT_BASE+99`,
-a 100-port block in 20000–59999 whose ports were all bindable on `127.0.0.1` at
-selection. Projects derive host-side ports as base plus a fixed offset. A later
+a 100-port block whose ports were all bindable on `127.0.0.1` at selection. Blocks
+lie in 10000–65535 outside the OS ephemeral (outgoing) range, so outbound connections
+cannot take ports in it: Linux reads `/proc/sys/net/ipv4/ip_local_port_range`
+(default 32768–60999, giving 10000–32699), macOS `net.inet.ip.portrange.first`/`last`
+(default 49152–65535). The larger window below or above that range is used; if the
+range is unreadable, Chainman assumes 32768–65535. Projects derive host-side ports as base plus a fixed offset. A later
 bind failure is the project's clear error, not a silent retry; a rerun selects a new
 block. Container-nix and bare-host modes leave it unset and keep fixed ports.
 The run prints one line, for example
-`Chainman parallelism: conservative — jobs 3 (per lane 3), lanes 1, ports 41200–41299.`,
+`Chainman parallelism: conservative — jobs 3 (per lane 3), lanes 1, ports 21200–21299.`,
 and keep-going verification records the values under `parallelism` in its report.
 
 ## Services
