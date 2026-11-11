@@ -184,6 +184,9 @@ def apply(settings: object, env: MutableMapping[str, str]) -> None:
             raise ValueError(
                 f"{variable} must be a positive integer when explicitly configured"
             )
-    jobs = _budget(configured, *detected())
+    cpus, memory = detected()
+    # Inside a run, never exceed one lane's share of the run-wide budget.
+    lane = positive_integer(env.get("CHAINMAN_JOBS_PER_LANE", ""))
+    jobs = _budget(configured, min(cpus, lane) if lane else cpus, memory)
     for variable in configured.variables:
         env.setdefault(variable, str(jobs))

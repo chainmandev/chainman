@@ -420,6 +420,7 @@ and memory per job; it is always at least one. Linux considers available memory,
 affinity and cgroup-v2 ancestor limits, with v1 memory-limit support. macOS uses
 available CPU count and physical memory. These are concurrency hints rather than
 memory isolation. Workflows without a resource declaration perform no resource probe.
+Within a run, the budget is also capped by `CHAINMAN_JOBS_PER_LANE` (below).
 
 ### Run-wide parallelism
 

@@ -53,6 +53,20 @@ class ResourceTests(unittest.TestCase):
             env, {"CARGO_BUILD_JOBS": "7", "CMAKE_BUILD_PARALLEL_LEVEL": "2"}
         )
 
+    def test_run_wide_lane_share_caps_job_variables(self):
+        env = {"CHAINMAN_JOBS_PER_LANE": "3"}
+        with patch.object(resources, "detected", return_value=(16, 64 * resources.GIB)):
+            resources.apply(
+                {"job_variables": ["CARGO_BUILD_JOBS"], "memory_per_job_gib": 3}, env
+            )
+        self.assertEqual(env["CARGO_BUILD_JOBS"], "3")
+        env = {"CHAINMAN_JOBS_PER_LANE": "12"}
+        with patch.object(resources, "detected", return_value=(16, 9 * resources.GIB)):
+            resources.apply(
+                {"job_variables": ["CARGO_BUILD_JOBS"], "memory_per_job_gib": 3}, env
+            )
+        self.assertEqual(env["CARGO_BUILD_JOBS"], "3")
+
     def test_ordinary_commands_do_not_probe_resources(self):
         with patch.object(resources, "detected") as detect:
             resources.apply({}, {})
