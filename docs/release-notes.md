@@ -42,6 +42,9 @@ review candidate changes and preserve each project's acceptance criteria.
 
 ## Development workflow improvements
 
+- Service tasks no longer fail on unrelated services: only the requested closure
+  needs its container engine and environment references. Unpreparable other
+  services are left out of the shared controller templates.
 - Update and query commands make fewer GitHub REST requests. Tags resolve through
   the Git protocol. Commit times, annotated tag targets and immutable release
   metadata are cached across runs. A `/rate_limit` preflight stops exhausted runs

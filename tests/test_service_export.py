@@ -330,6 +330,109 @@ shutdown_command=["checkpoint"]
                         ],
                     )
 
+    def closure_plan(self, base, task, engine="", environment=None):
+        root = base / "project"
+        root.mkdir(exist_ok=True)
+        digest = "@sha256:" + "a" * 64
+        (root / "chainman.toml").write_text(f"""schema=3
+[project]
+default_profile="host"
+[environment]
+pass=["FIXTURE_DATABASE_PASSWORD"]
+[tasks.dev]
+services=["web"]
+commands=[["true"]]
+[tasks.analytics]
+services=["analytics"]
+commands=[["true"]]
+[services.web]
+command=["serve"]
+depends_on=["store"]
+[services.store]
+command=["store"]
+[services.reporter]
+command=["report"]
+depends_on=["analytics"]
+[services.analytics]
+[services.analytics.container]
+image="registry.example.invalid/analytics{digest}"
+environment={{DATABASE_PASSWORD="{{env:FIXTURE_DATABASE_PASSWORD}}"}}
+""")
+        output = Path(tempfile.mkdtemp(dir=base))
+        # Values reach planning only through the captured host environment.
+        (output / "host-environment").write_bytes(
+            b"".join(
+                f"{key}={value}".encode() + b"\0"
+                for key, value in (environment or {}).items()
+            )
+        )
+        real_run = subprocess.run
+
+        def run(argv, **kwargs):
+            if "--out-link" in argv:
+                return subprocess.CompletedProcess(argv, 0, self.package + "\n")
+            return real_run(argv, **kwargs)
+
+        with (
+            patch.dict(os.environ, CHAINMAN_MODE="host-nix"),
+            patch.object(services.subprocess, "run", side_effect=run),
+        ):
+            os.environ.pop("FIXTURE_DATABASE_PASSWORD", None)
+            services.export(
+                root,
+                [
+                    str(output),
+                    "linux-arm64",
+                    str(base / "state"),
+                    engine,
+                    "/fixture/launcher",
+                    "run",
+                    task,
+                ],
+            )
+        return json.loads((output / "plan.json").read_text())
+
+    def test_unrequested_services_need_no_engine_or_their_environment(self):
+        with tempfile.TemporaryDirectory(prefix="chainman closure ") as temporary:
+            plan = self.closure_plan(Path(temporary).resolve(), "dev")
+        self.assertEqual(plan["requested"], ["store", "web"])
+        # The transitive host closure is prepared; the container service and the
+        # template that depends on it are omitted rather than failing the task.
+        self.assertEqual(sorted(plan["services"]), ["store", "web"])
+        self.assertEqual(plan["volumes"], [])
+        self.assertNotIn("resources", plan)
+
+    def test_available_unrequested_services_remain_templates_for_later_clients(self):
+        with tempfile.TemporaryDirectory(prefix="chainman closure ") as temporary:
+            plan = self.closure_plan(
+                Path(temporary).resolve(),
+                "dev",
+                engine="/fixture/docker",
+                environment={"FIXTURE_DATABASE_PASSWORD": "fixture-value"},
+            )
+        self.assertEqual(plan["requested"], ["store", "web"])
+        self.assertEqual(
+            sorted(plan["services"]), ["analytics", "reporter", "store", "web"]
+        )
+
+    def test_requested_container_service_still_requires_engine_and_environment(self):
+        with tempfile.TemporaryDirectory(prefix="chainman closure ") as temporary:
+            base = Path(temporary).resolve()
+            with self.assertRaisesRegex(ValueError, "host Docker or Podman"):
+                self.closure_plan(base, "analytics")
+            with self.assertRaisesRegex(
+                ValueError, "Environment reference is unset: FIXTURE_DATABASE_PASSWORD"
+            ):
+                self.closure_plan(base, "analytics", engine="/fixture/docker")
+            plan = self.closure_plan(
+                base,
+                "analytics",
+                engine="/fixture/docker",
+                environment={"FIXTURE_DATABASE_PASSWORD": "fixture-value"},
+            )
+        self.assertEqual(plan["requested"], ["analytics"])
+        self.assertIn("analytics", plan["services"])
+
     def test_service_image_is_separated_from_engine_options(self):
         digest = "@sha256:" + "a" * 64
         image = "registry.example.invalid:5000/team/database:1.0" + digest

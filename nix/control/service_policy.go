@@ -71,3 +71,15 @@ func degradedServices(p Plan, processes []Process, selected map[string]bool) []s
 	sort.Strings(names)
 	return names
 }
+
+// A running controller only starts services from its saved templates. Planning
+// omits an unrequested service it could not prepare (no engine or an unset
+// environment reference); a later client that needs it must restart the scope.
+func retainedTemplates(saved Plan, selected []string) error {
+	for _, name := range selected {
+		if _, ok := saved.Services[name]; !ok {
+			return fmt.Errorf("service %s was unavailable when the running services started; stop them with services-stop and start again", name)
+		}
+	}
+	return nil
+}

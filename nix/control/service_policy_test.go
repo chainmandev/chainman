@@ -120,3 +120,14 @@ func TestServiceFailurePolicyRejectsUnknownValuesAndPreservesRestart(t *testing.
 		}
 	}
 }
+
+func TestRunningControllerRequiresRetainedTemplates(t *testing.T) {
+	saved := Plan{Services: map[string]Service{"web": {}, "store": {}}}
+	if err := retainedTemplates(saved, []string{"store", "web"}); err != nil {
+		t.Fatal(err)
+	}
+	err := retainedTemplates(saved, []string{"web", "analytics"})
+	if err == nil || !strings.Contains(err.Error(), "service analytics was unavailable") || !strings.Contains(err.Error(), "services-stop") {
+		t.Fatalf("missing template was not reported: %v", err)
+	}
+}

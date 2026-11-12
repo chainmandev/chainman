@@ -112,6 +112,15 @@ uses `wait_for_services = true` to retain ownership until stop or interruption.
 Inspection and stop use saved ownership state even if the current configuration
 is invalid. Stop also cancels finite tasks using those services.
 
+A task requires only its requested services and their `depends_on` closure. Their
+container engine, ports and environment references must resolve. Other declared
+services are kept as templates for later tasks sharing the same controller when
+they can be prepared now. One that needs an absent Docker or Podman, or an unset
+`{env:NAME}` reference, is left out instead of failing an unrelated task, along with
+any template that depends on it. A later task that needs it while those services
+are still running reports it as unavailable; stop the services and start again.
+Configuration validation still covers every declaration.
+
 ### External source checkouts
 
 A command service, task, or setup group may declare `source_root_env`, naming an

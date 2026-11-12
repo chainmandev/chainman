@@ -1207,6 +1207,9 @@ func acquire(p Plan, persistent bool, parent *LeaseRef, startup *startupGuard) (
 	// An empty local selection can still have live repository users without a
 	// local controller. Retain their cleanup intent when adding another task.
 	if controller(p).alive() {
+		if e = retainedTemplates(previous, selected); e != nil {
+			return cleanup(e)
+		}
 		if e = admitHTTPProbes(&previous, p, selected, previousUsers); e != nil {
 			return cleanup(e)
 		}

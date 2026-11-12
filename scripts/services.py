@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import re
 import hashlib
 import json
@@ -873,9 +874,8 @@ def export(root: Path, arguments: list[str]) -> int:
         and not Path(launcher).is_relative_to(root)
     ):
         container_launcher = str(chainman.RUNTIME / "bootstrap/chainman.sh")
-    for name, spec in declared.items():
-        if name in shared_names and not shared_requested:
-            continue
+
+    def prepare_service(name: str, spec: Table) -> None:
         if name in shared_names:
             assert shared_scope is not None
             service_root, service_key = shared_scope[0], shared_scope[1]
@@ -1170,6 +1170,46 @@ def export(root: Path, arguments: list[str]) -> int:
                     "name": build_name,
                     "token": build_owner,
                 }
+
+    # Every service in the requested closure must be prepared exactly. Others are
+    # retained as templates for later clients of the same controller when they
+    # can be prepared now; one that needs an absent engine or unset environment
+    # is omitted instead of failing a task that does not use it.
+    unavailable: list[str] = []
+    for name, spec in declared.items():
+        if name in shared_names and not shared_requested:
+            continue
+        if name in closure:
+            prepare_service(name, spec)
+            continue
+        retained_volumes = copy.deepcopy(volumes)
+        try:
+            prepare_service(name, spec)
+        except ValueError:
+            prepared.pop(name, None)
+            volumes.clear()
+            volumes.update(retained_volumes)
+            unavailable.append(name)
+    # A retained template must not reference an omitted service.
+    changed = bool(unavailable)
+    while changed:
+        changed = False
+        for name, value in list(prepared.items()):
+            if name in closure:
+                continue
+            references = [*value["depends_on"], value.get("network_service", "")]
+            if any(reference in unavailable for reference in references):
+                del prepared[name]
+                unavailable.append(name)
+                for volume in volumes.values():
+                    if name in volume["services"]:
+                        volume["services"].remove(name)
+                for volume_name in [
+                    key for key, volume in volumes.items() if not volume["services"]
+                ]:
+                    del volumes[volume_name]
+                changed = True
+
     plan: Plan = {
         "schema": 1,
         "root": str(root),
@@ -1297,6 +1337,7 @@ def export(root: Path, arguments: list[str]) -> int:
                                         planning_env,
                                     )
                                     for name in shared_names
+                                    if name not in unavailable
                                 },
                             ],
                             sort_keys=True,
