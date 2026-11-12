@@ -42,6 +42,12 @@ review candidate changes and preserve each project's acceptance criteria.
 
 ## Development workflow improvements
 
+- Update and query commands make fewer GitHub REST requests. Tags resolve through
+  the Git protocol. Commit times, annotated tag targets and immutable release
+  metadata are cached across runs. A `/rate_limit` preflight stops exhausted runs
+  early with the reset time. GitHub tokens now also come from `GH_TOKEN`, `gh auth
+  token` or a Git credential helper. Lookup is read-only and non-interactive, and a
+  rejected token continues anonymously. Opt out with `CHAINMAN_GITHUB_CREDENTIALS=off`.
 - Each top-level run exports conservative `CHAINMAN_JOBS`, `CHAINMAN_LANES` and
   `CHAINMAN_JOBS_PER_LANE` hints (`CHAINMAN_PARALLELISM=aggressive` opts in), plus a
   free 100-port `CHAINMAN_PORT_BASE` block in host-nix mode, chosen outside the

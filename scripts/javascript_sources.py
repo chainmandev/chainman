@@ -574,15 +574,14 @@ def audit_identity(
         or not re.fullmatch(r"sha256:[a-f0-9]{64}", digest)
     ):
         raise ValueError("Retained source lacks a complete immutable archive identity")
-    commit = table(
-        registry.data(f"https://api.github.com/repos/{match[1]}/commits/{revision}"),
-        "GitHub commit",
-    )
-    if commit.get("sha") != revision:
-        raise ValueError("GitHub returned a different retained source commit")
-    details = table(commit["commit"], "GitHub commit details")
-    committer = table(details["committer"], "GitHub committer")
-    published = registry.timestamp(committer["date"])
+    try:
+        published = registry.github_commit_date(match[1], revision)
+    except ValueError as exc:
+        if "different commit identity" in str(exc):
+            raise ValueError(
+                "GitHub returned a different retained source commit"
+            ) from None
+        raise
     if published > now or (
         identity not in before
         and published > now - timedelta(days=registry.minimum_age(policy))

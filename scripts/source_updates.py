@@ -157,15 +157,7 @@ def revision(value: str) -> str:
 def commit_time(repository: str, commit: str) -> datetime:
     repository_name(repository)
     revision(commit)
-    item = ad.table(
-        registry.data(f"https://api.github.com/repos/{repository}/commits/{commit}"),
-        "GitHub commit",
-    )
-    if item.get("sha") != commit:
-        raise ValueError("GitHub returned a different commit identity")
-    details = ad.table(item["commit"], "GitHub commit details")
-    committer = ad.table(details["committer"], "GitHub committer")
-    return registry.timestamp(committer["date"])
+    return registry.github_commit_date(repository, commit)
 
 
 def cutoff(policy: Mapping[str, object], now: datetime) -> datetime:
@@ -488,7 +480,19 @@ def action_release_batch(repository: str) -> dict[str, registry.Release | None]:
     return result
 
 
+IMMUTABLE_RELEASE_FIELDS = ("tag_name", "draft", "prerelease", "published_at")
+
+
 def action_release_by_tag(repository: str, tag: str) -> registry.Release | None:
+    # GitHub immutable releases cannot change their tag, state or publication
+    # time, so their metadata is reused across commands. Others are read live.
+    key = ["immutable-release", repository, tag]
+    cached = registry.immutable_get(key)
+    if isinstance(cached, dict) and set(cached) == set(IMMUTABLE_RELEASE_FIELDS):
+        try:
+            return action_release(cached, tag)
+        except ValueError:
+            pass
     try:
         item = registry.data(
             f"https://api.github.com/repos/{repository}/releases/tags/{quote(tag, safe='')}"
@@ -498,7 +502,16 @@ def action_release_by_tag(repository: str, tag: str) -> registry.Release | None:
             raise
         # An advertised Git tag without a published GitHub release is not a release.
         return None
-    return action_release(item, tag)
+    release = action_release(item, tag)
+    if (
+        isinstance(item, dict)
+        and item.get("immutable") is True
+        and item.get("draft") is False
+    ):
+        registry.immutable_put(
+            key, {name: item.get(name) for name in IMMUTABLE_RELEASE_FIELDS}
+        )
+    return release
 
 
 def select_action(

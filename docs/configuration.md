@@ -118,34 +118,54 @@ resolves tag and commit-time evidence only for that version, including a matchin
 commit publication time; metadata does not claim eligibility. Full version
 selection and final artifact audits still require their complete evidence.
 
-GitHub registry metadata can use an explicitly supplied `GITHUB_TOKEN` environment
-variable. Absent or empty keeps anonymous requests. Supply it through the caller's
-secret environment, never a token literal in project configuration, URLs or command
-arguments. chainman does not discover credentials from `gh`, `.netrc`, Git helpers
-or credential files. Tokens must be at most 4096 ASCII bearer-token characters
-(letters, digits, `-._~+/`, with optional trailing `=`); malformed values fail
-without being echoed.
+GitHub registry metadata uses a token when one is available. The order is
+`GITHUB_TOKEN`, then `GH_TOKEN`, then (for update and query commands) `gh auth token`,
+then `git credential fill` for `https://github.com`. Discovery is strictly read-only
+and non-interactive: prompts are disabled (`GIT_TERMINAL_PROMPT=0`,
+`GCM_INTERACTIVE=never`, `GH_PROMPT_DISABLED=1`, no ask-pass helpers, fixed helper
+input, five-second limit). Any failure, timeout or malformed value leaves requests
+anonymous. chainman never runs `git credential approve` or `reject`. A discovered
+token is never logged, printed, cached, persisted or exported to child processes.
+Set `CHAINMAN_GITHUB_CREDENTIALS=off` to skip discovery; explicit variables still
+apply. Discovered credentials carry your token's scopes. chainman uses them only for
+read-only `api.github.com` metadata requests. Tokens must be at most 4096 ASCII
+bearer-token characters (letters, digits, `-._~+/`, with optional trailing `=`);
+malformed values fail without being echoed. Never put a token literal in project
+configuration, URLs or command arguments.
 
 The first registry request fixes the credential context for that command. Changing
-`GITHUB_TOKEN` afterward fails before either cached evidence or another request can
-be used, including after clearing the response cache. Start a new command to change
-credentials. Authorization is attached only to `https://api.github.com`, with no
-userinfo and the default HTTPS port. Every authenticated redirect is rejected before
-it can dispatch a successor request. Other origins retain anonymous transport;
-authentication errors never fall back to anonymous requests. Existing request,
-retry, maturity and immutable-source audit bounds remain in force. Authentication
-does not guarantee quota availability.
+`GITHUB_TOKEN` or `GH_TOKEN` afterward fails before either cached evidence or another
+request can be used, including after clearing the response cache. Start a new command
+to change credentials. Authorization is attached only to `https://api.github.com`,
+with no userinfo and the default HTTPS port. Every authenticated redirect is rejected
+before it can dispatch a successor request. Other origins retain anonymous transport.
+If GitHub rejects the credential (HTTP 401, or an organization SSO restriction), one
+notice is printed and the rest of the command continues anonymously. Existing
+request, retry, maturity and immutable-source audit bounds remain in force.
+
+Update and query commands keep GitHub REST use small. Tag names resolve through the
+Git protocol (`git ls-remote`, anonymous, prompts disabled), with the REST API only as
+a fallback, for example for private repositories. Content-addressed answers are kept
+under `${XDG_CACHE_HOME:-~/.cache}/chainman/github-immutable/v1`: commit committer
+times, annotated tag object targets, and release metadata that GitHub marks
+`immutable`. Each entry restates its full key; unreadable or mismatched entries are
+ignored and fetched again. Tag names, release lists and branch heads are always read
+live. Before resolving updates, chainman reads `GET /rate_limit`, which GitHub does
+not count against the quota. If the core quota is exhausted, or a later response
+reports exhaustion, the command stops with the reset time and ways to supply a token.
 
 Public chainman asset bytes are requested anonymously from the outset, including
 when metadata uses a token. GitHub can redirect those downloads to its asset host;
 no credential accompanies either request. Asset IDs, sizes and digests still bind
 the downloaded bytes to the validated release. Authenticated metadata requests
-retain their no-redirect rule; an authentication failure is never retried anonymously.
+retain their no-redirect rule.
 
-Host mode inherits the explicitly supplied variable. Container callers can select
-`environment.pass = ["GITHUB_TOKEN"]`; the existing forwarding passes its name,
-without putting its value in arguments. This option covers chainman's Python
-registry metadata requests. Native Git, Swift and Nix downloads keep their own
+Host mode inherits explicit variables and discovers on the host. Container lanes
+also run project commands, so a token reaches them only by choice. Select
+`environment.pass = ["GITHUB_TOKEN"]` (or `GH_TOKEN`); the existing forwarding passes
+the name, without putting its value in arguments. Inside a container, discovery finds
+no host `gh` or Git credentials and requests stay anonymous. This option covers
+chainman's Python registry metadata requests. Native Git, Swift and Nix downloads keep their own
 credential behavior; this does not qualify general private-repository support.
 
 Service planning keeps project environment files, defaults, values and task context

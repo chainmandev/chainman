@@ -1002,6 +1002,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.action in {"deps-query", "deps-resolve"}:
             import dependency_api
+            import registry
+
+            registry.configure_github()
 
             result = (
                 dependency_api.query_command(root, rest)
@@ -1022,8 +1025,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError("nix-update is a resolver hook inside deps-update")
             import dependency_api
             import module_updates
+            import registry
             import source_updates
 
+            registry.configure_github()
             policy, now = dependency_api.policy(root), dependency_api.instant()
             spec = module_updates.nix_spec(policy)
             if spec is not None:

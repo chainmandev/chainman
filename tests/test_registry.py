@@ -642,14 +642,15 @@ class GitHubAuthTests(unittest.TestCase):
             all(r.get_header("Authorization") == "Bearer " + self.token for r in sent)
         )
 
-    def test_absent_empty_token_and_unrelated_environment_keep_anonymous_transport(
+    def test_absent_empty_tokens_and_unrelated_environment_keep_anonymous_transport(
         self,
     ):
-        os.environ["GH_TOKEN"] = "not_selected"
+        os.environ["UNRELATED_TOKEN"] = "not_selected"
         with patch.object(self.registry, "build_opener") as authenticated:
             for supplied in (None, ""):
                 if supplied is not None:
                     os.environ["GITHUB_TOKEN"] = supplied
+                    os.environ["GH_TOKEN"] = supplied
                 response = io.BytesIO(b"public")
                 response.headers = {}
                 with patch.object(
@@ -658,6 +659,21 @@ class GitHubAuthTests(unittest.TestCase):
                     self.assertEqual(self.registry._fetch(self.url)[0], b"public")
                 self.assertIsNone(send.call_args.args[0].get_header("Authorization"))
             authenticated.assert_not_called()
+
+    def test_github_token_precedes_gh_token_which_is_used_alone(self):
+        for environment, expected in (
+            ({"GITHUB_TOKEN": self.token, "GH_TOKEN": "secondary"}, self.token),
+            ({"GITHUB_TOKEN": "", "GH_TOKEN": self.token}, self.token),
+            ({"GH_TOKEN": self.token}, self.token),
+        ):
+            with self.subTest(environment=sorted(environment)):
+                self.registry = self.module()
+                with patch.dict(os.environ, environment, clear=True):
+                    sent, _, _ = self.transport([(200, {}, b"ok")])
+                    self.registry._fetch(self.url)
+                self.assertEqual(
+                    sent[0].get_header("Authorization"), "Bearer " + expected
+                )
 
     def test_malformed_token_is_rejected_before_any_transport(self):
         with (
@@ -719,7 +735,7 @@ class GitHubAuthTests(unittest.TestCase):
 
     def test_permanent_http_errors_are_sanitized_closed_and_never_fall_back(self):
         os.environ["GITHUB_TOKEN"] = self.token
-        for status in (401, 403, 404):
+        for status in (403, 404):
             sent, closed, waits = self.transport(
                 [(status, {"Location": "location-secret"}, b"body-secret")]
             )
@@ -732,6 +748,42 @@ class GitHubAuthTests(unittest.TestCase):
             self.assertEqual(len(sent), 1)
             self.assertEqual(waits, [])
             self.assertTrue(all(stream.closed for stream in closed))
+
+    def test_rejected_credentials_continue_anonymously_for_the_command(self):
+        for status, headers in (
+            (401, {}),
+            (403, {"X-GitHub-SSO": "required; url=https://github.com/sso-secret"}),
+        ):
+            with self.subTest(status=status):
+                self.registry = self.module()
+                os.environ["GITHUB_TOKEN"] = self.token
+                sent, closed, waits = self.transport(
+                    [(status, headers, b"body-secret")]
+                )
+                anonymous = []
+
+                def send(request, timeout):
+                    anonymous.append(request)
+                    self.assertIsNone(request.get_header("Authorization"))
+                    response = io.BytesIO(b"public")
+                    response.headers = {}
+                    return response
+
+                with (
+                    patch.object(self.registry, "urlopen", side_effect=send),
+                    patch("sys.stderr", new_callable=io.StringIO) as stderr,
+                ):
+                    self.assertEqual(self.registry._fetch(self.url)[0], b"public")
+                    self.assertEqual(
+                        self.registry._fetch(self.url + "&second=1")[0], b"public"
+                    )
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(len(anonymous), 2)
+                self.assertEqual(waits, [])
+                self.assertTrue(all(stream.closed for stream in closed))
+                self.assertIn("continuing anonymously", stderr.getvalue())
+                self.assertNotIn(self.token, stderr.getvalue())
+                self.assertEqual(self.registry.github_token(), "")
 
     def test_authenticated_retries_keep_credentials_bounds_and_uncached_failures(self):
         os.environ["GITHUB_TOKEN"] = self.token

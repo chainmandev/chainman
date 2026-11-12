@@ -16,7 +16,11 @@ import hashlib
 import os
 from http.client import HTTPException
 import re
+import subprocess
+import sys
+import tempfile
 import time
+from pathlib import Path
 from threading import Lock
 from typing import IO, Literal, NoReturn, Protocol, Self, overload
 from urllib.error import HTTPError, URLError
@@ -38,8 +42,41 @@ MAX_RETRY_WAIT_SECONDS = 60
 _crates_request_lock = Lock()
 _crates_last_request: float | None = None
 _github_context_unset = object()
-_github_context = _github_context_unset
+_github_context: object = _github_context_unset
 _github_context_lock = Lock()
+# A rejected credential (401 or an SSO-restricted token) leaves the rest of the
+# command anonymous instead of failing it.
+_github_rejected = False
+GITHUB_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
+CREDENTIAL_TIMEOUT_SECONDS = 5
+IMMUTABLE_CACHE_SCHEMA = 1
+
+
+class GitHubSettings:
+    """Command-level GitHub behavior; library imports and tests keep the defaults."""
+
+    def __init__(self) -> None:
+        self.discover = False
+        self.git_refs = False
+        self.cache: Path | None = None
+
+
+_github_settings = GitHubSettings()
+
+
+def configure_github(*, cache_home: Path | None = None) -> None:
+    """Enable credential discovery, Git tag refs and the immutable answer cache.
+
+    Called by update and query entry points before their first registry request.
+    """
+    base = cache_home or Path(
+        os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    )
+    _github_settings.discover = True
+    _github_settings.git_refs = True
+    _github_settings.cache = (
+        base / "chainman" / "github-immutable" / f"v{IMMUTABLE_CACHE_SCHEMA}"
+    )
 
 
 @contextmanager
@@ -238,22 +275,159 @@ def constraint(
     return validate_constraint(provider, rule.get("range", ""))
 
 
+def valid_github_token(token: str) -> bool:
+    return len(token) <= 4096 and GITHUB_TOKEN_PATTERN.fullmatch(token) is not None
+
+
+def credential_environment() -> dict[str, str]:
+    """Strictly non-interactive helper environment without repository routing."""
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key
+        not in {
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_COMMON_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "GIT_TRACE",
+            "GIT_TRACE_CURL",
+            "GIT_CURL_VERBOSE",
+            "GH_DEBUG",
+            "DEBUG",
+        }
+    }
+    env.update(
+        GIT_TERMINAL_PROMPT="0",
+        GCM_INTERACTIVE="never",
+        GH_PROMPT_DISABLED="1",
+        GH_NO_UPDATE_NOTIFIER="1",
+    )
+    return env
+
+
+def _credential_output(argv: list[str], data: bytes | None) -> bytes:
+    try:
+        result = subprocess.run(
+            argv,
+            input=data if data is not None else b"",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=credential_environment(),
+            cwd="/",
+            timeout=CREDENTIAL_TIMEOUT_SECONDS,
+            check=False,
+            start_new_session=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return b""
+    return result.stdout if result.returncode == 0 else b""
+
+
+def discover_github_token() -> str:
+    """Read-only, non-interactive lookup: gh first, then Git's credential helpers.
+
+    Any failure, timeout or malformed value is anonymous. The value is never logged,
+    cached or persisted, and Git credential approve/reject is never invoked.
+    """
+    if os.environ.get("CHAINMAN_GITHUB_CREDENTIALS", "") == "off":
+        return ""
+    token = (
+        _credential_output(["gh", "auth", "token", "--hostname", "github.com"], None)
+        .decode("ascii", errors="replace")
+        .strip()
+    )
+    if not token:
+        filled = _credential_output(
+            [
+                "git",
+                "-c",
+                "core.askPass=",
+                "-c",
+                "credential.interactive=never",
+                "credential",
+                "fill",
+            ],
+            b"protocol=https\nhost=github.com\n\n",
+        )
+        for line in filled.decode("utf-8", errors="replace").splitlines():
+            if line.startswith("password="):
+                token = line.removeprefix("password=")
+                break
+    return token if token and valid_github_token(token) else ""
+
+
 def github_token() -> str:
-    """One explicit credential context per command, including cached/fresh reads."""
+    """One credential context per command, including cached/fresh reads.
+
+    Precedence: GITHUB_TOKEN, GH_TOKEN, then (when the command enabled discovery)
+    `gh auth token` and `git credential fill` for https://github.com.
+    """
     global _github_context
-    token = os.environ.get("GITHUB_TOKEN", "")
-    if token and (
-        len(token) > 4096 or re.fullmatch(r"[A-Za-z0-9._~+/-]+=*", token) is None
-    ):
-        raise ValueError("Invalid GITHUB_TOKEN header value") from None
+    explicit = (os.environ.get("GITHUB_TOKEN", ""), os.environ.get("GH_TOKEN", ""))
+    for value, name in zip(explicit, ("GITHUB_TOKEN", "GH_TOKEN"), strict=True):
+        if value and not valid_github_token(value):
+            raise ValueError(f"Invalid {name} header value") from None
     with _github_context_lock:
         if _github_context is _github_context_unset:
-            _github_context = token
-        elif token != _github_context:
+            token = explicit[0] or explicit[1]
+            if not token and _github_settings.discover:
+                token = discover_github_token()
+            _github_context = (explicit, token)
+        assert isinstance(_github_context, tuple)
+        if explicit != _github_context[0]:
+            name = (
+                "GITHUB_TOKEN" if explicit[0] != _github_context[0][0] else "GH_TOKEN"
+            )
             raise ValueError(
-                "GITHUB_TOKEN changed during this command; start a new command"
+                f"{name} changed during this command; start a new command"
             ) from None
-        return _github_context
+        return "" if _github_rejected else str(_github_context[1])
+
+
+def reject_github_token(status: int) -> None:
+    global _github_rejected
+    with _github_context_lock:
+        if not _github_rejected:
+            _github_rejected = True
+            print(
+                f"GitHub rejected the configured credential (HTTP {status}); "
+                "continuing anonymously for this command.",
+                file=sys.stderr,
+            )
+
+
+class GitHubRateLimitError(RegistryHTTPError):
+    """Exhausted GitHub API quota, with its reset time and credential guidance."""
+
+    def __init__(self, status: int, reset: str | None, authenticated: bool):
+        super().__init__(status, "api.github.com")
+        when = "an unknown time"
+        if reset is not None and reset.isdigit():
+            when = datetime.fromtimestamp(int(reset), timezone.utc).isoformat()
+        guidance = (
+            "the authenticated quota resets then"
+            if authenticated
+            else "anonymous requests share a small per-address quota; provide a token "
+            "with GITHUB_TOKEN or GH_TOKEN, `gh auth login`, or a Git credential helper "
+            "for https://github.com (unless CHAINMAN_GITHUB_CREDENTIALS=off)"
+        )
+        self.reset = when
+        self.args = (f"GitHub API rate limit exhausted until {when}; {guidance}",)
+
+
+def rate_limited(status: int, headers: Message | None) -> bool:
+    return (
+        status in (403, 429)
+        and headers is not None
+        and headers.get("X-RateLimit-Remaining") == "0"
+    )
+
+
+def sso_restricted(status: int, headers: Message | None) -> bool:
+    return status == 403 and headers is not None and bool(headers.get("X-GitHub-SSO"))
 
 
 class GitHubNoRedirect(HTTPRedirectHandler):
@@ -333,17 +507,37 @@ def _fetch(
                     )
                 return body, dict(response.headers.items())
         except HTTPError as exc:
+            fallback = False
             try:
-                if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                if parsed.hostname == "api.github.com" and rate_limited(
+                    exc.code, exc.headers
+                ):
+                    raise GitHubRateLimitError(
+                        exc.code,
+                        exc.headers.get("X-RateLimit-Reset") if exc.headers else None,
+                        authenticated,
+                    ) from None
+                if authenticated and (
+                    exc.code == 401 or sso_restricted(exc.code, exc.headers)
+                ):
+                    fallback = True
+                elif exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
                     raise RegistryHTTPError(exc.code, parsed.hostname) from None
-                delay = retry_delay(
-                    exc.headers.get("Retry-After") if exc.headers else None,
-                    attempt,
-                    exc.code,
-                    parsed.hostname,
-                )
+                else:
+                    delay = retry_delay(
+                        exc.headers.get("Retry-After") if exc.headers else None,
+                        attempt,
+                        exc.code,
+                        parsed.hostname,
+                    )
             finally:
                 exc.close()
+            if fallback:
+                # An unusable credential is dropped for the rest of the command.
+                reject_github_token(exc.code)
+                return _fetch(url, accept, method, fresh=fresh, anonymous=True)
+            time.sleep(delay)
+            continue
         except (URLError, TimeoutError):
             if attempt == 2:
                 raise ValueError(f"Registry unavailable: {parsed.hostname}") from None
@@ -400,6 +594,146 @@ def data(url: str) -> object:
 
 def _fresh_data(url: str) -> object:
     return json.loads(_fetch(url, fresh=True)[0])
+
+
+def _immutable_path(key: list[str]) -> Path | None:
+    root = _github_settings.cache
+    if root is None:
+        return None
+    digest = hashlib.sha256(json.dumps(key, separators=(",", ":")).encode()).hexdigest()
+    return root / digest[:2] / (digest + ".json")
+
+
+def immutable_get(key: list[str]) -> object | None:
+    """Return a stored answer only when the file restates its complete key.
+
+    Unreadable, foreign or malformed entries are ignored and replaced on demand.
+    """
+    path = _immutable_path([str(IMMUTABLE_CACHE_SCHEMA), *key])
+    if path is None:
+        return None
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        entry = json.loads(path.read_bytes()[: 1024 * 1024])
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(entry, dict)
+        or entry.get("key") != [str(IMMUTABLE_CACHE_SCHEMA), *key]
+        or "value" not in entry
+    ):
+        return None
+    value: object = entry["value"]
+    return value
+
+
+def immutable_put(key: list[str], value: object) -> None:
+    """Best-effort atomic write of an answer that cannot change for its key."""
+    full = [str(IMMUTABLE_CACHE_SCHEMA), *key]
+    path = _immutable_path(full)
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.parent.is_symlink():
+            return
+        handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=".entry-")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as stream:
+                json.dump({"key": full, "value": value}, stream, sort_keys=True)
+            os.replace(temporary, path)
+        except BaseException:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+    except OSError:
+        return
+
+
+def github_commit_date(repository: str, commit: str) -> datetime:
+    """Committer time of an exact commit; content-addressed, so cached durably."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or not (
+        re.fullmatch(r"[a-f0-9]{40}", commit)
+    ):
+        raise ValueError("Expected a GitHub repository and exact commit identity")
+    key = ["commit-committer-date", repository, commit]
+    cached = immutable_get(key)
+    if isinstance(cached, str):
+        try:
+            return timestamp(cached)
+        except ValueError:
+            pass
+    item = table(
+        data(f"https://api.github.com/repos/{repository}/commits/{commit}"),
+        "GitHub commit",
+    )
+    if item.get("sha") != commit:
+        raise ValueError("GitHub returned a different commit identity")
+    details = table(item["commit"], "GitHub commit details")
+    committer = table(details["committer"], "GitHub committer")
+    published = timestamp(committer["date"])
+    immutable_put(key, published.isoformat())
+    return published
+
+
+def git_tag_target(repository: str, tag: str) -> str | None:
+    """Resolve one tag through the Git protocol, peeling annotated tags.
+
+    Returns None when the Git transport cannot answer (unavailable Git, network,
+    private repository or a missing ref); callers then use the REST API.
+    """
+    if not _github_settings.git_refs or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._+/-]{0,127}", tag
+    ):
+        return None
+    try:
+        import git_runtime
+
+        with git_runtime.isolated_repository() as selected:
+            listing = git_runtime.git(
+                selected,
+                "-c",
+                "protocol.version=2",
+                "-c",
+                "credential.helper=",
+                "ls-remote",
+                f"https://github.com/{repository}.git",
+                f"refs/tags/{tag}",
+            ).decode("utf-8")
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError):
+        return None
+    refs: dict[str, str] = {}
+    for line in listing.splitlines():
+        value, _, name = line.partition("\t")
+        if not re.fullmatch(r"[a-f0-9]{40}", value):
+            return None
+        if name in (f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}"):
+            if name in refs:
+                return None
+            refs[name] = value
+    return refs.get(f"refs/tags/{tag}^{{}}", refs.get(f"refs/tags/{tag}"))
+
+
+def github_quota_check() -> None:
+    """Fail early when the core API quota is exhausted; /rate_limit is not counted.
+
+    Transport failures are ignored here: the first real request reports them.
+    """
+    try:
+        body, _ = _fetch("https://api.github.com/rate_limit")
+        core = table(table(json.loads(body), "GitHub rate limit")["resources"], "Rate")[
+            "core"
+        ]
+        resources = table(core, "Core rate limit")
+    except GitHubRateLimitError:
+        raise
+    except (ValueError, KeyError, OSError):
+        return
+    remaining, reset = resources.get("remaining"), resources.get("reset")
+    if type(remaining) is int and remaining <= 0:
+        raise GitHubRateLimitError(
+            403, str(reset) if type(reset) is int else None, bool(github_token())
+        )
 
 
 class VersionRank(Protocol):
@@ -729,7 +1063,23 @@ def github_releases(repository: str) -> list[Release]:
 
 
 def github_commit(repository: str, tag: str, *, fresh: bool = False) -> str:
-    """Resolve a tag, optionally refreshing every hop outside the snapshot cache."""
+    """Resolve a tag, optionally refreshing every hop outside the snapshot cache.
+
+    The tag name is always read live. The Git protocol answers without REST quota;
+    annotated tag objects and commit identities are content-addressed and cached.
+    """
+    target = git_tag_target(repository, tag)
+    if target is not None:
+        # A tag may name a non-commit object; the commit lookup proves its type.
+        try:
+            github_commit_date(repository, target)
+        except RegistryHTTPError as exc:
+            if exc.status not in (404, 422):
+                raise
+            raise ValueError(
+                "Release tag does not resolve to a bounded commit identity"
+            ) from None
+        return target
     read = _fresh_data if fresh else data
     item = table(
         table(
@@ -744,17 +1094,26 @@ def github_commit(repository: str, tag: str, *, fresh: bool = False) -> str:
         sha = text(item["sha"], "GitHub object SHA")
         if item["type"] == "commit" and re.fullmatch(r"[a-f0-9]{40}", sha):
             return sha
-        if item["type"] != "tag":
+        if item["type"] != "tag" or not re.fullmatch(r"[a-f0-9]{40}", sha):
             break
+        key = ["tag-object-target", repository, sha]
+        cached = immutable_get(key)
+        if (
+            isinstance(cached, dict)
+            and cached.get("type") in {"commit", "tag"}
+            and isinstance(cached.get("sha"), str)
+        ):
+            item = cached
+            continue
         item = table(
             table(
-                read(
-                    f"https://api.github.com/repos/{repository}/git/tags/{item['sha']}"
-                ),
+                read(f"https://api.github.com/repos/{repository}/git/tags/{sha}"),
                 "GitHub tag",
             )["object"],
             "GitHub object",
         )
+        if item.get("type") in {"commit", "tag"} and isinstance(item.get("sha"), str):
+            immutable_put(key, {"type": item["type"], "sha": item["sha"]})
     raise ValueError("Release tag does not resolve to a bounded commit identity")
 
 
