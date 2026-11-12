@@ -1004,13 +1004,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             import dependency_api
             import registry
 
-            registry.configure_github()
-
-            result = (
-                dependency_api.query_command(root, rest)
-                if args.action == "deps-query"
-                else dependency_api.resolve_command(root, rest)
-            )
+            with registry.github_session():
+                result = (
+                    dependency_api.query_command(root, rest)
+                    if args.action == "deps-query"
+                    else dependency_api.resolve_command(root, rest)
+                )
             print(json.dumps(result, sort_keys=True))
         elif args.action in {"deps-coverage", "deps-policy-report"}:
             import dependency_reports
@@ -1028,13 +1027,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             import registry
             import source_updates
 
-            registry.configure_github()
             policy, now = dependency_api.policy(root), dependency_api.instant()
             spec = module_updates.nix_spec(policy)
             if spec is not None:
-                before = source_updates.snapshot(root, spec)
-                source_updates.resolve(root, spec, policy, now)
-                source_updates.audit(root, spec, before, policy, now)
+                with registry.github_session():
+                    before = source_updates.snapshot(root, spec)
+                    source_updates.resolve(root, spec, policy, now)
+                    source_updates.audit(root, spec, before, policy, now)
         elif args.action in {"module", "modules"}:
             if args.action == "modules":
                 if len(rest) != 1 or rest[0] not in {

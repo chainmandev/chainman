@@ -532,6 +532,12 @@ class ExecutionTests(ConsumerFixture):
         ):
             self.assertEqual(chainman.main(), 0)
         self.assertEqual(events, ["before", "resolve", ("audit", {"baseline": True})])
+        import registry
+
+        # The update session must not leak durable caching or discovery in-process.
+        self.assertIsNone(registry._github_settings.cache)
+        self.assertFalse(registry._github_settings.discover)
+        self.assertFalse(registry._github_settings.git_refs)
 
     def test_adopted_git_flake_excludes_caches_and_uses_dirty_tracked_bytes(self):
         self.write(

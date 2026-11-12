@@ -1169,10 +1169,10 @@ def main() -> int:
     parser.add_argument("--modules", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        registry.configure_github()
-        # Resolution can make many API requests; stop before any when exhausted.
-        registry.github_quota_check()
-        resolve(ROOT, registry.timestamp(args.resolve_at), args.modules.split(","))
+        with registry.github_session():
+            # Resolution can make many API requests; stop before any when exhausted.
+            registry.github_quota_check()
+            resolve(ROOT, registry.timestamp(args.resolve_at), args.modules.split(","))
         return 0
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
         print(

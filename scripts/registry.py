@@ -64,19 +64,35 @@ class GitHubSettings:
 _github_settings = GitHubSettings()
 
 
-def configure_github(*, cache_home: Path | None = None) -> None:
+@contextmanager
+def github_session(*, cache_home: Path | None = None) -> Iterator[None]:
     """Enable credential discovery, Git tag refs and the immutable answer cache.
 
-    Called by update and query entry points before their first registry request.
+    Update and query entry points wrap their work in this session; the previous
+    settings are restored afterwards, so in-process callers and tests do not
+    inherit durable caching or credential discovery.
     """
     base = cache_home or Path(
         os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    )
+    previous = (
+        _github_settings.discover,
+        _github_settings.git_refs,
+        _github_settings.cache,
     )
     _github_settings.discover = True
     _github_settings.git_refs = True
     _github_settings.cache = (
         base / "chainman" / "github-immutable" / f"v{IMMUTABLE_CACHE_SCHEMA}"
     )
+    try:
+        yield
+    finally:
+        (
+            _github_settings.discover,
+            _github_settings.git_refs,
+            _github_settings.cache,
+        ) = previous
 
 
 @contextmanager

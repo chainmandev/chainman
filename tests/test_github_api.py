@@ -68,7 +68,7 @@ class CredentialDiscoveryTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_environment_tokens_precede_gh_which_precedes_git(self):
-        self.registry.configure_github(cache_home=Path("/nonexistent"))
+        self.enterContext(self.registry.github_session(cache_home=Path("/nonexistent")))
         with self.helpers(gh=b"gh_token_value\n", git=b"password=git_value\n"):
             self.assertEqual(self.registry.discover_github_token(), "gh_token_value")
         self.assertEqual([argv[0] for argv, _ in self.calls], ["gh"])
@@ -83,7 +83,7 @@ class CredentialDiscoveryTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_helpers_are_read_only_non_interactive_and_bounded(self):
-        self.registry.configure_github(cache_home=Path("/nonexistent"))
+        self.enterContext(self.registry.github_session(cache_home=Path("/nonexistent")))
         os.environ.update(
             GIT_ASKPASS="/fixture/askpass",
             SSH_ASKPASS="/fixture/askpass",
@@ -113,7 +113,7 @@ class CredentialDiscoveryTests(unittest.TestCase):
         self.assertEqual(self.calls[0][1]["input"], b"")
 
     def test_failures_timeouts_and_malformed_values_are_anonymous(self):
-        self.registry.configure_github(cache_home=Path("/nonexistent"))
+        self.enterContext(self.registry.github_session(cache_home=Path("/nonexistent")))
         for options in (
             {"fail": "gh", "git": b""},
             {"fail": "git"},
@@ -128,14 +128,14 @@ class CredentialDiscoveryTests(unittest.TestCase):
             self.assertEqual(self.registry.discover_github_token(), "")
 
     def test_opt_out_never_starts_helpers(self):
-        self.registry.configure_github(cache_home=Path("/nonexistent"))
+        self.enterContext(self.registry.github_session(cache_home=Path("/nonexistent")))
         os.environ["CHAINMAN_GITHUB_CREDENTIALS"] = "off"
         with self.helpers(gh=TOKEN.encode()):
             self.assertEqual(self.registry.github_token(), "")
         self.assertEqual(self.calls, [])
 
     def test_discovered_token_reaches_only_api_github_and_is_not_exported(self):
-        self.registry.configure_github(cache_home=Path("/nonexistent"))
+        self.enterContext(self.registry.github_session(cache_home=Path("/nonexistent")))
         authenticated, anonymous = [], []
 
         class Opener:
@@ -237,7 +237,7 @@ class ImmutableCacheTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {}, clear=True))
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.registry = fresh_registry()
-        self.registry.configure_github(cache_home=self.home)
+        self.enterContext(self.registry.github_session(cache_home=self.home))
         self.registry._github_settings.discover = False
 
     def commit_body(self, sha=COMMIT, date="2026-01-02T03:04:05Z"):
@@ -251,7 +251,7 @@ class ImmutableCacheTests(unittest.TestCase):
             first = self.registry.github_commit_date("example/demo", COMMIT)
         read.assert_called_once_with(url)
         later = fresh_registry()
-        later.configure_github(cache_home=self.home)
+        self.enterContext(later.github_session(cache_home=self.home))
         with patch.object(later, "data", side_effect=AssertionError("network")):
             self.assertEqual(later.github_commit_date("example/demo", COMMIT), first)
         entries = list(self.home.rglob("*.json"))
@@ -363,7 +363,7 @@ class GitTagTests(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {}, clear=True))
         self.home = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.registry = fresh_registry()
-        self.registry.configure_github(cache_home=self.home)
+        self.enterContext(self.registry.github_session(cache_home=self.home))
         self.registry._github_settings.discover = False
         import git_runtime
 
@@ -443,6 +443,14 @@ class GitTagTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ValueError, "bounded commit identity"):
                 self.registry.github_commit("example/demo", "v1.0.0")
+
+    def test_sessions_restore_library_defaults(self):
+        plain = fresh_registry()
+        with plain.github_session(cache_home=self.home):
+            self.assertTrue(plain._github_settings.git_refs)
+        self.assertFalse(plain._github_settings.git_refs)
+        self.assertFalse(plain._github_settings.discover)
+        self.assertIsNone(plain._github_settings.cache)
 
     def test_git_refs_require_a_command_entry_point(self):
         plain = fresh_registry()
