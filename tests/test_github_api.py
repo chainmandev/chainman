@@ -231,6 +231,57 @@ class QuotaTests(unittest.TestCase):
         ):
             self.registry.github_quota_check()
 
+    def test_session_preflight_runs_only_before_the_first_counted_request(self):
+        def limit(remaining):
+            body = {
+                "resources": {"core": {"remaining": remaining, "reset": 1800000000}}
+            }
+            return response(json.dumps(body).encode())
+
+        sent = []
+
+        def send(request, timeout):
+            sent.append(request.full_url)
+            if request.full_url == self.registry.RATE_LIMIT_URL:
+                return limit(self.remaining)
+            return response(b"[]")
+
+        self.remaining = 0
+        with (
+            patch.object(self.registry, "urlopen", side_effect=send),
+            self.registry.github_session(
+                cache_home=Path("/nonexistent"), preflight=True
+            ),
+        ):
+            self.registry._github_settings.discover = False
+            # Updates that need no REST request never consult the quota.
+            self.registry._fetch("https://registry.npmjs.org/demo")
+            self.assertEqual(sent, ["https://registry.npmjs.org/demo"])
+            with self.assertRaises(self.registry.GitHubRateLimitError):
+                self.registry._fetch("https://api.github.com/repos/example/demo")
+        self.assertEqual(sent[1:], [self.registry.RATE_LIMIT_URL])
+
+        sent.clear()
+        self.remaining = 10
+        with (
+            patch.object(self.registry, "urlopen", side_effect=send),
+            self.registry.github_session(
+                cache_home=Path("/nonexistent"), preflight=True
+            ),
+        ):
+            self.registry._github_settings.discover = False
+            self.registry._fetch("https://api.github.com/repos/example/one")
+            self.registry._fetch("https://api.github.com/repos/example/two")
+        self.assertEqual(
+            sent,
+            [
+                self.registry.RATE_LIMIT_URL,
+                "https://api.github.com/repos/example/one",
+                "https://api.github.com/repos/example/two",
+            ],
+        )
+        self.assertFalse(self.registry._github_settings.preflight)
+
 
 class ImmutableCacheTests(unittest.TestCase):
     def setUp(self):

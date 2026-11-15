@@ -150,9 +150,10 @@ under `${XDG_CACHE_HOME:-~/.cache}/chainman/github-immutable/v1`: commit committ
 times, annotated tag object targets, and release metadata that GitHub marks
 `immutable`. Each entry restates its full key; unreadable or mismatched entries are
 ignored and fetched again. Tag names, release lists and branch heads are always read
-live. Before resolving updates, chainman reads `GET /rate_limit`, which GitHub does
-not count against the quota. If the core quota is exhausted, or a later response
-reports exhaustion, the command stops with the reset time and ways to supply a token.
+live. Before an update's first counted API request, chainman reads `GET /rate_limit`,
+which GitHub does not count against the quota; updates that need no REST request
+never consult it. If the core quota is exhausted, or a later response reports
+exhaustion, the command stops with the reset time and ways to supply a token.
 
 Public chainman asset bytes are requested anonymously from the outset, including
 when metadata uses a token. GitHub can redirect those downloads to its asset host;

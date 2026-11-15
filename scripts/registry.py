@@ -50,6 +50,7 @@ _github_rejected = False
 GITHUB_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9._~+/-]+=*")
 CREDENTIAL_TIMEOUT_SECONDS = 5
 IMMUTABLE_CACHE_SCHEMA = 1
+RATE_LIMIT_URL = "https://api.github.com/rate_limit"
 
 
 class GitHubSettings:
@@ -59,13 +60,16 @@ class GitHubSettings:
         self.discover = False
         self.git_refs = False
         self.cache: Path | None = None
+        self.preflight = False
 
 
 _github_settings = GitHubSettings()
 
 
 @contextmanager
-def github_session(*, cache_home: Path | None = None) -> Iterator[None]:
+def github_session(
+    *, cache_home: Path | None = None, preflight: bool = False
+) -> Iterator[None]:
     """Enable credential discovery, Git tag refs and the immutable answer cache.
 
     Update and query entry points wrap their work in this session; the previous
@@ -79,9 +83,13 @@ def github_session(*, cache_home: Path | None = None) -> Iterator[None]:
         _github_settings.discover,
         _github_settings.git_refs,
         _github_settings.cache,
+        _github_settings.preflight,
     )
     _github_settings.discover = True
     _github_settings.git_refs = True
+    # Check quota lazily: an update that needs no REST request must not fail
+    # because a shared anonymous quota is exhausted.
+    _github_settings.preflight = preflight
     _github_settings.cache = (
         base / "chainman" / "github-immutable" / f"v{IMMUTABLE_CACHE_SCHEMA}"
     )
@@ -92,6 +100,7 @@ def github_session(*, cache_home: Path | None = None) -> Iterator[None]:
             _github_settings.discover,
             _github_settings.git_refs,
             _github_settings.cache,
+            _github_settings.preflight,
         ) = previous
 
 
@@ -482,6 +491,14 @@ def _fetch(
         or not parsed.hostname
     ):
         raise ValueError("Registry requests require credential-free HTTPS URLs")
+    if (
+        _github_settings.preflight
+        and parsed.hostname == "api.github.com"
+        and url != RATE_LIMIT_URL
+    ):
+        # One uncounted /rate_limit read before the session's first counted request.
+        _github_settings.preflight = False
+        github_quota_check()
     try:
         authenticated = (
             not anonymous
@@ -736,7 +753,7 @@ def github_quota_check() -> None:
     Transport failures are ignored here: the first real request reports them.
     """
     try:
-        body, _ = _fetch("https://api.github.com/rate_limit")
+        body, _ = _fetch(RATE_LIMIT_URL)
         core = table(table(json.loads(body), "GitHub rate limit")["resources"], "Rate")[
             "core"
         ]
