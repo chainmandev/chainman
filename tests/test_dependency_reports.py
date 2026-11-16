@@ -299,16 +299,28 @@ class ReportTests(unittest.TestCase):
             patch.object(
                 dependency_audit.chainman,
                 "execute",
-                return_value=subprocess.CompletedProcess(
-                    [], 1, '{"advisories":{"123":{"module_name":"demo"}}}', ""
-                ),
+                side_effect=[
+                    subprocess.CompletedProcess([], 0, "12.14.0\n", ""),
+                    subprocess.CompletedProcess(
+                        [], 1, '{"advisories":{"123":{"module_name":"demo"}}}', ""
+                    ),
+                ],
             ) as execute,
         ):
+            root = Path(temporary).resolve()
+            (root / "package.json").write_text('{"packageManager":"pnpm@12.14.0"}')
             output = io.StringIO()
             with redirect_stdout(output):
-                status = dependency_audit.run(Path(temporary).resolve(), ["targets=js"])
+                status = dependency_audit.run(root, ["targets=js"])
             self.assertEqual(status, 1)
-            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_count, 2)
+            self.assertEqual(execute.call_args_list[0].args[2], ["pnpm", "--version"])
+            self.assertEqual(execute.call_args_list[0].kwargs["cwd"], Path("/"))
+            self.assertEqual(
+                execute.call_args_list[1].args[2],
+                ["pnpm", "--pm-on-fail=ignore", "audit", "--json"],
+            )
+            self.assertEqual(execute.call_args_list[1].kwargs["cwd"], root)
             report = json.loads(output.getvalue())
             self.assertEqual([row["adapter"] for row in report["lanes"]], ["js"])
             self.assertEqual(

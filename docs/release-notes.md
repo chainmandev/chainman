@@ -37,6 +37,11 @@ empty selections and requires exact reviewed versions for JavaScript advisory
 waivers. Upgrade the runtime before using these fields; migrate old package-wide
 waivers using the [audit guidance](recipes.md).
 
+pnpm advisory audits check the selected profile's manager version outside the
+project and enforce an exact `packageManager` pin when present. They leave the
+project lockfile unchanged and send only project dependencies for advisory checks,
+without downloading another package manager.
+
 `VERSION` is descriptive package metadata. Expect interface changes during alpha;
 review candidate changes and preserve each project's acceptance criteria.
 

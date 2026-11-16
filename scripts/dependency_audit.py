@@ -99,6 +99,39 @@ def javascript(
     raise ValueError("Package audit report has no recognized vulnerability inventory")
 
 
+def javascript_audit_command(
+    root: Path, spec: Mapping[str, object], directory: Path
+) -> list[str]:
+    manager = ad.text(spec.get("manager", "pnpm"), "JavaScript manager")
+    command = [manager]
+    if manager == "pnpm":
+        import pnpm_setup
+
+        try:
+            body = tc.regular_input(directory, "package.json")
+        except FileNotFoundError:
+            expected = None  # pnpm also supports auditing a lock-only directory.
+        else:
+            manifest = ad.table(json.loads(body), "Package manifest")
+            expected = pnpm_setup.required_version(manifest, required=False)
+        # Even a matching pnpm 12 can write a separate manager lock before
+        # auditing. Check the selected profile outside the project first, then
+        # suppress only pnpm's duplicate manager resolution for this audit.
+        observed = chainman.execute(
+            root,
+            ad.text(spec["profile"], "Adapter profile"),
+            [manager, "--version"],
+            cwd=Path("/"),
+            env=tc.environment(root),
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        command.extend(pnpm_setup.options(observed.stdout.strip(), expected))
+    return [*command, "audit", "--json"]
+
+
 def validate_waivers(exceptions: Sequence[Mapping[str, object]], today: date) -> None:
     seen: list[Mapping[str, object]] = []
     for entry in exceptions:
@@ -345,13 +378,7 @@ def run_retained(root: Path, arguments: list[str], roots: Path) -> int:
                     return result
 
                 if kind == "javascript":
-                    result = execute(
-                        [
-                            ad.text(spec.get("manager", "pnpm"), "JavaScript manager"),
-                            "audit",
-                            "--json",
-                        ]
-                    )
+                    result = execute(javascript_audit_command(root, spec, cwd))
                     if result.returncode not in (0, 1):
                         raise ValueError("Package audit tool failed")
                     findings = javascript(

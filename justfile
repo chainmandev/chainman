@@ -115,6 +115,7 @@ javascript-test:
     @./scripts/enter.sh javascript env CHAINMAN_TEST_TRUST_NODE=1 python3 -B -m unittest discover -s tests -p test_trust_stores.py -v
     @./scripts/enter.sh javascript env CHAINMAN_TEST_PNPM=1 python3 -B -m unittest discover -s tests -p 'test_javascript*.py' -v
     @./scripts/enter.sh javascript python3 -B -m unittest discover -s tests -p test_pnpm_setup.py -v
+    @./scripts/enter.sh javascript env CHAINMAN_TEST_PNPM_AUDIT=1 python3 -B -m unittest discover -s tests -p test_pnpm_audit.py -v
     @./scripts/enter.sh javascript python3 -B -m unittest discover -s tests -p test_pnpm_entries.py -v
     @./scripts/enter.sh javascript python3 -B -m unittest discover -s tests -p test_pnpm_runtime.py -v
 
@@ -128,6 +129,7 @@ go-test:
 # Real pinned scanners in disposable fixtures; no application audit or policy waiver.
 audit-test:
     @./scripts/enter.sh core env CHAINMAN_TEST_AUDIT=1 python3 -B -m unittest discover -s tests -p test_audit_native.py -v
+    @./scripts/enter.sh javascript env CHAINMAN_TEST_PNPM_AUDIT=1 python3 -B -m unittest discover -s tests -p test_pnpm_audit.py -v
 
 # Actual CA bundles and embedded-client configuration on each qualified platform.
 trust-test:
