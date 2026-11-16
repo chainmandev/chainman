@@ -49,8 +49,8 @@ the complete bootstrap suite and starter qualification, including real update an
 resume transactions. Repeated Podman runs exceeded the earlier one-hour job limit
 while their tests were still passing, and later reached 86 minutes in the
 bootstrap suite alone, leaving no room for starter qualification within 90. The remaining ten lanes retain their
-60-minute limits. Intel runs first in the serial matrix; all fourteen lanes and
-preparation must succeed.
+60-minute limits. After Intel runtime preparation succeeds, up to four independent
+matrix lanes run concurrently; all fourteen lanes and preparation must succeed.
 Bootstrap command deadlines and scanner assertions are unchanged.
 `just ci-runtime-test` verifies the transfer in isolated local Nix stores,
 including refusal of changed content before import.

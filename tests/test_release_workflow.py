@@ -141,7 +141,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             step["run"],
             "nix --extra-experimental-features 'nix-command flakes' run path:./nix#just -- module attest verify",
         )
-        self.assertEqual(job["strategy"]["max-parallel"], 1)
+        self.assertEqual(job["strategy"]["max-parallel"], 4)
         module = tomllib.loads((ROOT / "modules/attest.toml").read_text())
         self.assertEqual(
             module["commands"]["verify"],
